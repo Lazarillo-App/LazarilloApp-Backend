@@ -13,6 +13,8 @@ app.use('/api/auth', authRoutes);
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 app.use('/api/agrupaciones', agrupacionesRoutes);
 
+console.log('📂 Usando base de datos:', process.env.DB_NAME);
+
 // Puerto
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
