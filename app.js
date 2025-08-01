@@ -11,7 +11,7 @@ app.use(express.json());
 const authRoutes = require('./routes/authRoutes');
 app.use('/api/auth', authRoutes);
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
-app.use('/api/agrupaciones', agrupacionesRoutes);
+app.use('/api', agrupacionesRoutes);
 
 console.log('📂 Usando base de datos:', process.env.DB_NAME);
 
