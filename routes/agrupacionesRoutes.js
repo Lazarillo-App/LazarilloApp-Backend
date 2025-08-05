@@ -1,28 +1,23 @@
+// agrupacionesRoutes.js
 const express = require('express');
 const router = express.Router();
 const {
-  crearRubro,
-  obtenerRubros,
-  actualizarRubro,
-  eliminarRubro,
-  crearSubrubro,
-  obtenerSubrubroPorId,
-  obtenerSubrubros,
-  eliminarSubrubro,
-  obtenerSubrubrosPorRubro 
+  crearAgrupacion,
+  obtenerAgrupaciones,
+  editarAgrupacion,
+  eliminarAgrupacion,
+  agregarArticulosAAgrupacion,
+  obtenerArticulosDeAgrupacion
 } = require('../controllers/agrupacionesController');
 
-// 🟢 Rutas para rubros
-router.post('/rubro', crearRubro);
-router.get('/rubros', obtenerRubros);
-router.put('/rubro/:id', actualizarRubro);
-router.delete('/rubro/:id', eliminarRubro);
+// 🟢 Rutas para agrupaciones
+router.post('/agrupaciones', crearAgrupacion);
+router.get('/agrupaciones', obtenerAgrupaciones);
+router.delete('/agrupaciones/:id', eliminarAgrupacion);
+router.put('/agrupaciones/:id', editarAgrupacion);
 
-// 🔵 Rutas para subrubros
-router.post('/subrubros', crearSubrubro);
-router.get('/subrubros', obtenerSubrubros);
-router.get('/subrubros/:id', obtenerSubrubroPorId);
-router.delete('/subrubros/:id', eliminarSubrubro);
-router.get('/subrubros/por-rubro/:rubroId', obtenerSubrubrosPorRubro);
+// 🔵 Rutas para artículos dentro de agrupaciones
+router.post('/agrupaciones/:id/articulos', agregarArticulosAAgrupacion);
+router.get('/agrupaciones/:id/articulos', obtenerArticulosDeAgrupacion);
 
 module.exports = router;

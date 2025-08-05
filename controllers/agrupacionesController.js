@@ -1,114 +1,83 @@
-const Rubro = require('../models/Rubro');
-const Subrubro = require('../models/Subrubro');
+const db = require('../config/db');
 
-exports.crearRubro = (req, res) => {
-  const { nombre, descripcion } = req.body;
+// 🔹 Crear una nueva agrupación con artículos asociados
+exports.crearAgrupacion = async (req, res) => {
+  const { nombre, articulos } = req.body;
 
-  if (!nombre) {
-    return res.status(400).json({ error: 'El nombre del rubro es obligatorio' });
+  if (!nombre || !Array.isArray(articulos) || articulos.length === 0) {
+    return res.status(400).json({ error: 'Nombre y lista de artículos son requeridos' });
   }
 
-  Rubro.crear(nombre, descripcion, (err, resultado) => {
-    if (err) {
-      console.error('❌ Error al crear rubro:', err);
-      return res.status(500).json({ error: 'Error al guardar el rubro' });
-    }
-
-    res.status(201).json({ mensaje: 'Rubro creado exitosamente', id: resultado.insertId });
-  });
-};
-
-exports.obtenerRubros = (req, res) => {
-  Rubro.obtenerTodos((err, rubros) => {
-    if (err) {
-      console.error('❌ Error al obtener rubros:', err);
-      return res.status(500).json({ error: 'Error al obtener rubros' });
-    }
-
-    res.status(200).json(rubros);
-  });
-};
-
-exports.actualizarRubro = (req, res) => {
-  const { id } = req.params;
-  const { nombre, descripcion } = req.body;
-
-  Rubro.actualizar(id, nombre, descripcion, (err, result) => {
-    if (err) {
-      console.error('❌ Error al actualizar rubro:', err);
-      return res.status(500).json({ error: 'Error al actualizar rubro' });
-    }
-
-    res.status(200).json({ mensaje: 'Rubro actualizado correctamente' });
-  });
-};
-
-exports.eliminarRubro = (req, res) => {
-  const { id } = req.params;
-
-  Rubro.eliminar(id, (err, result) => {
-    if (err) {
-      console.error('❌ Error al eliminar rubro:', err);
-      return res.status(500).json({ error: 'Error al eliminar rubro' });
-    }
-
-    res.status(200).json({ mensaje: 'Rubro eliminado correctamente' });
-  });
-};
-
-exports.crearSubrubro = async (req, res) => {
   try {
-    const nuevoSubrubro = await Subrubro.crear(req.body);
-    res.status(201).json(nuevoSubrubro);
+    // Insertar agrupación
+    const insertAgrupacionQuery = 'INSERT INTO agrupaciones (nombre) VALUES (?)';
+    const [agrupacionResult] = await db.promise().query(insertAgrupacionQuery, [nombre]);
+    const agrupacionId = agrupacionResult.insertId;
+
+    // Insertar artículos asociados
+    const insertArticuloQuery = 'INSERT INTO agrupacion_articulos (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro) VALUES ?';
+    const values = articulos.map(a => [agrupacionId, a.id, a.nombre, a.categoria, a.subrubro]);
+
+    await db.promise().query(insertArticuloQuery, [values]);
+
+    res.status(201).json({ mensaje: 'Agrupación creada con éxito', agrupacionId });
   } catch (error) {
-    console.error('❌ Error al crear subrubro:', error);
-    res.status(500).json({ error: 'Error al crear subrubro' });
+    console.error('❌ Error al crear agrupación:', error);
+    res.status(500).json({ error: 'Error al crear la agrupación' });
   }
 };
 
-exports.eliminarSubrubro = (req, res) => {
+// 🔹 Obtener todas las agrupaciones con sus artículos
+exports.obtenerAgrupaciones = async (req, res) => {
+  try {
+    const [agrupaciones] = await db.promise().query('SELECT * FROM agrupaciones');
+
+    const agrupacionesConArticulos = await Promise.all(
+      agrupaciones.map(async (agrupacion) => {
+        const [articulos] = await db.promise().query(
+          'SELECT articulo_id AS id, articulo_nombre AS nombre, categoria, subrubro FROM agrupacion_articulos WHERE agrupacion_id = ?',
+          [agrupacion.id]
+        );
+        return { ...agrupacion, articulos };
+      })
+    );
+
+    res.status(200).json(agrupacionesConArticulos);
+  } catch (error) {
+    console.error('❌ Error al obtener agrupaciones:', error);
+    res.status(500).json({ error: 'Error al obtener las agrupaciones' });
+  }
+};
+
+// 🔹 Editar el nombre de una agrupación
+exports.editarAgrupacion = async (req, res) => {
+  const { id } = req.params;
+  const { nombre } = req.body;
+
+  if (!nombre || !nombre.trim()) {
+    return res.status(400).json({ error: 'El nombre es obligatorio' });
+  }
+
+  try {
+    await db.promise().query('UPDATE agrupaciones SET nombre = ? WHERE id = ?', [nombre, id]);
+    res.status(200).json({ mensaje: 'Agrupación actualizada correctamente' });
+  } catch (error) {
+    console.error('❌ Error al actualizar agrupación:', error);
+    res.status(500).json({ error: 'Error al actualizar la agrupación' });
+  }
+};
+
+// 🔹 Eliminar agrupación y sus artículos
+exports.eliminarAgrupacion = async (req, res) => {
   const { id } = req.params;
 
-  Subrubro.eliminar(id, (err, result) => {
-    if (err) {
-      console.error('❌ Error al eliminar subrubro:', err);
-      return res.status(500).json({ error: 'Error al eliminar subrubro' });
-    }
+  try {
+    await db.promise().query('DELETE FROM agrupacion_articulos WHERE agrupacion_id = ?', [id]);
+    await db.promise().query('DELETE FROM agrupaciones WHERE id = ?', [id]);
 
-    res.status(200).json({ mensaje: 'Subrubro eliminado correctamente' });
-  });
-};
-
-exports.obtenerSubrubrosPorRubro = (req, res) => {
-  const { rubroId } = req.params;
-
-  Subrubro.obtenerPorRubro(rubroId, (err, subrubros) => {
-    if (err) {
-      console.error('❌ Error al obtener subrubros:', err);
-      return res.status(500).json({ error: 'Error al obtener subrubros' });
-    }
-
-    res.status(200).json(subrubros);
-  });
-};
-
-exports.obtenerSubrubroPorId = (req, res) => {
-  const { id } = req.params;
-  Subrubro.obtenerPorId(id, (err, subrubro) => {
-    if (err) {
-      console.error('❌ Error al obtener subrubro:', err);
-      return res.status(500).json({ error: 'Error al obtener subrubro' });
-    }
-    res.status(200).json(subrubro);
-  });
-};
-
-exports.obtenerSubrubros = (req, res) => {
-  Subrubro.obtenerTodos((err, subrubros) => {
-    if (err) {
-      console.error('❌ Error al obtener subrubros:', err);
-      return res.status(500).json({ error: 'Error al obtener subrubros' });
-    }
-    res.status(200).json(subrubros);
-  });
+    res.status(200).json({ mensaje: 'Agrupación eliminada correctamente' });
+  } catch (error) {
+    console.error('❌ Error al eliminar agrupación:', error);
+    res.status(500).json({ error: 'Error al eliminar la agrupación' });
+  }
 };
