@@ -49,8 +49,8 @@ exports.obtenerAgrupaciones = async (req, res) => {
   }
 };
 
-// 🔹 Editar el nombre de una agrupación
-exports.editarAgrupacion = async (req, res) => {
+// 🔹 Editar solo el nombre de una agrupación
+exports.actualizarAgrupacion = async (req, res) => {
   const { id } = req.params;
   const { nombre } = req.body;
 
@@ -60,10 +60,10 @@ exports.editarAgrupacion = async (req, res) => {
 
   try {
     await db.promise().query('UPDATE agrupaciones SET nombre = ? WHERE id = ?', [nombre, id]);
-    res.status(200).json({ mensaje: 'Agrupación actualizada correctamente' });
+    res.status(200).json({ mensaje: 'Nombre actualizado con éxito' });
   } catch (error) {
-    console.error('❌ Error al actualizar agrupación:', error);
-    res.status(500).json({ error: 'Error al actualizar la agrupación' });
+    console.error('❌ Error al actualizar nombre de agrupación:', error);
+    res.status(500).json({ error: 'Error al actualizar el nombre de la agrupación' });
   }
 };
 
@@ -84,7 +84,7 @@ exports.eliminarAgrupacion = async (req, res) => {
 
 // 🔹 Agregar nuevos artículos a una agrupación existente
 exports.agregarArticulosAgrupacion = async (req, res) => {
-  const { id } = req.params; // agrupacion_id
+  const { id } = req.params;
   const { articulos } = req.body;
 
   if (!Array.isArray(articulos) || articulos.length === 0) {
@@ -93,13 +93,11 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 
   try {
     const values = articulos.map(a => [id, a.id, a.nombre, a.categoria, a.subrubro]);
-
     const insertQuery = `
       INSERT INTO agrupacion_articulos 
       (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro) 
       VALUES ?
     `;
-
     await db.promise().query(insertQuery, [values]);
 
     res.status(200).json({ mensaje: 'Artículos agregados correctamente a la agrupación' });
@@ -125,5 +123,36 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   } catch (error) {
     console.error('❌ Error al eliminar artículo de la agrupación:', error);
     res.status(500).json({ error: 'Error al eliminar el artículo de la agrupación' });
+  }
+};
+
+// agrupacionesController.js
+
+const actualizarAgrupacion = async (req, res) => {
+  const { id } = req.params;
+  const { nombre, articulos } = req.body;
+
+  try {
+    if (nombre) {
+      await connection.query('UPDATE agrupaciones SET nombre = ? WHERE id = ?', [nombre, id]);
+    }
+
+    if (articulos && Array.isArray(articulos)) {
+      // Primero eliminamos todos los existentes
+      await connection.query('DELETE FROM agrupacion_articulos WHERE agrupacion_id = ?', [id]);
+
+      // Luego insertamos los nuevos
+      for (const art of articulos) {
+        await connection.query(
+          'INSERT INTO agrupacion_articulos (agrupacion_id, articulo_id, nombre, categoria, subrubro) VALUES (?, ?, ?, ?, ?)',
+          [id, art.id, art.nombre, art.categoria, art.subrubro]
+        );
+      }
+    }
+
+    res.status(200).json({ mensaje: "Agrupación actualizada con éxito" });
+  } catch (error) {
+    console.error("Error al actualizar agrupación:", error);
+    res.status(500).json({ mensaje: "Error al actualizar la agrupación" });
   }
 };
