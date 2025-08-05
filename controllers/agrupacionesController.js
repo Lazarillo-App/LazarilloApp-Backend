@@ -81,3 +81,49 @@ exports.eliminarAgrupacion = async (req, res) => {
     res.status(500).json({ error: 'Error al eliminar la agrupación' });
   }
 };
+
+// 🔹 Agregar nuevos artículos a una agrupación existente
+exports.agregarArticulosAgrupacion = async (req, res) => {
+  const { id } = req.params; // agrupacion_id
+  const { articulos } = req.body;
+
+  if (!Array.isArray(articulos) || articulos.length === 0) {
+    return res.status(400).json({ error: 'Debe proporcionar una lista de artículos' });
+  }
+
+  try {
+    const values = articulos.map(a => [id, a.id, a.nombre, a.categoria, a.subrubro]);
+
+    const insertQuery = `
+      INSERT INTO agrupacion_articulos 
+      (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro) 
+      VALUES ?
+    `;
+
+    await db.promise().query(insertQuery, [values]);
+
+    res.status(200).json({ mensaje: 'Artículos agregados correctamente a la agrupación' });
+  } catch (error) {
+    console.error('❌ Error al agregar artículos a la agrupación:', error);
+    res.status(500).json({ error: 'Error al agregar artículos a la agrupación' });
+  }
+};
+
+// 🔹 Eliminar un artículo de una agrupación
+exports.eliminarArticuloDeAgrupacion = async (req, res) => {
+  const { id, articuloId } = req.params;
+
+  try {
+    const deleteQuery = `
+      DELETE FROM agrupacion_articulos 
+      WHERE agrupacion_id = ? AND articulo_id = ?
+    `;
+
+    await db.promise().query(deleteQuery, [id, articuloId]);
+
+    res.status(200).json({ mensaje: 'Artículo eliminado de la agrupación' });
+  } catch (error) {
+    console.error('❌ Error al eliminar artículo de la agrupación:', error);
+    res.status(500).json({ error: 'Error al eliminar el artículo de la agrupación' });
+  }
+};
