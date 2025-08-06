@@ -47,7 +47,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
     const agrupacionesConArticulos = await Promise.all(
       agrupaciones.map(async (agrupacion) => {
         const [articulos] = await db.promise().query(
-          'SELECT articulo_id AS id, articulo_nombre AS nombre, categoria, subrubro, precio FROM agrupacion_articulos WHERE agrupacion_id = ?'
+          'SELECT articulo_id AS id, articulo_nombre AS nombre, categoria, subrubro, precio FROM agrupacion_articulos WHERE agrupacion_id = ?',
           [agrupacion.id]
         );
 
