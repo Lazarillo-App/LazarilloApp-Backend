@@ -15,8 +15,20 @@ exports.crearAgrupacion = async (req, res) => {
     const agrupacionId = agrupacionResult.insertId;
 
     // Insertar artículos asociados
-    const insertArticuloQuery = 'INSERT INTO agrupacion_articulos (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro) VALUES ?';
-    const values = articulos.map(a => [agrupacionId, a.id, a.nombre, a.categoria, a.subrubro]);
+    const insertArticuloQuery = `
+  INSERT INTO agrupacion_articulos 
+  (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro, precio) 
+  VALUES ?
+`;
+
+    const values = articulos.map(a => [
+      agrupacionId,
+      a.id,
+      a.nombre,
+      a.categoria || 'Sin categoría',
+      a.subrubro || 'Sin subrubro',
+      a.precio ?? 0
+    ]);
 
     await db.promise().query(insertArticuloQuery, [values]);
 
@@ -35,8 +47,8 @@ exports.obtenerAgrupaciones = async (req, res) => {
     const agrupacionesConArticulos = await Promise.all(
       agrupaciones.map(async (agrupacion) => {
         const [articulos] = await db.promise().query(
-          'SELECT articulo_id AS id, articulo_nombre AS nombre, categoria, subrubro FROM agrupacion_articulos WHERE agrupacion_id = ?',
-          [agrupacion.id]
+          'SELECT articulo_id AS id, articulo_nombre AS nombre, categoria, subrubro, precio FROM agrupacion_articulos WHERE agrupacion_id = ?'
+          [agrupacion.id],
         );
         return { ...agrupacion, articulos };
       })
@@ -92,12 +104,20 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
   }
 
   try {
-    const values = articulos.map(a => [id, a.id, a.nombre, a.categoria, a.subrubro]);
     const insertQuery = `
-      INSERT INTO agrupacion_articulos 
-      (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro) 
-      VALUES ?
-    `;
+  INSERT INTO agrupacion_articulos 
+  (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro, precio) 
+  VALUES ?
+`;
+    const values = articulos.map(a => [
+      id,
+      a.id,
+      a.nombre,
+      a.categoria || 'Sin categoría',
+      a.subrubro || 'Sin subrubro',
+      a.precio ?? 0
+    ]);
+
     await db.promise().query(insertQuery, [values]);
 
     res.status(200).json({ mensaje: 'Artículos agregados correctamente a la agrupación' });
@@ -144,9 +164,10 @@ const actualizarAgrupacion = async (req, res) => {
       // Luego insertamos los nuevos
       for (const art of articulos) {
         await connection.query(
-          'INSERT INTO agrupacion_articulos (agrupacion_id, articulo_id, nombre, categoria, subrubro) VALUES (?, ?, ?, ?, ?)',
-          [id, art.id, art.nombre, art.categoria, art.subrubro]
+          'INSERT INTO agrupacion_articulos (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro, precio) VALUES (?, ?, ?, ?, ?, ?)',
+          [id, art.id, art.nombre, art.categoria || 'Sin categoría', art.subrubro || 'Sin subrubro', art.precio ?? 0]
         );
+
       }
     }
 
