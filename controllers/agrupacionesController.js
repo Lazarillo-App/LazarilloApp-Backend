@@ -1,4 +1,20 @@
-const db = require('../config/db');
+// controllers/agrupacionesController.js
+const pool = require('../config/db');
+
+// helper para inserts masivos
+function buildBulkInsertPlaceholders(rowCount, colCount, startIndex = 1) {
+  // Devuelve: "($1,$2,...),($n,...)" y el último índice usado
+  const groups = [];
+  let i = startIndex;
+  for (let r = 0; r < rowCount; r++) {
+    const placeholders = [];
+    for (let c = 0; c < colCount; c++) {
+      placeholders.push(`$${i++}`);
+    }
+    groups.push(`(${placeholders.join(',')})`);
+  }
+  return { text: groups.join(','), lastIndex: i - 1 };
+}
 
 // 🔹 Crear una nueva agrupación con artículos asociados
 exports.crearAgrupacion = async (req, res) => {
@@ -8,54 +24,70 @@ exports.crearAgrupacion = async (req, res) => {
     return res.status(400).json({ error: 'Nombre y lista de artículos son requeridos' });
   }
 
+  const client = await pool.connect();
   try {
-    // Insertar agrupación
-    const insertAgrupacionQuery = 'INSERT INTO agrupaciones (nombre) VALUES (?)';
-    const [agrupacionResult] = await db.promise().query(insertAgrupacionQuery, [nombre]);
-    const agrupacionId = agrupacionResult.insertId;
+    await client.query('BEGIN');
 
-    // Insertar artículos asociados
-    const insertArticuloQuery = `
-  INSERT INTO agrupacion_articulos 
-  (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro, precio) 
-  VALUES ?
-`;
+    // Insert agrupación y obtener id
+    const insertAgr = 'INSERT INTO agrupaciones (nombre) VALUES ($1) RETURNING id';
+    const { rows: agrRows } = await client.query(insertAgr, [nombre]);
+    const agrupacionId = agrRows[0].id;
 
-    const values = articulos.map(a => [
-      agrupacionId,
-      a.id,
-      a.nombre,
-      a.categoria || 'Sin categoría',
-      a.subrubro || 'Sin subrubro',
-      a.precio ?? 0
-    ]);
+    // Insert masivo de artículos
+    const cols = ['agrupacion_id','articulo_id','articulo_nombre','categoria','subrubro','precio'];
+    const values = [];
+    for (const a of articulos) {
+      values.push(
+        agrupacionId,
+        a.id,
+        a.nombre,
+        a.categoria || 'Sin categoría',
+        a.subrubro || 'Sin subrubro',
+        a.precio ?? 0
+      );
+    }
+    const { text: placeholders } = buildBulkInsertPlaceholders(articulos.length, cols.length, 1);
+    const insertArt = `
+      INSERT INTO agrupacion_articulos (${cols.join(',')})
+      VALUES ${placeholders}
+    `;
+    await client.query(insertArt, values);
 
-    await db.promise().query(insertArticuloQuery, [values]);
-
+    await client.query('COMMIT');
     res.status(201).json({ mensaje: 'Agrupación creada con éxito', agrupacionId });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('❌ Error al crear agrupación:', error);
     res.status(500).json({ error: 'Error al crear la agrupación' });
+  } finally {
+    client.release();
   }
 };
 
 // 🔹 Obtener todas las agrupaciones con sus artículos
-exports.obtenerAgrupaciones = async (req, res) => {
+exports.obtenerAgrupaciones = async (_req, res) => {
   try {
-    const [agrupaciones] = await db.promise().query('SELECT * FROM agrupaciones');
+    const { rows: agrupaciones } = await pool.query('SELECT * FROM agrupaciones ORDER BY id DESC');
 
-    const agrupacionesConArticulos = await Promise.all(
-      agrupaciones.map(async (agrupacion) => {
-        const [articulos] = await db.promise().query(
-          'SELECT articulo_id AS id, articulo_nombre AS nombre, categoria, subrubro, precio FROM agrupacion_articulos WHERE agrupacion_id = ?',
-          [agrupacion.id]
-        );
+    // Traer artículos por cada agrupación (simple y claro)
+    const resultado = [];
+    for (const agr of agrupaciones) {
+      const { rows: articulos } = await pool.query(
+        `SELECT 
+           articulo_id AS id, 
+           articulo_nombre AS nombre, 
+           categoria, 
+           subrubro, 
+           precio
+         FROM agrupacion_articulos
+         WHERE agrupacion_id = $1
+         ORDER BY id ASC`,
+        [agr.id]
+      );
+      resultado.push({ ...agr, articulos });
+    }
 
-        return { ...agrupacion, articulos };
-      })
-    );
-
-    res.status(200).json(agrupacionesConArticulos);
+    res.status(200).json(resultado);
   } catch (error) {
     console.error('❌ Error al obtener agrupaciones:', error);
     res.status(500).json({ error: 'Error al obtener las agrupaciones' });
@@ -72,7 +104,7 @@ exports.actualizarAgrupacion = async (req, res) => {
   }
 
   try {
-    await db.promise().query('UPDATE agrupaciones SET nombre = ? WHERE id = ?', [nombre, id]);
+    await pool.query('UPDATE agrupaciones SET nombre = $1 WHERE id = $2', [nombre.trim(), id]);
     res.status(200).json({ mensaje: 'Nombre actualizado con éxito' });
   } catch (error) {
     console.error('❌ Error al actualizar nombre de agrupación:', error);
@@ -80,14 +112,12 @@ exports.actualizarAgrupacion = async (req, res) => {
   }
 };
 
-// 🔹 Eliminar agrupación y sus artículos
+// 🔹 Eliminar agrupación y sus artículos (ON DELETE CASCADE ya ayuda)
 exports.eliminarAgrupacion = async (req, res) => {
   const { id } = req.params;
 
   try {
-    await db.promise().query('DELETE FROM agrupacion_articulos WHERE agrupacion_id = ?', [id]);
-    await db.promise().query('DELETE FROM agrupaciones WHERE id = ?', [id]);
-
+    await pool.query('DELETE FROM agrupaciones WHERE id = $1', [id]);
     res.status(200).json({ mensaje: 'Agrupación eliminada correctamente' });
   } catch (error) {
     console.error('❌ Error al eliminar agrupación:', error);
@@ -105,21 +135,25 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
   }
 
   try {
-    const insertQuery = `
-  INSERT INTO agrupacion_articulos 
-  (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro, precio) 
-  VALUES ?
-`;
-    const values = articulos.map(a => [
-      id,
-      a.id,
-      a.nombre,
-      a.categoria || 'Sin categoría',
-      a.subrubro || 'Sin subrubro',
-      a.precio ?? 0
-    ]);
-
-    await db.promise().query(insertQuery, [values]);
+    const cols = ['agrupacion_id','articulo_id','articulo_nombre','categoria','subrubro','precio'];
+    const values = [];
+    for (const a of articulos) {
+      values.push(
+        id,
+        a.id,
+        a.nombre,
+        a.categoria || 'Sin categoría',
+        a.subrubro || 'Sin subrubro',
+        a.precio ?? 0
+      );
+    }
+    const { text: placeholders } = buildBulkInsertPlaceholders(articulos.length, cols.length, 1);
+    const insertArt = `
+      INSERT INTO agrupacion_articulos (${cols.join(',')})
+      VALUES ${placeholders}
+      ON CONFLICT (agrupacion_id, articulo_id) DO NOTHING
+    `;
+    await pool.query(insertArt, values);
 
     res.status(200).json({ mensaje: 'Artículos agregados correctamente a la agrupación' });
   } catch (error) {
@@ -133,48 +167,13 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   const { id, articuloId } = req.params;
 
   try {
-    const deleteQuery = `
-      DELETE FROM agrupacion_articulos 
-      WHERE agrupacion_id = ? AND articulo_id = ?
-    `;
-
-    await db.promise().query(deleteQuery, [id, articuloId]);
-
+    await pool.query(
+      'DELETE FROM agrupacion_articulos WHERE agrupacion_id = $1 AND articulo_id = $2',
+      [id, articuloId]
+    );
     res.status(200).json({ mensaje: 'Artículo eliminado de la agrupación' });
   } catch (error) {
     console.error('❌ Error al eliminar artículo de la agrupación:', error);
     res.status(500).json({ error: 'Error al eliminar el artículo de la agrupación' });
-  }
-};
-
-// agrupacionesController.js
-
-const actualizarAgrupacion = async (req, res) => {
-  const { id } = req.params;
-  const { nombre, articulos } = req.body;
-
-  try {
-    if (nombre) {
-      await connection.query('UPDATE agrupaciones SET nombre = ? WHERE id = ?', [nombre, id]);
-    }
-
-    if (articulos && Array.isArray(articulos)) {
-      // Primero eliminamos todos los existentes
-      await connection.query('DELETE FROM agrupacion_articulos WHERE agrupacion_id = ?', [id]);
-
-      // Luego insertamos los nuevos
-      for (const art of articulos) {
-        await connection.query(
-          'INSERT INTO agrupacion_articulos (agrupacion_id, articulo_id, articulo_nombre, categoria, subrubro, precio) VALUES (?, ?, ?, ?, ?, ?)',
-          [id, art.id, art.nombre, art.categoria || 'Sin categoría', art.subrubro || 'Sin subrubro', art.precio ?? 0]
-        );
-
-      }
-    }
-
-    res.status(200).json({ mensaje: "Agrupación actualizada con éxito" });
-  } catch (error) {
-    console.error("Error al actualizar agrupación:", error);
-    res.status(500).json({ mensaje: "Error al actualizar la agrupación" });
   }
 };

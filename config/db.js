@@ -1,15 +1,14 @@
-const mysql = require('mysql2');
-require('dotenv').config(); 
+require('dotenv').config();
+const { Pool } = require('pg');
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,      
-  user: process.env.DB_USER,       
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,   
-  port: process.env.DB_PORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+const isRender = !!process.env.RENDER || /render\.com/.test(process.env.DATABASE_URL || '');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+    // fallback para local si te olvidás de poner DATABASE_URL
+    || `postgres://${process.env.PGUSER || 'postgres'}:${process.env.PGPASSWORD || ''}` +
+       `@${process.env.PGHOST || 'localhost'}:${process.env.PGPORT || 5432}/${process.env.PGDATABASE || 'agrupaciones_db'}`,
+  ssl: isRender ? { rejectUnauthorized: false } : false
 });
 
 module.exports = pool;
