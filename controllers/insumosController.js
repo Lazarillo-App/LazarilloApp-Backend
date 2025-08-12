@@ -46,11 +46,11 @@ async function obtenerTokenMaxi() {
   throw new Error('Faltan credenciales: usa MAXI_EMAIL/MAXI_PASS/MAXI_CODCLI o MAXI_BEARER_TOKEN');
 }
 
-console.log('💡 insumosController.js cargado, versión 2.0');
+console.log('💡 insumosController.js cargado');
 
 // ====== SYNC DESDE MAXI ======
 exports.syncDesdeMaxi = async (req, res) => {
-  console.log('▶️  Entró a syncDesdeMaxi');
+  console.log('▶️  Sync de insumos iniciado');
   try {
     const token  = await obtenerTokenMaxi();
     const CODCLI = process.env.MAXI_CODCLI;
@@ -66,7 +66,6 @@ exports.syncDesdeMaxi = async (req, res) => {
 
     for (const b of bases) {
       const url = `${b}/estadisticasmaster/insumos`;
-      console.log('🔎 Probando:', url);
       try {
         const r = await axios.get(url, {
           headers: { Authorization: token },
@@ -89,7 +88,7 @@ exports.syncDesdeMaxi = async (req, res) => {
     const raw   = payload?.content?.content || payload?.content || [];
     const items = Array.isArray(raw) ? raw : [];
     console.log(`✅ Maxi OK (${usada}) → ${items.length} items`);
-    if (items[0]) console.log('🔍 shape ejemplo:', Object.keys(items[0]));
+    if (items[0]) console.log('🔍 ejemplo keys:', Object.keys(items[0]));
 
     // UPSERT — solo si hay código
     const client = await pool.connect();
@@ -250,23 +249,6 @@ exports.eliminar = async (req, res) => {
     const r = await pool.query(`UPDATE insumos SET activo=FALSE, updated_at=NOW() WHERE id=$1`, [id]);
     if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-// ====== Mantenimiento temporal (limpieza de filas vacías) ======
-exports.__cleanupNullInsumos = async (req, res) => {
-  try {
-    const secret = req.headers['x-admin-secret'];
-    if (!secret || secret !== process.env.ADMIN_MAINTENANCE_SECRET) {
-      return res.status(401).json({ ok: false, error: 'unauthorized' });
-    }
-    const r = await pool.query(
-      `DELETE FROM insumos WHERE origen='maxi' AND codigo_maxi IS NULL`
-    );
-    res.json({ ok: true, deleted: r.rowCount });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: e.message });
