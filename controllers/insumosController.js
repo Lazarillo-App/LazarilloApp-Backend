@@ -280,22 +280,68 @@ exports.eliminar = async (req, res) => {
 };
 
 // controllers/insumosController.js (agrega ESTO al final del archivo)
-
-// ⚠️ TEMPORAL: borra filas malas (codigo_maxi vacío/undefined). Eliminalo luego.
-exports.__cleanupInvalidCodes = async (req, res) => {
+// 🔍 TEMP: prueba login en ambas bases
+exports.__debugLogin = async (req, res) => {
   try {
-    const secret = req.headers['x-admin-secret'];
-    if (!secret || secret !== process.env.ADMIN_MAINTENANCE_SECRET) {
-      return res.status(401).json({ ok:false, error:'unauthorized' });
+    const email  = process.env.MAXI_EMAIL;
+    const pass   = process.env.MAXI_PASS;
+    const codCli = process.env.MAXI_CODCLI;
+    const bases = [
+      process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar',
+      process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar'
+    ];
+    const out = [];
+    for (const b of bases) {
+      try {
+        const r = await axios.post(`${b}/login`, { email, pass, cod_cli: codCli }, {
+          headers: { 'Content-Type': 'application/json' }, timeout: 15000
+        });
+        out.push({ base:b, ok:true, resultCode:r.data?.resultCode, hasToken: !!r.data?.content?.tokenAccess });
+      } catch (e) {
+        out.push({ base:b, ok:false, status:e.response?.status, data:e.response?.data || e.message });
+      }
     }
-    const r = await pool.query(`
-      DELETE FROM insumos
-      WHERE origen='maxi'
-        AND (codigo_maxi IS NULL OR codigo_maxi='' OR codigo_maxi='undefined')
-    `);
-    res.json({ ok:true, deleted: r.rowCount });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok:false, error:e.message });
-  }
+    res.json({ ok:true, out });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+};
+
+// 🔍 TEMP: login + pedir insumos, reporta cantidad y keys
+exports.__debugInsumos = async (req, res) => {
+  try {
+    const email  = process.env.MAXI_EMAIL;
+    const pass   = process.env.MAXI_PASS;
+    const codCli = process.env.MAXI_CODCLI;
+    const bases = [
+      process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar',
+      process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar'
+    ];
+    const out = [];
+    for (const b of bases) {
+      try {
+        const lr = await axios.post(`${b}/login`, { email, pass, cod_cli: codCli }, {
+          headers: { 'Content-Type':'application/json' }, timeout:15000
+        });
+        const token = lr.data?.content?.tokenAccess;
+        if (!token) throw new Error('sin token');
+        const auth = { Authorization: `Bearer ${token}` };
+
+        // intentamos sin y con cod_cli (por si el host lo exige)
+        let ir;
+        try {
+          ir = await axios.get(`${b}/estadisticasmaster/insumos`, { headers: auth, timeout:30000 });
+        } catch {
+          ir = await axios.get(`${b}/estadisticasmaster/insumos`, {
+            headers: auth, params:{ cod_cli: codCli }, timeout:30000
+          });
+        }
+
+        const raw = ir.data?.content?.content || ir.data?.content || [];
+        const items = Array.isArray(raw) ? raw : [];
+        out.push({ base:b, ok:true, count: items.length, sampleKeys: items[0] ? Object.keys(items[0]) : [] });
+      } catch (e) {
+        out.push({ base:b, ok:false, where:'insumos', status:e.response?.status, data:e.response?.data || e.message });
+      }
+    }
+    res.json({ ok:true, out });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 };
