@@ -47,98 +47,68 @@ async function obtenerTokenMaxi() {
 console.log('💡 insumosController.js cargado, versión 2.0');
 // ====== SYNC DESDE MAXI ======
 exports.syncDesdeMaxi = async (req, res) => {
+  console.log('▶️  Entró a syncDesdeMaxi');
   try {
     const token = await obtenerTokenMaxi();
-    console.log('BASE=', BASE, 'email=', process.env.MAXI_EMAIL, 'codCli=', process.env.MAXI_CODCLI);
-    console.log('Llamando a', `${BASE}/estadisticasmaster/insumos`);
+    const CODCLI = process.env.MAXI_CODCLI;
 
-    // 1) Primero probamos con api-mconn + cod_cli en query
-    const url1 = `${BASE}/estadisticasmaster/insumos`;
-    try {
-      const { data } = await axios.get(url1, {
-        headers: { Authorization: token },
-        params: { cod_cli: process.env.MAXI_CODCLI },   // 👈 forzamos cod_cli
-        timeout: 30000
-      });
+    // 1) Intentos en orden
+    const bases = [
+      process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar',
+      process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar',
+    ];
 
-      // si llega acá, OK — continúa con el UPSERT como ya lo tenés
-      // ...
-      // (no cambies nada de tu UPSERT)
-      return res.json({ ok: true, total: count });
-    } catch (e1) {
-      // si falló con 401, probamos el host alternativo
-      const status = e1.response?.status;
-      const data = e1.response?.data;
-      console.log('Primera URL falló:', status, data);
+    let payload = null;   // respuesta Maxi válida
+    let usada = null;     // base que funcionó
 
-      // 2) Host alternativo para estadisticas
-      const ALT_BASE = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
-      const url2 = `${ALT_BASE}/estadisticasmaster/insumos`;
-
+    for (const b of bases) {
+      const url = `${b}/estadisticasmaster/insumos`;
+      console.log('🔎 Probando:', url);
       try {
-        const { data } = await axios.get(url2, {
+        const r = await axios.get(url, {
           headers: { Authorization: token },
-          params: { cod_cli: process.env.MAXI_CODCLI },
+          params: { cod_cli: CODCLI },       // 👈 forzamos cod_cli
           timeout: 30000
         });
-
-        // … y el mismo UPSERT que ya tenés:
-        const items = data?.content?.content || data?.content || data || [];
-        let count = 0;
-        const client = await pool.connect();
-        try {
-          await client.query('BEGIN');
-          for (const it of items) {
-            const row = {
-              codigo_maxi: String(it.codigo),
-              nombre: it.nombre || '',
-              rubro: it.rubro ?? null,
-              unidad_med: it.medida ?? null,
-              precio_ref: num(it.precio) ?? 0
-            };
-            await client.query(
-              `INSERT INTO insumos (codigo_maxi, nombre, rubro, unidad_med, precio_ref, origen, activo)
-           VALUES ($1,$2,$3,$4,$5,'maxi',TRUE)
-           ON CONFLICT (codigo_maxi) DO UPDATE SET
-             nombre=$2, rubro=$3, unidad_med=$4, precio_ref=$5, activo=TRUE, updated_at=NOW()`,
-              [row.codigo_maxi, row.nombre, row.rubro, row.unidad_med, row.precio_ref]
-            );
-            count++;
-          }
-          await client.query('COMMIT');
-        } catch (e) {
-          await client.query('ROLLBACK');
-          throw e;
-        } finally {
-          client.release();
-        }
-
-        return res.json({ ok: true, total: count });
-      } catch (e2) {
-        console.error('Segunda URL (ALT_BASE) también falló:', e2.response?.status, e2.response?.data);
-        return res.status(500).json({ ok: false, error: e2.response?.data || e2.message });
+        payload = r.data;
+        usada = b;
+        break; // ¡listo!
+      } catch (e) {
+        console.log('❌ Falló', b, 'status:', e.response?.status, 'data:', e.response?.data);
       }
     }
 
-    const items = data?.content?.content || data?.content || data || [];
-    let count = 0;
+    if (!payload) {
+      return res.status(500).json({ ok:false, error: 'No se pudo obtener insumos de Maxi (401/5xx en todas las URLs)' });
+    }
 
+    // 2) Normalizamos items
+    const items = payload?.content?.content || payload?.content || payload || [];
+    console.log(`✅ Maxi OK (${usada}) → ${Array.isArray(items) ? items.length : 0} items`);
+
+    // 3) UPSERT
     const client = await pool.connect();
+    let count = 0;
     try {
       await client.query('BEGIN');
       for (const it of items) {
         const row = {
-          codigo_maxi: String(it.codigo),
-          nombre: it.nombre || '',
-          rubro: it.rubro ?? null,
-          unidad_med: it.medida ?? null,
-          precio_ref: num(it.precio) ?? 0
+          codigo_maxi: it?.codigo != null ? String(it.codigo) : null,
+          nombre: it?.nombre || '',
+          rubro: it?.rubro ?? null,
+          unidad_med: it?.medida ?? null,
+          precio_ref: num(it?.precio) ?? 0
         };
         await client.query(
           `INSERT INTO insumos (codigo_maxi, nombre, rubro, unidad_med, precio_ref, origen, activo)
            VALUES ($1,$2,$3,$4,$5,'maxi',TRUE)
            ON CONFLICT (codigo_maxi) DO UPDATE SET
-             nombre=$2, rubro=$3, unidad_med=$4, precio_ref=$5, activo=TRUE, updated_at=NOW()`,
+             nombre=EXCLUDED.nombre,
+             rubro=EXCLUDED.rubro,
+             unidad_med=EXCLUDED.unidad_med,
+             precio_ref=EXCLUDED.precio_ref,
+             activo=TRUE,
+             updated_at=NOW()`,
           [row.codigo_maxi, row.nombre, row.rubro, row.unidad_med, row.precio_ref]
         );
         count++;
@@ -151,10 +121,10 @@ exports.syncDesdeMaxi = async (req, res) => {
       client.release();
     }
 
-    res.json({ ok: true, total: count });
+    return res.json({ ok:true, total: count });
   } catch (e) {
     console.error('syncDesdeMaxi error:', e?.response?.data || e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok:false, error: e.response?.data || e.message });
   }
 };
 
