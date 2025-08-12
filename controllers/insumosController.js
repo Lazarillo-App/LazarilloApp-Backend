@@ -1,6 +1,6 @@
 // controllers/insumosController.js
 const axios = require('axios');
-const pool  = require('../config/db');
+const pool = require('../config/db');
 
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
@@ -15,8 +15,8 @@ async function obtenerTokenMaxi() {
   // cache en memoria
   if (cachedToken && now < tokenExpiresAt) return cachedToken;
 
-  const email  = process.env.MAXI_EMAIL;
-  const pass   = process.env.MAXI_PASS;
+  const email = process.env.MAXI_EMAIL;
+  const pass = process.env.MAXI_PASS;
   const codCli = process.env.MAXI_CODCLI;
 
   // Modo 1: login automático (recomendado)
@@ -29,14 +29,14 @@ async function obtenerTokenMaxi() {
     }
     const token = data.content?.tokenAccess;
     const alive = Number(data.content?.aliveTime || 3600); // segundos
-    cachedToken   = `Bearer ${token}`;
+    cachedToken = `Bearer ${token}`;
     tokenExpiresAt = now + (alive - 60) * 1000; // renueva 1 min antes
     return cachedToken;
   }
 
   // Modo 2: token fijo (fallback)
   if (process.env.MAXI_BEARER_TOKEN) {
-    cachedToken   = process.env.MAXI_BEARER_TOKEN.startsWith('Bearer ')
+    cachedToken = process.env.MAXI_BEARER_TOKEN.startsWith('Bearer ')
       ? process.env.MAXI_BEARER_TOKEN
       : `Bearer ${process.env.MAXI_BEARER_TOKEN}`;
     tokenExpiresAt = now + (55 * 60 * 1000);
@@ -52,7 +52,7 @@ console.log('💡 insumosController.js cargado');
 exports.syncDesdeMaxi = async (req, res) => {
   console.log('▶️  Sync de insumos iniciado');
   try {
-    const token  = await obtenerTokenMaxi();
+    const token = await obtenerTokenMaxi();
     const CODCLI = process.env.MAXI_CODCLI;
 
     // probamos 2 bases en orden
@@ -81,11 +81,11 @@ exports.syncDesdeMaxi = async (req, res) => {
     }
 
     if (!payload) {
-      return res.status(500).json({ ok:false, error:'No se pudo obtener insumos de Maxi (401/5xx en todas las URLs)' });
+      return res.status(500).json({ ok: false, error: 'No se pudo obtener insumos de Maxi (401/5xx en todas las URLs)' });
     }
 
     // normalizamos items
-    const raw   = payload?.content?.content || payload?.content || [];
+    const raw = payload?.content?.content || payload?.content || [];
     const items = Array.isArray(raw) ? raw : [];
     console.log(`✅ Maxi OK (${usada}) → ${items.length} items`);
     if (items[0]) console.log('🔍 ejemplo keys:', Object.keys(items[0]));
@@ -97,27 +97,40 @@ exports.syncDesdeMaxi = async (req, res) => {
       await client.query('BEGIN');
 
       for (const it of items) {
-        const codigo = it?.codigo ?? it?.cod_rui ?? it?.id ?? null;
-        if (!codigo) continue;   // ⛔️ no insertes sin código
+        // 1) sacamos el valor crudo que pudiera traer Maxi en distintos nombres
+        const codigoRaw = it?.codigo ?? it?.cod_rui ?? it?.id ?? it?.codigo_articulo ?? null;
+
+        // 2) normalizamos: si es string "undefined", vacío, null, etc → lo tratamos como inválido
+        const codigoValido =
+          (typeof codigoRaw === 'number' && !Number.isNaN(codigoRaw)) ||
+          (typeof codigoRaw === 'string' && codigoRaw.trim() !== '' && codigoRaw.trim().toLowerCase() !== 'undefined');
+
+        if (!codigoValido) {
+          // debug opcional:
+          // console.log('🔸 salteado por código inválido:', codigoRaw, it);
+          continue;
+        }
+
+        const codigo = String(codigoRaw).trim();
 
         const row = {
-          codigo_maxi : String(codigo),
-          nombre      : (it?.nombre ?? '').trim(),
-          rubro       : it?.rubro ?? null,
-          unidad_med  : it?.medida ?? it?.unidad_med ?? null,
-          precio_ref  : num(it?.precio) ?? 0
+          codigo_maxi: codigo,
+          nombre: (it?.nombre ?? '').trim(),
+          rubro: it?.rubro ?? null,
+          unidad_med: it?.medida ?? it?.unidad_med ?? null,
+          precio_ref: num(it?.precio) ?? 0
         };
 
         await client.query(
           `INSERT INTO insumos (codigo_maxi, nombre, rubro, unidad_med, precio_ref, origen, activo)
-           VALUES ($1,$2,$3,$4,$5,'maxi',TRUE)
-           ON CONFLICT (codigo_maxi) DO UPDATE SET
-             nombre=EXCLUDED.nombre,
-             rubro=EXCLUDED.rubro,
-             unidad_med=EXCLUDED.unidad_med,
-             precio_ref=EXCLUDED.precio_ref,
-             activo=TRUE,
-             updated_at=NOW()`,
+     VALUES ($1,$2,$3,$4,$5,'maxi',TRUE)
+     ON CONFLICT (codigo_maxi) DO UPDATE SET
+       nombre=EXCLUDED.nombre,
+       rubro=EXCLUDED.rubro,
+       unidad_med=EXCLUDED.unidad_med,
+       precio_ref=EXCLUDED.precio_ref,
+       activo=TRUE,
+       updated_at=NOW()`,
           [row.codigo_maxi, row.nombre, row.rubro, row.unidad_med, row.precio_ref]
         );
         count++;
@@ -131,40 +144,40 @@ exports.syncDesdeMaxi = async (req, res) => {
       client.release();
     }
 
-    return res.json({ ok:true, total: count });
+    return res.json({ ok: true, total: count });
   } catch (e) {
     console.error('syncDesdeMaxi error:', e?.response?.data || e.message);
-    return res.status(500).json({ ok:false, error: e.response?.data || e.message });
+    return res.status(500).json({ ok: false, error: e.response?.data || e.message });
   }
 };
 
 // ====== LISTAR / CRUD ======
 exports.listar = async (req, res) => {
   try {
-    const { page=1, limit=50, search='', rubro, unidadMed, origen, activo='true',
-            orderBy='nombre', order='ASC' } = req.query;
+    const { page = 1, limit = 50, search = '', rubro, unidadMed, origen, activo = 'true',
+      orderBy = 'nombre', order = 'ASC' } = req.query;
 
     const where = [];
     const params = [];
 
     if (search) {
       params.push(`%${search}%`, `%${search}%`);
-      where.push(`(nombre ILIKE $${params.length-1} OR codigo_maxi ILIKE $${params.length})`);
+      where.push(`(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`);
     }
-    if (rubro)     { params.push(rubro);     where.push(`rubro = $${params.length}`); }
+    if (rubro) { params.push(rubro); where.push(`rubro = $${params.length}`); }
     if (unidadMed) { params.push(unidadMed); where.push(`unidad_med = $${params.length}`); }
-    if (origen)    { params.push(origen);    where.push(`origen = $${params.length}`); }
+    if (origen) { params.push(origen); where.push(`origen = $${params.length}`); }
     if (activo !== 'all') { params.push(activo === 'true'); where.push(`activo = $${params.length}`); }
 
-    const offset = (Number(page)-1) * Number(limit);
+    const offset = (Number(page) - 1) * Number(limit);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const validOrderBy = ['nombre','codigo_maxi','rubro','unidad_med','precio_ref','created_at','updated_at'].includes(orderBy) ? orderBy : 'nombre';
-    const validOrder   = order.toUpperCase()==='DESC' ? 'DESC' : 'ASC';
+    const validOrderBy = ['nombre', 'codigo_maxi', 'rubro', 'unidad_med', 'precio_ref', 'created_at', 'updated_at'].includes(orderBy) ? orderBy : 'nombre';
+    const validOrder = order.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
-        `SELECT * FROM insumos ${whereSql} ORDER BY ${validOrderBy} ${validOrder} LIMIT $${params.length+1} OFFSET $${params.length+2}`,
+        `SELECT * FROM insumos ${whereSql} ORDER BY ${validOrderBy} ${validOrder} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         [...params, Number(limit), Number(offset)]
       ),
       pool.query(`SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`, params)
@@ -213,20 +226,20 @@ exports.crearManual = async (req, res) => {
 exports.actualizar = async (req, res) => {
   try {
     const { id } = req.params, b = req.body || {};
-    const sets = [], vals = []; const push = (c,v)=>{ vals.push(v); sets.push(`${c}=$${vals.length}`); };
+    const sets = [], vals = []; const push = (c, v) => { vals.push(v); sets.push(`${c}=$${vals.length}`); };
 
-    if (b.nombre !== undefined)           push('nombre', b.nombre);
-    if (b.unidadMed !== undefined)        push('unidad_med', b.unidadMed);
-    if (b.precioRef !== undefined)        push('precio_ref', num(b.precioRef));
-    if (b.rubro !== undefined)            push('rubro', b.rubro);
-    if (b.envase !== undefined)           push('envase', b.envase);
-    if (b.vencimiento !== undefined)      push('vencimiento', b.vencimiento);
-    if (b.resumen !== undefined)          push('resumen', b.resumen);
+    if (b.nombre !== undefined) push('nombre', b.nombre);
+    if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
+    if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
+    if (b.rubro !== undefined) push('rubro', b.rubro);
+    if (b.envase !== undefined) push('envase', b.envase);
+    if (b.vencimiento !== undefined) push('vencimiento', b.vencimiento);
+    if (b.resumen !== undefined) push('resumen', b.resumen);
     if (b.cantIngredientes !== undefined) push('cant_ingredientes', b.cantIngredientes);
-    if (b.agrupacionBase !== undefined)   push('agrupacion_base', b.agrupacionBase);
-    if (b.costoRef !== undefined)         push('costo_ref', num(b.costoRef));
-    if (b.nota !== undefined)             push('nota', b.nota);
-    if (b.activo !== undefined)           push('activo', b.activo);
+    if (b.agrupacionBase !== undefined) push('agrupacion_base', b.agrupacionBase);
+    if (b.costoRef !== undefined) push('costo_ref', num(b.costoRef));
+    if (b.nota !== undefined) push('nota', b.nota);
+    if (b.activo !== undefined) push('activo', b.activo);
 
     if (!sets.length) return res.json({ ok: true, data: null });
 
@@ -249,6 +262,28 @@ exports.eliminar = async (req, res) => {
     const r = await pool.query(`UPDATE insumos SET activo=FALSE, updated_at=NOW() WHERE id=$1`, [id]);
     if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ⚠️ temporal: limpiar filas con codigo inválido
+exports.__cleanupInvalidCodes = async (req, res) => {
+  try {
+    const secret = req.headers['x-admin-secret'];
+    if (!secret || secret !== process.env.ADMIN_MAINTENANCE_SECRET) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    const r = await pool.query(
+      `DELETE FROM insumos
+       WHERE origen='maxi' AND (
+         codigo_maxi IS NULL OR
+         codigo_maxi = '' OR
+         codigo_maxi = 'undefined'
+       )`
+    );
+    res.json({ ok: true, deleted: r.rowCount });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: e.message });

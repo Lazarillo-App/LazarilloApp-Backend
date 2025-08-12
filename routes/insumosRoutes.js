@@ -7,5 +7,6 @@ router.get('/', ctrl.listar);
 router.post('/', ctrl.crearManual);
 router.put('/:id', ctrl.actualizar);
 router.delete('/:id', ctrl.eliminar);
+router.post('/admin/cleanup-invalid', ctrl.__cleanupInvalidCodes);
 
 module.exports = router;
