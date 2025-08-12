@@ -46,87 +46,53 @@ async function obtenerTokenMaxi() {
 }
 console.log('💡 insumosController.js cargado, versión 2.0');
 // ====== SYNC DESDE MAXI ======
-exports.syncDesdeMaxi = async (req, res) => {
-  console.log('▶️  Entró a syncDesdeMaxi');
-  try {
-    const token = await obtenerTokenMaxi();
-    const CODCLI = process.env.MAXI_CODCLI;
+// 2) Normalizamos items
+const raw = payload?.content?.content || payload?.content || [];
+const items = Array.isArray(raw) ? raw : [];
+console.log('🔍 shape ejemplo:', items[0] ? Object.keys(items[0]) : 'sin items');
 
-    // 1) Intentos en orden
-    const bases = [
-      process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar',
-      process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar',
-    ];
+// 3) UPSERT (solo con codigo válido)
+const client = await pool.connect();
+let count = 0;
+try {
+  await client.query('BEGIN');
 
-    let payload = null;   // respuesta Maxi válida
-    let usada = null;     // base que funcionó
+  for (const it of items) {
+    const codigo = it?.codigo ?? it?.cod_rui ?? it?.id ?? null;
+    if (!codigo) continue;                // ⛔️ no guardamos sin código
 
-    for (const b of bases) {
-      const url = `${b}/estadisticasmaster/insumos`;
-      console.log('🔎 Probando:', url);
-      try {
-        const r = await axios.get(url, {
-          headers: { Authorization: token },
-          params: { cod_cli: CODCLI },       // 👈 forzamos cod_cli
-          timeout: 30000
-        });
-        payload = r.data;
-        usada = b;
-        break; // ¡listo!
-      } catch (e) {
-        console.log('❌ Falló', b, 'status:', e.response?.status, 'data:', e.response?.data);
-      }
-    }
+    const row = {
+      codigo_maxi : String(codigo),
+      nombre      : (it?.nombre ?? '').trim(),
+      rubro       : it?.rubro ?? null,
+      unidad_med  : it?.medida ?? it?.unidad_med ?? null,
+      precio_ref  : num(it?.precio) ?? 0
+    };
 
-    if (!payload) {
-      return res.status(500).json({ ok:false, error: 'No se pudo obtener insumos de Maxi (401/5xx en todas las URLs)' });
-    }
-
-    // 2) Normalizamos items
-    const items = payload?.content?.content || payload?.content || payload || [];
-    console.log(`✅ Maxi OK (${usada}) → ${Array.isArray(items) ? items.length : 0} items`);
-
-    // 3) UPSERT
-    const client = await pool.connect();
-    let count = 0;
-    try {
-      await client.query('BEGIN');
-      for (const it of items) {
-        const row = {
-          codigo_maxi: it?.codigo != null ? String(it.codigo) : null,
-          nombre: it?.nombre || '',
-          rubro: it?.rubro ?? null,
-          unidad_med: it?.medida ?? null,
-          precio_ref: num(it?.precio) ?? 0
-        };
-        await client.query(
-          `INSERT INTO insumos (codigo_maxi, nombre, rubro, unidad_med, precio_ref, origen, activo)
-           VALUES ($1,$2,$3,$4,$5,'maxi',TRUE)
-           ON CONFLICT (codigo_maxi) DO UPDATE SET
-             nombre=EXCLUDED.nombre,
-             rubro=EXCLUDED.rubro,
-             unidad_med=EXCLUDED.unidad_med,
-             precio_ref=EXCLUDED.precio_ref,
-             activo=TRUE,
-             updated_at=NOW()`,
-          [row.codigo_maxi, row.nombre, row.rubro, row.unidad_med, row.precio_ref]
-        );
-        count++;
-      }
-      await client.query('COMMIT');
-    } catch (e) {
-      await client.query('ROLLBACK');
-      throw e;
-    } finally {
-      client.release();
-    }
-
-    return res.json({ ok:true, total: count });
-  } catch (e) {
-    console.error('syncDesdeMaxi error:', e?.response?.data || e.message);
-    return res.status(500).json({ ok:false, error: e.response?.data || e.message });
+    await client.query(
+      `INSERT INTO insumos (codigo_maxi, nombre, rubro, unidad_med, precio_ref, origen, activo)
+       VALUES ($1,$2,$3,$4,$5,'maxi',TRUE)
+       ON CONFLICT (codigo_maxi) DO UPDATE SET
+         nombre=EXCLUDED.nombre,
+         rubro=EXCLUDED.rubro,
+         unidad_med=EXCLUDED.unidad_med,
+         precio_ref=EXCLUDED.precio_ref,
+         activo=TRUE,
+         updated_at=NOW()`,
+      [row.codigo_maxi, row.nombre, row.rubro, row.unidad_med, row.precio_ref]
+    );
+    count++;
   }
-};
+
+  await client.query('COMMIT');
+} catch (e) {
+  await client.query('ROLLBACK');
+  throw e;
+} finally {
+  client.release();
+}
+
+return res.json({ ok: true, total: count });
 
 // ====== LISTAR / CRUD ======
 exports.listar = async (req, res) => {
@@ -242,5 +208,21 @@ exports.eliminar = async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+exports.__cleanupNullInsumos = async (req, res) => {
+  try {
+    const secret = req.headers['x-admin-secret'];
+    if (!secret || secret !== process.env.ADMIN_MAINTENANCE_SECRET) {
+      return res.status(401).json({ ok:false, error:'unauthorized' });
+    }
+    const r = await pool.query(
+      `DELETE FROM insumos WHERE origen='maxi' AND codigo_maxi IS NULL`
+    );
+    res.json({ ok:true, deleted: r.rowCount });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok:false, error:e.message });
   }
 };
