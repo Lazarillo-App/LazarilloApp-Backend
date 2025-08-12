@@ -40,6 +40,8 @@ app.get('/health/db', async (_req, res) => {
   }
 });
 
+app.use('/api/insumos', require('./routes/insumosRoutes'));
+
 // Puerto API (evitamos 5000 porque lo usa tu PG)
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {

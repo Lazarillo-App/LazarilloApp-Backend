@@ -177,3 +177,81 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
     res.status(500).json({ error: 'Error al eliminar el artículo de la agrupación' });
   }
 };
+
+// === NUEVO: sincronizar insumos desde /estadisticas/compras ===
+exports.syncDesdeCompras = async (req, res) => {
+  try {
+    const token = await obtenerTokenMaxi();
+
+    // rango por defecto: últimos 7 días
+    const hoy = new Date();
+    const to = (req.body?.to) || hoy.toISOString().slice(0,10);
+    const from = (req.body?.from) || new Date(hoy.getTime() - 6*86400000).toISOString().slice(0,10);
+
+    // llamada a compras
+    const { data } = await axios.post(
+      `${BASE}/estadisticas/compras`,
+      { from, to },  // ¡RAW JSON! solo fechas al principio
+      {
+        headers: { Authorization: token, 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    );
+
+    // validación de respuesta
+    if (data?.resultCode !== 'SUCCESS') {
+      return res.status(502).json({ ok:false, error: data?.resultDescription || 'Fallo compras' });
+    }
+
+    // lista de comprobantes
+    const docs = data?.content?.content || [];
+    // recolectamos insumos de todos los items
+    const map = new Map();
+    for (const doc of docs) {
+      const items = Array.isArray(doc?.items) ? doc.items : [];
+      for (const it of items) {
+        const codigo = it?.insumo;              // viene como número
+        if (!codigo || Number(codigo) === 0) continue; // descartamos 0/undefined
+        const precio = Number(it?.precio) || 0;
+
+        // si ya lo vimos, podemos actualizar el precio_ref con el último encontrado
+        map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
+      }
+    }
+
+    if (map.size === 0) {
+      return res.json({ ok:true, total:0, from, to, note: 'No se hallaron insumos en el rango' });
+    }
+
+    // UPSERT en transacción
+    const client = await pool.connect();
+    let count = 0;
+    try {
+      await client.query('BEGIN');
+      for (const { codigo_maxi, precio_ref } of map.values()) {
+        await client.query(
+          `INSERT INTO insumos (codigo_maxi, nombre, rubro, unidad_med, precio_ref, origen, activo)
+           VALUES ($1, $2, $3, $4, $5, 'compras', TRUE)
+           ON CONFLICT (codigo_maxi) DO UPDATE SET
+             precio_ref = EXCLUDED.precio_ref,
+             origen = 'compras',
+             activo = TRUE,
+             updated_at = NOW()`,
+          [codigo_maxi, '', null, null, precio_ref]
+        );
+        count++;
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok:true, total: count, from, to });
+  } catch (e) {
+    console.error('syncDesdeCompras error:', e?.response?.data || e.message);
+    res.status(500).json({ ok:false, error: e?.message || 'error' });
+  }
+};
