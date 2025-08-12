@@ -48,85 +48,53 @@ async function obtenerTokenMaxi() {
 
 console.log('💡 insumosController.js cargado');
 
-// ====== SYNC DESDE MAXI ======
-// reemplazá TODO el cuerpo de syncDesdeMaxi por este
 exports.syncDesdeMaxi = async (req, res) => {
-  console.log('▶️  Sync de insumos iniciado');
   try {
-    const CODCLI = process.env.MAXI_CODCLI;
-    const bases = [
-      process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar',
-      process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar'
-    ];
+    console.log('▶️  Sync de insumos (mconn → partners)');
 
-    let payload = null;
-    let usada = null;
+    const email  = process.env.MAXI_EMAIL;
+    const pass   = process.env.MAXI_PASS;
+    const codCli = process.env.MAXI_CODCLI;
+    const BASE_LOGIN = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
+    const BASE_STATS = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
 
-    // Intentamos por cada base: login + consulta en la misma base
-    for (const b of bases) {
-      try {
-        // 1) LOGIN en ESTA base
-        const email  = process.env.MAXI_EMAIL;
-        const pass   = process.env.MAXI_PASS;
-        const credOk = email && pass && CODCLI;
-        const token =
-          credOk
-            ? (await axios.post(`${b}/login`, { email, pass, cod_cli: CODCLI },
-                { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
-              )).data?.content?.tokenAccess
-            : null;
+    // 1) Login en mconn
+    const lr = await axios.post(`${BASE_LOGIN}/login`, { email, pass, cod_cli: codCli }, {
+      headers: { 'Content-Type':'application/json' }, timeout: 15000
+    });
+    if (lr.data?.resultCode !== 'SUCCESS') {
+      return res.status(401).json({ ok:false, error:'login_failed', data: lr.data });
+    }
+    const token = lr.data?.content?.tokenAccess;
+    const auth = { Authorization: `Bearer ${token}` };
 
-        if (!token) {
-          console.log('❌ Login falló en', b);
-          continue;
-        }
-        const bearer = `Bearer ${token}`;
-
-        // 2) STATS en ESTA base (mismo host)
-        const url = `${b}/estadisticasmaster/insumos`;
-        console.log('🔎 Probando:', url);
-        const r = await axios.get(url, {
-          headers: { Authorization: bearer },
-          params : { cod_cli: CODCLI },
-          timeout: 30000
-        });
-
-        payload = r.data;
-        usada = b;
-        break;
-      } catch (e) {
-        console.log('❌ Falló', b, 'status:', e.response?.status, 'data:', e.response?.data);
-      }
+    // 2) Insumos en partners (log completo)
+    let ir;
+    try {
+      ir = await axios.get(`${BASE_STATS}/estadisticasmaster/insumos`, { headers: auth, timeout: 30000 });
+    } catch {
+      ir = await axios.get(`${BASE_STATS}/estadisticasmaster/insumos`, {
+        headers: auth, params: { cod_cli: codCli }, timeout: 30000
+      });
     }
 
-    if (!payload) {
-      return res.status(500).json({ ok:false, error:'No se pudo obtener insumos de Maxi en ningún host' });
-    }
+    console.log('📦 Respuesta completa de insumos:', JSON.stringify(ir.data, null, 2));
 
-    // Normalizamos items
-    const raw   = payload?.content?.content || payload?.content || [];
+    const raw = ir.data?.content?.content || ir.data?.content || [];
     const items = Array.isArray(raw) ? raw : [];
-    console.log(`✅ Maxi OK (${usada}) → ${items.length} items`);
-    if (items[0]) console.log('🔍 ejemplo keys:', Object.keys(items[0]));
+    console.log('ℹ️  Insumos recibidos:', items.length);
 
-    // UPSERT con filtro anti-undefined
-    const client = await pool.connect();
+    // 3) UPSERT con filtro de código válido
     let count = 0;
+    const client = await pool.connect();
     try {
       await client.query('BEGIN');
-
       for (const it of items) {
-        const codigoRaw = it?.codigo ?? it?.cod_rui ?? it?.id ?? it?.codigo_articulo ?? null;
-        const valido =
-          (typeof codigoRaw === 'number' && !Number.isNaN(codigoRaw)) ||
-          (typeof codigoRaw === 'string' && codigoRaw.trim() !== '' && codigoRaw.trim().toLowerCase() !== 'undefined');
-
-        if (!valido) continue; // nunca guardar sin código
-
-        const codigo = String(codigoRaw).trim();
+        const codigo = it?.codigo ?? it?.cod_rui ?? it?.id ?? null;
+        if (!codigo) continue;
 
         const row = {
-          codigo_maxi : codigo,
+          codigo_maxi : String(codigo),
           nombre      : (it?.nombre ?? '').trim(),
           rubro       : it?.rubro ?? null,
           unidad_med  : it?.medida ?? it?.unidad_med ?? null,
@@ -147,18 +115,18 @@ exports.syncDesdeMaxi = async (req, res) => {
         );
         count++;
       }
-
       await client.query('COMMIT');
     } catch (e) {
-      await client.query('ROLLBACK'); throw e;
+      await client.query('ROLLBACK');
+      throw e;
     } finally {
       client.release();
     }
 
     return res.json({ ok:true, total: count });
   } catch (e) {
-    console.error('syncDesdeMaxi error:', e?.response?.data || e.message);
-    return res.status(500).json({ ok:false, error: e.response?.data || e.message });
+    console.error('syncDesdeMaxi error:', e.response?.data || e.message);
+    return res.status(500).json({ ok:false, error: e.message });
   }
 };
 
