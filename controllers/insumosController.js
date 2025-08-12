@@ -345,3 +345,48 @@ exports.__debugInsumos = async (req, res) => {
     res.json({ ok:true, out });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 };
+
+// 🔍 TEMP: login en api-mconn y pedir insumos en partners con ese token
+exports.__debugCombo = async (req, res) => {
+  try {
+    const email  = process.env.MAXI_EMAIL;
+    const pass   = process.env.MAXI_PASS;
+    const codCli = process.env.MAXI_CODCLI;
+    const BASE_LOGIN = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
+    const BASE_STATS = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
+
+    // 1) login en api-mconn
+    const lr = await axios.post(`${BASE_LOGIN}/login`, { email, pass, cod_cli: codCli }, {
+      headers: { 'Content-Type':'application/json' }, timeout: 15000
+    });
+    const token = lr.data?.content?.tokenAccess;
+    if (!token) return res.json({ ok:false, step:'login', data:lr.data });
+
+    const auth = { Authorization: `Bearer ${token}` };
+
+    // 2) pedir insumos en partners (intento A: sin params)
+    let ir;
+    try {
+      ir = await axios.get(`${BASE_STATS}/estadisticasmaster/insumos`, { headers: auth, timeout: 30000 });
+    } catch (e1) {
+      // intento B: con cod_cli en query
+      try {
+        ir = await axios.get(`${BASE_STATS}/estadisticasmaster/insumos`, {
+          headers: auth, params: { cod_cli: codCli }, timeout: 30000
+        });
+      } catch (e2) {
+        return res.json({ ok:false, step:'insumos', status:e2.response?.status, data:e2.response?.data || e2.message });
+      }
+    }
+
+    const raw = ir.data?.content?.content || ir.data?.content || [];
+    const items = Array.isArray(raw) ? raw : [];
+    return res.json({
+      ok: true,
+      count: items.length,
+      sampleKeys: items[0] ? Object.keys(items[0]) : []
+    });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error: e.message });
+  }
+};

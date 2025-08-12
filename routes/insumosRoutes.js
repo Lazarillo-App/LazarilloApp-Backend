@@ -11,4 +11,7 @@ router.delete('/:id', ctrl.eliminar);
 router.get('/admin/debug-login',   ctrl.__debugLogin);
 router.get('/admin/debug-insumos', ctrl.__debugInsumos);
 
+// routes/insumosRoutes.js
+router.get('/admin/debug-combo', ctrl.__debugCombo);
+
 module.exports = router;
