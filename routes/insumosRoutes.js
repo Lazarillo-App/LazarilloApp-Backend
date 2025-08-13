@@ -29,4 +29,10 @@ router.put('/:id', ctrl.actualizar);
 router.delete('/:id', ctrl.eliminar);
 router.post('/admin/cleanup-null', ctrl.__cleanupNullInsumos);
 
+// Debug helpers
+router.post('/__debugLogin', ctrl.__debugLogin);
+router.post('/__debugInsumos', ctrl.__debugInsumos);
+router.post('/__debugCombo', ctrl.__debugCombo);
+router.post('/__debugCompras', ctrl.__debugCompras); // 👈 esta es la que faltó
+
 module.exports = router;
