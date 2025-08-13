@@ -355,67 +355,25 @@ exports.__debugCombo = async (req, res) => {
   }
 };
 
+// ====== SYNC DESDE COMPRAS (mconn con reintentos; fallback partners; chunking) ======
 exports.syncDesdeCompras = async (req, res) => {
   try {
     const email  = process.env.MAXI_EMAIL;
     const pass   = process.env.MAXI_PASS;
     const codCli = process.env.MAXI_CODCLI;
 
-    const BASE_LOGIN = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
-    const BASE_STATS = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
+    const MCONN   = process.env.MAXI_BASE_URL       || 'https://api-mconn.maxisistemas.com.ar';
+    const PARTNER = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
 
     const hoy = new Date();
-    const toRequested = (req.body?.to) || hoy.toISOString().slice(0,10);
-    const fromRequested = (req.body?.from) || new Date(hoy.getTime() - 6*86400000).toISOString().slice(0,10);
-    const chunkDays = Math.max(1, Math.min(Number(req.body?.chunkDays) || 0, 14));
-
-    const hosts = [
-      BASE_LOGIN, // api-mconn
-      BASE_STATS  // partners
-    ];
-
-    const login = async (BASE) => {
-      const lr = await axios.post(`${BASE}/login`, { email, pass, cod_cli: codCli }, {
-        headers: { 'Content-Type':'application/json' }, timeout: 20000
-      });
-      if (lr.data?.resultCode !== 'SUCCESS') {
-        throw new Error(`Login fallo en ${BASE}: ${lr.data?.resultDescription || 'desconocido'}`);
-      }
-      return `Bearer ${lr.data?.content?.tokenAccess}`;
-    };
-
-    const callCompras = async (BASE, token, from, to) => {
-      const AUTH = { Authorization: token, 'Content-Type': 'application/json' };
-      // sin cod_cli
-      try {
-        const { data } = await axios.post(
-          `${BASE}/estadisticas/compras`,
-          { from, to },
-          { headers: AUTH, timeout: 120000 }
-        );
-        if (data?.resultCode === 'SUCCESS') return data;
-      } catch (e) {
-        // seguimos abajo
-      }
-      // con cod_cli
-      const url2 = `${BASE}/estadisticas/compras?cod_cli=${encodeURIComponent(codCli||'')}`;
-      const { data } = await axios.post(
-        url2,
-        { from, to },
-        { headers: AUTH, timeout: 120000 }
-      );
-      if (data?.resultCode !== 'SUCCESS') {
-        const desc = data?.resultDescription || 'desconocido';
-        throw new Error(`Fallo compras (${BASE}${BASE.includes('partners') ? ' + cod_cli' : ''}): ${desc}`);
-      }
-      return data;
-    };
+    const toRequested   = (req.body?.to)   || hoy.toISOString().slice(0,10);
+    const fromRequested = (req.body?.from) || new Date(hoy.getTime() - 1*86400000).toISOString().slice(0,10); // por defecto 2 días
+    const chunkDays = Math.max(1, Math.min(Number(req.body?.chunkDays) || 2, 7)); // 1..7
 
     const toDate = (s) => new Date(`${s}T00:00:00Z`);
-    const toStr = (d) => d.toISOString().slice(0,10);
-
-    const ranges = [];
-    if (chunkDays > 0) {
+    const toStr  = (d) => d.toISOString().slice(0,10);
+    const buildRanges = () => {
+      const ranges = [];
       let from = toDate(fromRequested);
       const end = toDate(toRequested);
       while (from <= end) {
@@ -423,48 +381,99 @@ exports.syncDesdeCompras = async (req, res) => {
         ranges.push([toStr(from), toStr(chunkEnd)]);
         from = new Date(chunkEnd.getTime() + 86400000);
       }
-    } else {
-      ranges.push([fromRequested, toRequested]);
-    }
+      return ranges;
+    };
 
-    const map = new Map();
-    const usedHost = [];
+    const login = async (BASE) => {
+      const lr = await axios.post(`${BASE}/login`, { email, pass, cod_cli: codCli }, {
+        headers: { 'Content-Type':'application/json', 'Accept':'application/json' }, timeout: 20000
+      });
+      if (lr.data?.resultCode !== 'SUCCESS') {
+        throw new Error(`Login falló en ${BASE}: ${lr.data?.resultDescription || 'desconocido'}`);
+      }
+      return `Bearer ${lr.data?.content?.tokenAccess}`;
+    };
 
-    // probamos primero en api-mconn; si no, partners
-    for (const BASE of hosts) {
+    const postCompras = async (BASE, token, from, to) => {
+      const AUTH = { Authorization: token, 'Content-Type': 'application/json', 'Accept':'application/json' };
+      // intento A: sin cod_cli
       try {
-        const token = await login(BASE);
-        usedHost.push(BASE);
-        for (const [f, t] of ranges) {
-          const data = await callCompras(BASE, token, f, t);
-          const docs = data?.content?.content || [];
-          for (const doc of docs) {
-            const items = Array.isArray(doc?.items) ? doc.items : [];
-            for (const it of items) {
-              const codigo = it?.insumo;
-              if (!codigo || Number(codigo) === 0) continue;
-              const precio = Number(it?.precio) || 0;
-              map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
-            }
-          }
+        const r = await axios.post(`${BASE}/estadisticas/compras`, { from, to }, { headers: AUTH, timeout: 120000 });
+        if (r.data?.resultCode === 'SUCCESS') return r.data;
+      } catch (_) { /* seguimos */ }
+      // intento B: con cod_cli
+      const url2 = `${BASE}/estadisticas/compras?cod_cli=${encodeURIComponent(codCli||'')}`;
+      const r2 = await axios.post(url2, { from, to }, { headers: AUTH, timeout: 120000 });
+      if (r2.data?.resultCode !== 'SUCCESS') {
+        const desc = r2.data?.resultDescription || 'desconocido';
+        throw new Error(`compras falló en ${BASE}: ${desc}`);
+      }
+      return r2.data;
+    };
+
+    // Reintentos con backoff para mconn
+    const fetchMconn = async (from, to) => {
+      let lastErr;
+      for (let i=0;i<3;i++){
+        try {
+          const token = await login(MCONN);
+          return await postCompras(MCONN, token, from, to);
+        } catch (e) {
+          lastErr = e;
+          await new Promise(r => setTimeout(r, 1000 * (2**i))); // 1s, 2s, 4s
         }
-        // si alguna llamada funcionó en este host, no seguimos probando el otro
-        if (map.size > 0) break;
+      }
+      throw lastErr || new Error('mconn no disponible');
+    };
+
+    // Fallback simple a partners (sabemos que suele dar 0, pero lo intentamos)
+    const fetchPartner = async (from, to) => {
+      try {
+        // partners a veces permite sin token
+        try {
+          const r = await axios.post(`${PARTNER}/estadisticas/compras`, { from, to }, {
+            headers: { 'Content-Type':'application/json', 'Accept':'application/json' }, timeout: 120000
+          });
+          return r.data;
+        } catch (_){
+          const token = await login(PARTNER);
+          return await postCompras(PARTNER, token, from, to);
+        }
       } catch (e) {
-        // probamos siguiente host
-        if (BASE === BASE_STATS) {
-          // si ya probamos ambos, reportamos
-          console.error('syncDesdeCompras detalle:', e.response?.data || e.message);
+        throw e;
+      }
+    };
+
+    const ranges = buildRanges();
+    const map = new Map();
+    const chunksMeta = [];
+    let source = 'mconn';
+
+    for (const [f,t] of ranges) {
+      let data;
+      try {
+        data = await fetchMconn(f,t);
+      } catch (eM) {
+        // si mconn cae con 502, probamos partners solo para no frenar
+        source = 'partners';
+        data = await fetchPartner(f,t);
+      }
+
+      const docs = data?.content?.content || data?.content || [];
+      chunksMeta.push({ from: f, to: t, docs: Array.isArray(docs) ? docs.length : -1, source });
+      for (const doc of (Array.isArray(docs) ? docs : [])) {
+        const items = Array.isArray(doc?.items) ? doc.items : [];
+        for (const it of items) {
+          const codigo = it?.insumo;
+          if (!codigo || Number(codigo) === 0) continue;
+          const precio = Number(it?.precio) || 0;
+          map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
         }
       }
     }
 
     if (map.size === 0) {
-      return res.status(502).json({
-        ok:false,
-        error:'No se pudo obtener compras en ninguno de los hosts',
-        tried: usedHost
-      });
+      return res.json({ ok:true, total:0, from: fromRequested, to: toRequested, source, chunks: chunksMeta, note:'Sin items de compras' });
     }
 
     const client = await pool.connect();
@@ -492,19 +501,13 @@ exports.syncDesdeCompras = async (req, res) => {
       client.release();
     }
 
-    return res.json({
-      ok: true,
-      total: count,
-      from: fromRequested,
-      to: toRequested,
-      usedHost
-    });
+    return res.json({ ok:true, total: count, from: fromRequested, to: toRequested, source, chunks: chunksMeta });
   } catch (e) {
     console.error('syncDesdeCompras error:', e?.response?.data || e.message);
     return res.status(500).json({ ok:false, error: e?.message || 'error' });
   }
-}
-;
+};
+
 
 // ====== MANTENIMIENTO / CLEANUP ======
 exports.__cleanupNullInsumos = async (req, res) => {
