@@ -355,52 +355,94 @@ exports.__debugCombo = async (req, res) => {
   }
 };
 
-// ====== SYNC DESDE COMPRAS (fallback) ======
+// ====== SYNC DESDE COMPRAS (robusto con fallbacks y chunking) ======
 exports.syncDesdeCompras = async (req, res) => {
   try {
     const token = await obtenerTokenMaxi();
+    const AUTH = { Authorization: token, 'Content-Type': 'application/json' };
 
-    // rango por defecto: últimos 7 días
+    // rango solicitado o últimos 7 días por defecto
     const hoy = new Date();
-    const to = (req.body?.to) || hoy.toISOString().slice(0,10);
-    const from = (req.body?.from) || new Date(hoy.getTime() - 6*86400000).toISOString().slice(0,10);
+    const toRequested = (req.body?.to) || hoy.toISOString().slice(0,10);
+    const fromRequested = (req.body?.from) || new Date(hoy.getTime() - 6*86400000).toISOString().slice(0,10);
 
-    // llamada a compras
-    const { data } = await axios.post(
-      `${BASE}/estadisticas/compras`,
-      { from, to },  // RAW JSON: solo fechas
-      {
-        headers: { Authorization: token, 'Content-Type': 'application/json' },
-        timeout: 30000
+    // chunking opcional (pasalo en el body si querés: { chunkDays: 3 })
+    const chunkDays = Math.max(1, Math.min(Number(req.body?.chunkDays) || 0, 14)); // 1..14, 0 = sin chunk
+    const BASE_LOGIN = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
+    const BASE_STATS = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
+    const codCli = process.env.MAXI_CODCLI;
+
+    const hosts = [
+      // Intentos: [urlBase, conQueryCodCli?]
+      [`${BASE_LOGIN}`, false],
+      [`${BASE_LOGIN}`, true],
+      [`${BASE_STATS}`, false],
+      [`${BASE_STATS}`, true],
+    ];
+
+    const callCompras = async (from, to) => {
+      let lastErr;
+      for (const [BASE, withCod] of hosts) {
+        try {
+          // Primero POST sin params; si el host exige cod_cli en query, lo agregamos
+          const url = withCod ? `${BASE}/estadisticas/compras?cod_cli=${encodeURIComponent(codCli || '')}`
+                              : `${BASE}/estadisticas/compras`;
+          const { data } = await axios.post(
+            url,
+            { from, to },                     // Solo fechas
+            { headers: AUTH, timeout: 120000 } // 120s
+          );
+          if (data?.resultCode !== 'SUCCESS') {
+            lastErr = new Error(`Fallo compras (${BASE}${withCod ? ' + cod_cli' : ''}): ` +
+                                (data?.resultDescription || 'desconocido'));
+            continue;
+          }
+          return data;
+        } catch (e) {
+          lastErr = e;
+        }
       }
-    );
+      throw lastErr || new Error('No se pudo obtener compras');
+    };
 
-    // validación de respuesta
-    if (data?.resultCode !== 'SUCCESS') {
-      return res.status(502).json({ ok:false, error: data?.resultDescription || 'Fallo compras' });
+    // Helper para iterar en chunks si se pidió
+    const toDate = (s) => new Date(`${s}T00:00:00Z`);
+    const toStr = (d) => d.toISOString().slice(0,10);
+    const results = [];
+    if (chunkDays > 0) {
+      let from = toDate(fromRequested);
+      const end = toDate(toRequested);
+      while (from <= end) {
+        const chunkEnd = new Date(Math.min(from.getTime() + (chunkDays-1)*86400000, end.getTime()));
+        const f = toStr(from), t = toStr(chunkEnd);
+        const data = await callCompras(f, t);
+        results.push({ range: [f,t], data });
+        from = new Date(chunkEnd.getTime() + 86400000); // siguiente día
+      }
+    } else {
+      const data = await callCompras(fromRequested, toRequested);
+      results.push({ range: [fromRequested, toRequested], data });
     }
 
-    // lista de comprobantes
-    const docs = data?.content?.content || [];
-    // recolectamos insumos de todos los items
+    // Recolectar y upsert
     const map = new Map();
-    for (const doc of docs) {
-      const items = Array.isArray(doc?.items) ? doc.items : [];
-      for (const it of items) {
-        const codigo = it?.insumo;              // viene como número
-        if (!codigo || Number(codigo) === 0) continue; // descartamos 0/undefined
-        const precio = Number(it?.precio) || 0;
-
-        // si ya lo vimos, actualizamos el precio_ref con el último encontrado
-        map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
+    for (const r of results) {
+      const docs = r.data?.content?.content || [];
+      for (const doc of docs) {
+        const items = Array.isArray(doc?.items) ? doc.items : [];
+        for (const it of items) {
+          const codigo = it?.insumo;
+          if (!codigo || Number(codigo) === 0) continue;
+          const precio = Number(it?.precio) || 0;
+          map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
+        }
       }
     }
 
     if (map.size === 0) {
-      return res.json({ ok:true, total:0, from, to, note: 'No se hallaron insumos en el rango' });
+      return res.json({ ok:true, total:0, from: fromRequested, to: toRequested, note: 'Sin insumos en el rango (compras)' });
     }
 
-    // UPSERT en transacción
     const client = await pool.connect();
     let count = 0;
     try {
@@ -426,12 +468,19 @@ exports.syncDesdeCompras = async (req, res) => {
       client.release();
     }
 
-    res.json({ ok:true, total: count, from, to });
+    return res.json({
+      ok: true,
+      total: count,
+      from: fromRequested,
+      to: toRequested,
+      chunks: results.map(r => ({ from: r.range[0], to: r.range[1], size: (r.data?.content?.content || []).length }))
+    });
   } catch (e) {
     console.error('syncDesdeCompras error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error: e?.message || 'error' });
+    return res.status(500).json({ ok:false, error: e?.message || 'error' });
   }
 };
+;
 
 // ====== MANTENIMIENTO / CLEANUP ======
 exports.__cleanupNullInsumos = async (req, res) => {
