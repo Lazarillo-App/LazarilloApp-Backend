@@ -48,6 +48,7 @@ async function obtenerTokenMaxi() {
 
 console.log('💡 insumosController.js cargado');
 
+// ====== SYNC DESDE API ======
 exports.syncDesdeMaxi = async (req, res) => {
   try {
     console.log('▶️  Sync de insumos (mconn → partners)');
@@ -68,7 +69,7 @@ exports.syncDesdeMaxi = async (req, res) => {
     const token = lr.data?.content?.tokenAccess;
     const auth = { Authorization: `Bearer ${token}` };
 
-    // 2) Insumos en partners (log completo)
+    // 2) Insumos en partners (intento sin y con cod_cli)
     let ir;
     try {
       ir = await axios.get(`${BASE_STATS}/estadisticasmaster/insumos`, { headers: auth, timeout: 30000 });
@@ -247,8 +248,7 @@ exports.eliminar = async (req, res) => {
   }
 };
 
-// controllers/insumosController.js (agrega ESTO al final del archivo)
-// 🔍 TEMP: prueba login en ambas bases
+// ====== DEBUG UTILS (opcionales) ======
 exports.__debugLogin = async (req, res) => {
   try {
     const email  = process.env.MAXI_EMAIL;
@@ -273,7 +273,6 @@ exports.__debugLogin = async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 };
 
-// 🔍 TEMP: login + pedir insumos, reporta cantidad y keys
 exports.__debugInsumos = async (req, res) => {
   try {
     const email  = process.env.MAXI_EMAIL;
@@ -293,7 +292,6 @@ exports.__debugInsumos = async (req, res) => {
         if (!token) throw new Error('sin token');
         const auth = { Authorization: `Bearer ${token}` };
 
-        // intentamos sin y con cod_cli (por si el host lo exige)
         let ir;
         try {
           ir = await axios.get(`${b}/estadisticasmaster/insumos`, { headers: auth, timeout:30000 });
@@ -314,7 +312,6 @@ exports.__debugInsumos = async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 };
 
-// 🔍 TEMP: login en api-mconn y pedir insumos en partners con ese token
 exports.__debugCombo = async (req, res) => {
   try {
     const email  = process.env.MAXI_EMAIL;
@@ -332,12 +329,11 @@ exports.__debugCombo = async (req, res) => {
 
     const auth = { Authorization: `Bearer ${token}` };
 
-    // 2) pedir insumos en partners (intento A: sin params)
+    // 2) pedir insumos en partners (A: sin params, B: con cod_cli)
     let ir;
     try {
       ir = await axios.get(`${BASE_STATS}/estadisticasmaster/insumos`, { headers: auth, timeout: 30000 });
     } catch (e1) {
-      // intento B: con cod_cli en query
       try {
         ir = await axios.get(`${BASE_STATS}/estadisticasmaster/insumos`, {
           headers: auth, params: { cod_cli: codCli }, timeout: 30000
@@ -359,6 +355,7 @@ exports.__debugCombo = async (req, res) => {
   }
 };
 
+// ====== SYNC DESDE COMPRAS (fallback) ======
 exports.syncDesdeCompras = async (req, res) => {
   try {
     const token = await obtenerTokenMaxi();
@@ -371,7 +368,7 @@ exports.syncDesdeCompras = async (req, res) => {
     // llamada a compras
     const { data } = await axios.post(
       `${BASE}/estadisticas/compras`,
-      { from, to },  // ¡RAW JSON! solo fechas al principio
+      { from, to },  // RAW JSON: solo fechas
       {
         headers: { Authorization: token, 'Content-Type': 'application/json' },
         timeout: 30000
@@ -394,7 +391,7 @@ exports.syncDesdeCompras = async (req, res) => {
         if (!codigo || Number(codigo) === 0) continue; // descartamos 0/undefined
         const precio = Number(it?.precio) || 0;
 
-        // si ya lo vimos, podemos actualizar el precio_ref con el último encontrado
+        // si ya lo vimos, actualizamos el precio_ref con el último encontrado
         map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
       }
     }
@@ -433,5 +430,53 @@ exports.syncDesdeCompras = async (req, res) => {
   } catch (e) {
     console.error('syncDesdeCompras error:', e?.response?.data || e.message);
     res.status(500).json({ ok:false, error: e?.message || 'error' });
+  }
+};
+
+// ====== MANTENIMIENTO / CLEANUP ======
+exports.__cleanupNullInsumos = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1) Borra filas sin código o sin nombre (si querés conservarlas, comentá estas líneas)
+    const r1 = await client.query(`
+      DELETE FROM insumos
+      WHERE (codigo_maxi IS NULL OR TRIM(COALESCE(codigo_maxi, '')) = '')
+         OR (nombre IS NULL OR TRIM(COALESCE(nombre, '')) = '')
+    `);
+
+    // 2) Normaliza espacios en nombre y unidad_med
+    const r2 = await client.query(`
+      UPDATE insumos
+         SET nombre = NULLIF(TRIM(nombre), ''),
+             unidad_med = NULLIF(TRIM(unidad_med), ''),
+             updated_at = NOW()
+       WHERE (nombre IS NOT NULL AND nombre <> TRIM(nombre))
+          OR (unidad_med IS NOT NULL AND unidad_med <> TRIM(unidad_med))
+    `);
+
+    // 3) Colapsa duplicados por codigo_maxi dejando el más reciente
+    //    (si ya tenés UNIQUE(codigo_maxi), esto es opcional)
+    const r3 = await client.query(`
+      DELETE FROM insumos a
+      USING insumos b
+      WHERE a.id < b.id
+        AND a.codigo_maxi = b.codigo_maxi
+    `);
+
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      removed_nulls: r1.rowCount,
+      normalized: r2.rowCount,
+      removed_dupes: r3.rowCount
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('__cleanupNullInsumos error:', e.message);
+    return res.status(500).json({ ok:false, error: e.message });
+  } finally {
+    client.release();
   }
 };
