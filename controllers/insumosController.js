@@ -355,92 +355,116 @@ exports.__debugCombo = async (req, res) => {
   }
 };
 
-// ====== SYNC DESDE COMPRAS (robusto con fallbacks y chunking) ======
 exports.syncDesdeCompras = async (req, res) => {
   try {
-    const token = await obtenerTokenMaxi();
-    const AUTH = { Authorization: token, 'Content-Type': 'application/json' };
+    const email  = process.env.MAXI_EMAIL;
+    const pass   = process.env.MAXI_PASS;
+    const codCli = process.env.MAXI_CODCLI;
 
-    // rango solicitado o últimos 7 días por defecto
+    const BASE_LOGIN = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
+    const BASE_STATS = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
+
     const hoy = new Date();
     const toRequested = (req.body?.to) || hoy.toISOString().slice(0,10);
     const fromRequested = (req.body?.from) || new Date(hoy.getTime() - 6*86400000).toISOString().slice(0,10);
-
-    // chunking opcional (pasalo en el body si querés: { chunkDays: 3 })
-    const chunkDays = Math.max(1, Math.min(Number(req.body?.chunkDays) || 0, 14)); // 1..14, 0 = sin chunk
-    const BASE_LOGIN = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
-    const BASE_STATS = process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar';
-    const codCli = process.env.MAXI_CODCLI;
+    const chunkDays = Math.max(1, Math.min(Number(req.body?.chunkDays) || 0, 14));
 
     const hosts = [
-      // Intentos: [urlBase, conQueryCodCli?]
-      [`${BASE_LOGIN}`, false],
-      [`${BASE_LOGIN}`, true],
-      [`${BASE_STATS}`, false],
-      [`${BASE_STATS}`, true],
+      BASE_LOGIN, // api-mconn
+      BASE_STATS  // partners
     ];
 
-    const callCompras = async (from, to) => {
-      let lastErr;
-      for (const [BASE, withCod] of hosts) {
-        try {
-          // Primero POST sin params; si el host exige cod_cli en query, lo agregamos
-          const url = withCod ? `${BASE}/estadisticas/compras?cod_cli=${encodeURIComponent(codCli || '')}`
-                              : `${BASE}/estadisticas/compras`;
-          const { data } = await axios.post(
-            url,
-            { from, to },                     // Solo fechas
-            { headers: AUTH, timeout: 120000 } // 120s
-          );
-          if (data?.resultCode !== 'SUCCESS') {
-            lastErr = new Error(`Fallo compras (${BASE}${withCod ? ' + cod_cli' : ''}): ` +
-                                (data?.resultDescription || 'desconocido'));
-            continue;
-          }
-          return data;
-        } catch (e) {
-          lastErr = e;
-        }
+    const login = async (BASE) => {
+      const lr = await axios.post(`${BASE}/login`, { email, pass, cod_cli: codCli }, {
+        headers: { 'Content-Type':'application/json' }, timeout: 20000
+      });
+      if (lr.data?.resultCode !== 'SUCCESS') {
+        throw new Error(`Login fallo en ${BASE}: ${lr.data?.resultDescription || 'desconocido'}`);
       }
-      throw lastErr || new Error('No se pudo obtener compras');
+      return `Bearer ${lr.data?.content?.tokenAccess}`;
     };
 
-    // Helper para iterar en chunks si se pidió
+    const callCompras = async (BASE, token, from, to) => {
+      const AUTH = { Authorization: token, 'Content-Type': 'application/json' };
+      // sin cod_cli
+      try {
+        const { data } = await axios.post(
+          `${BASE}/estadisticas/compras`,
+          { from, to },
+          { headers: AUTH, timeout: 120000 }
+        );
+        if (data?.resultCode === 'SUCCESS') return data;
+      } catch (e) {
+        // seguimos abajo
+      }
+      // con cod_cli
+      const url2 = `${BASE}/estadisticas/compras?cod_cli=${encodeURIComponent(codCli||'')}`;
+      const { data } = await axios.post(
+        url2,
+        { from, to },
+        { headers: AUTH, timeout: 120000 }
+      );
+      if (data?.resultCode !== 'SUCCESS') {
+        const desc = data?.resultDescription || 'desconocido';
+        throw new Error(`Fallo compras (${BASE}${BASE.includes('partners') ? ' + cod_cli' : ''}): ${desc}`);
+      }
+      return data;
+    };
+
     const toDate = (s) => new Date(`${s}T00:00:00Z`);
     const toStr = (d) => d.toISOString().slice(0,10);
-    const results = [];
+
+    const ranges = [];
     if (chunkDays > 0) {
       let from = toDate(fromRequested);
       const end = toDate(toRequested);
       while (from <= end) {
         const chunkEnd = new Date(Math.min(from.getTime() + (chunkDays-1)*86400000, end.getTime()));
-        const f = toStr(from), t = toStr(chunkEnd);
-        const data = await callCompras(f, t);
-        results.push({ range: [f,t], data });
-        from = new Date(chunkEnd.getTime() + 86400000); // siguiente día
+        ranges.push([toStr(from), toStr(chunkEnd)]);
+        from = new Date(chunkEnd.getTime() + 86400000);
       }
     } else {
-      const data = await callCompras(fromRequested, toRequested);
-      results.push({ range: [fromRequested, toRequested], data });
+      ranges.push([fromRequested, toRequested]);
     }
 
-    // Recolectar y upsert
     const map = new Map();
-    for (const r of results) {
-      const docs = r.data?.content?.content || [];
-      for (const doc of docs) {
-        const items = Array.isArray(doc?.items) ? doc.items : [];
-        for (const it of items) {
-          const codigo = it?.insumo;
-          if (!codigo || Number(codigo) === 0) continue;
-          const precio = Number(it?.precio) || 0;
-          map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
+    const usedHost = [];
+
+    // probamos primero en api-mconn; si no, partners
+    for (const BASE of hosts) {
+      try {
+        const token = await login(BASE);
+        usedHost.push(BASE);
+        for (const [f, t] of ranges) {
+          const data = await callCompras(BASE, token, f, t);
+          const docs = data?.content?.content || [];
+          for (const doc of docs) {
+            const items = Array.isArray(doc?.items) ? doc.items : [];
+            for (const it of items) {
+              const codigo = it?.insumo;
+              if (!codigo || Number(codigo) === 0) continue;
+              const precio = Number(it?.precio) || 0;
+              map.set(String(codigo), { codigo_maxi: String(codigo), precio_ref: precio });
+            }
+          }
+        }
+        // si alguna llamada funcionó en este host, no seguimos probando el otro
+        if (map.size > 0) break;
+      } catch (e) {
+        // probamos siguiente host
+        if (BASE === BASE_STATS) {
+          // si ya probamos ambos, reportamos
+          console.error('syncDesdeCompras detalle:', e.response?.data || e.message);
         }
       }
     }
 
     if (map.size === 0) {
-      return res.json({ ok:true, total:0, from: fromRequested, to: toRequested, note: 'Sin insumos en el rango (compras)' });
+      return res.status(502).json({
+        ok:false,
+        error:'No se pudo obtener compras en ninguno de los hosts',
+        tried: usedHost
+      });
     }
 
     const client = await pool.connect();
@@ -473,13 +497,13 @@ exports.syncDesdeCompras = async (req, res) => {
       total: count,
       from: fromRequested,
       to: toRequested,
-      chunks: results.map(r => ({ from: r.range[0], to: r.range[1], size: (r.data?.content?.content || []).length }))
+      usedHost
     });
   } catch (e) {
     console.error('syncDesdeCompras error:', e?.response?.data || e.message);
     return res.status(500).json({ ok:false, error: e?.message || 'error' });
   }
-};
+}
 ;
 
 // ====== MANTENIMIENTO / CLEANUP ======
@@ -527,5 +551,79 @@ exports.__cleanupNullInsumos = async (req, res) => {
     return res.status(500).json({ ok:false, error: e.message });
   } finally {
     client.release();
+  }
+};
+// 🔍 DEBUG: probar /estadisticas/compras en ambos hosts con login por host
+exports.__debugCompras = async (req, res) => {
+  try {
+    const email  = process.env.MAXI_EMAIL;
+    const pass   = process.env.MAXI_PASS;
+    const codCli = process.env.MAXI_CODCLI;
+    const from = (req.body?.from);
+    const to   = (req.body?.to);
+
+    if (!from || !to) {
+      return res.status(400).json({ ok:false, error:'Falta from/to (YYYY-MM-DD)' });
+    }
+
+    const BASES = [
+      process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar',
+      process.env.MAXI_STATS_BASE_URL || 'https://partners.maxisistemas.com.ar'
+    ];
+
+    const out = [];
+    for (const BASE of BASES) {
+      const step = { base: BASE };
+      try {
+        // 1) login en el mismo host
+        const lr = await axios.post(`${BASE}/login`, { email, pass, cod_cli: codCli }, {
+          headers: { 'Content-Type':'application/json' }, timeout: 20000
+        });
+        step.login = {
+          status:   'ok',
+          resultCode: lr.data?.resultCode,
+          hasToken: !!lr.data?.content?.tokenAccess
+        };
+        const token = lr.data?.content?.tokenAccess;
+        const AUTH = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+        // 2) compras sin y con cod_cli
+        const tries = [
+          { url: `${BASE}/estadisticas/compras`, query: 'none' },
+          { url: `${BASE}/estadisticas/compras?cod_cli=${encodeURIComponent(codCli||'')}`, query: 'cod_cli' },
+        ];
+
+        step.calls = [];
+        for (const t of tries) {
+          try {
+            const r = await axios.post(t.url, { from, to }, { headers: AUTH, timeout: 120000 });
+            const raw = r.data;
+            const list = raw?.content?.content || raw?.content || [];
+            step.calls.push({
+              url: t.url,
+              ok:  true,
+              resultCode: raw?.resultCode,
+              resultDescription: raw?.resultDescription,
+              items: Array.isArray(list) ? list.length : -1,
+              sampleKeys: Array.isArray(list) && list[0] ? Object.keys(list[0]) : []
+            });
+          } catch (e) {
+            step.calls.push({
+              url: t.url,
+              ok: false,
+              status: e.response?.status,
+              data: e.response?.data || e.message
+            });
+          }
+        }
+      } catch (e) {
+        step.login = { status: 'fail', data: e.response?.data || e.message };
+      }
+      out.push(step);
+    }
+
+    return res.json({ ok:true, out });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:e.message });
   }
 };
