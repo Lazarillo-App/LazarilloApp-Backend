@@ -19,6 +19,9 @@ app.use(cors({
   methods: ['GET','POST','PUT','DELETE','OPTIONS']
 }));
 
+// app.js
+app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
+
 app.use(express.json());
 
 // Rutas
