@@ -13,7 +13,7 @@ exports.listar = async (req, res) => {
       page = 1,
       limit = 50,
       search = '',
-      // rubro,  // 👈 deprecado
+      // rubro, // deprecado
       unidadMed,
       origen,
       activo = 'true',
@@ -28,21 +28,25 @@ exports.listar = async (req, res) => {
       params.push(`%${search}%`, `%${search}%`);
       where.push(`(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`);
     }
-    // if (rubro)     { params.push(rubro);     where.push(`rubro = $${params.length}`); } // 👈 deprecado
+    // if (rubro) { params.push(rubro); where.push(`rubro = $${params.length}`); } // deprecado
     if (unidadMed) { params.push(unidadMed); where.push(`unidad_med = $${params.length}`); }
     if (origen)    { params.push(origen);    where.push(`origen = $${params.length}`); }
     if (activo !== 'all') { params.push(activo === 'true'); where.push(`activo = $${params.length}`); }
 
-    const offset = (Number(page) - 1) * Number(limit);
+    const offset   = (Number(page) - 1) * Number(limit);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const validOrderByWhitelist = ['nombre', 'codigo_maxi', 'unidad_med', 'precio_ref', 'created_at', 'updated_at']; // 👈 sin rubro
+    // No incluimos "codigo_mostrar" en el ORDER BY porque es un alias calculado.
+    const validOrderByWhitelist = ['nombre', 'codigo_maxi', 'unidad_med', 'precio_ref', 'created_at', 'updated_at'];
     const validOrderBy = validOrderByWhitelist.includes(orderBy) ? orderBy : 'nombre';
-    const validOrder = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
+    const validOrder   = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
-        `SELECT * FROM insumos ${whereSql}
+        `SELECT *,
+                COALESCE(NULLIF(TRIM(codigo_maxi), ''), 'INS-' || id) AS codigo_mostrar
+         FROM insumos
+         ${whereSql}
          ORDER BY ${validOrderBy} ${validOrder}
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         [...params, Number(limit), Number(offset)]
@@ -54,7 +58,7 @@ exports.listar = async (req, res) => {
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page: Number(page),
+        page : Number(page),
         limit: Number(limit),
         total: countRes.rows[0].total,
         pages: Math.ceil(countRes.rows[0].total / Number(limit))
@@ -65,6 +69,7 @@ exports.listar = async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 };
+
 
 exports.crearManual = async (req, res) => {
   try {
