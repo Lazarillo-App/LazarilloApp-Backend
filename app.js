@@ -3,6 +3,12 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
+const { runMigrations } = require('./db/migrations');
+
+runMigrations()
+  .then(() => console.log('✅ Migraciones ejecutadas'))
+  .catch(err => { console.error('❌ Error ejecutando migraciones:', err); process.exit(1); });
+
 // CORS (frontend local y tu dominio en Wiroos)
 app.use(cors({
   origin: [
@@ -28,7 +34,7 @@ app.use('/api', agrupacionesRoutes);
 // Log correcto para PG
 console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
 
-// (opcional) healthcheck de DB
+// Healthcheck de DB
 const pool = require('./config/db');
 app.get('/health/db', async (_req, res) => {
   try {
@@ -39,8 +45,6 @@ app.get('/health/db', async (_req, res) => {
     res.status(500).json({ error: 'db down' });
   }
 });
-
-app.use('/api/insumos', require('./routes/insumosRoutes'));
 
 // Puerto API (evitamos 5000 porque lo usa tu PG)
 const PORT = process.env.PORT || 4000;
