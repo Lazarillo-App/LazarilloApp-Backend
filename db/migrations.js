@@ -41,7 +41,7 @@ async function runMigrations() {
     );
   `);
 
-  // 2.1) Asegurar columnas (si venías con una versión previa)
+  // 2.1) Asegurar columnas
   await execSafe(`ALTER TABLE insumos ADD COLUMN codigo_maxi TEXT;`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN nombre TEXT NOT NULL DEFAULT '';`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN unidad_med TEXT;`);
@@ -52,7 +52,7 @@ async function runMigrations() {
   await execSafe(`ALTER TABLE insumos ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
-  // 2.2) Columna generada: codigo_mostrar (si ya existe, lo ignoro)
+  // 2.2) Columna generada
   await execSafe(`
     ALTER TABLE insumos
     ADD COLUMN codigo_mostrar TEXT
@@ -67,16 +67,16 @@ async function runMigrations() {
   await exec(`CREATE INDEX IF NOT EXISTS insumos_activo_idx ON insumos (activo);`);
   await exec(`CREATE INDEX IF NOT EXISTS insumos_codigo_mostrar_trgm ON insumos USING gin (codigo_mostrar gin_trgm_ops);`);
 
-  // 3) Presentaciones por insumo
+  // 3) Presentaciones
   await exec(`
     CREATE TABLE IF NOT EXISTS insumo_presentaciones (
       id              BIGSERIAL PRIMARY KEY,
       insumo_id       BIGINT NOT NULL REFERENCES insumos(id) ON DELETE CASCADE,
-      unidad          TEXT   NOT NULL,              -- ej: kg, g, lt, ml, un
-      cantidad        NUMERIC(14,4) NOT NULL,       -- ej: 1, 500, etc.
-      precio          NUMERIC(14,2) NOT NULL,       -- precio del paquete
-      unidad_base     TEXT   NOT NULL,              -- ej: g, ml, un
-      factor_base     NUMERIC(14,6) NOT NULL,       -- ej: 1000 si unidad=kg y base=g
+      unidad          TEXT   NOT NULL,
+      cantidad        NUMERIC(14,4) NOT NULL,
+      precio          NUMERIC(14,2) NOT NULL,
+      unidad_base     TEXT   NOT NULL,
+      factor_base     NUMERIC(14,6) NOT NULL,
       precio_unitario NUMERIC(14,6) GENERATED ALWAYS AS
         (CASE WHEN (cantidad * factor_base) > 0
               THEN precio / (cantidad * factor_base)
@@ -87,7 +87,7 @@ async function runMigrations() {
     );
   `);
 
-  // 3.1) CHECKs de unidades (si ya existen, los ignoro con execSafe)
+  // 3.1) CHECKs
   await execSafe(`
     ALTER TABLE insumo_presentaciones
     ADD CONSTRAINT pres_unidad_check
@@ -99,7 +99,7 @@ async function runMigrations() {
     CHECK (unidad_base IN ('kg','g','lt','ml','un'));
   `);
 
-  // 3.2) Únicos / índices presentaciones
+  // 3.2) Índices
   await exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS insumo_presentaciones_unique_idx
     ON insumo_presentaciones (insumo_id, unidad, cantidad);
@@ -133,12 +133,25 @@ async function runMigrations() {
     );
   `);
 
-  // 4.1) Único por cliente+nombre y otros índices
-  await execSafe(`
-    ALTER TABLE insumo_grupos
-    ADD CONSTRAINT insumo_grupos_cliente_nombre_key
-    UNIQUE (cliente_id, nombre);
+  // 4.1) Único por cliente+nombre (idempotente con índice)
+  await exec(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'insumo_grupos_cliente_nombre_key'
+      ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_igrupos_cliente_nombre
+          ON insumo_grupos (cliente_id, nombre);
+        ALTER TABLE insumo_grupos
+          ADD CONSTRAINT insumo_grupos_cliente_nombre_key
+          UNIQUE USING INDEX idx_igrupos_cliente_nombre;
+      END IF;
+    END$$;
   `);
+
+  // otros índices
   await exec(`CREATE INDEX IF NOT EXISTS ig_cliente_idx ON insumo_grupos (cliente_id, activo);`);
   await exec(`CREATE INDEX IF NOT EXISTS ig_parent_idx ON insumo_grupos (parent_id);`);
   await exec(`
@@ -148,7 +161,7 @@ async function runMigrations() {
   await exec(`CREATE INDEX IF NOT EXISTS igi_grupo_idx ON insumo_grupo_items (grupo_id, orden);`);
   await exec(`CREATE INDEX IF NOT EXISTS igi_cliente_idx ON insumo_grupo_items (cliente_id);`);
 
-  // 5) Función y triggers de updated_at (idempotentes sin DO $$)
+  // 5) Función y triggers updated_at
   await exec(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $$
@@ -159,7 +172,6 @@ async function runMigrations() {
     $$ LANGUAGE plpgsql;
   `);
 
-  // Triggers: dropeo si existen y los creo de nuevo (idempotente)
   await exec(`DROP TRIGGER IF EXISTS trg_insumos_updated_at ON insumos;`);
   await exec(`
     CREATE TRIGGER trg_insumos_updated_at
