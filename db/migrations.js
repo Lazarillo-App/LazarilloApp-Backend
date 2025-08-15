@@ -156,38 +156,41 @@ async function runMigrations() {
   await execSafe(`CREATE INDEX IF NOT EXISTS igi_cliente_idx ON insumo_grupo_items (cliente_id);`);
 
   // ========== 4) AGRUPACIONES ==========
-  await execSafe(`
-    CREATE TABLE IF NOT EXISTS agrupaciones (
-      id          SERIAL PRIMARY KEY,
-      nombre      TEXT NOT NULL,
-      articulos   JSONB NOT NULL DEFAULT '[]'::jsonb,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
+await execSafe(`
+  CREATE TABLE IF NOT EXISTS agrupaciones (
+    id          SERIAL PRIMARY KEY,
+    nombre      TEXT NOT NULL,
+    articulos   JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`);
 
-  // UNIQUE(nombre) idempotente
-  await execSafe(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'agrupaciones_nombre_key'
-      ) THEN
-        CREATE UNIQUE INDEX IF NOT EXISTS agrupaciones_nombre_key
-          ON agrupaciones (nombre);
-        ALTER TABLE agrupaciones
-          ADD CONSTRAINT agrupaciones_nombre_key
-          UNIQUE USING INDEX agrupaciones_nombre_key;
-      END IF;
-    END$$;
-  `);
+// ⚠️ Compatibilidad: si la tabla ya existía sin "articulos", la agregamos
+await execSafe(`ALTER TABLE agrupaciones ADD COLUMN IF NOT EXISTS articulos JSONB;`);
+await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
+await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
+await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
 
-  // Por si venías con NULL en articulos
-  await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
+// UNIQUE(nombre) idempotente
+await execSafe(`
+  DO $$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint WHERE conname = 'agrupaciones_nombre_key'
+    ) THEN
+      CREATE UNIQUE INDEX IF NOT EXISTS agrupaciones_nombre_key
+        ON agrupaciones (nombre);
+      ALTER TABLE agrupaciones
+        ADD CONSTRAINT agrupaciones_nombre_key
+        UNIQUE USING INDEX agrupaciones_nombre_key;
+    END IF;
+  END$$;
+`);
 
-  // Índices útiles
-  await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_nombre_trgm ON agrupaciones USING gin (nombre gin_trgm_ops);`);
-  await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_articulos_gin ON agrupaciones USING gin (articulos);`);
+// Índices útiles
+await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_nombre_trgm ON agrupaciones USING gin (nombre gin_trgm_ops);`);
+await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_articulos_gin ON agrupaciones USING gin (articulos);`);
 
   // ========== 5) EXCLUSIONES POR AGRUPACIÓN ==========
   await execSafe(`
