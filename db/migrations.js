@@ -5,7 +5,7 @@ async function runMigrations() {
   const exec = (sql, params = []) => pool.query(sql, params);
 
   // Ignora "ya existe": 42710 duplicate_object, 42701 duplicate_column,
-  // 23505 unique_violation, 42P07 duplicate_table / index / relation.
+  // 23505 unique_violation, 42P07 duplicate_table / relation / index.
   const execSafe = async (sql) => {
     try {
       await exec(sql);
@@ -15,10 +15,10 @@ async function runMigrations() {
     }
   };
 
-  // 1) Extensiones
+  // ========== 0) Extensiones ==========
   await execSafe(`CREATE EXTENSION IF NOT EXISTS pg_trgm;`);
 
-  // 2) Tabla INSUMOS (creación base)
+  // ========== 1) INSUMOS (como lo tenías) ==========
   await execSafe(`
     CREATE TABLE IF NOT EXISTS insumos (
       id                BIGSERIAL PRIMARY KEY,
@@ -41,7 +41,7 @@ async function runMigrations() {
     );
   `);
 
-  // 2.1) Asegurar columnas (si venías con una versión previa)
+  // columnas (por si venías de una versión previa)
   await execSafe(`ALTER TABLE insumos ADD COLUMN codigo_maxi TEXT;`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN nombre TEXT NOT NULL DEFAULT '';`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN unidad_med TEXT;`);
@@ -52,7 +52,7 @@ async function runMigrations() {
   await execSafe(`ALTER TABLE insumos ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
-  // 2.2) Columna generada: codigo_mostrar
+  // columna generada
   await execSafe(`
     ALTER TABLE insumos
     ADD COLUMN codigo_mostrar TEXT
@@ -61,13 +61,13 @@ async function runMigrations() {
     ) STORED;
   `);
 
-  // 2.3) Índices
+  // índices
   await execSafe(`CREATE UNIQUE INDEX IF NOT EXISTS insumos_codigo_maxi_key ON insumos (codigo_maxi);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS insumos_nombre_trgm ON insumos USING gin (nombre gin_trgm_ops);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS insumos_activo_idx ON insumos (activo);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS insumos_codigo_mostrar_trgm ON insumos USING gin (codigo_mostrar gin_trgm_ops);`);
 
-  // 3) Presentaciones por insumo
+  // ========== 2) Presentaciones por insumo ==========
   await execSafe(`
     CREATE TABLE IF NOT EXISTS insumo_presentaciones (
       id              BIGSERIAL PRIMARY KEY,
@@ -87,7 +87,6 @@ async function runMigrations() {
     );
   `);
 
-  // 3.1) CHECKs de unidades
   await execSafe(`
     ALTER TABLE insumo_presentaciones
     ADD CONSTRAINT pres_unidad_check
@@ -99,7 +98,6 @@ async function runMigrations() {
     CHECK (unidad_base IN ('kg','g','lt','ml','un'));
   `);
 
-  // 3.2) Únicos / índices presentaciones
   await execSafe(`
     CREATE UNIQUE INDEX IF NOT EXISTS insumo_presentaciones_unique_idx
     ON insumo_presentaciones (insumo_id, unidad, cantidad);
@@ -107,7 +105,7 @@ async function runMigrations() {
   await execSafe(`CREATE INDEX IF NOT EXISTS pres_insumo_idx ON insumo_presentaciones (insumo_id);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS pres_unidad_idx ON insumo_presentaciones (unidad, activo);`);
 
-  // 4) Grupos de insumos
+  // ========== 3) Grupos de insumos ==========
   await execSafe(`
     CREATE TABLE IF NOT EXISTS insumo_grupos (
       id           BIGSERIAL PRIMARY KEY,
@@ -133,13 +131,11 @@ async function runMigrations() {
     );
   `);
 
-  // 4.1) Único por cliente+nombre (idempotente con índice + constraint)
   await execSafe(`
     DO $$
     BEGIN
       IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'insumo_grupos_cliente_nombre_key'
+        SELECT 1 FROM pg_constraint WHERE conname = 'insumo_grupos_cliente_nombre_key'
       ) THEN
         CREATE UNIQUE INDEX IF NOT EXISTS idx_igrupos_cliente_nombre
           ON insumo_grupos (cliente_id, nombre);
@@ -150,7 +146,6 @@ async function runMigrations() {
     END$$;
   `);
 
-  // otros índices
   await execSafe(`CREATE INDEX IF NOT EXISTS ig_cliente_idx ON insumo_grupos (cliente_id, activo);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS ig_parent_idx ON insumo_grupos (parent_id);`);
   await execSafe(`
@@ -160,7 +155,83 @@ async function runMigrations() {
   await execSafe(`CREATE INDEX IF NOT EXISTS igi_grupo_idx ON insumo_grupo_items (grupo_id, orden);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS igi_cliente_idx ON insumo_grupo_items (cliente_id);`);
 
-  // 5) Función y triggers de updated_at
+  // ========== 4) AGRUPACIONES ==========
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS agrupaciones (
+      id          SERIAL PRIMARY KEY,
+      nombre      TEXT NOT NULL,
+      articulos   JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  // UNIQUE(nombre) idempotente
+  await execSafe(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'agrupaciones_nombre_key'
+      ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS agrupaciones_nombre_key
+          ON agrupaciones (nombre);
+        ALTER TABLE agrupaciones
+          ADD CONSTRAINT agrupaciones_nombre_key
+          UNIQUE USING INDEX agrupaciones_nombre_key;
+      END IF;
+    END$$;
+  `);
+
+  // Por si venías con NULL en articulos
+  await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
+
+  // Índices útiles
+  await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_nombre_trgm ON agrupaciones USING gin (nombre gin_trgm_ops);`);
+  await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_articulos_gin ON agrupaciones USING gin (articulos);`);
+
+  // ========== 5) EXCLUSIONES POR AGRUPACIÓN ==========
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS agrupacion_exclusiones (
+      id             SERIAL PRIMARY KEY,
+      agrupacion_id  INT  NOT NULL REFERENCES agrupaciones(id) ON DELETE CASCADE,
+      scope          TEXT NOT NULL,
+      ref_id         TEXT NOT NULL
+    );
+  `);
+
+  // CHECK(scope) y UNIQUE(agrupacion_id,scope,ref_id)
+  await execSafe(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'agrupacion_exclusiones_scope_check'
+      ) THEN
+        ALTER TABLE agrupacion_exclusiones
+        ADD CONSTRAINT agrupacion_exclusiones_scope_check
+        CHECK (scope IN ('categoria','subrubro','articulo'));
+      END IF;
+    END$$;
+  `);
+
+  await execSafe(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'agrupacion_exclusiones_unique_key'
+      ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS agrupacion_exclusiones_unique_key
+          ON agrupacion_exclusiones (agrupacion_id, scope, ref_id);
+        ALTER TABLE agrupacion_exclusiones
+          ADD CONSTRAINT agrupacion_exclusiones_unique_key
+          UNIQUE USING INDEX agrupacion_exclusiones_unique_key;
+      END IF;
+    END$$;
+  `);
+
+  await execSafe(`CREATE INDEX IF NOT EXISTS agrupacion_exclusiones_agr_idx ON agrupacion_exclusiones (agrupacion_id);`);
+  await execSafe(`CREATE INDEX IF NOT EXISTS agrupacion_exclusiones_scope_idx ON agrupacion_exclusiones (scope);`);
+
+  // ========== 6) Triggers de updated_at ==========
   await execSafe(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $$
@@ -171,7 +242,7 @@ async function runMigrations() {
     $$ LANGUAGE plpgsql;
   `);
 
-  // Triggers: dropeo si existen y los creo de nuevo
+  // insumos
   await execSafe(`DROP TRIGGER IF EXISTS trg_insumos_updated_at ON insumos;`);
   await execSafe(`
     CREATE TRIGGER trg_insumos_updated_at
@@ -179,6 +250,7 @@ async function runMigrations() {
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 
+  // insumo_presentaciones
   await execSafe(`DROP TRIGGER IF EXISTS trg_pres_updated_at ON insumo_presentaciones;`);
   await execSafe(`
     CREATE TRIGGER trg_pres_updated_at
@@ -186,10 +258,19 @@ async function runMigrations() {
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 
+  // insumo_grupos
   await execSafe(`DROP TRIGGER IF EXISTS trg_igrupos_updated_at ON insumo_grupos;`);
   await execSafe(`
     CREATE TRIGGER trg_igrupos_updated_at
     BEFORE UPDATE ON insumo_grupos
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  // agrupaciones
+  await execSafe(`DROP TRIGGER IF EXISTS trg_agrupaciones_updated_at ON agrupaciones;`);
+  await execSafe(`
+    CREATE TRIGGER trg_agrupaciones_updated_at
+    BEFORE UPDATE ON agrupaciones
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 }

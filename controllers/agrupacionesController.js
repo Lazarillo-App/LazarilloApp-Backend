@@ -92,20 +92,17 @@ exports.actualizarAgrupacion = async (req, res) => {
 
     if (!sets.length) return res.json({ ok:true, data: null });
 
-    push('updated_at', nowISO());
-
-    const { rows } = await pool.query(
-      `UPDATE agrupaciones
-         SET ${sets.join(', ')}
-       WHERE id = $${vals.length - 1}
-       RETURNING *`,
-      vals
-    );
+    // updated_at directo en SQL
+    const sql = `
+      UPDATE agrupaciones
+         SET ${sets.join(', ')}, updated_at = NOW()
+       WHERE id = $${vals.length + 1}
+       RETURNING *`;
+    const { rows } = await pool.query(sql, [...vals, id]);
 
     if (!rows.length) return res.status(404).json({ ok:false, error:'Agrupación no encontrada' });
     return res.json(rows[0]);
   } catch (e) {
-    // manejar duplicado de nombre
     if (e.code === '23505') {
       return res.status(409).json({ ok:false, error:'Ya existe una agrupación con ese nombre' });
     }
@@ -197,11 +194,10 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
 };
 
 // ========================= “TODO” + Exclusiones =========================
-// PUT /agrupaciones/todo
-// Asegura y retorna la agrupación { id, nombre:'TODO' }
+
 exports.ensureTodoAgrupacion = async (_req, res) => {
   try {
-    // 1) Buscar
+    // 1) Buscar si existe
     const q1 = await pool.query(
       `SELECT id, nombre FROM agrupaciones WHERE nombre = 'TODO' LIMIT 1`
     );
@@ -215,7 +211,7 @@ exports.ensureTodoAgrupacion = async (_req, res) => {
     );
     return res.status(201).json(q2.rows[0]);
   } catch (e) {
-    // en caso de condición de carrera (dos crean al mismo tiempo): 23505
+    // Si hay carrera (dos crean a la vez) y tenés UNIQUE(nombre), cae acá con 23505
     if (e.code === '23505') {
       const q = await pool.query(
         `SELECT id, nombre FROM agrupaciones WHERE nombre = 'TODO' LIMIT 1`
