@@ -1,44 +1,33 @@
+// app.js
 require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
-const app = express();
-
+const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 
-runMigrations()
-  .then(() => console.log('✅ Migraciones ejecutadas'))
-  .catch(err => { console.error('❌ Error ejecutando migraciones:', err); process.exit(1); });
+// ==== Inicialización ====
+const app = express();
 
-// CORS (frontend local y tu dominio en Wiroos)
+// ==== Middlewares globales (antes de rutas) ====
 app.use(cors({
   origin: [
     'http://localhost:5173',
     'https://lazarillo.com.ar',
     'http://lazarillo.com.ar'
   ],
-  methods: ['GET','POST','PUT','DELETE','OPTIONS']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 }));
-
-// app.js
-app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
-
 app.use(express.json());
 
-// Rutas
-const authRoutes = require('./routes/authRoutes');
-app.use('/api/auth', authRoutes);
+// ==== Rutas ====
+app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
+app.use('/api/auth', require('./routes/authRoutes'));
+app.use('/api/insumos', require('./routes/insumosRoutes'));
+app.use('/api', require('./routes/agrupacionesRoutes')); // contiene /agrupaciones, /agrupaciones/todo, etc.
 
-const insumosRoutes = require('./routes/insumosRoutes');
-app.use('/api/insumos', insumosRoutes);
-
-const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
-app.use('/api', agrupacionesRoutes);
-
-// Log correcto para PG
-console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
-
-// Healthcheck de DB
-const pool = require('./config/db');
+// ==== Healthchecks ====
+app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/health/db', async (_req, res) => {
   try {
     const { rows } = await pool.query('SELECT 1 AS ok');
@@ -49,8 +38,20 @@ app.get('/health/db', async (_req, res) => {
   }
 });
 
-// Puerto API (evitamos 5000 porque lo usa tu PG)
+// ==== Logs útiles ====
+console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
+
+// ==== Arranque con migraciones ====
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
-});
+(async () => {
+  try {
+    await runMigrations();
+    console.log('✅ Migraciones ejecutadas');
+    app.listen(PORT, () => {
+      console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error('❌ Error ejecutando migraciones:', err);
+    process.exit(1);
+  }
+})();
