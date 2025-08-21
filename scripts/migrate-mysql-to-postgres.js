@@ -5,10 +5,18 @@ const { Pool } = require('pg');
 
 async function createSchema(pg) {
   await pg.query(`
+    -- ========== Tablas base ==========
     CREATE TABLE IF NOT EXISTS agrupaciones (
       id BIGSERIAL PRIMARY KEY,
       nombre TEXT NOT NULL
+      -- columnas de timestamps se agregan abajo con ALTER TABLE para cubrir el caso de tabla preexistente
     );
+
+    -- Asegurar timestamps en agrupaciones aunque la tabla ya exista
+    ALTER TABLE agrupaciones
+      ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT NOW(),
+      ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT NOW();
+
     CREATE TABLE IF NOT EXISTS agrupacion_articulos (
       id BIGSERIAL PRIMARY KEY,
       agrupacion_id BIGINT NOT NULL REFERENCES agrupaciones(id) ON DELETE CASCADE,
@@ -18,9 +26,25 @@ async function createSchema(pg) {
       subrubro TEXT DEFAULT 'Sin subrubro',
       precio NUMERIC(10,2) NOT NULL DEFAULT 0
     );
+
+    -- ========== Índices ==========
     CREATE INDEX IF NOT EXISTS idx_aa_agrupacion_id ON agrupacion_articulos (agrupacion_id);
     CREATE INDEX IF NOT EXISTS idx_aa_articulo_id   ON agrupacion_articulos (articulo_id);
     CREATE UNIQUE INDEX IF NOT EXISTS ux_aa_agrupacion_articulo ON agrupacion_articulos (agrupacion_id, articulo_id);
+
+    -- ========== Trigger updated_at ==========
+    CREATE OR REPLACE FUNCTION set_updated_at()
+    RETURNS trigger AS $$
+    BEGIN
+      NEW.updated_at := NOW();
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS agrupaciones_set_updated_at ON agrupaciones;
+    CREATE TRIGGER agrupaciones_set_updated_at
+    BEFORE UPDATE ON agrupaciones
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 }
 
@@ -45,7 +69,8 @@ function chunk(arr, size) {
     console.log('⏳ Conectando a Postgres destino...');
     const pgPool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
+      // Si no usás SSL en local, podés quitar esto o hacerlo condicional
+      ssl: process.env.PG_SSL === 'true' ? { rejectUnauthorized: false } : undefined
     });
 
     console.log('🔧 Verificando/creando esquema en Postgres…');
@@ -70,7 +95,7 @@ function chunk(arr, size) {
     try {
       await client.query('BEGIN');
 
-      // Limpiar destino
+      // Limpiar destino para migración idempotente
       await client.query('TRUNCATE agrupacion_articulos RESTART IDENTITY CASCADE');
       await client.query('TRUNCATE agrupaciones RESTART IDENTITY CASCADE');
 
@@ -83,6 +108,9 @@ function chunk(arr, size) {
           return `($${b + 1}, $${b + 2})`;
         }).join(',');
         await client.query(`INSERT INTO agrupaciones (id, nombre) VALUES ${placeholders}`, values);
+
+        // Opcional: actualizar timestamps si querés dejarlos en NOW()
+        await client.query(`UPDATE agrupaciones SET created_at = NOW(), updated_at = NOW()`);
       }
 
       // Insert articulos en lotes

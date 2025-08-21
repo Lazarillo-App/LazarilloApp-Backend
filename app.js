@@ -6,10 +6,8 @@ const cors = require('cors');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 
-// ==== Inicialización ====
 const app = express();
 
-// ==== Middlewares globales (antes de rutas) ====
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -20,28 +18,28 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ==== Rutas ====
+// ======== Rutas existentes ========
 app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/insumos', require('./routes/insumosRoutes'));
-app.use('/api', require('./routes/agrupacionesRoutes')); // contiene /agrupaciones, /agrupaciones/todo, etc.
+app.use('/api', require('./routes/agrupacionesRoutes'));
 
-// ==== Healthchecks ====
+// ======== NUEVA ruta ventas ========
+app.use('/api/ventas', require('./routes/ventasRoutes'));
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/health/db', async (_req, res) => {
   try {
     const { rows } = await pool.query('SELECT 1 AS ok');
-    res.json(rows[0]); // { ok: 1 }
+    res.json(rows[0]);
   } catch (e) {
     console.error('DB health error:', e);
     res.status(500).json({ error: 'db down' });
   }
 });
 
-// ==== Logs útiles ====
 console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
 
-// ==== Arranque con migraciones ====
 const PORT = process.env.PORT || 4000;
 (async () => {
   try {
@@ -55,3 +53,4 @@ const PORT = process.env.PORT || 4000;
     process.exit(1);
   }
 })();
+
