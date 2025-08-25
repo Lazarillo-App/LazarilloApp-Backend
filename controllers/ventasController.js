@@ -1,14 +1,35 @@
 // controllers/ventasController.js
 const fetch = require('node-fetch'); // v2
 
-// === Bases ===
+/* ========================= Config ========================= */
 const API_BASE   = process.env.MAXI_BASE_URL       || 'https://api-mconn.maxisistemas.com.ar';
 const STATS_BASE = process.env.MAXI_STATS_BASE_URL || API_BASE;
+const MAXI_TZ    = process.env.MAXI_TZ || 'America/Argentina/Buenos_Aires';
+const CACHE_TTL_MS = Number(process.env.VENTAS_CACHE_TTL_MS || (12 * 60 * 60 * 1000)); // 12h
 
-// === Utils fechas ===
-const toDate  = (s) => new Date(`${s}T00:00:00`);
-const fmtYMD  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const addDays = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
+/* ========================= Utils YMD/TZ ========================= */
+const ymd = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+
+const toDateLocal = (ymdStr) => new Date(`${ymdStr}T00:00:00`);
+
+const todayYMDinTZ = (tz) => {
+  // "en-CA" -> YYYY-MM-DD
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date());
+};
+
+const ymdCmp = (a, b) => a === b ? 0 : (a < b ? -1 : 1);
+
+const clampToYesterdayYMD = (toYMD, tz) => {
+  const today = todayYMDinTZ(tz);
+  // ayer = today - 1 día (en calendario, no por timestamp)
+  const d = toDateLocal(today);
+  const ayer = ymd(addDays(d, -1));
+  return (ymdCmp(toYMD, ayer) > 0) ? ayer : toYMD;
+};
 
 const weekLabel = (d) => {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
@@ -19,7 +40,7 @@ const weekLabel = (d) => {
 };
 const monthLabel = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 
-// === Log raw opcional ===
+/* ========================= Log (opcional) ========================= */
 function logRaw(tag, data) {
   if (process.env.LOG_MAXI_RAW === '1') {
     const ts = new Date().toISOString();
@@ -29,28 +50,14 @@ function logRaw(tag, data) {
   }
 }
 
-// === Cache de respuesta (estabiliza resultados del mismo rango) ===
-const CACHE_TTL = Number(process.env.VENTAS_CACHE_TTL_MS || 10 * 60 * 1000); // 10 min
-const respCache = new Map(); // key -> { val, exp }
-const cacheGet  = (k) => {
-  const e = respCache.get(k);
-  if (e && e.exp > Date.now()) return e.val;
-  if (e) respCache.delete(k);
-  return null;
-};
-const cacheSet  = (k, v, ttl = CACHE_TTL) => respCache.set(k, { val: v, exp: Date.now() + ttl });
-
-// === Login cache ===
+/* ========================= Auth cache ========================= */
 let tokenCache = { token: null, exp: 0 };
 
 async function getMaxiToken() {
   const now = Date.now();
-
-  // Si nos dan un Bearer fijo por env, usarlo
-  if (process.env.MAXI_BEARER_TOKEN && process.env.MAXI_BEARER_TOKEN.startsWith('Bearer ')) {
+  if (process.env.MAXI_BEARER_TOKEN?.startsWith('Bearer ')) {
     return process.env.MAXI_BEARER_TOKEN.replace(/^Bearer\s+/, '');
   }
-
   if (tokenCache.token && tokenCache.exp > now) return tokenCache.token;
 
   const body = {
@@ -87,7 +94,7 @@ async function getMaxiToken() {
   return token;
 }
 
-// === Fetch por semana (la API limita ~7 días) ===
+/* ========================= Fetch por rango (máx 7d) ========================= */
 async function fetchFullByDate(fromYMD, toYMD, token) {
   const url = new URL(`${STATS_BASE}/estadisticas/fullinvoicebydate`);
   url.searchParams.set('from', fromYMD);
@@ -110,13 +117,12 @@ async function fetchFullByDate(fromYMD, toYMD, token) {
     err.status = 502;
     throw err;
   }
-
-  // Suele venir como { content: [...] } o anidados
+  // Algunas respuestas vienen "content.content.content"
   return data?.content ?? data ?? {};
 }
 
-// === Parser: contar SOLO hojas (leaf), con opción ignoreZero ===
-function extractDeepLeafItems(content, targetId, { ignoreZero = false } = {}) {
+/* ========================= Parser leaf + ignoreZero ========================= */
+function extractDeepLeafItems(content, targetId, ignoreZero) {
   const out = [];
 
   const coerceFecha = (obj, parentFecha) => {
@@ -129,11 +135,10 @@ function extractDeepLeafItems(content, targetId, { ignoreZero = false } = {}) {
     return parentFecha;
   };
 
-  const pickId    = (n) => n.cod_art ?? n.articuloId ?? n.codigoArticulo ?? n.codigo ?? n.idArticulo ?? n.id;
-  const pickQty   = (n) => n.cantidad ?? n.cantidadVendida ?? n.qty ?? n.unidades;
-  const pickPrice = (n) => n.precio ?? n.pcio ?? n.precio_final ?? n.price ?? 0;
+  const pickId     = (n) => n.cod_art ?? n.articuloId ?? n.codigoArticulo ?? n.codigo ?? n.idArticulo ?? n.id;
+  const pickQty    = (n) => n.cantidad ?? n.cantidadVendida ?? n.qty ?? n.unidades;
+  const pickPrecio = (n) => n.precio ?? n.precioUnit ?? n.importeUnit;
 
-  // devuelve true si en este subárbol se contó al menos un candidato
   const walk = (node, parentFecha = null) => {
     if (!node) return false;
 
@@ -146,7 +151,7 @@ function extractDeepLeafItems(content, targetId, { ignoreZero = false } = {}) {
     if (typeof node === 'object') {
       const fecha = coerceFecha(node, parentFecha);
 
-      // Primero hijos
+      // primero hijos
       let childCounted = false;
       for (const v of Object.values(node)) {
         if (v && typeof v === 'object') {
@@ -154,22 +159,24 @@ function extractDeepLeafItems(content, targetId, { ignoreZero = false } = {}) {
         }
       }
 
-      // Luego este nodo (solo si es hoja)
+      // luego este nodo (solo si no contó ningún hijo)
       const idRaw  = pickId(node);
       const qtyRaw = pickQty(node);
+      const price  = pickPrecio(node);
       const isCandidate = (idRaw != null) && (qtyRaw != null) && !!fecha;
 
       if (isCandidate && !childCounted) {
         const idNum = Number(idRaw);
         const qNum  = Number(qtyRaw) || 0;
-        const pNum  = Number(pickPrice(node)) || 0;
-
+        const pNum  = Number(price);
         if (Number.isFinite(idNum) && idNum === targetId) {
-          if (ignoreZero && pNum <= 0) return true; // hoja pero descartada por precio 0
-          out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
-          return true;
+          if (!ignoreZero || pNum > 0) {
+            out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
+            return true;
+          }
         }
       }
+
       return childCounted;
     }
 
@@ -180,69 +187,59 @@ function extractDeepLeafItems(content, targetId, { ignoreZero = false } = {}) {
   return out;
 }
 
-/* ============================= Handler ============================= */
+/* ========================= Cache respuesta ========================= */
+const responseCache = new Map(); // key -> { exp, data }
+const cacheKey = (o) =>
+  `${o.articuloId}|${o.from}|${o.to}|${o.groupBy}|${o.ignoreZero?'1':'0'}|${o.tz}`;
+
+const cacheGet = (key) => {
+  const hit = responseCache.get(key);
+  if (!hit) return null;
+  if (hit.exp < Date.now()) { responseCache.delete(key); return null; }
+  return hit.data;
+};
+const cachePut = (key, data) => {
+  responseCache.set(key, { exp: Date.now() + CACHE_TTL_MS, data });
+};
+
+/* ========================= Handler ========================= */
 /**
- * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month&ignoreZero=true|false
- * - Clampea SIEMPRE el “to” a AYER (medianoche local del server) para evitar parciales.
- * - Cachea la respuesta por (id|from|to|groupBy|ignoreZero) por 10 min (configurable).
+ * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month&ignoreZero=true
+ * - Clampea `to` a AYER en TZ (`MAXI_TZ`) para evitar parciales.
+ * - Ignora precio 0 por default.
+ * - Memoiza respuesta (12h).
  */
 async function getVentas(req, res, next) {
   try {
+    const articuloId = Number(req.query.articuloId);
     const groupBy = String(req.query.groupBy || 'day').toLowerCase();
-    const ignoreZero = String(req.query.ignoreZero || '').toLowerCase() === 'true';
-    const { articuloId, from, to } = req.query;
+    const ignoreZero = String(req.query.ignoreZero ?? 'true') === 'true';
+    const tz = MAXI_TZ;
 
-    // Mock opcional
-    if (process.env.VENTAS_MOCK === '1') {
-      if (!from || !to) return res.status(400).json({ error: 'Parámetros requeridos: from, to' });
-      const start = toDate(from);
-      const end   = toDate(to);
-      if (Number.isNaN(start) || Number.isNaN(end) || start > end) {
-        return res.status(400).json({ error: 'Rango de fechas inválido' });
-      }
-      const items = [];
-      const dayMs = 24 * 60 * 60 * 1000;
-      let acc = 0;
-      for (let t = start.getTime(); t <= end.getTime(); t += dayMs) {
-        const d = new Date(t);
-        const ymd = fmtYMD(d);
-        const qty = Math.floor(1 + Math.random() * 3); // 1..3
-        items.push({ label: ymd, qty });
-        acc += qty;
-      }
-      return res.json({ total: acc, items });
-    }
+    let fromYMD = String(req.query.from || '').slice(0, 10);
+    let toYMD   = String(req.query.to   || '').slice(0, 10);
 
-    if (!articuloId || !from || !to) {
+    if (!Number.isFinite(articuloId) || !fromYMD || !toYMD) {
       return res.status(400).json({ error: 'Parámetros requeridos: articuloId, from, to' });
     }
 
-    const targetId = Number(articuloId);
-    if (!Number.isFinite(targetId)) {
-      return res.status(400).json({ error: 'articuloId inválido' });
+    // clamp TO a AYER en TZ
+    toYMD = clampToYesterdayYMD(toYMD, tz);
+    if (ymdCmp(fromYMD, toYMD) > 0) {
+      return res.status(400).json({ error: 'Rango de fechas inválido (from > to)' });
     }
 
-    const start = toDate(from);
-    let end     = toDate(to);
-
-    // 🔒 Clampea a AYER (medianoche)
-    const now = new Date();
-    const todayMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (end >= todayMid) end = addDays(todayMid, -1);
-
-    if (Number.isNaN(start) || Number.isNaN(end) || start > end) {
-      return res.status(400).json({ error: 'Rango de fechas inválido' });
-    }
-
-    // Cache (ya con "end" clampado)
-    const cacheKey = `${targetId}|${fmtYMD(start)}|${fmtYMD(end)}|${groupBy}|${ignoreZero}`;
-    const cached = cacheGet(cacheKey);
+    // Cache
+    const key = cacheKey({ articuloId, from: fromYMD, to: toYMD, groupBy, ignoreZero, tz });
+    const cached = cacheGet(key);
     if (cached) return res.json(cached);
 
+    // Auth
     const token = await getMaxiToken();
 
-    // Iterar por bloques semanales [cursor..stop]
-    let cursor = new Date(start);
+    // Iterar por semanas (máx 7 días)
+    let cursor = toDateLocal(fromYMD);
+    const end  = toDateLocal(toYMD);
     const lines = [];
 
     while (cursor <= end) {
@@ -250,21 +247,21 @@ async function getVentas(req, res, next) {
       const cEnd   = addDays(cursor, 6);
       const stop   = (cEnd < end ? cEnd : end);
 
-      const content = await fetchFullByDate(fmtYMD(cStart), fmtYMD(stop), token);
-      const chunk = extractDeepLeafItems(content, targetId, { ignoreZero });
+      const chunkContent = await fetchFullByDate(ymd(cStart), ymd(stop), token);
+      const chunk = extractDeepLeafItems(chunkContent, articuloId, ignoreZero);
       if (chunk.length) lines.push(...chunk);
 
       cursor = addDays(stop, 1);
     }
 
-    // Agrupar por day|week|month
+    // Agrupar
     const bucket = new Map();
     for (const it of lines) {
-      const d = toDate(it.fechaYMD);
+      const d = toDateLocal(it.fechaYMD);
       const label =
         groupBy === 'month' ? monthLabel(d) :
         groupBy === 'week'  ? weekLabel(d)  :
-        fmtYMD(d); // day
+        ymd(d); // day
       bucket.set(label, (bucket.get(label) || 0) + it.cantidad);
     }
 
@@ -273,9 +270,9 @@ async function getVentas(req, res, next) {
       .map(([label, qty]) => ({ label, qty }));
 
     const total = items.reduce((acc, x) => acc + x.qty, 0);
-    const payload = { total, items };
 
-    cacheSet(cacheKey, payload);
+    const payload = { total, items, from: fromYMD, to: toYMD };
+    cachePut(key, payload);
     return res.json(payload);
   } catch (err) {
     return next(err);
