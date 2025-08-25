@@ -24,6 +24,11 @@ app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/insumos', require('./routes/insumosRoutes'));
 app.use('/api', require('./routes/agrupacionesRoutes'));
 
+app.use((err, req, res, _next) => {
+  console.error('❌ Error:', err); // Render logs
+  res.status(500).json({ error: 'internal', message: err?.message, code: err?.code });
+});
+
 // ======== NUEVA ruta ventas ========
 app.use('/api/ventas', require('./routes/ventasRoutes'));
 

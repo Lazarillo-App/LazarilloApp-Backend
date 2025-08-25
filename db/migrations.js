@@ -192,6 +192,31 @@ await execSafe(`
 await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_nombre_trgm ON agrupaciones USING gin (nombre gin_trgm_ops);`);
 await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_articulos_gin ON agrupaciones USING gin (articulos);`);
 
+
+// --- Forzar tipo JSONB en articulos si quedó como TEXT en alguna DB vieja
+await execSafe(`
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name='agrupaciones' AND column_name='articulos' AND data_type <> 'jsonb'
+  ) THEN
+    ALTER TABLE agrupaciones
+      ALTER COLUMN articulos TYPE jsonb
+      USING CASE
+        WHEN articulos IS NULL OR btrim(articulos::text) = '' THEN '[]'::jsonb
+        ELSE articulos::jsonb
+      END;
+  END IF;
+END$$;
+`);
+
+await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
+await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
+await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
+
+
   // ========== 5) EXCLUSIONES POR AGRUPACIÓN ==========
   await execSafe(`
     CREATE TABLE IF NOT EXISTS agrupacion_exclusiones (

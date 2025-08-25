@@ -33,8 +33,8 @@ function mergeById(base = [], incoming = []) {
 exports.obtenerAgrupaciones = async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
-         FROM agrupaciones
+      `SELECT id, nombre, 
+      COALESCE(NULLIF(articulos::text, '')::jsonb, '[]'::jsonb) AS articulos FROM agrupaciones
         ORDER BY id ASC`
     );
     return res.json(rows);
@@ -140,7 +140,7 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     const incoming = toItemsArray(req.body?.articulos);
     if (!incoming.length) return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
 
-    const { rows: r0 } = await pool.query(`SELECT COALESCE(articulos,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`, [id]);
+    const { rows: r0 } = await pool.query(`SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`, [id]);
     if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
     const base = isArray(r0[0].articulos) ? r0[0].articulos : [];
@@ -170,7 +170,7 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'id/articuloId inválidos' });
     }
 
-    const { rows: r0 } = await pool.query(`SELECT COALESCE(articulos,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`, [id]);
+    const { rows: r0 } = await pool.query(`SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`, [id]);
     if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
     const base = isArray(r0[0].articulos) ? r0[0].articulos : [];
@@ -199,8 +199,9 @@ exports.ensureTodoAgrupacion = async (_req, res) => {
     if (q1.rows.length) return res.json(q1.rows[0]);
 
     const q2 = await pool.query(
-      `INSERT INTO agrupaciones (nombre, articulos)
+      `INSERT INTO agrupaciones (nombre)
        VALUES ('TODO', '[]'::jsonb)
+       ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
        RETURNING id, nombre`
     );
     return res.status(201).json(q2.rows[0]);
