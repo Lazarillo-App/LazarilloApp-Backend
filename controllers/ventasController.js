@@ -1,9 +1,11 @@
+// controllers/ventasController.js
 const fetch = require('node-fetch'); // v2
 
+// === Bases ===
 const API_BASE   = process.env.MAXI_BASE_URL       || 'https://api-mconn.maxisistemas.com.ar';
 const STATS_BASE = process.env.MAXI_STATS_BASE_URL || API_BASE;
 
-// ========== Utils fechas ==========
+// === Utils fechas ===
 const toDate  = (s) => new Date(`${s}T00:00:00`);
 const fmtYMD  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const addDays = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
@@ -17,7 +19,7 @@ const weekLabel = (d) => {
 };
 const monthLabel = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 
-// (opcional) log crudo
+// === Log raw opcional ===
 function logRaw(tag, data) {
   if (process.env.LOG_MAXI_RAW === '1') {
     const ts = new Date().toISOString();
@@ -27,14 +29,25 @@ function logRaw(tag, data) {
   }
 }
 
-// ========== Login cache ==========
+// === Cache de respuesta (estabiliza resultados del mismo rango) ===
+const CACHE_TTL = Number(process.env.VENTAS_CACHE_TTL_MS || 10 * 60 * 1000); // 10 min
+const respCache = new Map(); // key -> { val, exp }
+const cacheGet  = (k) => {
+  const e = respCache.get(k);
+  if (e && e.exp > Date.now()) return e.val;
+  if (e) respCache.delete(k);
+  return null;
+};
+const cacheSet  = (k, v, ttl = CACHE_TTL) => respCache.set(k, { val: v, exp: Date.now() + ttl });
+
+// === Login cache ===
 let tokenCache = { token: null, exp: 0 };
 
 async function getMaxiToken() {
   const now = Date.now();
 
-  // Token fijo por env (si existe)
-  if (process.env.MAXI_BEARER_TOKEN?.startsWith('Bearer ')) {
+  // Si nos dan un Bearer fijo por env, usarlo
+  if (process.env.MAXI_BEARER_TOKEN && process.env.MAXI_BEARER_TOKEN.startsWith('Bearer ')) {
     return process.env.MAXI_BEARER_TOKEN.replace(/^Bearer\s+/, '');
   }
 
@@ -74,7 +87,7 @@ async function getMaxiToken() {
   return token;
 }
 
-// ========== Fetch por semana ==========
+// === Fetch por semana (la API limita ~7 días) ===
 async function fetchFullByDate(fromYMD, toYMD, token) {
   const url = new URL(`${STATS_BASE}/estadisticas/fullinvoicebydate`);
   url.searchParams.set('from', fromYMD);
@@ -98,11 +111,12 @@ async function fetchFullByDate(fromYMD, toYMD, token) {
     throw err;
   }
 
+  // Suele venir como { content: [...] } o anidados
   return data?.content ?? data ?? {};
 }
 
-// ========== Parser: contar SOLO hojas (leaf) ==========
-function extractDeepLeafItems(content, targetId) {
+// === Parser: contar SOLO hojas (leaf), con opción ignoreZero ===
+function extractDeepLeafItems(content, targetId, { ignoreZero = false } = {}) {
   const out = [];
 
   const coerceFecha = (obj, parentFecha) => {
@@ -115,17 +129,14 @@ function extractDeepLeafItems(content, targetId) {
     return parentFecha;
   };
 
-  const pickId = (n) =>
-    n.cod_art ?? n.articuloId ?? n.codigoArticulo ?? n.codigo ?? n.idArticulo ?? n.id;
-
-  const pickQty = (n) =>
-    n.cantidad ?? n.cantidadVendida ?? n.qty ?? n.unidades;
+  const pickId    = (n) => n.cod_art ?? n.articuloId ?? n.codigoArticulo ?? n.codigo ?? n.idArticulo ?? n.id;
+  const pickQty   = (n) => n.cantidad ?? n.cantidadVendida ?? n.qty ?? n.unidades;
+  const pickPrice = (n) => n.precio ?? n.pcio ?? n.precio_final ?? n.price ?? 0;
 
   // devuelve true si en este subárbol se contó al menos un candidato
   const walk = (node, parentFecha = null) => {
     if (!node) return false;
 
-    // arrays: acumular hijos
     if (Array.isArray(node)) {
       let any = false;
       for (const n of node) { if (walk(n, parentFecha)) any = true; }
@@ -135,7 +146,7 @@ function extractDeepLeafItems(content, targetId) {
     if (typeof node === 'object') {
       const fecha = coerceFecha(node, parentFecha);
 
-      // primero procesamos hijos
+      // Primero hijos
       let childCounted = false;
       for (const v of Object.values(node)) {
         if (v && typeof v === 'object') {
@@ -143,7 +154,7 @@ function extractDeepLeafItems(content, targetId) {
         }
       }
 
-      // luego evaluamos ESTE nodo
+      // Luego este nodo (solo si es hoja)
       const idRaw  = pickId(node);
       const qtyRaw = pickQty(node);
       const isCandidate = (idRaw != null) && (qtyRaw != null) && !!fecha;
@@ -151,12 +162,14 @@ function extractDeepLeafItems(content, targetId) {
       if (isCandidate && !childCounted) {
         const idNum = Number(idRaw);
         const qNum  = Number(qtyRaw) || 0;
+        const pNum  = Number(pickPrice(node)) || 0;
+
         if (Number.isFinite(idNum) && idNum === targetId) {
+          if (ignoreZero && pNum <= 0) return true; // hoja pero descartada por precio 0
           out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
-          return true; // este nodo contó
+          return true;
         }
       }
-
       return childCounted;
     }
 
@@ -169,13 +182,15 @@ function extractDeepLeafItems(content, targetId) {
 
 /* ============================= Handler ============================= */
 /**
- * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month
- * Clampea SIEMPRE el “to” a AYER (medianoche local del server) para evitar parciales.
+ * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month&ignoreZero=true|false
+ * - Clampea SIEMPRE el “to” a AYER (medianoche local del server) para evitar parciales.
+ * - Cachea la respuesta por (id|from|to|groupBy|ignoreZero) por 10 min (configurable).
  */
 async function getVentas(req, res, next) {
   try {
-    const { articuloId, from, to } = req.query;
     const groupBy = String(req.query.groupBy || 'day').toLowerCase();
+    const ignoreZero = String(req.query.ignoreZero || '').toLowerCase() === 'true';
+    const { articuloId, from, to } = req.query;
 
     // Mock opcional
     if (process.env.VENTAS_MOCK === '1') {
@@ -191,7 +206,7 @@ async function getVentas(req, res, next) {
       for (let t = start.getTime(); t <= end.getTime(); t += dayMs) {
         const d = new Date(t);
         const ymd = fmtYMD(d);
-        const qty = Math.floor(1 + Math.random() * 3);
+        const qty = Math.floor(1 + Math.random() * 3); // 1..3
         items.push({ label: ymd, qty });
         acc += qty;
       }
@@ -210,7 +225,7 @@ async function getVentas(req, res, next) {
     const start = toDate(from);
     let end     = toDate(to);
 
-    // 🔒 clamp a AYER
+    // 🔒 Clampea a AYER (medianoche)
     const now = new Date();
     const todayMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     if (end >= todayMid) end = addDays(todayMid, -1);
@@ -219,9 +234,14 @@ async function getVentas(req, res, next) {
       return res.status(400).json({ error: 'Rango de fechas inválido' });
     }
 
+    // Cache (ya con "end" clampado)
+    const cacheKey = `${targetId}|${fmtYMD(start)}|${fmtYMD(end)}|${groupBy}|${ignoreZero}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json(cached);
+
     const token = await getMaxiToken();
 
-    // iterar por semanas [cursor..stop] sin solapamiento
+    // Iterar por bloques semanales [cursor..stop]
     let cursor = new Date(start);
     const lines = [];
 
@@ -231,13 +251,13 @@ async function getVentas(req, res, next) {
       const stop   = (cEnd < end ? cEnd : end);
 
       const content = await fetchFullByDate(fmtYMD(cStart), fmtYMD(stop), token);
-      const chunk = extractDeepLeafItems(content, targetId);
+      const chunk = extractDeepLeafItems(content, targetId, { ignoreZero });
       if (chunk.length) lines.push(...chunk);
 
       cursor = addDays(stop, 1);
     }
 
-    // agrupar por day|week|month
+    // Agrupar por day|week|month
     const bucket = new Map();
     for (const it of lines) {
       const d = toDate(it.fechaYMD);
@@ -253,8 +273,10 @@ async function getVentas(req, res, next) {
       .map(([label, qty]) => ({ label, qty }));
 
     const total = items.reduce((acc, x) => acc + x.qty, 0);
+    const payload = { total, items };
 
-    return res.json({ total, items });
+    cacheSet(cacheKey, payload);
+    return res.json(payload);
   } catch (err) {
     return next(err);
   }
