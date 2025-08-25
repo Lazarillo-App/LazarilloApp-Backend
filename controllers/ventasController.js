@@ -3,7 +3,7 @@ const fetch = require('node-fetch'); // v2
 const API_BASE   = process.env.MAXI_BASE_URL       || 'https://api-mconn.maxisistemas.com.ar';
 const STATS_BASE = process.env.MAXI_STATS_BASE_URL || API_BASE;
 
-// === Utils fechas (día cerrado, sin superposición) ===
+// ========== Utils fechas ==========
 const toDate  = (s) => new Date(`${s}T00:00:00`);
 const fmtYMD  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const addDays = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
@@ -17,7 +17,7 @@ const weekLabel = (d) => {
 };
 const monthLabel = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 
-// Log raw opcional
+// (opcional) log crudo
 function logRaw(tag, data) {
   if (process.env.LOG_MAXI_RAW === '1') {
     const ts = new Date().toISOString();
@@ -27,14 +27,17 @@ function logRaw(tag, data) {
   }
 }
 
-// Token cache / login
+// ========== Login cache ==========
 let tokenCache = { token: null, exp: 0 };
 
 async function getMaxiToken() {
   const now = Date.now();
+
+  // Token fijo por env (si existe)
   if (process.env.MAXI_BEARER_TOKEN?.startsWith('Bearer ')) {
     return process.env.MAXI_BEARER_TOKEN.replace(/^Bearer\s+/, '');
   }
+
   if (tokenCache.token && tokenCache.exp > now) return tokenCache.token;
 
   const body = {
@@ -71,15 +74,13 @@ async function getMaxiToken() {
   return token;
 }
 
-// Fetch por semana (la API limita 7 días)
+// ========== Fetch por semana ==========
 async function fetchFullByDate(fromYMD, toYMD, token) {
   const url = new URL(`${STATS_BASE}/estadisticas/fullinvoicebydate`);
   url.searchParams.set('from', fromYMD);
   url.searchParams.set('to', toYMD);
 
-  const res = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
 
   const text = await res.text().catch(() => '');
   let data; try { data = JSON.parse(text); } catch { data = null; }
@@ -100,15 +101,15 @@ async function fetchFullByDate(fromYMD, toYMD, token) {
   return data?.content ?? data ?? {};
 }
 
-// Parseo filtrado por articuloId
-function extractItemsFiltered(content, targetId) {
+// ========== Parser: contar SOLO hojas (leaf) ==========
+function extractDeepLeafItems(content, targetId) {
   const out = [];
 
-  const coerceFecha = (node, parentFecha) => {
-    if (!node || typeof node !== 'object') return parentFecha;
-    for (const k of Object.keys(node)) {
-      if (/^fecha/i.test(k) && typeof node[k] === 'string') {
-        return String(node[k]).slice(0, 10);
+  const coerceFecha = (obj, parentFecha) => {
+    if (!obj || typeof obj !== 'object') return parentFecha;
+    for (const k of Object.keys(obj)) {
+      if (/^fecha/i.test(k) && typeof obj[k] === 'string') {
+        return String(obj[k]).slice(0, 10);
       }
     }
     return parentFecha;
@@ -120,26 +121,46 @@ function extractItemsFiltered(content, targetId) {
   const pickQty = (n) =>
     n.cantidad ?? n.cantidadVendida ?? n.qty ?? n.unidades;
 
+  // devuelve true si en este subárbol se contó al menos un candidato
   const walk = (node, parentFecha = null) => {
-    if (!node) return;
-    if (Array.isArray(node)) { for (const n of node) walk(n, parentFecha); return; }
+    if (!node) return false;
+
+    // arrays: acumular hijos
+    if (Array.isArray(node)) {
+      let any = false;
+      for (const n of node) { if (walk(n, parentFecha)) any = true; }
+      return any;
+    }
+
     if (typeof node === 'object') {
       const fecha = coerceFecha(node, parentFecha);
-      const id    = pickId(node);
-      const qty   = pickQty(node);
 
-      // Contamos solo “líneas” con id + qty + fecha
-      if (id != null && qty != null && fecha) {
-        const idNum = Number(id);
-        if (Number.isFinite(idNum) && idNum === targetId) {
-          const qNum = Number(qty) || 0;
-          out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
+      // primero procesamos hijos
+      let childCounted = false;
+      for (const v of Object.values(node)) {
+        if (v && typeof v === 'object') {
+          if (walk(v, fecha)) childCounted = true;
         }
       }
-      for (const v of Object.values(node)) {
-        if (v && typeof v === 'object') walk(v, fecha);
+
+      // luego evaluamos ESTE nodo
+      const idRaw  = pickId(node);
+      const qtyRaw = pickQty(node);
+      const isCandidate = (idRaw != null) && (qtyRaw != null) && !!fecha;
+
+      if (isCandidate && !childCounted) {
+        const idNum = Number(idRaw);
+        const qNum  = Number(qtyRaw) || 0;
+        if (Number.isFinite(idNum) && idNum === targetId) {
+          out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
+          return true; // este nodo contó
+        }
       }
+
+      return childCounted;
     }
+
+    return false;
   };
 
   walk(content, null);
@@ -148,14 +169,15 @@ function extractItemsFiltered(content, targetId) {
 
 /* ============================= Handler ============================= */
 /**
- * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month&tz=America/Argentina/Buenos_Aires
- * 🔒 Clampea SIEMPRE el “to” a AYER para evitar variaciones intra-día.
+ * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month
+ * Clampea SIEMPRE el “to” a AYER (medianoche local del server) para evitar parciales.
  */
 async function getVentas(req, res, next) {
   try {
     const { articuloId, from, to } = req.query;
     const groupBy = String(req.query.groupBy || 'day').toLowerCase();
 
+    // Mock opcional
     if (process.env.VENTAS_MOCK === '1') {
       if (!from || !to) return res.status(400).json({ error: 'Parámetros requeridos: from, to' });
       const start = toDate(from);
@@ -188,7 +210,7 @@ async function getVentas(req, res, next) {
     const start = toDate(from);
     let end     = toDate(to);
 
-    // 🔒 CLAMP: si pidieron “hoy” o futuro, corto en AYER (medianoche local)
+    // 🔒 clamp a AYER
     const now = new Date();
     const todayMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     if (end >= todayMid) end = addDays(todayMid, -1);
@@ -199,7 +221,7 @@ async function getVentas(req, res, next) {
 
     const token = await getMaxiToken();
 
-    // Iterar en semanas sin solapamiento
+    // iterar por semanas [cursor..stop] sin solapamiento
     let cursor = new Date(start);
     const lines = [];
 
@@ -209,20 +231,20 @@ async function getVentas(req, res, next) {
       const stop   = (cEnd < end ? cEnd : end);
 
       const content = await fetchFullByDate(fmtYMD(cStart), fmtYMD(stop), token);
-      const chunk = extractItemsFiltered(content, targetId);
+      const chunk = extractDeepLeafItems(content, targetId);
       if (chunk.length) lines.push(...chunk);
 
       cursor = addDays(stop, 1);
     }
 
-    // Agregar
+    // agrupar por day|week|month
     const bucket = new Map();
     for (const it of lines) {
       const d = toDate(it.fechaYMD);
       const label =
         groupBy === 'month' ? monthLabel(d) :
         groupBy === 'week'  ? weekLabel(d)  :
-        fmtYMD(d);
+        fmtYMD(d); // day
       bucket.set(label, (bucket.get(label) || 0) + it.cantidad);
     }
 
