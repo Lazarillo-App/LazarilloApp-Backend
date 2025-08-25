@@ -1,4 +1,3 @@
-// controllers/ventasController.js
 const fetch = require('node-fetch'); // v2
 
 /* ========================= Config ========================= */
@@ -10,22 +9,17 @@ const CACHE_TTL_MS = Number(process.env.VENTAS_CACHE_TTL_MS || (12 * 60 * 60 * 1
 /* ========================= Utils YMD/TZ ========================= */
 const ymd = (d) =>
   `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-
 const toDateLocal = (ymdStr) => new Date(`${ymdStr}T00:00:00`);
 
-const todayYMDinTZ = (tz) => {
-  // "en-CA" -> YYYY-MM-DD
-  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
-    .format(new Date());
-};
+const todayYMDinTZ = (tz) =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date()); // YYYY-MM-DD
 
 const ymdCmp = (a, b) => a === b ? 0 : (a < b ? -1 : 1);
 
 const clampToYesterdayYMD = (toYMD, tz) => {
   const today = todayYMDinTZ(tz);
-  // ayer = today - 1 día (en calendario, no por timestamp)
   const d = toDateLocal(today);
   const ayer = ymd(addDays(d, -1));
   return (ymdCmp(toYMD, ayer) > 0) ? ayer : toYMD;
@@ -117,45 +111,63 @@ async function fetchFullByDate(fromYMD, toYMD, token) {
     err.status = 502;
     throw err;
   }
-  // Algunas respuestas vienen "content.content.content"
-  return data?.content ?? data ?? {};
+
+  // algunas respuestas vienen anidadas: content.content.content
+  const c = (data && data.content) || data || {};
+  const inner = (c && c.content) || c;
+  return (inner && inner.content) || inner || {};
 }
 
-/* ========================= Parser leaf + ignoreZero ========================= */
+/* ========================= Parser leaf + ignoreZero + fecha normalizada ========================= */
+function normalizeFechaStr(s) {
+  if (!s || typeof s !== 'string') return null;
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // DD/MM/YYYY -> YYYY-MM-DD
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return null;
+}
+
 function extractDeepLeafItems(content, targetId, ignoreZero) {
   const out = [];
 
   const coerceFecha = (obj, parentFecha) => {
-    if (!obj || typeof obj !== 'object') return parentFecha;
+    let f = parentFecha || null;
+    if (!obj || typeof obj !== 'object') return f;
+
+    // preferir un ISO si existe en el objeto actual
     for (const k of Object.keys(obj)) {
       if (/^fecha/i.test(k) && typeof obj[k] === 'string') {
-        return String(obj[k]).slice(0, 10);
+        const norm = normalizeFechaStr(obj[k]);
+        if (norm) { f = norm; break; }
       }
     }
-    return parentFecha;
+    return f;
   };
 
   const pickId     = (n) => n.cod_art ?? n.articuloId ?? n.codigoArticulo ?? n.codigo ?? n.idArticulo ?? n.id;
   const pickQty    = (n) => n.cantidad ?? n.cantidadVendida ?? n.qty ?? n.unidades;
   const pickPrecio = (n) => n.precio ?? n.precioUnit ?? n.importeUnit;
 
-  const walk = (node, parentFecha = null) => {
+  const walk = (node, inheritedFecha = null) => {
     if (!node) return false;
 
     if (Array.isArray(node)) {
       let any = false;
-      for (const n of node) { if (walk(n, parentFecha)) any = true; }
+      for (const n of node) { if (walk(n, inheritedFecha)) any = true; }
       return any;
     }
 
     if (typeof node === 'object') {
-      const fecha = coerceFecha(node, parentFecha);
+      // detectar/normalizar fecha en ESTE nodo; propagar a hijos
+      const fechaHere = coerceFecha(node, inheritedFecha);
 
       // primero hijos
       let childCounted = false;
       for (const v of Object.values(node)) {
         if (v && typeof v === 'object') {
-          if (walk(v, fecha)) childCounted = true;
+          if (walk(v, fechaHere)) childCounted = true;
         }
       }
 
@@ -163,7 +175,8 @@ function extractDeepLeafItems(content, targetId, ignoreZero) {
       const idRaw  = pickId(node);
       const qtyRaw = pickQty(node);
       const price  = pickPrecio(node);
-      const isCandidate = (idRaw != null) && (qtyRaw != null) && !!fecha;
+
+      const isCandidate = (idRaw != null) && (qtyRaw != null) && !!fechaHere;
 
       if (isCandidate && !childCounted) {
         const idNum = Number(idRaw);
@@ -171,7 +184,7 @@ function extractDeepLeafItems(content, targetId, ignoreZero) {
         const pNum  = Number(price);
         if (Number.isFinite(idNum) && idNum === targetId) {
           if (!ignoreZero || pNum > 0) {
-            out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
+            out.push({ fechaYMD: fechaHere, articuloId: idNum, cantidad: qNum });
             return true;
           }
         }
@@ -191,7 +204,6 @@ function extractDeepLeafItems(content, targetId, ignoreZero) {
 const responseCache = new Map(); // key -> { exp, data }
 const cacheKey = (o) =>
   `${o.articuloId}|${o.from}|${o.to}|${o.groupBy}|${o.ignoreZero?'1':'0'}|${o.tz}`;
-
 const cacheGet = (key) => {
   const hit = responseCache.get(key);
   if (!hit) return null;
@@ -203,12 +215,6 @@ const cachePut = (key, data) => {
 };
 
 /* ========================= Handler ========================= */
-/**
- * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month&ignoreZero=true
- * - Clampea `to` a AYER en TZ (`MAXI_TZ`) para evitar parciales.
- * - Ignora precio 0 por default.
- * - Memoiza respuesta (12h).
- */
 async function getVentas(req, res, next) {
   try {
     const articuloId = Number(req.query.articuloId);
@@ -237,7 +243,7 @@ async function getVentas(req, res, next) {
     // Auth
     const token = await getMaxiToken();
 
-    // Iterar por semanas (máx 7 días)
+    // Iterar por semanas (máx 7 días) sin solapamiento
     let cursor = toDateLocal(fromYMD);
     const end  = toDateLocal(toYMD);
     const lines = [];
@@ -257,7 +263,7 @@ async function getVentas(req, res, next) {
     // Agrupar
     const bucket = new Map();
     for (const it of lines) {
-      const d = toDateLocal(it.fechaYMD);
+      const d = toDateLocal(it.fechaYMD); // ya normalizado
       const label =
         groupBy === 'month' ? monthLabel(d) :
         groupBy === 'week'  ? weekLabel(d)  :
