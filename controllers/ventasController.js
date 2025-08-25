@@ -1,15 +1,16 @@
-// controllers/ventasController.js
 const fetch = require('node-fetch'); // v2
 
 // === Bases ===
 const API_BASE   = process.env.MAXI_BASE_URL       || 'https://api-mconn.maxisistemas.com.ar'; // /login
 const STATS_BASE = process.env.MAXI_STATS_BASE_URL || API_BASE;                                 // /estadisticas
 
-// === Utils fechas ===
-const toDate   = (s) => new Date(`${s}T00:00:00`);
-const fmtYMD   = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const addDays  = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
-const weekLabel  = (d) => {
+// === Utils fechas (día cerrado, sin superposición) ===
+const toDate  = (s) => new Date(`${s}T00:00:00`); // interpreta como medianoche local del server
+const fmtYMD  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const addDays = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
+
+const weekLabel = (d) => {
+  // ISO week en UTC (suficiente para reporte estable)
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
   const th = new Date(date); th.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
   const ys = new Date(Date.UTC(th.getUTCFullYear(), 0, 1));
@@ -34,7 +35,7 @@ let tokenCache = { token: null, exp: 0 };
 async function getMaxiToken() {
   const now = Date.now();
 
-  // Si nos dan un Bearer fijo por env, usarlo
+  // Si viene un Bearer fijo en env, usarlo
   if (process.env.MAXI_BEARER_TOKEN && process.env.MAXI_BEARER_TOKEN.startsWith('Bearer ')) {
     return process.env.MAXI_BEARER_TOKEN.replace(/^Bearer\s+/, '');
   }
@@ -101,7 +102,6 @@ async function fetchFullByDate(fromYMD, toYMD, token) {
     throw err;
   }
 
-  // Suele venir como { content: [...] }
   return data?.content ?? data ?? {};
 }
 
@@ -127,12 +127,7 @@ function extractItemsFiltered(content, targetId) {
 
   const walk = (node, parentFecha = null) => {
     if (!node) return;
-
-    if (Array.isArray(node)) {
-      for (const n of node) walk(n, parentFecha);
-      return;
-    }
-
+    if (Array.isArray(node)) { for (const n of node) walk(n, parentFecha); return; }
     if (typeof node === 'object') {
       const fecha = coerceFecha(node, parentFecha);
       const id    = pickId(node);
@@ -145,7 +140,6 @@ function extractItemsFiltered(content, targetId) {
           out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
         }
       }
-
       for (const v of Object.values(node)) {
         if (v && typeof v === 'object') walk(v, fecha);
       }
@@ -156,12 +150,22 @@ function extractItemsFiltered(content, targetId) {
   return out;
 }
 
-// === Handler principal ===
+/* ============================= Handlers ============================= */
+
+/**
+ * GET /api/ventas?articuloId=...&from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month&tz=America/Argentina/Buenos_Aires
+ * - Itera en bloques de 7 días *sin* superponer.
+ * - Agrega por day/week/month.
+ */
 async function getVentas(req, res, next) {
   try {
-    const { articuloId, from, to, groupBy = 'day' } = req.query;
+    const { articuloId, from, to } = req.query;
+    const groupBy = String(req.query.groupBy || 'day').toLowerCase();
+    // llega desde el front; acá no la usamos para pedir a Maxi (porque pide YMD),
+    // pero la mantenemos por si luego necesitás ajustar weekLabel en TZ específica.
+    const tz = String(req.query.tz || 'America/Argentina/Buenos_Aires');
 
-    // Mock rápido (útil si Maxi todavía no habilitó permisos). VENTAS_MOCK=1
+    // Mock
     if (process.env.VENTAS_MOCK === '1') {
       if (!from || !to) return res.status(400).json({ error: 'Parámetros requeridos: from, to' });
       const start = toDate(from);
@@ -175,7 +179,7 @@ async function getVentas(req, res, next) {
       for (let t = start.getTime(); t <= end.getTime(); t += dayMs) {
         const d = new Date(t);
         const ymd = fmtYMD(d);
-        const qty = Math.floor(1 + Math.random() * 3); // 1..3 por día
+        const qty = Math.floor(1 + Math.random() * 3);
         items.push({ label: ymd, qty });
         acc += qty;
       }
@@ -199,9 +203,9 @@ async function getVentas(req, res, next) {
 
     const token = await getMaxiToken();
 
-    // La API permite máx. 7 días por request
+    // Iteramos en semanas sin solapamiento (inclusive en ambos extremos de cada tramo)
     let cursor = new Date(start);
-    const lines = []; // acumulamos SOLO el artículo pedido
+    const lines = [];
 
     while (cursor <= end) {
       const cStart = new Date(cursor);
@@ -215,7 +219,7 @@ async function getVentas(req, res, next) {
       cursor = addDays(stop, 1);
     }
 
-    // Agrupar por day|week|month
+    // Agregar según agrupador
     const bucket = new Map();
     for (const it of lines) {
       const d = toDate(it.fechaYMD);
