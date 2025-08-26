@@ -19,14 +19,19 @@ app.use(cors({
 app.use(express.json());
 
 // ======== Rutas existentes ========
+// ... tus app.use(...) de rutas:
 app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/insumos', require('./routes/insumosRoutes'));
 app.use('/api', require('./routes/agrupacionesRoutes'));
+app.use('/api/ventas', require('./routes/ventasRoutes')); // 👈 ventas montado aquí
 
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// 👇🏼 mover el handler de errores al final
 app.use((err, req, res, _next) => {
-  console.error('❌ Error:', err); // Render logs
-  res.status(500).json({ error: 'internal', message: err?.message, code: err?.code });
+  console.error('❌ Error:', err);
+  res.status(err.status || 500).json({ error: 'internal', message: err?.message, code: err?.code });
 });
 
 // ======== NUEVA ruta ventas ========
