@@ -1,9 +1,8 @@
-// routes/ventasRoutes.js
 const express = require('express');
 const router = express.Router();
-const { getVentas } = require('../controllers/ventasController');
+const ventasController = require('../controllers/ventasController');
 
-router.get('/', getVentas);
+router.get('/ventas', ventasController.getVentas);
 router.post('/ventas/batch', ventasController.getVentasBatch);
 
 module.exports = router;
