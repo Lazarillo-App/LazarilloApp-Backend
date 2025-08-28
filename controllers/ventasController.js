@@ -1,375 +1,356 @@
-// controllers/ventasController.js
-const fetch = require('node-fetch'); // v2
+// src/controllers/ventasController.js
+// — Blindado + multi-tenant (token por negocio) + búsqueda por código/nombre + peek —
 
-// === Bases (podés sobreescribir por env) ===
-const API_BASE   = process.env.MAXI_BASE_URL       || 'https://api-mconn.maxisistemas.com.ar';
-const STATS_BASE = process.env.MAXI_STATS_BASE_URL || API_BASE;
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+const { getCreds } = require('../services/maxiCredsService');
 
-// === Utils fechas ===
-const toDate  = (s) => new Date(`${s}T00:00:00`);
-const fmtYMD  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const addDays = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
+// ====================== ENV & CONST ======================
+const MAXI_BASE =
+  process.env.MAXI_BASE ||
+  process.env.MAXI_BASE_URL ||
+  'https://api-mconn.maxisistemas.com.ar';
 
-const weekLabel = (d) => {
-  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const th = new Date(date); th.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
-  const ys = new Date(Date.UTC(th.getUTCFullYear(), 0, 1));
-  const week = Math.ceil((((th - ys) / 86400000) + 1) / 7);
-  return `${th.getUTCFullYear()}-W${String(week).padStart(2,'0')}`;
-};
-const monthLabel = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+const LOGIN_URL = `${MAXI_BASE}/login`;
+const STATS_URL = `${MAXI_BASE}/estadisticas/fullinvoicebydate`;
 
-// === Log crudo opcional ===
-function logRaw(tag, data) {
-  if (process.env.LOG_MAXI_RAW === '1') {
-    const ts = new Date().toISOString();
-    console.log(`\x1b[36m[LOG_MAXI_RAW]\x1b[0m ${ts} — ${tag}`);
-    console.dir(data, { depth: null, colors: true });
-    console.log('--------------------------------------------------');
+const LOG_MAXI_RAW  = process.env.LOG_MAXI_RAW === '1';
+const LOG_PARSER_DEBUG = process.env.LOG_PARSER_DEBUG === '1';
+const AR_TIMEZONE   = process.env.AR_TIMEZONE || 'America/Argentina/Buenos_Aires';
+const USE_MOCK      = process.env.VENTAS_MOCK === '1';
+
+const MAXI_MAX_WINDOW_DAYS      = Number(process.env.MAXI_MAX_WINDOW_DAYS || 6);
+const MAXI_CONCURRENCY          = Number(process.env.MAXI_CONCURRENCY || 2);
+const MAXI_RETRIES              = Number(process.env.MAXI_RETRIES || 4);
+const MAXI_RETRY_BASE_MS        = Number(process.env.MAXI_RETRY_BASE_MS || 600);
+const MAXI_FETCH_TIMEOUT_MS     = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 20000);
+const MAXI_FETCH_TIMEOUT_CAP_MS = Number(process.env.MAXI_FETCH_TIMEOUT_CAP_MS || 90000);
+
+const logRaw = (...a) => { if (LOG_MAXI_RAW) console.log('[MAXI]', ...a); };
+const dbg    = (...a) => { if (LOG_PARSER_DEBUG) console.log('[PARSER]', ...a); };
+const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
+
+// ====================== LOGIN (cache por negocio) ======================
+const TOKEN_CACHE = new Map();      // key -> { token, expAt }
+const LOGIN_INFLIGHT = new Map();   // key -> Promise
+
+const cacheKey = (creds, req) =>
+  `${req?.business?.id || 'env'}:${creds.email}:${creds.cod_cli}`;
+
+async function readCredsFromDBOrEnv(req) {
+  // 1) DB por negocio activo
+  if (req?.business?.id) {
+    const c = await getCreds(req.business.id);
+    if (c) return c;
   }
+  // 2) Fallback .env (testing)
+  const email   = process.env.MAXI_EMAIL  || process.env.EMAIL  || '';
+  const pass    = process.env.MAXI_PASS   || process.env.PASS   || '';
+  const cod_cli = process.env.MAXI_CODCLI || process.env.CODCLI || process.env.MAXI_CLIENTE || '';
+  return { email: String(email).trim(), pass: String(pass).trim(), cod_cli: String(cod_cli).trim() };
 }
 
-// === Login cache ===
-let tokenCache = { token: null, exp: 0 };
+function pickTokenAndTTL(json) {
+  const c = json?.content ?? json;
+  const token = c?.access_token || c?.tokenAccess || c?.token || c?.accessToken || null;
+  const ttl   = Number(c?.expires_in ?? c?.aliveTime ?? 3600);
+  return { token, ttl };
+}
 
-async function getMaxiToken() {
-  const now = Date.now();
-
-  // Si nos dan un Bearer fijo por env, usarlo
-  if (process.env.MAXI_BEARER_TOKEN && process.env.MAXI_BEARER_TOKEN.startsWith('Bearer ')) {
-    return process.env.MAXI_BEARER_TOKEN.replace(/^Bearer\s+/, '');
+async function loginMaxiInner(req, creds, key) {
+  const variants = [
+    { label: 'email/pass/cod_cli',       body: { email: creds.email, pass: creds.pass, cod_cli: creds.cod_cli } },
+    { label: 'usuario/password/cliente', body: { usuario: creds.email, password: creds.pass, cliente: creds.cod_cli } },
+  ];
+  let lastTxt = '';
+  for (const v of variants) {
+    logRaw('POST /login ->', v.label);
+    const res = await fetch(LOGIN_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(v.body) });
+    const txt = await res.text(); lastTxt = txt;
+    let json; try { json = JSON.parse(txt); } catch { json = null; }
+    logRaw('RESP /login', res.status, txt.slice(0, 500));
+    if (res.ok && json) {
+      const { token, ttl } = pickTokenAndTTL(json);
+      if (token) {
+        TOKEN_CACHE.set(key, { token, expAt: Date.now() + (Number(ttl) || 3600) * 1000 });
+        return token;
+      }
+      if (res.status === 200) continue;
+    }
+    if (res.status === 422) continue;
+    throw new Error(`Login Maxi falló: ${res.status} ${txt}`);
   }
+  throw new Error(`Login Maxi falló: 200/422 ${lastTxt}`);
+}
 
-  if (tokenCache.token && tokenCache.exp > now) return tokenCache.token;
+async function loginMaxi(req, creds, key) {
+  if (LOGIN_INFLIGHT.has(key)) return await LOGIN_INFLIGHT.get(key);
+  const p = (async () => {
+    try { return await loginMaxiInner(req, creds, key); }
+    finally { LOGIN_INFLIGHT.delete(key); }
+  })();
+  LOGIN_INFLIGHT.set(key, p);
+  return await p;
+}
 
-  const body = {
-    email:   process.env.MAXI_EMAIL,
-    pass:    process.env.MAXI_PASS,
-    cod_cli: process.env.MAXI_CODCLI,
+async function getToken(req, { force = false } = {}) {
+  const creds = await readCredsFromDBOrEnv(req);
+  const key = cacheKey(creds, req);
+  const cached = TOKEN_CACHE.get(key);
+  const stillValid = cached && Date.now() < cached.expAt - 30_000;
+  if (!force && stillValid) return cached.token;
+  await loginMaxi(req, creds, key);
+  return TOKEN_CACHE.get(key).token;
+}
+
+// ====================== FECHAS ======================
+const isYMD = s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+function ymdInTZ(date, tz) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(date).reduce((a, p) => (a[p.type] = p.value, a), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+function normalizeInputYMD(v, tz){ if (isYMD(v)) return v; const d=v instanceof Date?v:new Date(v); if (isNaN(d)) return null; return ymdInTZ(d,tz); }
+function getAyer(tz=AR_TIMEZONE){ const now=new Date(); return ymdInTZ(new Date(now.getTime()-86400000), tz); }
+function clampToAyer({ from, to, tz = AR_TIMEZONE }) {
+  const AYER = getAyer(tz);
+  let F = from ? normalizeInputYMD(from, tz) : AYER;
+  let T = to   ? normalizeInputYMD(to, tz)   : AYER;
+  if (!F) F = AYER; if (!T) T = AYER;
+  if (T > AYER) T = AYER; if (F > T) F = T;
+  return { from: F, to: T, AYER };
+}
+function dateRangeDays(F,T){ const [fy,fm,fd]=F.split('-').map(Number),[ty,tm,td]=T.split('-').map(Number);
+  const s=Date.UTC(fy,fm-1,fd), e=Date.UTC(ty,tm-1,td); const out=[]; for(let t=s;t<=e;t+=86400000){
+    const d=new Date(t); out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`);
+  } return out; }
+function diffDays(F,T){ const [fy,fm,fd]=F.split('-').map(Number),[ty,tm,td]=T.split('-').map(Number);
+  return Math.floor((Date.UTC(ty,tm-1,td)-Date.UTC(fy,fm-1,fd))/86400000); }
+function ymdAddDays(ymd,n){ const [y,m,d]=ymd.split('-').map(Number); const t=Date.UTC(y,m-1,d)+n*86400000; const dt=new Date(t);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()+1).padStart(2,'0')}-${String(dt.getUTCDate()).padStart(2,'0')}`; }
+
+// ====================== FETCH con retries ======================
+const isAbort = (e)=> e?.name==='AbortError'||e?.type==='aborted'||/aborted/i.test(String(e?.message||''));
+const isTransient = (e)=> isAbort(e) || [429,500,502,503,504].includes(e?.status) ||
+  /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(e?.code||'') || /timeout/i.test(String(e?.message||''));
+
+async function fetchStatsWithRetry({ from, to, req }) {
+  const tryOnce = async (timeoutMs) => {
+    const token  = await getToken(req);
+    const bearer = String(token).startsWith('Bearer ') ? token : `Bearer ${token}`;
+    const url = `${STATS_URL}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    logRaw('GET', url);
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
+    try {
+      const res = await fetch(url, { headers: { Authorization: bearer }, signal: ctrl.signal });
+      const txt = await res.text(); let json; try { json = JSON.parse(txt); } catch { json = null; }
+      logRaw('RESP /estadisticas/fullinvoicebydate', res.status, txt.slice(0, 500));
+      if (!res.ok) {
+        const apiCode = json?.resultCode ?? json?.content?.resultCode ?? json?.result?.resultCode ?? null;
+        const err = new Error(`HTTP ${res.status} ${txt || ''}`); err.status = res.status; err.apiCode = apiCode; throw err;
+      }
+      return json;
+    } finally { clearTimeout(timer); }
   };
 
-  const res = await fetch(`${API_BASE}/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  const text = await res.text().catch(() => '');
-  let json; try { json = JSON.parse(text); } catch { json = null; }
-  logRaw('LOGIN /login (raw)', json ?? text);
-
-  if (!res.ok || json?.resultCode !== 'SUCCESS') {
-    const msg = (json && json.resultDescription) || res.statusText || text || 'login error';
-    const err = new Error(`Login MaxiRest ${res.status || ''}: ${msg}`);
-    err.status = 502;
-    throw err;
-  }
-
-  const token = json?.content?.tokenAccess;
-  if (!token) {
-    const err = new Error('Login MaxiRest: token vacío');
-    err.status = 502;
-    throw err;
-  }
-
-  tokenCache = { token, exp: now + 10 * 60 * 1000 }; // 10 min
-  return token;
-}
-
-// === Fetch por semana ===
-async function fetchFullByDate(fromYMD, toYMD, token) {
-  const url = new URL(`${STATS_BASE}/estadisticas/fullinvoicebydate`);
-  url.searchParams.set('from', fromYMD);
-  url.searchParams.set('to', toYMD);
-
-  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
-
-  const text = await res.text().catch(() => '');
-  let data; try { data = JSON.parse(text); } catch { data = null; }
-  logRaw(`GET ${url.pathname}?from=${fromYMD}&to=${toYMD} (raw)`, data ?? text);
-
-  if (!res.ok) {
-    const msg = (data && data.resultDescription) || res.statusText || text || 'fetch error';
-    const err = new Error(`MaxiRest ${res.status}: ${msg}`);
-    err.status = res.status || 502;
-    throw err;
-  }
-  if (data?.resultCode && data.resultCode !== 'SUCCESS') {
-    const err = new Error(`MaxiRest: ${data?.resultDescription || 'error'}`);
-    err.status = 502;
-    throw err;
-  }
-
-  // Suele venir como { content: [...] } o { content: { facturas: [...] } }
-  return data?.content ?? data ?? {};
-}
-
-// === Parser profundo: cuenta SOLO hojas y puede ignorar precio=0 ===
-function extractDeepLeafItems(content, targetId, { ignoreZero = true } = {}) {
-  const out = [];
-
-  const coerceFecha = (obj, parentFecha) => {
-    if (!obj || typeof obj !== 'object') return parentFecha;
-    for (const k of Object.keys(obj)) {
-      if (/^fecha/i.test(k) && typeof obj[k] === 'string') {
-        return String(obj[k]).slice(0, 10);
+  for (let attempt = 1; attempt <= MAXI_RETRIES; attempt++) {
+    const timeoutMs = Math.min(MAXI_FETCH_TIMEOUT_MS * Math.pow(2, attempt - 1), MAXI_FETCH_TIMEOUT_CAP_MS);
+    try { return await tryOnce(timeoutMs); }
+    catch (e) {
+      if (e?.status === 401 || e?.status === 403) { await getToken(req, { force: true }); attempt--; continue; }
+      if (isTransient(e) && attempt < MAXI_RETRIES) {
+        const wait = Math.floor(MAXI_RETRY_BASE_MS * Math.pow(2, attempt - 1) * (1 + Math.random() * 0.25));
+        logRaw(`Retry ${attempt}/${MAXI_RETRIES} en ${wait}ms por ${e.status || e.code || e.name || e.message}`); await sleep(wait); continue;
       }
-    }
-    return parentFecha;
-  };
-
-  const pickId = (n) =>
-    n.cod_art ?? n.articuloId ?? n.codigoArticulo ?? n.codigo ?? n.idArticulo ?? n.id;
-
-  const pickQty    = (n) => n.cantidad ?? n.cantidadVendida ?? n.qty ?? n.unidades;
-  const pickPrecio = (n) => n.precio;
-
-  const walk = (node, parentFecha = null) => {
-    if (!node) return false;
-
-    if (Array.isArray(node)) {
-      let any = false;
-      for (const n of node) { if (walk(n, parentFecha)) any = true; }
-      return any;
-    }
-
-    if (typeof node === 'object') {
-      const fecha = coerceFecha(node, parentFecha);
-
-      // primero hijos
-      let childCounted = false;
-      for (const v of Object.values(node)) {
-        if (v && typeof v === 'object') {
-          if (walk(v, fecha)) childCounted = true;
-        }
-      }
-
-      // luego este nodo
-      const idRaw  = pickId(node);
-      const qtyRaw = pickQty(node);
-      const prRaw  = pickPrecio(node);
-      const isCandidate = (idRaw != null) && (qtyRaw != null) && !!fecha;
-
-      if (isCandidate && !childCounted) {
-        const idNum = Number(idRaw);
-        const qNum  = Number(qtyRaw) || 0;
-        const pNum  = Number(prRaw || 0);
-        if (Number.isFinite(idNum) && idNum === targetId) {
-          if (!ignoreZero || pNum > 0) {
-            out.push({ fechaYMD: fecha, articuloId: idNum, cantidad: qNum });
-            return true;
-          }
-        }
-      }
-
-      return childCounted;
-    }
-
-    return false;
-  };
-
-  walk(content, null);
-  return out;
-}
-
-// === Recolector directo para batch (más rápido) ===
-function collectCountsFromContent(content, targetSet, { ignoreZero = true } = {}) {
-  const out = new Map();
-  const facturas =
-    content?.facturas ||
-    content?.content?.facturas ||
-    [];
-
-  for (const envoltorio of facturas) {
-    const items = envoltorio?.factura?.items || [];
-    for (const it of items) {
-      const id = Number(
-        it.cod_art ?? it.articuloId ?? it.codigoArticulo ?? it.codigo ?? it.idArticulo ?? it.id
-      );
-      const cant   = Number(it.cantidad ?? it.qty ?? it.unidades ?? 0) || 0;
-      const precio = Number(it.precio ?? 0) || 0;
-      if (!Number.isFinite(id) || !targetSet.has(id)) continue;
-      if (ignoreZero && precio <= 0) continue;
-      out.set(id, (out.get(id) || 0) + cant);
+      throw e;
     }
   }
-  return out;
 }
 
-/* ============================= GET /api/ventas ============================= */
+function segmentWindows(F,T,size){ const total=diffDays(F,T)+1; const wins=[]; let start=F, remain=total;
+  while(remain>0){ const span=Math.min(size,remain); const end=ymdAddDays(start,span-1); wins.push([start,end]); start=ymdAddDays(end,1); remain-=span; }
+  return wins; }
+async function fetchSafe(a,b,req){ try{ const json=await fetchStatsWithRetry({from:a,to:b,req}); return extractFacturas(json); }
+  catch(e){ if(e?.status===400&&(e.apiCode==='LONG_PARAMS'||String(e.message).includes('LONG_PARAMS'))){ const span=diffDays(a,b)+1;
+      if(span<=1) throw e; const mid=ymdAddDays(a,Math.floor(span/2)-1), right=ymdAddDays(mid,1);
+      const L=await fetchSafe(a,mid,req), R=await fetchSafe(right,b,req); return [...L,...R]; } throw e; } }
+async function fetchStatsAll({ from, to, req, maxDays }) {
+  const size=maxDays||MAXI_MAX_WINDOW_DAYS; const wins=segmentWindows(from,to,size);
+  const conc=Math.max(1,MAXI_CONCURRENCY); let cursor=0; const collected=[];
+  async function worker(id){ while(cursor<wins.length){ const idx=cursor++; const [a,b]=wins[idx];
+      logRaw(`WORKER#${id} ventana ${idx+1}/${wins.length}: ${a}..${b}`); const facts=await fetchSafe(a,b,req); collected.push(...facts); } }
+  await Promise.all(Array.from({length:conc},(_,i)=>worker(i+1))); return collected;
+}
+
+// ====================== PARSER (ID, CÓDIGO y búsqueda por nombre) ======================
+function extractFacturas(json){ const c=json?.content?.content ?? json?.content ?? json; return Array.isArray(c?.facturas)?c.facturas:[]; }
+const normCode = (s)=> String(s ?? '').trim().replace(/^0+/, '');
+const asNum = (x)=> { if(typeof x==='number') return x; if(typeof x==='string'){ const n=Number(x.replace?.(',','.')); return Number.isFinite(n)?n:NaN; } return NaN; };
+
+function pickItemId(it){
+  const cand=[it?.idArticulo,it?.id_articulo,it?.articuloId,it?.id,it?.IdArticulo,it?.articulo?.idArticulo,it?.articulo?.id,it?.Articulo?.id]
+    .filter(v=>v!==undefined&&v!==null);
+  for(const v of cand){ const n=asNum(v); if(Number.isFinite(n)&&n>0) return n; } return null;
+}
+function pickItemCode(it){
+  const cand=[it?.codigo,it?.codArticulo,it?.codigoArticulo,it?.cod_articulo,it?.articulo?.codigo,it?.Articulo?.codigo]
+    .filter(v=>v!=null && String(v).trim()!=='');
+  for(const v of cand){ const c=normCode(v); if(c) return c; }
+  if(typeof it?.id==='string') return normCode(it.id);
+  return null;
+}
+function pickItemName(it){
+  const cand=[it?.descripcion,it?.nombre,it?.detalle,it?.Articulo?.descripcion,it?.articulo?.descripcion,it?.articulo?.nombre];
+  const v=cand.find(x=>typeof x==='string'&&x.trim()); return v? v.trim(): null;
+}
+function pickQty(it){ const cand=[it?.cantidad,it?.cant,it?.qty,it?.Cantidad,it?.unidades]; for(const v of cand){ const n=asNum(v); if(Number.isFinite(n)) return n; } return 0; }
+function pickUnitPrice(it){ const cand=[it?.precio,it?.precioUnitario,it?.price,it?.importeUnitario]; for(const v of cand){ const n=asNum(v); if(Number.isFinite(n)) return n; } return 0; }
+function pickAmount(it){ const cand=[it?.importe,it?.importeTotal,it?.totalItem,it?.total,it?.Importe,it?.subtotal]; for(const v of cand){ const n=asNum(v); if(Number.isFinite(n)) return n; } return pickQty(it)*pickUnitPrice(it); }
+function getDetalleArray(f){
+  const d1=f?.factura?.detalle, d2=f?.detalle, d3=f?.factura?.items, d4=f?.items;
+  const unwrap=(d)=>Array.isArray(d)?d: Array.isArray(d?.detalle)?d.detalle: Array.isArray(d?.items)?d.items: null;
+  return unwrap(d1)||unwrap(d2)||unwrap(d3)||unwrap(d4)||[];
+}
+function pickDateFromFactura(f,tz=AR_TIMEZONE){ const src=f?.factura?.cabecera?.fecha ?? f?.factura?.fecha ?? f?.fecha ?? null; return src? ymdInTZ(new Date(src),tz):null; }
+const normText = (s)=> String(s??'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase();
+const includesCI = (text, q)=> normText(text).includes(normText(q));
+
+function buildByDayForArticulo(facturas, { targetId, targetCode, q }, tz = AR_TIMEZONE) {
+  const byDay=new Map(); let cFact=0,cDet=0,cItems=0,cMatch=0; const sampleKeys=new Set();
+  for(const f of facturas){
+    cFact++; const dateKey=pickDateFromFactura(f,tz); if(!dateKey) continue;
+    const detalle=getDetalleArray(f); if(!Array.isArray(detalle)||detalle.length===0) continue; cDet++;
+    for(const it of detalle){
+      cItems++; if (LOG_PARSER_DEBUG) Object.keys(it||{}).slice(0,16).forEach(k=>sampleKeys.add(k));
+      const id=pickItemId(it), code=pickItemCode(it), name=pickItemName(it)||'';
+      const okId   =(targetId!=null)   && (typeof id==='number')  && id===targetId;
+      const okCode =(targetCode!=null) && (typeof code==='string') && normCode(code)===targetCode;
+      const okQ    =(q!=null && q!=='') && includesCI(name, q);
+      if(!okId && !okCode && !okQ) continue;
+      cMatch++; const qty=pickQty(it), amt=pickAmount(it);
+      const prev=byDay.get(dateKey)||{qty:0,amount:0}; prev.qty+=qty; prev.amount+=amt; byDay.set(dateKey,prev);
+    }
+  }
+  const sorted=[...byDay.entries()].sort((a,b)=>a[0].localeCompare(b[0])).map(([date,v])=>({date,qty:v.qty,amount:v.amount}));
+  const totals=sorted.reduce((a,d)=> (a.totalQty+=d.qty,a.totalAmount+=d.amount,a),{totalQty:0,totalAmount:0});
+  if (LOG_PARSER_DEBUG) {
+    dbg(`facturas=${cFact} conDetalle=${cDet} items=${cItems} matches=${cMatch}`);
+    dbg('muestra keys items:', Array.from(sampleKeys).slice(0,25));
+  }
+  return { byDay:sorted, ...totals };
+}
+
+function buildBasicMatches(facturas, { targetId, targetCode, q }, tz=AR_TIMEZONE, limit=200) {
+  const out=[]; for(const f of facturas){
+    const dateKey=pickDateFromFactura(f,tz); if(!dateKey) continue;
+    const detalle=getDetalleArray(f);
+    for(const it of detalle){
+      const id=pickItemId(it), code=pickItemCode(it), name=pickItemName(it)||'';
+      const okId   =(targetId!=null)   && (typeof id==='number')  && id===targetId;
+      const okCode =(targetCode!=null) && (typeof code==='string') && normCode(code)===targetCode;
+      const okQ    =(q!=null && q!=='') && includesCI(name, q);
+      if(!okId && !okCode && !okQ) continue;
+      out.push({ date:dateKey, code:code??null, name, unitPrice: pickUnitPrice(it), qty: pickQty(it), amount: pickAmount(it), id:id??null });
+      if(out.length>=limit) return out;
+    }
+  } return out;
+}
+
+function collectDistinctItems(facturas, tz=AR_TIMEZONE, limit=200) {
+  const map=new Map();
+  for(const f of facturas){
+    const dateKey=pickDateFromFactura(f,tz); if(!dateKey) continue;
+    const detalle=getDetalleArray(f);
+    for(const it of detalle){
+      const id=pickItemId(it), code=pickItemCode(it), key=code??(id!=null?`#${id}`:null);
+      if(!key) continue;
+      const name=pickItemName(it); const unit=pickUnitPrice(it);
+      const slot=map.get(key)||{ code:code??null, id:(typeof id==='number'?id:null), name, unitPrice:unit, count:0, sampleDate:dateKey };
+      slot.count++; slot.name = slot.name || name; slot.unitPrice = slot.unitPrice || unit;
+      map.set(key, slot);
+      if(map.size>=limit) break;
+    }
+    if(map.size>=limit) break;
+  }
+  return [...map.values()];
+}
+
+// ====================== MOCK ======================
+function buildMock({ from, to, ignoreZero }) {
+  const days=dateRangeDays(from,to);
+  const data=days.map((date,i)=>({ date, qty:(i%3===0)?2:0, amount:(i%3===0)?1990:0 }));
+  const filtered=ignoreZero?data.filter(d=>d.qty&&d.amount):data;
+  const totals=filtered.reduce((a,d)=>({ qty:a.qty+d.qty, amount:a.amount+d.amount }),{qty:0, amount:0});
+  return { totals, data: ignoreZero?filtered:data };
+}
+
+// ====================== HANDLERS ======================
+exports.ping = (_req,res)=> res.json({ ok:true });
+
 /**
- * Query: articuloId, from, to, groupBy=day|week|month, ignoreZero=true|false
- * - Clampea SIEMPRE el “to” a AYER (medianoche local del server) para evitar parciales.
- * - Reintenta una vez si recibe 401 en mitad del bucle semanal.
+ * GET /api/ventas
+ * query:
+ *   - articuloId? (number)  OR  codigo?/articuloCode?/code? (string)  OR  q? (texto en nombre)
+ *   - from?, to? (YYYY-MM-DD; clamp a AYER)
+ *   - groupBy=day | basic=true | peek=true
+ *   - ignoreZero=true|false
+ *   - limit? (para basic/peek)
  */
-async function getVentas(req, res, next) {
-  try {
-    const { articuloId, from, to } = req.query;
-    const groupBy = String(req.query.groupBy || 'day').toLowerCase();
-    const ignoreZero = String(req.query.ignoreZero || 'true').toLowerCase() !== 'false';
+exports.getVentas = async (req,res)=>{
+  try{
+    let { articuloId, codigo, articuloCode, code, q, from, to, groupBy='day', ignoreZero, basic, peek, limit } = req.query;
+    const hasId   = articuloId !== undefined && articuloId !== '';
+    const codeRaw = codigo ?? articuloCode ?? code;
+    const hasCode = codeRaw !== undefined && String(codeRaw).trim() !== '';
+    const hasQ    = q !== undefined && String(q).trim() !== '';
+    const LIM     = Math.min(Number(limit||200), 1000);
 
-    if (!articuloId || !from || !to) {
-      return res.status(400).json({ error: 'Parámetros requeridos: articuloId, from, to' });
+    if (!hasId && !hasCode && !hasQ && String(peek) !== 'true') {
+      return res.status(400).json({ error: 'Enviá articuloId o codigo o q (texto). También podés usar peek=true.' });
+    }
+    if (groupBy !== 'day' && String(basic) !== 'true' && String(peek) !== 'true') {
+      return res.status(400).json({ error: 'Sólo groupBy=day soportado (salvo basic/peek).' });
     }
 
-    const targetId = Number(articuloId);
-    if (!Number.isFinite(targetId)) {
-      return res.status(400).json({ error: 'articuloId inválido' });
-    }
+    const { from:F, to:T, AYER } = clampToAyer({ from, to });
 
-    const start = toDate(from);
-    let end     = toDate(to);
-
-    // clamp a AYER
-    const now = new Date();
-    const todayMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (end >= todayMid) end = addDays(todayMid, -1);
-
-    if (Number.isNaN(start) || Number.isNaN(end) || start > end) {
-      return res.status(400).json({ error: 'Rango de fechas inválido' });
-    }
-
-    let token = await getMaxiToken();
-
-    // iterar por semanas sin solapamiento
-    let cursor = new Date(start);
-    const lines = [];
-
-    while (cursor <= end) {
-      const cStart = new Date(cursor);
-      const cEnd   = addDays(cursor, 6);
-      const stop   = (cEnd < end ? cEnd : end);
-
-      let content = null;
-      try {
-        content = await fetchFullByDate(fmtYMD(cStart), fmtYMD(stop), token);
-      } catch (e) {
-        if (e?.status === 401) {
-          token = await getMaxiToken(); // refresh y reintento 1 vez
-          content = await fetchFullByDate(fmtYMD(cStart), fmtYMD(stop), token);
-        } else {
-          throw e;
-        }
+    // MOCK
+    if (USE_MOCK) {
+      if (String(basic)==='true' || String(peek)==='true') {
+        return res.json({ rango:{from:F,to:T,clampTo:AYER}, filtro:{ articuloId: hasId?Number(articuloId):null, codigo: hasCode?normCode(codeRaw):null, q: hasQ?String(q):null }, basic:[] });
       }
-
-      const chunk = extractDeepLeafItems(content, targetId, { ignoreZero });
-      if (chunk.length) lines.push(...chunk);
-
-      cursor = addDays(stop, 1);
+      const mock=buildMock({ from:F, to:T, ignoreZero:String(ignoreZero)==='true' });
+      return res.json({ rango:{from:F,to:T,clampTo:AYER}, articuloId: hasId?Number(articuloId):null, codigo: hasCode?normCode(codeRaw):null, groupBy:'day', ignoreZero:String(ignoreZero)==='true', totals:{ qty:mock.totals.qty, amount:mock.totals.amount }, data:mock.data });
     }
 
-    // agrupar por day|week|month
-    const bucket = new Map();
-    for (const it of lines) {
-      const d = toDate(it.fechaYMD);
-      const label =
-        groupBy === 'month' ? monthLabel(d) :
-        groupBy === 'week'  ? weekLabel(d)  :
-        fmtYMD(d); // day
-      bucket.set(label, (bucket.get(label) || 0) + it.cantidad);
+    // Real
+    const facturas = await fetchStatsAll({ from:F, to:T, req });
+
+    const target = {
+      targetId: hasId ? Number(articuloId) : null,
+      targetCode: hasCode ? normCode(codeRaw) : null,
+      q: hasQ ? String(q) : null
+    };
+
+    if (String(peek)==='true') {
+      const items = collectDistinctItems(facturas, AR_TIMEZONE, LIM);
+      return res.json({ rango:{from:F,to:T,clampTo:AYER}, filtro:{ articuloId: target.targetId, codigo: target.targetCode, q: target.q }, count: items.length, peek: items });
     }
 
-    const items = Array.from(bucket.entries())
-      .sort(([a],[b]) => a.localeCompare(b))
-      .map(([label, qty]) => ({ label, qty }));
+    if (String(basic)==='true') {
+      const items = buildBasicMatches(facturas, target, AR_TIMEZONE, LIM);
+      return res.json({ rango:{from:F,to:T,clampTo:AYER}, filtro:{ articuloId: target.targetId, codigo: target.targetCode, q: target.q }, count: items.length, basic: items });
+    }
 
-    const total = items.reduce((acc, x) => acc + x.qty, 0);
+    const agg = buildByDayForArticulo(facturas, target, AR_TIMEZONE);
+    const allDays = dateRangeDays(F,T);
+    const filled = allDays.map(date => agg.byDay.find(d=>d.date===date) || { date, qty:0, amount:0 });
+    const out = (String(ignoreZero)==='true') ? filled.filter(d=>d.qty&&d.amount) : filled;
 
-    return res.json({ total, items });
-  } catch (err) {
-    return next(err);
+    res.json({ rango:{from:F,to:T,clampTo:AYER}, articuloId: target.targetId, codigo: target.targetCode, groupBy:'day', ignoreZero:String(ignoreZero)==='true', totals:{ qty:agg.totalQty, amount:agg.totalAmount }, data: out });
+  }catch(e){
+    console.error('getVentas error:', e);
+    res.status(500).json({ error: e.message || 'Error interno' });
   }
-}
-
-/* =========================== POST /api/ventas/batch =========================== */
-/**
- * Body: { articuloIds:number[], from:'YYYY-MM-DD', to:'YYYY-MM-DD', ignoreZero?:boolean }
- * Devuelve: { total:number, items:[{articuloId, cantidad}], from, to }
- * - Hace UNA sola pasada por semanas y suma cantidades por artículo.
- * - Cache en memoria 10 min por (rango + ids + ignoreZero).
- */
-const _batchCache = new Map(); // key -> { at:number, data:any }
-const BATCH_TTL = 10 * 60 * 1000;
-const _now = () => Date.now();
-
-function _batchCacheGet(key) {
-  const e = _batchCache.get(key);
-  if (!e) return null;
-  if (_now() - e.at > BATCH_TTL) { _batchCache.delete(key); return null; }
-  return e.data;
-}
-function _batchCacheSet(key, data) {
-  _batchCache.set(key, { at: _now(), data });
-}
-
-async function getVentasBatch(req, res, next) {
-  try {
-    const { articuloIds, from, to, ignoreZero = true } = req.body || {};
-    const ids = (Array.isArray(articuloIds) ? articuloIds : []).map(Number).filter(Boolean);
-
-    if (!ids.length || !from || !to) {
-      return res.status(400).json({ error: 'articuloIds[], from, to requeridos' });
-    }
-
-    // clamp a AYER
-    const start = toDate(from);
-    let end = toDate(to);
-    const now = new Date();
-    const todayMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (end >= todayMid) end = addDays(todayMid, -1);
-    if (Number.isNaN(start) || Number.isNaN(end) || start > end) {
-      return res.status(400).json({ error: 'Rango de fechas inválido' });
-    }
-
-    const cacheKey = `${fmtYMD(start)}|${fmtYMD(end)}|${ids.slice().sort((a,b)=>a-b).join(',')}|${ignoreZero?1:0}`;
-    const cached = _batchCacheGet(cacheKey);
-    if (cached) return res.json(cached);
-
-    const idSet = new Set(ids);
-    let token = await getMaxiToken();
-
-    let cursor = new Date(start);
-    const globalMap = new Map();
-
-    while (cursor <= end) {
-      const cStart = new Date(cursor);
-      const cEnd = addDays(cursor, 6);
-      const stop = (cEnd < end ? cEnd : end);
-
-      let content = null;
-      try {
-        content = await fetchFullByDate(fmtYMD(cStart), fmtYMD(stop), token);
-      } catch (e) {
-        if (e?.status === 401) {
-          token = await getMaxiToken(); // refresh
-          content = await fetchFullByDate(fmtYMD(cStart), fmtYMD(stop), token);
-        } else {
-          throw e;
-        }
-      }
-
-      const partial = collectCountsFromContent(content, idSet, { ignoreZero });
-      for (const [id, qty] of partial.entries()) {
-        globalMap.set(id, (globalMap.get(id) || 0) + qty);
-      }
-
-      cursor = addDays(stop, 1);
-    }
-
-    const items = Array.from(globalMap.entries())
-      .map(([articuloId, cantidad]) => ({ articuloId, cantidad }));
-
-    const total = items.reduce((acc, x) => acc + (x.cantidad || 0), 0);
-
-    const payload = { total, items, from: fmtYMD(start), to: fmtYMD(end) };
-    _batchCacheSet(cacheKey, payload);
-    return res.json(payload);
-  } catch (err) {
-    return next(err);
-  }
-}
-
-module.exports = {
-  getVentas,
-  getVentasBatch,
 };

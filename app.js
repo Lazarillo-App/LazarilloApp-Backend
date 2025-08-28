@@ -5,38 +5,61 @@ const express = require('express');
 const cors = require('cors');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
+const { randomUUID } = require('crypto');
 
 const app = express();
 
+// ---------- Patch de logging (seguro y minimal) ----------
+app.set('trust proxy', 1); // Render/NGINX, IP real y HTTPS
+app.disable('x-powered-by');
+
+app.use((req, res, next) => {
+  const reqId = randomUUID().slice(0, 8);
+  const start = Date.now();
+
+  // Enmascarar Authorization
+  const auth = req.headers.authorization ? '***' : undefined;
+  const hdrs = { ...req.headers, authorization: auth };
+
+  console.log(`➡️ [${reqId}] ${req.method} ${req.originalUrl}`);
+  if (process.env.LOG_REQUEST_HEADERS === '1') {
+    console.log(`   [${reqId}] headers:`, hdrs);
+  }
+
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`⬅️ [${reqId}] ${res.statusCode} ${req.method} ${req.originalUrl} (${ms}ms)`);
+  });
+
+  next();
+});
+
+// ---------- CORS primero ----------
 app.use(cors({
   origin: [
     'http://localhost:5173',
     'https://lazarillo.com.ar',
-    'http://lazarillo.com.ar'
+    'http://lazarillo.com.ar',
+    // agrega aquí tu dominio del front en Render si aplica, p.ej:
+    // 'https://lazarilloapp-frontend.onrender.com',
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false, // true solo si usás cookies/sesiones entre dominios
 }));
+
+// ---------- Parsers ----------
 app.use(express.json());
 
-// ======== Rutas existentes ========
-// ... tus app.use(...) de rutas:
+// ---------- Rutas ----------
 app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/insumos', require('./routes/insumosRoutes'));
 app.use('/api', require('./routes/agrupacionesRoutes'));
-app.use('/api/ventas', require('./routes/ventasRoutes')); // 👈 ventas montado aquí
+app.use('/api/ventas', require('./routes/ventasRoutes')); 
+app.use('/api/businesses', require('./routes/businessRoutes'));
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
-
-// 👇🏼 mover el handler de errores al final
-app.use((err, req, res, _next) => {
-  console.error('❌ Error:', err);
-  res.status(err.status || 500).json({ error: 'internal', message: err?.message, code: err?.code });
-});
-
-// ======== NUEVA ruta ventas ========
-app.use('/api/ventas', require('./routes/ventasRoutes'));
-
+// ---------- Health ----------
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/health/db', async (_req, res) => {
   try {
@@ -48,19 +71,34 @@ app.get('/health/db', async (_req, res) => {
   }
 });
 
+// ---------- 404 explícito (opcional) ----------
+app.use((req, res, _next) => {
+  res.status(404).json({ error: 'not_found', path: req.originalUrl });
+});
+
+// ---------- Handler de errores AL FINAL ----------
+app.use((err, req, res, _next) => {
+  console.error('❌ Error:', err);
+  res.status(err.status || 500).json({
+    error: 'internal',
+    message: err?.message,
+    code: err?.code,
+  });
+});
+
 console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
 
 const PORT = process.env.PORT || 4000;
+
 (async () => {
   try {
     await runMigrations();
     console.log('✅ Migraciones ejecutadas');
-    app.listen(PORT, () => {
-      console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
-    });
+    app.listen(PORT, () =>
+      console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`)
+    );
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);
   }
 })();
-
