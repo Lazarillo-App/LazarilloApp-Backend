@@ -71,6 +71,23 @@ app.get('/health/db', async (_req, res) => {
   }
 });
 
+// en app.js (después de las otras health)
+app.get('/health/auth', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        (SELECT to_regclass('public.app_users') IS NOT NULL)  AS has_users,
+        (SELECT to_regclass('public.app_businesses') IS NOT NULL) AS has_biz,
+        (SELECT to_regclass('public.user_businesses') IS NOT NULL) AS has_link,
+        (SELECT to_regclass('public.app_users_email_lower_idx') IS NOT NULL) AS has_email_idx
+    `);
+    res.json(rows[0]);
+  } catch (e) {
+    console.error('Auth health error:', e);
+    res.status(500).json({ error: 'auth health failed' });
+  }
+});
+
 // ---------- 404 explícito (opcional) ----------
 app.use((req, res, _next) => {
   res.status(404).json({ error: 'not_found', path: req.originalUrl });

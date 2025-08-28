@@ -1,24 +1,28 @@
 // db/migrations.js
 const pool = require('../config/db');
+const m004 = require('./004_auth');
+const fs = require('fs');
+const path = require('path');
 
 async function runMigrations() {
   const exec = (sql, params = []) => pool.query(sql, params);
-
-  // Ignora "ya existe": 42710 duplicate_object, 42701 duplicate_column,
-  // 23505 unique_violation, 42P07 duplicate_table / relation / index.
   const execSafe = async (sql) => {
-    try {
-      await exec(sql);
-    } catch (e) {
-      if (['42710', '42701', '23505', '42P07'].includes(e.code)) return;
+    try { await exec(sql); }
+    catch (e) {
+      if (['42710','42701','23505','42P07'].includes(e.code)) return;
       throw e;
     }
   };
 
-  // ========== 0) Extensiones ==========
+  console.log('📂 Usando base de datos PG:', process.env.PGDATABASE || '(desconocido)');
+
+  // 0) extensiones
   await execSafe(`CREATE EXTENSION IF NOT EXISTS pg_trgm;`);
 
-  // ========== 1) INSUMOS (como lo tenías) ==========
+  // 1) AUTH — **UNA sola vez**
+  await m004.up(pool);
+
+  // ========== 1) INSUMOS ==========
   await execSafe(`
     CREATE TABLE IF NOT EXISTS insumos (
       id                BIGSERIAL PRIMARY KEY,
@@ -41,7 +45,6 @@ async function runMigrations() {
     );
   `);
 
-  // columnas (por si venías de una versión previa)
   await execSafe(`ALTER TABLE insumos ADD COLUMN codigo_maxi TEXT;`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN nombre TEXT NOT NULL DEFAULT '';`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN unidad_med TEXT;`);
@@ -52,7 +55,6 @@ async function runMigrations() {
   await execSafe(`ALTER TABLE insumos ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
   await execSafe(`ALTER TABLE insumos ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
-  // columna generada
   await execSafe(`
     ALTER TABLE insumos
     ADD COLUMN codigo_mostrar TEXT
@@ -61,7 +63,6 @@ async function runMigrations() {
     ) STORED;
   `);
 
-  // índices
   await execSafe(`CREATE UNIQUE INDEX IF NOT EXISTS insumos_codigo_maxi_key ON insumos (codigo_maxi);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS insumos_nombre_trgm ON insumos USING gin (nombre gin_trgm_ops);`);
   await execSafe(`CREATE INDEX IF NOT EXISTS insumos_activo_idx ON insumos (activo);`);
@@ -72,11 +73,11 @@ async function runMigrations() {
     CREATE TABLE IF NOT EXISTS insumo_presentaciones (
       id              BIGSERIAL PRIMARY KEY,
       insumo_id       BIGINT NOT NULL REFERENCES insumos(id) ON DELETE CASCADE,
-      unidad          TEXT   NOT NULL,              -- ej: kg, g, lt, ml, un
-      cantidad        NUMERIC(14,4) NOT NULL,       -- ej: 1, 500, etc.
-      precio          NUMERIC(14,2) NOT NULL,       -- precio del paquete
-      unidad_base     TEXT   NOT NULL,              -- ej: g, ml, un
-      factor_base     NUMERIC(14,6) NOT NULL,       -- ej: 1000 si unidad=kg y base=g
+      unidad          TEXT   NOT NULL,
+      cantidad        NUMERIC(14,4) NOT NULL,
+      precio          NUMERIC(14,2) NOT NULL,
+      unidad_base     TEXT   NOT NULL,
+      factor_base     NUMERIC(14,6) NOT NULL,
       precio_unitario NUMERIC(14,6) GENERATED ALWAYS AS
         (CASE WHEN (cantidad * factor_base) > 0
               THEN precio / (cantidad * factor_base)
@@ -156,66 +157,60 @@ async function runMigrations() {
   await execSafe(`CREATE INDEX IF NOT EXISTS igi_cliente_idx ON insumo_grupo_items (cliente_id);`);
 
   // ========== 4) AGRUPACIONES ==========
-await execSafe(`
-  CREATE TABLE IF NOT EXISTS agrupaciones (
-    id          SERIAL PRIMARY KEY,
-    nombre      TEXT NOT NULL,
-    articulos   JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
-`);
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS agrupaciones (
+      id          SERIAL PRIMARY KEY,
+      nombre      TEXT NOT NULL,
+      articulos   JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 
-// ⚠️ Compatibilidad: si la tabla ya existía sin "articulos", la agregamos
-await execSafe(`ALTER TABLE agrupaciones ADD COLUMN IF NOT EXISTS articulos JSONB;`);
-await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
-await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
-await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
+  await execSafe(`ALTER TABLE agrupaciones ADD COLUMN IF NOT EXISTS articulos JSONB;`);
+  await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
+  await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
+  await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
 
-// UNIQUE(nombre) idempotente
-await execSafe(`
+  await execSafe(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'agrupaciones_nombre_key'
+      ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS agrupaciones_nombre_key
+          ON agrupaciones (nombre);
+        ALTER TABLE agrupaciones
+          ADD CONSTRAINT agrupaciones_nombre_key
+          UNIQUE USING INDEX agrupaciones_nombre_key;
+      END IF;
+    END$$;
+  `);
+
+  await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_nombre_trgm ON agrupaciones USING gin (nombre gin_trgm_ops);`);
+  await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_articulos_gin ON agrupaciones USING gin (articulos);`);
+
+  await execSafe(`
   DO $$
   BEGIN
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_constraint WHERE conname = 'agrupaciones_nombre_key'
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_name='agrupaciones' AND column_name='articulos' AND data_type <> 'jsonb'
     ) THEN
-      CREATE UNIQUE INDEX IF NOT EXISTS agrupaciones_nombre_key
-        ON agrupaciones (nombre);
       ALTER TABLE agrupaciones
-        ADD CONSTRAINT agrupaciones_nombre_key
-        UNIQUE USING INDEX agrupaciones_nombre_key;
+        ALTER COLUMN articulos TYPE jsonb
+        USING CASE
+          WHEN articulos IS NULL OR btrim(articulos::text) = '' THEN '[]'::jsonb
+          ELSE articulos::jsonb
+        END;
     END IF;
   END$$;
-`);
+  `);
 
-// Índices útiles
-await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_nombre_trgm ON agrupaciones USING gin (nombre gin_trgm_ops);`);
-await execSafe(`CREATE INDEX IF NOT EXISTS agrupaciones_articulos_gin ON agrupaciones USING gin (articulos);`);
-
-
-// --- Forzar tipo JSONB en articulos si quedó como TEXT en alguna DB vieja
-await execSafe(`
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_name='agrupaciones' AND column_name='articulos' AND data_type <> 'jsonb'
-  ) THEN
-    ALTER TABLE agrupaciones
-      ALTER COLUMN articulos TYPE jsonb
-      USING CASE
-        WHEN articulos IS NULL OR btrim(articulos::text) = '' THEN '[]'::jsonb
-        ELSE articulos::jsonb
-      END;
-  END IF;
-END$$;
-`);
-
-await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
-await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
-await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
-
+  await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
+  await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
+  await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
 
   // ========== 5) EXCLUSIONES POR AGRUPACIÓN ==========
   await execSafe(`
@@ -227,7 +222,6 @@ await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
     );
   `);
 
-  // CHECK(scope) y UNIQUE(agrupacion_id,scope,ref_id)
   await execSafe(`
     DO $$
     BEGIN
@@ -270,7 +264,6 @@ await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
     $$ LANGUAGE plpgsql;
   `);
 
-  // insumos
   await execSafe(`DROP TRIGGER IF EXISTS trg_insumos_updated_at ON insumos;`);
   await execSafe(`
     CREATE TRIGGER trg_insumos_updated_at
@@ -278,7 +271,6 @@ await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 
-  // insumo_presentaciones
   await execSafe(`DROP TRIGGER IF EXISTS trg_pres_updated_at ON insumo_presentaciones;`);
   await execSafe(`
     CREATE TRIGGER trg_pres_updated_at
@@ -286,7 +278,6 @@ await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 
-  // insumo_grupos
   await execSafe(`DROP TRIGGER IF EXISTS trg_igrupos_updated_at ON insumo_grupos;`);
   await execSafe(`
     CREATE TRIGGER trg_igrupos_updated_at
@@ -294,13 +285,20 @@ await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 
-  // agrupaciones
   await execSafe(`DROP TRIGGER IF EXISTS trg_agrupaciones_updated_at ON agrupaciones;`);
   await execSafe(`
     CREATE TRIGGER trg_agrupaciones_updated_at
     BEFORE UPDATE ON agrupaciones
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
+
+  // ========== 7) AUTH / MULTITENANT ==========
+  if (m004?.up) {
+    console.log('➡️ Ejecutando 004_auth...');
+    await m004.up(pool);
+    console.log('✅ 004_auth OK');
+  }
+
 }
 
 module.exports = { runMigrations };
