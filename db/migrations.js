@@ -1,7 +1,8 @@
 // db/migrations.js
 const pool = require('../config/db');
 const m004 = require('./004_auth');
-const m005 = require('./005_branches');
+const m005 = require('./005_business_branding');
+const m006 = require('./006_branches');
 const fs = require('fs');
 const path = require('path');
 
@@ -23,6 +24,7 @@ async function runMigrations() {
   // 1) AUTH — **UNA sola vez**
   await m004.up(pool);
   await m005.up(pool);   // 🔹 sucursales
+  await m006.up(pool);
   // ========== 1) INSUMOS ==========
   await execSafe(`
     CREATE TABLE IF NOT EXISTS insumos (

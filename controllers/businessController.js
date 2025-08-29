@@ -69,45 +69,6 @@ exports.setActive = async (req, res) => {
   }
 };
 
-// Crear negocio
-exports.create = async (req, res) => {
-  try {
-    const uid = req.user?.id;
-    if (!uid) return res.status(401).json({ error: 'unauthorized' });
-
-    const { name, color_hex, brand_logo_url, brand_font } = req.body || {};
-    if (!name) return res.status(400).json({ error: 'name_required' });
-
-    // crea el negocio
-    const { rows } = await pool.query(
-      `INSERT INTO app_businesses (owner_id, name, color_hex, brand_logo_url, brand_font)
-       VALUES ($1,$2,$3,$4,$5)
-       RETURNING id, owner_id, name, color_hex, brand_logo_url, brand_font, created_at`,
-      [uid, name, color_hex || null, brand_logo_url || null, brand_font || null]
-    );
-    const biz = rows[0];
-
-    // relación N:N (por si en el futuro hay miembros)
-    await pool.query(
-      `INSERT INTO user_businesses (user_id, business_id, role)
-       VALUES ($1,$2,'owner')
-       ON CONFLICT (user_id,business_id) DO NOTHING`,
-      [uid, biz.id]
-    );
-
-    // ponelo activo
-    await pool.query(
-      `UPDATE app_users SET active_business_id=$1 WHERE id=$2`,
-      [biz.id, uid]
-    );
-
-    return res.status(201).json({ business: biz, activeBusinessId: biz.id });
-  } catch (e) {
-    console.error('POST /api/businesses error:', e);
-    return res.status(500).json({ error: 'internal' });
-  }
-};
-
 // Actualizar branding de un negocio existente
 exports.update = async (req, res) => {
   try {

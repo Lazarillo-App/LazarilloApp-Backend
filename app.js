@@ -40,11 +40,9 @@ app.use(cors({
     'http://localhost:5173',
     'https://lazarillo.com.ar',
     'http://lazarillo.com.ar',
-    // agrega aquí tu dominio del front en Render si aplica, p.ej:
-    // 'https://lazarilloapp-frontend.onrender.com',
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'],
   credentials: false, // true solo si usás cookies/sesiones entre dominios
 }));
 
