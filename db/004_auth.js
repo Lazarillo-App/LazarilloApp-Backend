@@ -61,6 +61,11 @@ module.exports.up = async function up(pool) {
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS brand_font TEXT;`);
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
+  // --- en 004_auth.js, después de CREATE TABLE app_businesses ... ---
+await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS slug TEXT;`);
+await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS props JSONB NOT NULL DEFAULT '{}'::jsonb;`);
+await execSafe(`CREATE UNIQUE INDEX IF NOT EXISTS app_businesses_slug_key ON app_businesses (slug);`);
+await execSafe(`CREATE INDEX IF NOT EXISTS app_businesses_props_gin ON app_businesses USING gin (props);`);
 
   // FK owner_id → app_users(id)
   await execSafe(`

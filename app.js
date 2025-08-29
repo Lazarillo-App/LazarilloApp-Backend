@@ -58,6 +58,7 @@ app.use('/api/insumos', require('./routes/insumosRoutes'));
 app.use('/api', require('./routes/agrupacionesRoutes'));
 app.use('/api/ventas', require('./routes/ventasRoutes')); 
 app.use('/api/businesses', require('./routes/businessRoutes'));
+app.use('/api/branches', require('./routes/branchRoutes'));
 
 // ---------- Health ----------
 app.get('/health', (_req, res) => res.json({ ok: true }));
