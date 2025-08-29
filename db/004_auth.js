@@ -5,7 +5,7 @@ module.exports.up = async function up(pool) {
     try { await exec(sql); }
     catch (e) {
       // ignora objetos/índices/columnas ya existentes
-      if (['42710','42701','23505','42P07','23503'].includes(e.code)) return;
+      if (['42710', '42701', '23505', '42P07', '23503'].includes(e.code)) return;
       throw e;
     }
   };
@@ -56,6 +56,9 @@ module.exports.up = async function up(pool) {
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS owner_id BIGINT;`);
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS name TEXT;`);
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS color_hex TEXT;`);
+  // 004_auth.js  (dentro de up(pool) después de crear app_businesses)
+  await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS brand_logo_url TEXT;`);
+  await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS brand_font TEXT;`);
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
   await execSafe(`ALTER TABLE app_businesses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
