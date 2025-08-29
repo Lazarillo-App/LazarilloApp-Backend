@@ -1,14 +1,17 @@
+// middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
+const SECRET = process.env.JWT_SECRET || 'dev-secret';
 
-exports.authRequired = (req, res, next) => {
+module.exports = function authRequired(req, res, next) {
   const h = req.headers.authorization || '';
-  const token = h.startsWith('Bearer ') ? h.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'missing_token' });
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  if (!m) return res.status(401).json({ error: 'missing_token' });
+
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const payload = jwt.verify(m[1], SECRET);
     req.user = { id: payload.uid, email: payload.email };
     next();
-  } catch (e) {
+  } catch {
     return res.status(401).json({ error: 'invalid_token' });
   }
 };

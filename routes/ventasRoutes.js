@@ -1,13 +1,22 @@
-// src/routes/ventasRoutes.js
+// routes/ventasRoutes.js
 const express = require('express');
 const router = express.Router();
-const ventasCtrl = require('../controllers/ventasController');
-const { authRequired } = require('../middleware/authMiddleware');
-const { loadActiveBusiness, requireBusiness } = require('../middleware/business');
+
+const authRequired = require('../middleware/authMiddleware');   // ✅ función
+const ventasCtrl   = require('../controllers/ventasController'); // ✅ objeto con funciones
+
+// (debug defensivo — opcional, te ayuda si vuelve a fallar)
+if (typeof authRequired !== 'function') {
+  console.warn('[ventasRoutes] authRequired NO es función:', authRequired);
+}
+if (typeof ventasCtrl?.getVentas !== 'function') {
+  console.warn('[ventasRoutes] getVentas NO es función');
+}
+if (typeof ventasCtrl?.ping !== 'function') {
+  console.warn('[ventasRoutes] ping NO es función');
+}
 
 router.get('/ping', ventasCtrl.ping);
-
-// Requiere usuario logueado y negocio activo (o x-business-id en el header)
-router.get('/', authRequired, loadActiveBusiness, requireBusiness, ventasCtrl.getVentas);
+router.get('/', authRequired, ventasCtrl.getVentas);
 
 module.exports = router;

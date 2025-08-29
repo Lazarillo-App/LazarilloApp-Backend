@@ -1,17 +1,12 @@
-const router = require('express').Router();
-const { authRequired } = require('../middleware/authMiddleware');
-const { loadActiveBusiness } = require('../middleware/business');
-const biz = require('../controllers/businessController');
+// routes/businessRoutes.js
+const express = require('express');
+const router = express.Router();
 
-router.use(authRequired, loadActiveBusiness);
+const authRequired = require('../middleware/authMiddleware'); // default
+const businesses = require('../controllers/businessController');
 
-router.get('/', biz.listMine);
-router.post('/', biz.create);
-router.put('/:id', biz.update);
-router.post('/:id/select', biz.setActive);
-
-// Maxi creds
-router.post('/:id/maxi-credentials', biz.saveMaxiCreds);
-router.get('/:id/maxi-status', biz.maxiStatus);
+router.get('/',        authRequired, businesses.listMine);
+router.get('/active',  authRequired, businesses.getActive);
+router.patch('/active',authRequired, businesses.setActive);
 
 module.exports = router;
