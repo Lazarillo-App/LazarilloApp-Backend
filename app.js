@@ -41,7 +41,7 @@ app.use(cors({
     'https://lazarillo.com.ar',
     'http://lazarillo.com.ar',
   ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+ methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'],
   credentials: false, // true solo si usás cookies/sesiones entre dominios
 }));
