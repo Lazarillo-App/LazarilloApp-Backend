@@ -108,9 +108,9 @@ exports.update = async (req, res) => {
 };
 
 
-const slugify = (s='') =>
-  String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40);
+const slugify = (s = '') =>
+  String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 
 exports.create = async (req, res) => {
   try {
@@ -158,10 +158,16 @@ exports.create = async (req, res) => {
     // por comodidad: setear como activo
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
 
-    res.status(201).json({ ok:true, business: biz, activeBusinessId: biz.id });
+    res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
   } catch (e) {
     console.error('POST /api/businesses error:', e);
     res.status(500).json({ error: 'internal' });
+  };
+  const { maxi, ...rest } = req.body || {};
+  const baseProps = { branding, contact, address, social, lang, currency, timezone, tax_id };
+  if (maxi?.email && maxi?.password && maxi?.codcli) {
+    const enc = encryptGCM(maxi.password);
+    baseProps.maxi = { email: maxi.email, codcli: maxi.codcli, enc };
   }
 };
 
@@ -183,7 +189,7 @@ exports.select = async (req, res) => {
     if (!belongs.length) return res.status(403).json({ error: 'forbidden' });
 
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [id, uid]);
-    res.json({ ok:true, activeBusinessId:id });
+    res.json({ ok: true, activeBusinessId: id });
   } catch (e) {
     console.error('POST /api/businesses/:id/select error:', e);
     res.status(500).json({ error: 'internal' });
@@ -194,7 +200,7 @@ const crypto = require('crypto');
 const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key');
 const KEY = crypto.createHash('sha256').update(ENC_KEY).digest(); // 32 bytes
 
-function enc(plain='') {
+function enc(plain = '') {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', KEY, iv);
   const ct = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
@@ -205,7 +211,7 @@ function enc(plain='') {
 exports.maxiStatus = async (req, res) => {
   try {
     const uid = req.user?.id;
-    const id  = Number(req.params.id);
+    const id = Number(req.params.id);
     if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
 
     // validar pertenencia
@@ -231,7 +237,7 @@ exports.maxiStatus = async (req, res) => {
 exports.maxiSave = async (req, res) => {
   try {
     const uid = req.user?.id;
-    const id  = Number(req.params.id);
+    const id = Number(req.params.id);
     const { email, password, codcli } = req.body || {};
     if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
     if (!email || !password || !codcli) return res.status(400).json({ error: 'missing_fields' });
