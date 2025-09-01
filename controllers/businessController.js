@@ -196,78 +196,114 @@ exports.select = async (req, res) => {
   }
 };
 
+// controllers/businessController.js  (añadir helpers y handlers Maxi)
 const crypto = require('crypto');
-const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key');
-const KEY = crypto.createHash('sha256').update(ENC_KEY).digest(); // 32 bytes
+const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key-dev-key-dev-key-32!!').slice(0,32);
+const ENC_IV  = Buffer.from('00000000000000000000000000000000'.slice(0,32), 'hex');
 
-function enc(plain = '') {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', KEY, iv);
-  const ct = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return Buffer.concat([iv, tag, ct]).toString('base64');
-}
+function enc(s=''){ const c = crypto.createCipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV); return Buffer.concat([c.update(String(s),'utf8'), c.final()]).toString('hex'); }
+function dec(h=''){ try{ const d=crypto.createDecipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV); return Buffer.concat([d.update(Buffer.from(h,'hex')), d.final()]).toString('utf8'); }catch{return '';} }
 
 exports.maxiStatus = async (req, res) => {
   try {
-    const uid = req.user?.id;
-    const id = Number(req.params.id);
-    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
+    const uid = req.user?.id; const id = Number(req.params.id);
+    if (!uid || !id) return res.status(400).json({ error:'bad_request' });
 
-    // validar pertenencia
+    // pertenencia
     const { rows: ok } = await pool.query(`
       SELECT props FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id=b.id
-      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
-    `, [id, uid]);
-    if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1`, [id, uid]);
+    if (!ok[0]) return res.status(403).json({ error:'forbidden' });
 
-    const maxi = ok[0].props?.maxi || null;
+    const props = ok[0].props || {};
+    const mx = props.maxi || {};
+    const configured = !!(mx.email && mx.codcli && (mx.pass_enc || mx.password));
     res.json({
-      configured: !!(maxi?.email && maxi?.codcli && maxi?.passwordEnc),
-      email: maxi?.email || null,
-      codcli: maxi?.codcli || null
+      configured,
+      email: mx.email || null,
+      codcli: mx.codcli || null
     });
   } catch (e) {
-    console.error('GET /businesses/:id/maxi-status error:', e);
-    res.status(500).json({ error: 'internal' });
+    console.error('GET /:id/maxi-status error:', e);
+    res.status(500).json({ error:'internal' });
   }
 };
 
 exports.maxiSave = async (req, res) => {
   try {
-    const uid = req.user?.id;
-    const id = Number(req.params.id);
-    const { email, password, codcli } = req.body || {};
-    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
-    if (!email || !password || !codcli) return res.status(400).json({ error: 'missing_fields' });
+    const uid = req.user?.id; const id = Number(req.params.id);
+    if (!uid || !id) return res.status(400).json({ error:'bad_request' });
 
-    // validar pertenencia
+    const { email, password, codcli } = req.body || {};
+    if (!email || !password || !codcli) return res.status(400).json({ error:'missing_fields' });
+
+    // pertenencia
     const { rows: ok } = await pool.query(`
       SELECT 1 FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id=b.id
-      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
-    `, [id, uid]);
-    if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1`, [id, uid]);
+    if (!ok.length) return res.status(403).json({ error:'forbidden' });
 
-    const maxi = {
-      email,
-      codcli,
-      passwordEnc: enc(password), // 🔐 guardamos cifrado, nunca plano
-      saved_at: new Date().toISOString()
-    };
-
-    await pool.query(`
+    const maxi = { email, codcli, pass_enc: enc(password) };
+    const { rows } = await pool.query(`
       UPDATE app_businesses
       SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
           updated_at = NOW()
-      WHERE id = $1
-    `, [id, JSON.stringify(maxi)]);
+      WHERE id=$1
+      RETURNING props
+    `, [id, maxi]);
 
-    res.status(201).json({ ok: true });
+    res.json({ ok:true, maxi: { email, codcli, configured:true } });
   } catch (e) {
-    console.error('POST /businesses/:id/maxi-credentials error:', e);
-    res.status(500).json({ error: 'internal' });
+    console.error('POST /:id/maxi-credentials error:', e);
+    res.status(500).json({ error:'internal' });
+  }
+};
+
+async function callMaxiArticles({ email, password, codcli, from, to }) {
+  // ⚠️ Pega acá tu lógica actual de obtener token y luego artículos.
+  // Ejemplo-esqueleto:
+  const BASE = process.env.MAXI_BASE_URL;
+  // 1) token
+  const tRes = await fetch(`${BASE}/auth/login`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ username: email, password })
+  });
+  if (!tRes.ok) throw new Error('maxi_login_failed');
+  const { token } = await tRes.json();
+
+  // 2) artículos
+  const aRes = await fetch(`${BASE}/articulos?codcli=${encodeURIComponent(codcli)}&desde=${from}&hasta=${to}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!aRes.ok) throw new Error('maxi_fetch_failed');
+  const items = await aRes.json();
+  return Array.isArray(items) ? items : (items?.data || []);
+}
+
+exports.maxiArticles = async (req, res) => {
+  try {
+    const uid = req.user?.id; const id = Number(req.params.id);
+    const { from='2025-01-01', to='2025-04-01' } = req.query || {};
+    if (!uid || !id) return res.status(400).json({ error:'bad_request' });
+
+    // props + pertenencia
+    const { rows } = await pool.query(`
+      SELECT props FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id=b.id
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1`, [id, uid]);
+    if (!rows[0]) return res.status(403).json({ error:'forbidden' });
+
+    const mx = (rows[0].props || {}).maxi || {};
+    const password = mx.pass_enc ? dec(mx.pass_enc) : mx.password;
+    if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error:'maxi_not_configured' });
+
+    const items = await callMaxiArticles({ email: mx.email, password, codcli: mx.codcli, from, to });
+    res.json({ items });
+  } catch (e) {
+    console.error('GET /:id/maxi-articles error:', e);
+    res.status(500).json({ error:'internal' });
   }
 };
 // controllers/businessController.js  (agregar)
