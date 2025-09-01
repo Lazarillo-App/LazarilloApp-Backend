@@ -270,3 +270,29 @@ exports.maxiSave = async (req, res) => {
     res.status(500).json({ error: 'internal' });
   }
 };
+// controllers/businessController.js  (agregar)
+exports.getOne = async (req, res) => {
+  try {
+    const uid = req.user?.id;
+    const id  = Number(req.params.id);
+    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
+
+    // pertenencia
+    const { rows: ok } = await pool.query(`
+      SELECT 1 FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id = b.id
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
+    `, [id, uid]);
+    if (!ok.length) return res.status(403).json({ error: 'forbidden' });
+
+    const { rows } = await pool.query(`
+      SELECT id, owner_id, name, slug, color_hex, props, created_at, updated_at
+      FROM app_businesses WHERE id=$1
+    `, [id]);
+
+    res.json(rows[0] || null);
+  } catch (e) {
+    console.error('GET /api/businesses/:id error:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};

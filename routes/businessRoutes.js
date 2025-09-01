@@ -12,5 +12,6 @@ router.post('/',              authRequired, businesses.create);
 router.post('/:id/select',    authRequired, businesses.select);
 router.get('/:id/maxi-status',       authRequired, businesses.maxiStatus);
 router.post('/:id/maxi-credentials', authRequired, businesses.maxiSave);
+router.get('/:id', authRequired, businesses.getOne);
 
 module.exports = router;
