@@ -310,25 +310,48 @@ exports.maxiArticles = async (req, res) => {
 exports.getOne = async (req, res) => {
   try {
     const uid = req.user?.id;
-    const id  = Number(req.params.id);
+    const id = Number(req.params.id);
     if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
 
-    // pertenencia
-    const { rows: ok } = await pool.query(`
-      SELECT 1 FROM app_businesses b
+    const { rows } = await pool.query(`
+      SELECT b.id, b.owner_id, b.name, b.slug, b.color_hex, b.props, b.created_at, b.updated_at
+      FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id = b.id
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
+      LIMIT 1
+    `, [id, uid]);
+
+    if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+    res.json({ business: rows[0] });
+  } catch (e) {
+    console.error('GET /api/businesses/:id error:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
+
+exports.remove = async (req, res) => {
+  try {
+    const uid = req.user?.id;
+    const id = Number(req.params.id);
+    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
+
+    // validar pertenencia
+    const { rows: ok } = await pool.query(`
+      SELECT 1
+      FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id=b.id
       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
     `, [id, uid]);
     if (!ok.length) return res.status(403).json({ error: 'forbidden' });
 
-    const { rows } = await pool.query(`
-      SELECT id, owner_id, name, slug, color_hex, props, created_at, updated_at
-      FROM app_businesses WHERE id=$1
-    `, [id]);
+    // si el usuario lo tenía activo, lo limpia
+    await pool.query(`UPDATE app_users SET active_business_id=NULL WHERE id=$1 AND active_business_id=$2`, [uid, id]);
 
-    res.json(rows[0] || null);
+    // borra (cascada elimina branches + user_businesses)
+    await pool.query(`DELETE FROM app_businesses WHERE id=$1`, [id]);
+    res.json({ ok: true });
   } catch (e) {
-    console.error('GET /api/businesses/:id error:', e);
+    console.error('DELETE /api/businesses/:id error:', e);
     res.status(500).json({ error: 'internal' });
   }
 };
