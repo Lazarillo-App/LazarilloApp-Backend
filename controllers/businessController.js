@@ -189,3 +189,78 @@ exports.select = async (req, res) => {
     res.status(500).json({ error: 'internal' });
   }
 };
+
+const crypto = require('crypto');
+const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key');
+const KEY = crypto.createHash('sha256').update(ENC_KEY).digest(); // 32 bytes
+
+function enc(plain='') {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', KEY, iv);
+  const ct = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, ct]).toString('base64');
+}
+
+exports.maxiStatus = async (req, res) => {
+  try {
+    const uid = req.user?.id;
+    const id  = Number(req.params.id);
+    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
+
+    // validar pertenencia
+    const { rows: ok } = await pool.query(`
+      SELECT props FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id=b.id
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
+    `, [id, uid]);
+    if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
+
+    const maxi = ok[0].props?.maxi || null;
+    res.json({
+      configured: !!(maxi?.email && maxi?.codcli && maxi?.passwordEnc),
+      email: maxi?.email || null,
+      codcli: maxi?.codcli || null
+    });
+  } catch (e) {
+    console.error('GET /businesses/:id/maxi-status error:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
+
+exports.maxiSave = async (req, res) => {
+  try {
+    const uid = req.user?.id;
+    const id  = Number(req.params.id);
+    const { email, password, codcli } = req.body || {};
+    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
+    if (!email || !password || !codcli) return res.status(400).json({ error: 'missing_fields' });
+
+    // validar pertenencia
+    const { rows: ok } = await pool.query(`
+      SELECT 1 FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id=b.id
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
+    `, [id, uid]);
+    if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
+
+    const maxi = {
+      email,
+      codcli,
+      passwordEnc: enc(password), // 🔐 guardamos cifrado, nunca plano
+      saved_at: new Date().toISOString()
+    };
+
+    await pool.query(`
+      UPDATE app_businesses
+      SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
+          updated_at = NOW()
+      WHERE id = $1
+    `, [id, JSON.stringify(maxi)]);
+
+    res.status(201).json({ ok: true });
+  } catch (e) {
+    console.error('POST /businesses/:id/maxi-credentials error:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
