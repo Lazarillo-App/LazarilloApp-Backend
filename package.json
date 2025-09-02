@@ -5,8 +5,9 @@
   "scripts": {
     "dev": "nodemon app.js",
     "start": "node app.js",
-    "pg:patch-agrupaciones": "node scripts/patch-agrupaciones-timestamps.js"
+    "migrate:agrupaciones": "node scripts/run-migration.js scripts/patch-agrupaciones.sql"
   },
+
   "keywords": [],
   "author": "",
   "license": "ISC",
