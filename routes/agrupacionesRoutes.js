@@ -33,5 +33,22 @@ router.delete('/agrupaciones/:id/articulos/:articuloId', eliminarArticuloDeAgrup
 router.get('/agrupaciones/:id/exclusiones', listarExclusiones);
 router.post('/agrupaciones/:id/exclusiones', upsertExclusiones);
 router.post('/agrupaciones/:fromId/move-items', moveItemsBetweenGroups);
+// routes/agrupacionesRoutes.js (temporal)
+router.get('/agrupaciones/:id/_debug', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const { rows } = await pool.query(
+      `SELECT id,
+              pg_typeof(articulos) as tipo,
+              LEFT(articulos::text, 400) as preview
+         FROM agrupaciones WHERE id=$1`,
+      [id]
+    );
+    res.json(rows[0] || null);
+  } catch (e) {
+    res.status(500).json({ ok:false, error:e.message, code:e.code, detail:e.detail });
+  }
+});
+
 
 module.exports = router;

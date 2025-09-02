@@ -14,6 +14,23 @@ const toItemsArray = (arr) =>
     }))
     .filter(x => Number.isFinite(x.id) && x.id > 0);
 
+    // helpers/agrupaciones.js (o al principio del controller)
+function parseJsonArrayLoose(val) {
+  if (Array.isArray(val)) return val;
+  if (val == null) return [];
+  try {
+    if (typeof val === 'string') {
+      const parsed = JSON.parse(val);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+    // psql puede devolver objetos JS ya parseados si la col es jsonb
+    return Array.isArray(val) ? val : [];
+  } catch {
+    return []; // si hay texto inválido -> lo tratamos como []
+  }
+}
+
+
 // merge por id, preservando el orden del base
 function mergeById(base = [], incoming = []) {
   const out = [...base];
@@ -138,29 +155,28 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
 
+    // ✅ aceptar { articulos:[{id,...}] } o { ids:[...] }
     const incomingArticulos = toItemsArray(req.body?.articulos);
     const incomingIds = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
-
     const incoming = incomingArticulos.length
       ? incomingArticulos
       : incomingIds.map(x => ({ id: x, nombre:'', categoria:'Sin categoría', subrubro:'Sin subrubro', precio:0 }));
 
     if (!incoming.length) return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
 
-    const { rows: r0 } = await pool.query(
-      `SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`,
-      [id]
-    );
+    // ❌ antes: SELECT ... NULLIF(articulos::text,'')::jsonb
+    // ✅ ahora: leo en crudo y parseo en JS (tolerante)
+    const { rows: r0 } = await pool.query(`SELECT articulos FROM agrupaciones WHERE id=$1`, [id]);
     if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
-    const base = Array.isArray(r0[0].articulos) ? r0[0].articulos : [];
+    const base = parseJsonArrayLoose(r0[0].articulos);
     const merged = mergeById(base, incoming);
 
     const { rows } = await pool.query(
       `UPDATE agrupaciones
-          SET articulos = $1::jsonb   -- ⚠️ si tu columna es TEXT, usa ($1::jsonb)::text hasta migrar
+          SET articulos = $1::jsonb
         WHERE id = $2
-      RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
+        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
       [JSON.stringify(merged), id]
     );
 
@@ -180,10 +196,10 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'id/articuloId inválidos' });
     }
 
-    const { rows: r0 } = await pool.query(`SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`, [id]);
+    const { rows: r0 } = await pool.query(`SELECT articulos FROM agrupaciones WHERE id=$1`, [id]);
     if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
-    const base = isArray(r0[0].articulos) ? r0[0].articulos : [];
+    const base = parseJsonArrayLoose(r0[0].articulos);
     const filtered = base.filter(a => Number(a.id) !== articuloId);
 
     const { rows } = await pool.query(
@@ -196,10 +212,11 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
 
     return res.json(rows[0]);
   } catch (e) {
-    console.error('eliminarArticuloDeAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    console.error('eliminarArticuloDeAgrupacion error:', { code:e.code, detail:e.detail, msg:e.message });
+    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
   }
 };
+
 
 // ========================= “TODO” + Exclusiones =========================
 
@@ -353,11 +370,10 @@ exports.moveItemsBetweenGroups = async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // ❌ antes: ... COALESCE(NULLIF(articulos::text,'')::jsonb, '[]'::jsonb)
+    // ✅ ahora: sin cast en SQL; parse en JS
     const { rows } = await client.query(
-      `SELECT id, COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
-         FROM agrupaciones
-        WHERE id IN ($1, $2)
-        FOR UPDATE`,
+      `SELECT id, articulos FROM agrupaciones WHERE id IN ($1, $2) FOR UPDATE`,
       [fromId, toId]
     );
     if (rows.length < 2) {
@@ -368,8 +384,8 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     const fromRow = rows.find(r => r.id === fromId);
     const toRow   = rows.find(r => r.id === toId);
 
-    const fromList = Array.isArray(fromRow.articulos) ? fromRow.articulos : [];
-    const toList   = Array.isArray(toRow.articulos) ? toRow.articulos : [];
+    const fromList = parseJsonArrayLoose(fromRow.articulos);
+    const toList   = parseJsonArrayLoose(toRow.articulos);
 
     const idsSet = new Set(ids);
     const moving = fromList.filter(a => idsSet.has(Number(a.id)));
@@ -378,6 +394,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
       return res.json({ ok:true, moved: 0 });
     }
 
+    // merge sin duplicados
     const seen = new Set(toList.map(x => Number(x.id)));
     const toMerged = [...toList];
     for (const it of moving) {
@@ -405,3 +422,4 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     client.release();
   }
 };
+
