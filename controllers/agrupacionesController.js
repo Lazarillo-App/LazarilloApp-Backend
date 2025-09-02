@@ -152,10 +152,9 @@ exports.eliminarAgrupacion = async (req, res) => {
 // controllers/agrupacionesController.js
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
-    const id = Number(req.params.id);
+    const id = Number(req.params.id ?? req.params.agrupacionId);
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
 
-    // ✅ aceptar { articulos:[{id,...}] } o { ids:[...] }
     const incomingArticulos = toItemsArray(req.body?.articulos);
     const incomingIds = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
     const incoming = incomingArticulos.length
@@ -164,8 +163,6 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 
     if (!incoming.length) return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
 
-    // ❌ antes: SELECT ... NULLIF(articulos::text,'')::jsonb
-    // ✅ ahora: leo en crudo y parseo en JS (tolerante)
     const { rows: r0 } = await pool.query(`SELECT articulos FROM agrupaciones WHERE id=$1`, [id]);
     if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
@@ -186,6 +183,7 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
   }
 };
+
 
 // DELETE /agrupaciones/:id/articulos/:articuloId
 exports.eliminarArticuloDeAgrupacion = async (req, res) => {
@@ -357,9 +355,11 @@ exports.upsertExclusiones = async (req, res) => {
 // controllers/agrupacionesController.js
 
 exports.moveItemsBetweenGroups = async (req, res) => {
-  const fromId = Number(req.params.fromId);
-  const toId = Number(req.body?.toId);
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  // Aceptar :id o :fromId según como esté declarada la ruta
+  const fromId = Number(req.params.id ?? req.params.fromId);
+  const toId   = Number(req.body?.toId);
+  const ids    = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+                  .map(Number).filter(Boolean);
 
   if (!Number.isFinite(fromId) || !Number.isFinite(toId) || !ids.length) {
     return res.status(400).json({ ok:false, error:'Parámetros inválidos' });
@@ -370,19 +370,25 @@ exports.moveItemsBetweenGroups = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // ❌ antes: ... COALESCE(NULLIF(articulos::text,'')::jsonb, '[]'::jsonb)
-    // ✅ ahora: sin cast en SQL; parse en JS
+    // Traer y bloquear ambas filas
     const { rows } = await client.query(
-      `SELECT id, articulos FROM agrupaciones WHERE id IN ($1, $2) FOR UPDATE`,
-      [fromId, toId]
+      `SELECT id, articulos FROM agrupaciones WHERE id = ANY($1::int[]) FOR UPDATE`,
+      [[fromId, toId]]
     );
-    if (rows.length < 2) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok:false, error:'Alguna agrupación no existe' });
-    }
 
-    const fromRow = rows.find(r => r.id === fromId);
-    const toRow   = rows.find(r => r.id === toId);
+    // Normalizar ids y verificar presencia individual (evita el bug)
+    const fromRow = rows.find(r => Number(r.id) === fromId);
+    const toRow   = rows.find(r => Number(r.id) === toId);
+
+    if (!fromRow || !toRow) {
+      await client.query('ROLLBACK');
+      const faltantes = [fromId, toId]
+        .filter(x => !rows.some(r => Number(r.id) === x));
+      return res.status(404).json({
+        ok:false,
+        error:`Agrupación/es no encontrada/s: ${faltantes.join(', ')}`
+      });
+    }
 
     const fromList = parseJsonArrayLoose(fromRow.articulos);
     const toList   = parseJsonArrayLoose(toRow.articulos);
@@ -394,7 +400,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
       return res.json({ ok:true, moved: 0 });
     }
 
-    // merge sin duplicados
+    // Merge a destino sin duplicar
     const seen = new Set(toList.map(x => Number(x.id)));
     const toMerged = [...toList];
     for (const it of moving) {
@@ -422,4 +428,3 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     client.release();
   }
 };
-
