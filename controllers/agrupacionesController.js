@@ -337,6 +337,8 @@ exports.upsertExclusiones = async (req, res) => {
   }
 };
 
+// controllers/agrupacionesController.js
+
 exports.moveItemsBetweenGroups = async (req, res) => {
   const fromId = Number(req.params.fromId);
   const toId = Number(req.body?.toId);
@@ -351,13 +353,13 @@ exports.moveItemsBetweenGroups = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Traemos ambos JSONB y bloqueamos filas para evitar race conditions
+    // ⚠️ importante: usar $1,$2 en vez de ANY($1::int[])
     const { rows } = await client.query(
       `SELECT id, COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
          FROM agrupaciones
-        WHERE id = ANY($1::int[])
+        WHERE id IN ($1, $2)
         FOR UPDATE`,
-      [[fromId, toId]]
+      [fromId, toId]
     );
     if (rows.length < 2) {
       await client.query('ROLLBACK');
@@ -367,13 +369,23 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     const fromRow = rows.find(r => r.id === fromId);
     const toRow   = rows.find(r => r.id === toId);
 
-    const fromList = isArray(fromRow.articulos) ? fromRow.articulos : [];
-    const toList   = isArray(toRow.articulos) ? toRow.articulos : [];
+    const fromList = Array.isArray(fromRow.articulos) ? fromRow.articulos : [];
+    const toList   = Array.isArray(toRow.articulos) ? toRow.articulos : [];
 
     const idsSet = new Set(ids);
     const moving = fromList.filter(a => idsSet.has(Number(a.id)));
+    if (!moving.length) {
+      await client.query('COMMIT');
+      return res.json({ ok:true, moved: 0 });
+    }
 
-    const toMerged = mergeById(toList, moving);
+    // dedup por id preservando orden del destino
+    const seen = new Set(toList.map(x => Number(x.id)));
+    const toMerged = [...toList];
+    for (const it of moving) {
+      const id = Number(it.id);
+      if (!seen.has(id)) { toMerged.push({ ...it, id }); seen.add(id); }
+    }
     const fromFiltered = fromList.filter(a => !idsSet.has(Number(a.id)));
 
     await client.query(
@@ -389,8 +401,11 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     return res.json({ ok:true, moved: moving.length });
   } catch (e) {
     await client.query('ROLLBACK');
-    console.error('moveItemsBetweenGroups error:', e);
-    return res.status(500).json({ ok:false, error:e.message });
+    // ✅ log extendido para ver motivo real en Render logs
+    console.error('moveItemsBetweenGroups error:', {
+      code: e.code, detail: e.detail, message: e.message, stack: e.stack
+    });
+    return res.status(500).json({ ok:false, error: e.message, code: e.code, detail: e.detail });
   } finally {
     client.release();
   }
