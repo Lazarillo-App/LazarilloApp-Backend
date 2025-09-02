@@ -73,6 +73,20 @@ app.get('/health/db', async (_req, res) => {
     res.status(500).json({ error: 'db down' });
   }
 });
+// en app.js, junto a /health/db
+app.get('/health/agrupaciones', async (_req, res) => {
+  const { rows } = await pool.query(`
+    SELECT
+      (SELECT to_regclass('public.agrupaciones') IS NOT NULL) AS has_table,
+      EXISTS (SELECT 1 FROM information_schema.columns 
+              WHERE table_name='agrupaciones' AND column_name='created_at') AS has_created_at,
+      EXISTS (SELECT 1 FROM information_schema.columns 
+              WHERE table_name='agrupaciones' AND column_name='updated_at') AS has_updated_at,
+      EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='set_updated_at_agrupaciones') AS has_trigger
+  `);
+  res.json(rows[0]);
+});
+
 
 // en app.js (después de las otras health)
 app.get('/health/auth', async (_req, res) => {
