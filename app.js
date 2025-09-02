@@ -9,6 +9,8 @@ const { randomUUID } = require('crypto');
 
 const app = express();
 
+const morgan = require('morgan');
+
 // ---------- Patch de logging (seguro y minimal) ----------
 app.set('trust proxy', 1); // Render/NGINX, IP real y HTTPS
 app.disable('x-powered-by');
@@ -48,6 +50,8 @@ app.use(cors({
 
 // ---------- Parsers ----------
 app.use(express.json());
+
+app.use(morgan('➡️ :method :url :status :response-time ms'));
 
 // ---------- Rutas ----------
 app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
@@ -118,3 +122,11 @@ const PORT = process.env.PORT || 4000;
     process.exit(1);
   }
 })();
+
+app.use((err, req, res, next) => {
+  console.error('[UNCAUGHT]', {
+    method: req.method, url: req.originalUrl,
+    msg: err.message, code: err.code, detail: err.detail, stack: err.stack,
+  });
+  res.status(500).json({ ok:false, error: err.message, code: err.code, detail: err.detail });
+});
