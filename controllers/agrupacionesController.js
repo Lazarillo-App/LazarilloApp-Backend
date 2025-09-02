@@ -132,6 +132,7 @@ exports.eliminarAgrupacion = async (req, res) => {
 
 // PUT /agrupaciones/:id/articulos
 // Agrega en “append” artículos nuevos SIN duplicar por id
+// controllers/agrupacionesController.js
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -147,18 +148,17 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     if (!incoming.length) return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
 
     const { rows: r0 } = await pool.query(
-      `SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
-         FROM agrupaciones WHERE id=$1`,
+      `SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`,
       [id]
     );
     if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
-    const base = isArray(r0[0].articulos) ? r0[0].articulos : [];
+    const base = Array.isArray(r0[0].articulos) ? r0[0].articulos : [];
     const merged = mergeById(base, incoming);
 
     const { rows } = await pool.query(
       `UPDATE agrupaciones
-          SET articulos = $1::jsonb
+          SET articulos = $1::jsonb   -- ⚠️ si tu columna es TEXT, usa ($1::jsonb)::text hasta migrar
         WHERE id = $2
       RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
       [JSON.stringify(merged), id]
@@ -166,8 +166,8 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 
     return res.json(rows[0]);
   } catch (e) {
-    console.error('agregarArticulosAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    console.error('agregarArticulosAgrupacion error:', { code:e.code, detail:e.detail, msg:e.message });
+    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
   }
 };
 
@@ -353,7 +353,6 @@ exports.moveItemsBetweenGroups = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // ⚠️ importante: usar $1,$2 en vez de ANY($1::int[])
     const { rows } = await client.query(
       `SELECT id, COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
          FROM agrupaciones
@@ -379,7 +378,6 @@ exports.moveItemsBetweenGroups = async (req, res) => {
       return res.json({ ok:true, moved: 0 });
     }
 
-    // dedup por id preservando orden del destino
     const seen = new Set(toList.map(x => Number(x.id)));
     const toMerged = [...toList];
     for (const it of moving) {
@@ -401,10 +399,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     return res.json({ ok:true, moved: moving.length });
   } catch (e) {
     await client.query('ROLLBACK');
-    // ✅ log extendido para ver motivo real en Render logs
-    console.error('moveItemsBetweenGroups error:', {
-      code: e.code, detail: e.detail, message: e.message, stack: e.stack
-    });
+    console.error('moveItemsBetweenGroups error:', { code:e.code, detail:e.detail, msg:e.message });
     return res.status(500).json({ ok:false, error: e.message, code: e.code, detail: e.detail });
   } finally {
     client.release();

@@ -11,7 +11,7 @@ async function runMigrations() {
   const execSafe = async (sql) => {
     try { await exec(sql); }
     catch (e) {
-      if (['42710','42701','23505','42P07'].includes(e.code)) return;
+      if (['42710', '42701', '23505', '42P07'].includes(e.code)) return;
       throw e;
     }
   };
@@ -214,6 +214,19 @@ async function runMigrations() {
   await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
   await execSafe(`UPDATE agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
   await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
+
+  // 🔧 Hotfix explícito por si alguna instancia quedó desalineada
+  await execSafe(`
+  ALTER TABLE agrupaciones
+    ALTER COLUMN articulos TYPE jsonb
+    USING (CASE
+      WHEN articulos IS NULL OR btrim(articulos::text) = '' THEN '[]'::jsonb
+      ELSE articulos::jsonb
+    END)
+`);
+  await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
+  await execSafe(`CREATE UNIQUE INDEX IF NOT EXISTS uq_agrupaciones_nombre ON agrupaciones (nombre);`);
+
 
   // ========== 5) EXCLUSIONES POR AGRUPACIÓN ==========
   await execSafe(`
