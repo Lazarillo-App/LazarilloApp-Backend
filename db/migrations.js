@@ -3,6 +3,7 @@ const pool = require('../config/db');
 const m004 = require('./004_auth');
 const m005 = require('./005_business_branding');
 const m006 = require('./006_branches');
+const m007 = require('./007_agrupaciones_fix');
 const fs = require('fs');
 const path = require('path');
 
@@ -227,6 +228,7 @@ async function runMigrations() {
   await execSafe(`ALTER TABLE agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
   await execSafe(`CREATE UNIQUE INDEX IF NOT EXISTS uq_agrupaciones_nombre ON agrupaciones (nombre);`);
 
+  await m007.up(pool);
 
   // ========== 5) EXCLUSIONES POR AGRUPACIÓN ==========
   await execSafe(`
