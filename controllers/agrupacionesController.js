@@ -137,10 +137,20 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
 
-    const incoming = toItemsArray(req.body?.articulos);
+    const incomingArticulos = toItemsArray(req.body?.articulos);
+    const incomingIds = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+
+    const incoming = incomingArticulos.length
+      ? incomingArticulos
+      : incomingIds.map(x => ({ id: x, nombre:'', categoria:'Sin categoría', subrubro:'Sin subrubro', precio:0 }));
+
     if (!incoming.length) return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
 
-    const { rows: r0 } = await pool.query(`SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos FROM agrupaciones WHERE id=$1`, [id]);
+    const { rows: r0 } = await pool.query(
+      `SELECT COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
+         FROM agrupaciones WHERE id=$1`,
+      [id]
+    );
     if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
     const base = isArray(r0[0].articulos) ? r0[0].articulos : [];
@@ -150,7 +160,7 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
       `UPDATE agrupaciones
           SET articulos = $1::jsonb
         WHERE id = $2
-        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
+      RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
       [JSON.stringify(merged), id]
     );
 
@@ -195,25 +205,35 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
 
 exports.ensureTodoAgrupacion = async (_req, res) => {
   try {
-    const q1 = await pool.query(`SELECT id, nombre FROM agrupaciones WHERE nombre='TODO' LIMIT 1`);
+    const q1 = await pool.query(
+      `SELECT id, nombre FROM agrupaciones WHERE nombre='TODO' LIMIT 1`
+    );
     if (q1.rows.length) return res.json(q1.rows[0]);
 
+    // ✅ columnas y valores alineados; requiere índice único por 'nombre'
     const q2 = await pool.query(
-      `INSERT INTO agrupaciones (nombre)
+      `INSERT INTO agrupaciones (nombre, articulos)
        VALUES ('TODO', '[]'::jsonb)
        ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
        RETURNING id, nombre`
     );
     return res.status(201).json(q2.rows[0]);
   } catch (e) {
-    if (e.code === '23505') {
-      const q = await pool.query(`SELECT id, nombre FROM agrupaciones WHERE nombre='TODO' LIMIT 1`);
-      if (q.rows.length) return res.json(q.rows[0]);
+    // Si no hay índice único y no querés crearlo aún:
+    // - podés capturar 42P10 y hacer un INSERT sin ON CONFLICT como fallback.
+    if (e.code === '42P10') {
+      const q = await pool.query(
+        `INSERT INTO agrupaciones (nombre, articulos)
+         VALUES ('TODO', '[]'::jsonb)
+         RETURNING id, nombre`
+      );
+      return res.status(201).json(q.rows[0]);
     }
     console.error('ensureTodoAgrupacion error:', e);
     return res.status(500).json({ ok:false, error: e.message });
   }
 };
+
 
 // GET /agrupaciones/:id/exclusiones
 exports.listarExclusiones = async (req, res) => {
@@ -314,5 +334,64 @@ exports.upsertExclusiones = async (req, res) => {
   } catch (e) {
     console.error('upsertExclusiones error:', e);
     return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+exports.moveItemsBetweenGroups = async (req, res) => {
+  const fromId = Number(req.params.fromId);
+  const toId = Number(req.body?.toId);
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+
+  if (!Number.isFinite(fromId) || !Number.isFinite(toId) || !ids.length) {
+    return res.status(400).json({ ok:false, error:'Parámetros inválidos' });
+  }
+  if (fromId === toId) return res.json({ ok:true, moved: 0 });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Traemos ambos JSONB y bloqueamos filas para evitar race conditions
+    const { rows } = await client.query(
+      `SELECT id, COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
+         FROM agrupaciones
+        WHERE id = ANY($1::int[])
+        FOR UPDATE`,
+      [[fromId, toId]]
+    );
+    if (rows.length < 2) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok:false, error:'Alguna agrupación no existe' });
+    }
+
+    const fromRow = rows.find(r => r.id === fromId);
+    const toRow   = rows.find(r => r.id === toId);
+
+    const fromList = isArray(fromRow.articulos) ? fromRow.articulos : [];
+    const toList   = isArray(toRow.articulos) ? toRow.articulos : [];
+
+    const idsSet = new Set(ids);
+    const moving = fromList.filter(a => idsSet.has(Number(a.id)));
+
+    const toMerged = mergeById(toList, moving);
+    const fromFiltered = fromList.filter(a => !idsSet.has(Number(a.id)));
+
+    await client.query(
+      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(fromFiltered), fromId]
+    );
+    await client.query(
+      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(toMerged), toId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok:true, moved: moving.length });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('moveItemsBetweenGroups error:', e);
+    return res.status(500).json({ ok:false, error:e.message });
+  } finally {
+    client.release();
   }
 };

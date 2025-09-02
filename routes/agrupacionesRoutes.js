@@ -11,7 +11,8 @@ const {
   eliminarArticuloDeAgrupacion,
   ensureTodoAgrupacion,
   listarExclusiones,
-  upsertExclusiones
+  upsertExclusiones,
+  moveItemsBetweenGroups 
 } = require('../controllers/agrupacionesController');
 
 // --- Rutas sin :id ---
@@ -31,5 +32,6 @@ router.delete('/agrupaciones/:id/articulos/:articuloId', eliminarArticuloDeAgrup
 // Exclusiones
 router.get('/agrupaciones/:id/exclusiones', listarExclusiones);
 router.post('/agrupaciones/:id/exclusiones', upsertExclusiones);
+router.post('/agrupaciones/:fromId/move-items', moveItemsBetweenGroups);
 
 module.exports = router;
