@@ -7,6 +7,7 @@ const sync = require('../controllers/syncController');
 
 // --- Sync + lectura desde BD (siempre con auth)
 router.post('/:id/sync', authRequired, sync.syncNow);
+router.get('/:id/sales', authRequired, sync.listSalesFromDB);
 router.get('/:id/articles', authRequired, sync.listArticlesFromDB);
 
 // --- CRUD + selección
