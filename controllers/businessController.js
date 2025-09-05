@@ -107,7 +107,6 @@ exports.update = async (req, res) => {
   }
 };
 
-
 const slugify = (s = '') =>
   String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -119,14 +118,16 @@ exports.create = async (req, res) => {
 
     const {
       name,
-      branding = {},       // {primary,secondary,background,font}
-      contact = {},        // {owner:{...}, manager:{...}, admin:{...}}
-      address = {},        // {line1, city, country}
-      social = {},         // {instagram, facebook, ...}
+      branding = {},
+      contact = {},
+      address = {},
+      social = {},
       lang = 'es-AR',
       currency = 'ARS',
       timezone = '-03:00',
-      tax_id = ''
+      tax_id = '',
+      // opcional: credenciales MAXI inline
+      maxi
     } = req.body || {};
 
     if (!name || !name.trim()) return res.status(400).json({ error: 'name_required' });
@@ -135,16 +136,19 @@ exports.create = async (req, res) => {
     let base = slugify(name);
     if (!base) base = 'local';
     let slug = base, i = 1;
-    // (búsqueda simple para evitar colisión)
     while (true) {
       const { rows } = await pool.query('SELECT 1 FROM app_businesses WHERE slug=$1 LIMIT 1', [slug]);
       if (!rows[0]) break;
       slug = `${base}-${++i}`;
     }
 
-    const props = {
-      branding, contact, address, social, lang, currency, timezone, tax_id
-    };
+    // props base
+    const props = { branding, contact, address, social, lang, currency, timezone, tax_id };
+
+    // si vienen credenciales MAXI al crear, las guardo cifradas
+    if (maxi?.email && maxi?.password && maxi?.codcli) {
+      props.maxi = { email: maxi.email, codcli: maxi.codcli, pass_enc: enc(maxi.password) };
+    }
 
     const { rows } = await pool.query(
       `INSERT INTO app_businesses (owner_id,name,slug,props)
@@ -152,22 +156,15 @@ exports.create = async (req, res) => {
        RETURNING id, owner_id, name, slug, color_hex, props, created_at`,
       [uid, name.trim(), slug, props]
     );
-
     const biz = rows[0];
 
-    // por comodidad: setear como activo
+    // set activo por comodidad
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
 
-    res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
+    return res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
   } catch (e) {
     console.error('POST /api/businesses error:', e);
-    res.status(500).json({ error: 'internal' });
-  };
-  const { maxi, ...rest } = req.body || {};
-  const baseProps = { branding, contact, address, social, lang, currency, timezone, tax_id };
-  if (maxi?.email && maxi?.password && maxi?.codcli) {
-    const enc = encryptGCM(maxi.password);
-    baseProps.maxi = { email: maxi.email, codcli: maxi.codcli, enc };
+    return res.status(500).json({ error: 'internal' });
   }
 };
 
@@ -197,10 +194,9 @@ exports.select = async (req, res) => {
 };
 
 // controllers/businessController.js  (añadir helpers y handlers Maxi)
-const crypto = require('crypto');
+// --- Helpers cifrado (usa la misma clave que ya venías usando)
 const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key-dev-key-dev-key-32!!').slice(0,32);
 const ENC_IV  = Buffer.from('00000000000000000000000000000000'.slice(0,32), 'hex');
-
 function enc(s=''){ const c = crypto.createCipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV); return Buffer.concat([c.update(String(s),'utf8'), c.final()]).toString('hex'); }
 function dec(h=''){ try{ const d=crypto.createDecipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV); return Buffer.concat([d.update(Buffer.from(h,'hex')), d.final()]).toString('utf8'); }catch{return '';} }
 
