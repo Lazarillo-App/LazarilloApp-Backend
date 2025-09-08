@@ -171,11 +171,6 @@ exports.syncNow = async (req, res) => {
   }
 };
 
-// GET /api/businesses/:id/sales?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|month&articuloId=6050
-// helpers de fecha que ya usás:
-function fmtDay(d){ return d.toISOString().slice(0,10); }
-function parseDate(s, def){ return s ? new Date(s + 'T00:00:00Z') : def; }
-
 // GET /api/businesses/:id/sales/summary?from&to
 // → Totales por artículo (para pintar la tabla rápidamente, sin llamar a MAXI)
 exports.salesSummaryFromDB = async (req, res) => {
