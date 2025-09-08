@@ -2,18 +2,19 @@ const express = require('express');
 const router = express.Router();
 
 const authRequired = require('../middleware/authMiddleware');
-const ventasCtrl = require('../controllers/ventasController');
+const ventasCtrl = require('../controllers/ventasController'); // 👈 mismas letras que abajo
 const { loadActiveBusiness, requireBusiness } = require('../middleware/business');
 
-// Ping simple
-router.get('/ping', ventasCtrl.ping);
+// ping para probar fácil
+router.get('/ping', (_req, res) => res.json({ ok: true }));
 
-// Este router se monta como app.use('/api/ventas', router) -> GET /api/ventas
+// GET /api/ventas
 router.get('/',
   authRequired,
   loadActiveBusiness,
   requireBusiness,
-  ventasCtrl.getVentas
+  ventasCtrl.getVentas     // 👈 usa el nombre real que exporta el controller
 );
 
 module.exports = router;
+

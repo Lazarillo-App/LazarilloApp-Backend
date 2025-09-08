@@ -172,12 +172,16 @@ exports.syncNow = async (req, res) => {
 };
 
 // GET /api/businesses/:id/sales?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|month&articuloId=6050
-exports.listSalesFromDB = async (req, res) => {
+// helpers de fecha que ya usás:
+function fmtDay(d){ return d.toISOString().slice(0,10); }
+function parseDate(s, def){ return s ? new Date(s + 'T00:00:00Z') : def; }
+
+// GET /api/businesses/:id/sales/summary?from&to
+// → Totales por artículo (para pintar la tabla rápidamente, sin llamar a MAXI)
+exports.salesSummaryFromDB = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
-  let { from, to, groupBy='day', articuloId } = req.query || {};
-
-  if (!uid || !businessId) return res.status(400).json({ error:'bad_request' });
+  if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
   // pertenencia
   const { rows: ok } = await pool.query(`
@@ -188,57 +192,77 @@ exports.listSalesFromDB = async (req, res) => {
     LIMIT 1`, [businessId, uid]);
   if (!ok[0]) return res.status(403).json({ error:'forbidden' });
 
-  // default mes corriente
+  // rango por defecto: mes corriente hasta ayer
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
-  const f = fmtDay(parseDate(from, startOfMonth));
-  const t = fmtDay(parseDate(to, yesterday));
+  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
 
-  const hasArticulo = Number.isFinite(Number(articuloId));
-  const params = [businessId, f, t];
-  let sql;
+  const from = fmtDay(parseDate(req.query.from, startOfMonth));
+  const to   = fmtDay(parseDate(req.query.to,   yesterday));
+
+  const { rows: items } = await pool.query(`
+    SELECT articulo_id,
+           SUM(qty)::numeric    AS qty,
+           SUM(amount)::numeric AS amount
+    FROM maxi_sales_daily
+    WHERE business_id=$1 AND day BETWEEN $2 AND $3
+    GROUP BY articulo_id
+    ORDER BY articulo_id`, [businessId, from, to]);
+
+  return res.json({ from, to, items });
+};
+
+// GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day|month
+// → Serie para el modal de un artículo puntual
+exports.salesSeriesFromDB = async (req, res) => {
+  const uid = req.user?.id;
+  const businessId = Number(req.params.id);
+  const articuloId = Number(req.params.articuloId);
+  let { groupBy = 'day' } = req.query || {};
+  if (!uid || !businessId || !Number.isFinite(articuloId)) {
+    return res.status(400).json({ error: 'bad_request' });
+  }
+
+  // pertenencia
+  const { rows: ok } = await pool.query(`
+    SELECT 1
+    FROM app_businesses b
+    LEFT JOIN user_businesses ub ON ub.business_id=b.id
+    WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
+    LIMIT 1`, [businessId, uid]);
+  if (!ok[0]) return res.status(403).json({ error:'forbidden' });
+
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
+
+  const from = fmtDay(parseDate(req.query.from, startOfMonth));
+  const to   = fmtDay(parseDate(req.query.to,   yesterday));
+
+  let sql, params = [businessId, from, to, articuloId];
 
   if (groupBy === 'month') {
-    if (hasArticulo) {
-      params.push(Number(articuloId));
-      sql = `
-        SELECT date_trunc('month', day)::date AS bucket, articulo_id, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
-        FROM maxi_sales_daily
-        WHERE business_id=$1 AND day BETWEEN $2 AND $3 AND articulo_id=$4
-        GROUP BY bucket, articulo_id
-        ORDER BY bucket ASC
-      `;
-    } else {
-      sql = `
-        SELECT date_trunc('month', day)::date AS bucket, articulo_id, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
-        FROM maxi_sales_daily
-        WHERE business_id=$1 AND day BETWEEN $2 AND $3
-        GROUP BY bucket, articulo_id
-        ORDER BY bucket ASC, articulo_id ASC
-      `;
-    }
-  } else { // day
-    if (hasArticulo) {
-      params.push(Number(articuloId));
-      sql = `
-        SELECT day AS bucket, articulo_id, qty::numeric, amount::numeric
-        FROM maxi_sales_daily
-        WHERE business_id=$1 AND day BETWEEN $2 AND $3 AND articulo_id=$4
-        ORDER BY bucket ASC
-      `;
-    } else {
-      sql = `
-        SELECT day AS bucket, articulo_id, qty::numeric, amount::numeric
-        FROM maxi_sales_daily
-        WHERE business_id=$1 AND day BETWEEN $2 AND $3
-        ORDER BY bucket ASC, articulo_id ASC
-      `;
-    }
+    sql = `
+      SELECT date_trunc('month', day)::date AS bucket,
+             SUM(qty)::numeric               AS qty,
+             SUM(amount)::numeric            AS amount
+      FROM maxi_sales_daily
+      WHERE business_id=$1 AND day BETWEEN $2 AND $3 AND articulo_id=$4
+      GROUP BY bucket
+      ORDER BY bucket ASC`;
+  } else {
+    groupBy = 'day';
+    sql = `
+      SELECT day AS bucket,
+             qty::numeric,
+             amount::numeric
+      FROM maxi_sales_daily
+      WHERE business_id=$1 AND day BETWEEN $2 AND $3 AND articulo_id=$4
+      ORDER BY bucket ASC`;
   }
 
   const { rows: items } = await pool.query(sql, params);
-  res.json({ from:f, to:t, groupBy, items });
+  return res.json({ from, to, groupBy, articuloId, items });
 };
 
 // (ya lo tenías): listar artículos desde BD si lo necesitás en este mismo controlador
