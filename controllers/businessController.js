@@ -1,5 +1,21 @@
 // controllers/businessController.js
+// controllers/businessController.js (al tope del archivo)
+const crypto = require('crypto');
 const pool = require('../config/db');
+
+const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key-dev-key-dev-key-32!!').slice(0,32);
+const ENC_IV  = Buffer.from('00000000000000000000000000000000'.slice(0,32), 'hex');
+function enc(s=''){
+  const c = crypto.createCipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV);
+  return Buffer.concat([c.update(String(s),'utf8'), c.final()]).toString('hex');
+}
+function dec(h=''){
+  try {
+    const d = crypto.createDecipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV);
+    return Buffer.concat([d.update(Buffer.from(h,'hex')), d.final()]).toString('utf8');
+  } catch { return ''; }
+}
+
 
 exports.listMine = async (req, res) => {
   try {
@@ -194,11 +210,6 @@ exports.select = async (req, res) => {
 };
 
 // controllers/businessController.js  (añadir helpers y handlers Maxi)
-// --- Helpers cifrado (usa la misma clave que ya venías usando)
-const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key-dev-key-dev-key-32!!').slice(0,32);
-const ENC_IV  = Buffer.from('00000000000000000000000000000000'.slice(0,32), 'hex');
-function enc(s=''){ const c = crypto.createCipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV); return Buffer.concat([c.update(String(s),'utf8'), c.final()]).toString('hex'); }
-function dec(h=''){ try{ const d=crypto.createDecipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV); return Buffer.concat([d.update(Buffer.from(h,'hex')), d.final()]).toString('utf8'); }catch{return '';} }
 
 exports.maxiStatus = async (req, res) => {
   try {
