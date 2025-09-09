@@ -276,40 +276,32 @@ exports.salesSeriesFromDB = async (req, res) => {
 // (ya lo tenías): listar artículos desde BD si lo necesitás en este mismo controlador
 // GET /api/businesses/:id/articles
 // controllers/syncController.js
+// controllers/syncController.js
 exports.listArticlesFromDB = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
   if (!uid || !businessId) return res.status(400).json({ error:'bad_request' });
 
-  try {
-    // Verificación de pertenencia
-    const { rows: ok } = await pool.query(`
-      SELECT 1
-      FROM app_businesses b
-      LEFT JOIN user_businesses ub ON ub.business_id=b.id
-      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-      LIMIT 1
-    `, [businessId, uid]);
-    if (!ok[0]) return res.status(403).json({ error:'forbidden' });
+  const { rows: ok } = await pool.query(`
+    SELECT 1 FROM app_businesses b
+    LEFT JOIN user_businesses ub ON ub.business_id=b.id
+    WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
+  `, [businessId, uid]);
+  if (!ok[0]) return res.status(403).json({ error:'forbidden' });
 
-    // Devolver catálogo desde tu BD
-    const { rows } = await pool.query(`
-      SELECT
-        articulo_id          AS id,
-        nombre,
-        categoria,
-        subrubro,
-        precio::numeric      AS precio,
-        costo::numeric       AS costo,
-        is_active
-      FROM public.maxi_articles
-      WHERE business_id = $1
-      ORDER BY nombre ASC
-    `, [businessId]);
+  const { rows } = await pool.query(`
+    SELECT
+      articulo_id AS id,
+      nombre,
+      categoria,
+      subrubro,
+      precio,
+      costo,
+      raw
+    FROM public.maxi_articles
+    WHERE business_id = $1
+    ORDER BY nombre ASC
+  `, [businessId]);
 
-    return res.json({ items: rows });
-  } catch (err) {
-    console.error('listArticlesFromDB error', err);
-    return res.status(500).json({ error: 'internal', detail: err.message });
-  }
+  res.json({ items: rows });
 };

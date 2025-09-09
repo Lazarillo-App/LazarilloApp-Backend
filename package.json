@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "nodemon app.js",
     "start": "node app.js",
-    "migrate:agrupaciones": "node scripts/run-migration.js scripts/patch-agrupaciones.sql"
+    "migrate:agrupaciones": "node scripts/run-migration.js scripts/patch-agrupaciones.sql",
+    "migrate:maxi": "node scripts/run_migration_maxi.js"
   },
 
   "keywords": [],
