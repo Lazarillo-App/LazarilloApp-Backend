@@ -178,6 +178,7 @@ exports.salesSummaryFromDB = async (req, res) => {
   const businessId = Number(req.params.id);
   if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
+  // pertenencia
   const { rows: ok } = await pool.query(`
     SELECT 1
     FROM app_businesses b
@@ -193,19 +194,24 @@ exports.salesSummaryFromDB = async (req, res) => {
   const from = fmtDay(parseDate(req.query.from, startOfMonth));
   const to   = fmtDay(parseDate(req.query.to,   yesterday));
 
-  const { rows: items } = await pool.query(`
-    SELECT articulo_id,
-           SUM(qty)::numeric    AS qty,
-           SUM(amount)::numeric AS amount
+  try {
+    const { rows: items } = await pool.query(`
+      SELECT articulo_id,
+             SUM(qty)::numeric    AS qty,
+             SUM(amount)::numeric AS amount
       FROM public.maxi_sales_daily
-     WHERE business_id = $1
-       AND day >= $2::date
-       AND day  < $3::date
-     GROUP BY articulo_id
-     ORDER BY articulo_id`, [businessId, from, to]);
+      WHERE business_id=$1 AND day BETWEEN $2 AND $3
+      GROUP BY articulo_id
+      ORDER BY articulo_id
+    `, [businessId, from, to]);
 
-  res.json({ from, to, items });
+    return res.json({ from, to, items });
+  } catch (err) {
+    console.error('salesSummaryFromDB error', err);
+    return res.status(500).json({ error: 'internal', detail: err.message });
+  }
 };
+
 
 // GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day|month
 // → Serie para el modal de un artículo puntual
