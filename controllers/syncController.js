@@ -178,7 +178,6 @@ exports.salesSummaryFromDB = async (req, res) => {
   const businessId = Number(req.params.id);
   if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
-  // pertenencia
   const { rows: ok } = await pool.query(`
     SELECT 1
     FROM app_businesses b
@@ -187,7 +186,6 @@ exports.salesSummaryFromDB = async (req, res) => {
     LIMIT 1`, [businessId, uid]);
   if (!ok[0]) return res.status(403).json({ error:'forbidden' });
 
-  // rango por defecto: mes corriente hasta ayer
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
@@ -199,12 +197,14 @@ exports.salesSummaryFromDB = async (req, res) => {
     SELECT articulo_id,
            SUM(qty)::numeric    AS qty,
            SUM(amount)::numeric AS amount
-    FROM maxi_sales_daily
-    WHERE business_id=$1 AND day BETWEEN $2 AND $3
-    GROUP BY articulo_id
-    ORDER BY articulo_id`, [businessId, from, to]);
+      FROM public.maxi_sales_daily
+     WHERE business_id = $1
+       AND day >= $2::date
+       AND day  < $3::date
+     GROUP BY articulo_id
+     ORDER BY articulo_id`, [businessId, from, to]);
 
-  return res.json({ from, to, items });
+  res.json({ from, to, items });
 };
 
 // GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day|month
@@ -218,7 +218,6 @@ exports.salesSeriesFromDB = async (req, res) => {
     return res.status(400).json({ error: 'bad_request' });
   }
 
-  // pertenencia
   const { rows: ok } = await pool.query(`
     SELECT 1
     FROM app_businesses b
@@ -234,51 +233,77 @@ exports.salesSeriesFromDB = async (req, res) => {
   const from = fmtDay(parseDate(req.query.from, startOfMonth));
   const to   = fmtDay(parseDate(req.query.to,   yesterday));
 
-  let sql, params = [businessId, from, to, articuloId];
+  groupBy = ['day','week','month'].includes(String(groupBy)) ? groupBy : 'day';
 
-  if (groupBy === 'month') {
-    sql = `
-      SELECT date_trunc('month', day)::date AS bucket,
-             SUM(qty)::numeric               AS qty,
-             SUM(amount)::numeric            AS amount
-      FROM maxi_sales_daily
-      WHERE business_id=$1 AND day BETWEEN $2 AND $3 AND articulo_id=$4
-      GROUP BY bucket
-      ORDER BY bucket ASC`;
-  } else {
-    groupBy = 'day';
-    sql = `
+  if (groupBy === 'day') {
+    const { rows } = await pool.query(`
       SELECT day AS bucket,
-             qty::numeric,
-             amount::numeric
-      FROM maxi_sales_daily
-      WHERE business_id=$1 AND day BETWEEN $2 AND $3 AND articulo_id=$4
-      ORDER BY bucket ASC`;
+             SUM(qty)::numeric    AS qty,
+             SUM(amount)::numeric AS amount
+        FROM public.maxi_sales_daily
+       WHERE business_id=$1
+         AND articulo_id=$2
+         AND day >= $3::date
+         AND day  < $4::date
+       GROUP BY day
+       ORDER BY bucket`, [businessId, articuloId, from, to]);
+
+    return res.json({ from, to, groupBy, articuloId, items: rows });
   }
 
-  const { rows: items } = await pool.query(sql, params);
-  return res.json({ from, to, groupBy, articuloId, items });
+  // week / month
+  const { rows } = await pool.query(`
+    SELECT date_trunc($5, day)::date AS bucket,
+           SUM(qty)::numeric         AS qty,
+           SUM(amount)::numeric      AS amount
+      FROM public.maxi_sales_daily
+     WHERE business_id=$1
+       AND articulo_id=$2
+       AND day >= $3::date
+       AND day  < $4::date
+     GROUP BY bucket
+     ORDER BY bucket`, [businessId, articuloId, from, to, groupBy]);
+
+  res.json({ from, to, groupBy, articuloId, items: rows });
 };
 
 // (ya lo tenías): listar artículos desde BD si lo necesitás en este mismo controlador
+// GET /api/businesses/:id/articles
+// controllers/syncController.js
 exports.listArticlesFromDB = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
   if (!uid || !businessId) return res.status(400).json({ error:'bad_request' });
 
-  const { rows: ok } = await pool.query(`
-    SELECT 1 FROM app_businesses b
-    LEFT JOIN user_businesses ub ON ub.business_id=b.id
-    WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
-  `, [businessId, uid]);
-  if (!ok[0]) return res.status(403).json({ error:'forbidden' });
+  try {
+    // Verificación de pertenencia
+    const { rows: ok } = await pool.query(`
+      SELECT 1
+      FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id=b.id
+      WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
+      LIMIT 1
+    `, [businessId, uid]);
+    if (!ok[0]) return res.status(403).json({ error:'forbidden' });
 
-  // Ajusta a tu esquema de artículos guardados
-  const { rows } = await pool.query(`
-    SELECT articulo_id AS id, data
-    FROM maxi_articles
-    WHERE business_id=$1
-  `, [businessId]);
+    // Devolver catálogo desde tu BD
+    const { rows } = await pool.query(`
+      SELECT
+        articulo_id          AS id,
+        nombre,
+        categoria,
+        subrubro,
+        precio::numeric      AS precio,
+        costo::numeric       AS costo,
+        is_active
+      FROM public.maxi_articles
+      WHERE business_id = $1
+      ORDER BY nombre ASC
+    `, [businessId]);
 
-  res.json({ items: rows });
+    return res.json({ items: rows });
+  } catch (err) {
+    console.error('listArticlesFromDB error', err);
+    return res.status(500).json({ error: 'internal', detail: err.message });
+  }
 };
