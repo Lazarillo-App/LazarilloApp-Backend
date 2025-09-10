@@ -55,10 +55,10 @@ async function maxiLogin({ email, password }) {
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ email, password })  // 👈 OJO: 'email' (no 'username')
+    body: JSON.stringify({ email, password }) // 👈 importante: email, no username
   });
 
-  const text = await r.text(); // para ver el error real si falla
+  const text = await r.text();
   if (!r.ok) {
     console.error('MAXI login failed', r.status, text.slice(0, 800));
     throw new Error(`maxi_login_failed_${r.status}`);
@@ -68,7 +68,7 @@ async function maxiLogin({ email, password }) {
   try { j = JSON.parse(text); } catch {}
   const token = j.token || j.access_token || j?.data?.token;
   if (!token) {
-    console.error('MAXI login ok pero sin token en body:', j);
+    console.error('MAXI login ok pero sin token:', j);
     throw new Error('maxi_login_no_token');
   }
   return token;
