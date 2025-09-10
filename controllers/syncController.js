@@ -47,29 +47,28 @@ async function upsertSalesDaily({ client, rows }) {
 
 // ------------- Llamadas a MAXI (ajustá endpoints reales) -------------
 const LOGIN_PATH = process.env.MAXI_LOGIN_PATH || '/auth/login';
-const USER_FIELD = process.env.MAXI_LOGIN_USER_FIELD || 'username';
 
 async function maxiLogin({ email, password }) {
   const BASE = process.env.MAXI_BASE_URL;
   const url  = `${BASE}${LOGIN_PATH}`;
-  const body = { [USER_FIELD]: email, password };
 
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ email, password })  // 👈 OJO: 'email' (no 'username')
   });
 
-  const text = await r.text();
+  const text = await r.text(); // para ver el error real si falla
   if (!r.ok) {
     console.error('MAXI login failed', r.status, text.slice(0, 800));
     throw new Error(`maxi_login_failed_${r.status}`);
   }
 
-  let j = {}; try { j = JSON.parse(text); } catch {}
+  let j = {};
+  try { j = JSON.parse(text); } catch {}
   const token = j.token || j.access_token || j?.data?.token;
   if (!token) {
-    console.error('MAXI login no token', j);
+    console.error('MAXI login ok pero sin token en body:', j);
     throw new Error('maxi_login_no_token');
   }
   return token;
