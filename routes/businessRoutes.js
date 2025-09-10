@@ -1,4 +1,6 @@
 // routes/businessRoutes.js
+const { encryptSecret, decryptSecret } = require('../utils/cryptoField');
+
 const express = require('express');
 const router = express.Router();
 
@@ -27,6 +29,7 @@ router.delete('/:id',   authRequired, businesses.remove);
 router.post('/:id/select', authRequired, businesses.select);
 
 // --- Config/estado MAXI (solo credenciales/estado)
+
 router.get('/:id/maxi-status',       authRequired, businesses.maxiStatus);
 router.post('/:id/maxi-credentials', authRequired, businesses.maxiSave);
 

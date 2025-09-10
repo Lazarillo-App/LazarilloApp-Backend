@@ -1,21 +1,7 @@
 // controllers/businessController.js
-// controllers/businessController.js (al tope del archivo)
-const crypto = require('crypto');
+
 const pool = require('../config/db');
-
-const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key-dev-key-dev-key-32!!').slice(0,32);
-const ENC_IV  = Buffer.from('00000000000000000000000000000000'.slice(0,32), 'hex');
-function enc(s=''){
-  const c = crypto.createCipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV);
-  return Buffer.concat([c.update(String(s),'utf8'), c.final()]).toString('hex');
-}
-function dec(h=''){
-  try {
-    const d = crypto.createDecipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV);
-    return Buffer.concat([d.update(Buffer.from(h,'hex')), d.final()]).toString('utf8');
-  } catch { return ''; }
-}
-
+const { encryptSecret, decryptSecret } = require('../utils/cryptoField');
 
 exports.listMine = async (req, res) => {
   try {
@@ -163,7 +149,7 @@ exports.create = async (req, res) => {
 
     // si vienen credenciales MAXI al crear, las guardo cifradas
     if (maxi?.email && maxi?.password && maxi?.codcli) {
-      props.maxi = { email: maxi.email, codcli: maxi.codcli, pass_enc: enc(maxi.password) };
+      props.maxi = { email: maxi.email, codcli: maxi.codcli, pass_enc: encryptSecret(maxi.password) };
     }
 
     const { rows } = await pool.query(
@@ -214,14 +200,14 @@ exports.select = async (req, res) => {
 exports.maxiStatus = async (req, res) => {
   try {
     const uid = req.user?.id; const id = Number(req.params.id);
-    if (!uid || !id) return res.status(400).json({ error:'bad_request' });
+    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
 
     // pertenencia
     const { rows: ok } = await pool.query(`
       SELECT props FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id=b.id
       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1`, [id, uid]);
-    if (!ok[0]) return res.status(403).json({ error:'forbidden' });
+    if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
 
     const props = ok[0].props || {};
     const mx = props.maxi || {};
@@ -233,26 +219,26 @@ exports.maxiStatus = async (req, res) => {
     });
   } catch (e) {
     console.error('GET /:id/maxi-status error:', e);
-    res.status(500).json({ error:'internal' });
+    res.status(500).json({ error: 'internal' });
   }
 };
 
 exports.maxiSave = async (req, res) => {
   try {
     const uid = req.user?.id; const id = Number(req.params.id);
-    if (!uid || !id) return res.status(400).json({ error:'bad_request' });
+    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
 
     const { email, password, codcli } = req.body || {};
-    if (!email || !password || !codcli) return res.status(400).json({ error:'missing_fields' });
+    if (!email || !password || !codcli) return res.status(400).json({ error: 'missing_fields' });
 
     // pertenencia
     const { rows: ok } = await pool.query(`
       SELECT 1 FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id=b.id
       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1`, [id, uid]);
-    if (!ok.length) return res.status(403).json({ error:'forbidden' });
+    if (!ok.length) return res.status(403).json({ error: 'forbidden' });
 
-    const maxi = { email, codcli, pass_enc: enc(password) };
+    const maxi = { email, codcli, pass_enc: encryptSecret(password) };
     const { rows } = await pool.query(`
       UPDATE app_businesses
       SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
@@ -261,10 +247,10 @@ exports.maxiSave = async (req, res) => {
       RETURNING props
     `, [id, maxi]);
 
-    res.json({ ok:true, maxi: { email, codcli, configured:true } });
+    res.json({ ok: true, maxi: { email, codcli, configured: true } });
   } catch (e) {
     console.error('POST /:id/maxi-credentials error:', e);
-    res.status(500).json({ error:'internal' });
+    res.status(500).json({ error: 'internal' });
   }
 };
 
@@ -274,7 +260,7 @@ async function callMaxiArticles({ email, password, codcli, from, to }) {
   const BASE = process.env.MAXI_BASE_URL;
   // 1) token
   const tRes = await fetch(`${BASE}/auth/login`, {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: email, password })
   });
   if (!tRes.ok) throw new Error('maxi_login_failed');
@@ -292,25 +278,26 @@ async function callMaxiArticles({ email, password, codcli, from, to }) {
 exports.maxiArticles = async (req, res) => {
   try {
     const uid = req.user?.id; const id = Number(req.params.id);
-    const { from='2025-01-01', to='2025-04-01' } = req.query || {};
-    if (!uid || !id) return res.status(400).json({ error:'bad_request' });
+    const { from = '2025-01-01', to = '2025-04-01' } = req.query || {};
+    if (!uid || !id) return res.status(400).json({ error: 'bad_request' });
 
     // props + pertenencia
     const { rows } = await pool.query(`
       SELECT props FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id=b.id
       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1`, [id, uid]);
-    if (!rows[0]) return res.status(403).json({ error:'forbidden' });
+    if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
 
     const mx = (rows[0].props || {}).maxi || {};
-    const password = mx.pass_enc ? dec(mx.pass_enc) : mx.password;
-    if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error:'maxi_not_configured' });
+    const password = mx.pass_enc ? decryptSecret(mx.pass_enc) : mx.password;
+
+    if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
     const items = await callMaxiArticles({ email: mx.email, password, codcli: mx.codcli, from, to });
     res.json({ items });
   } catch (e) {
     console.error('GET /:id/maxi-articles error:', e);
-    res.status(500).json({ error:'internal' });
+    res.status(500).json({ error: 'internal' });
   }
 };
 // controllers/businessController.js  (agregar)

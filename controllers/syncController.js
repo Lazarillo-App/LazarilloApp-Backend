@@ -1,11 +1,8 @@
 // controllers/syncController.js
+const { decryptSecret } = require('../utils/cryptoField');
+
 const pool = require('../config/db');
 const fetch = global.fetch || require('node-fetch');
-
-const ENC_KEY = (process.env.ENCRYPTION_KEY || 'dev-key-dev-key-dev-key-32!!').slice(0,32);
-const crypto = require('crypto');
-const ENC_IV  = Buffer.from('00000000000000000000000000000000'.slice(0,32), 'hex');
-function dec(h=''){ try{ const d=crypto.createDecipheriv('aes-256-ctr', Buffer.from(ENC_KEY), ENC_IV); return Buffer.concat([d.update(Buffer.from(h,'hex')), d.final()]).toString('utf8'); }catch{return '';} }
 
 // ---------- Helpers ----------
 function parseDate(d, fallback) {
@@ -14,11 +11,11 @@ function parseDate(d, fallback) {
 }
 function fmtDay(d) {
   const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth()+1).padStart(2,'0');
-  const day = String(d.getUTCDate()).padStart(2,'0');
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
-function addDays(d, n){ const x=new Date(d); x.setUTCDate(x.getUTCDate()+n); return x; }
+function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
 
 // Agrega items a INSERT por chunks para no superar límites de parámetros
 async function upsertSalesDaily({ client, rows }) {
@@ -26,8 +23,8 @@ async function upsertSalesDaily({ client, rows }) {
   const CHUNK = 500; // 500 filas por batch
   let total = 0;
 
-  for (let i=0; i<rows.length; i+=CHUNK) {
-    const slice = rows.slice(i, i+CHUNK);
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK);
     // (business_id, articulo_id, day, qty, amount, updated_at)
     const values = [];
     const params = [];
@@ -49,33 +46,41 @@ async function upsertSalesDaily({ client, rows }) {
 }
 
 // ------------- Llamadas a MAXI (ajustá endpoints reales) -------------
+const LOGIN_PATH = process.env.MAXI_LOGIN_PATH || '/auth/login';
+const USER_FIELD = process.env.MAXI_LOGIN_USER_FIELD || 'username';
+
 async function maxiLogin({ email, password }) {
   const BASE = process.env.MAXI_BASE_URL;
-  const r = await fetch(`${BASE}/auth/login`, {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json' },
-    body: JSON.stringify({ username: email, password })
+  const url  = `${BASE}${LOGIN_PATH}`;
+  const body = { [USER_FIELD]: email, password };
+
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
   });
-  if (!r.ok) throw new Error('maxi_login_failed');
-  const j = await r.json();
-  return j?.token || j?.access_token;
+
+  const text = await r.text();
+  if (!r.ok) {
+    console.error('MAXI login failed', r.status, text.slice(0, 800));
+    throw new Error(`maxi_login_failed_${r.status}`);
+  }
+
+  let j = {}; try { j = JSON.parse(text); } catch {}
+  const token = j.token || j.access_token || j?.data?.token;
+  if (!token) {
+    console.error('MAXI login no token', j);
+    throw new Error('maxi_login_no_token');
+  }
+  return token;
 }
 
-/**
- * Debe devolver movimientos de venta con al menos:
- *  - fecha (YYYY-MM-DD)
- *  - articuloId (number)
- *  - cantidad (number)
- *  - monto (number)   // opcional, si no existe dejar 0
- *
- * Si MAXI trae líneas crudas, agregamos por día+artículo acá.
- */
 async function fetchMaxiSalesDaily({ token, codcli, from, to }) {
   const BASE = process.env.MAXI_BASE_URL;
 
   // ⚠️ Ajustá este endpoint a tu API real de MAXI
   const url = `${BASE}/ventas?codcli=${encodeURIComponent(codcli)}&from=${from}&to=${to}`;
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }});
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!r.ok) throw new Error('maxi_sales_fetch_failed');
 
   const raw = await r.json();
@@ -84,14 +89,14 @@ async function fetchMaxiSalesDaily({ token, codcli, from, to }) {
   // Normalizar + agregar por día
   const map = new Map(); // key: `${articuloId}|${day}`
   for (const it of list) {
-    const day = String(it.fecha || it.day || '').slice(0,10);
+    const day = String(it.fecha || it.day || '').slice(0, 10);
     const articuloId = Number(it.articuloId ?? it.codigo ?? it.codigoArticulo ?? it.id);
     const qty = Number(it.cantidad ?? it.qty ?? 0);
     const amount = Number(it.monto ?? it.amount ?? 0);
     if (!day || !Number.isFinite(articuloId)) continue;
 
     const k = `${articuloId}|${day}`;
-    const prev = map.get(k) || { qty:0, amount:0 };
+    const prev = map.get(k) || { qty: 0, amount: 0 };
     map.set(k, { qty: prev.qty + qty, amount: prev.amount + amount });
   }
 
@@ -99,7 +104,7 @@ async function fetchMaxiSalesDaily({ token, codcli, from, to }) {
   const out = [];
   for (const [k, v] of map.entries()) {
     const [aid, day] = k.split('|');
-    out.push({ articulo_id:Number(aid), day, qty:v.qty, amount:v.amount });
+    out.push({ articulo_id: Number(aid), day, qty: v.qty, amount: v.amount });
   }
   return out;
 }
@@ -110,8 +115,8 @@ async function fetchMaxiSalesDaily({ token, codcli, from, to }) {
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
-  const { scope='sales', from, to } = req.body || {};
-  if (!uid || !businessId) return res.status(400).json({ error:'bad_request' });
+  const { scope = 'sales', from, to } = req.body || {};
+  if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
   // pertenencia + props
   const { rows } = await pool.query(`
@@ -120,7 +125,7 @@ exports.syncNow = async (req, res) => {
     LEFT JOIN user_businesses ub ON ub.business_id=b.id
     WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
     LIMIT 1`, [businessId, uid]);
-  if (!rows[0]) return res.status(403).json({ error:'forbidden' });
+  if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
 
   // Rango por defecto: mes corriente hasta ayer
   const today = new Date();
@@ -132,9 +137,10 @@ exports.syncNow = async (req, res) => {
 
   // MAXI creds
   const mx = (rows[0].props || {}).maxi || {};
-  const password = mx.pass_enc ? dec(mx.pass_enc) : (mx.password || '');
+  const password = mx.pass_enc ? decryptSecret(mx.pass_enc) : (mx.password || '');
+
   if (!(mx.email && password && mx.codcli)) {
-    return res.status(400).json({ error:'maxi_not_configured' });
+    return res.status(400).json({ error: 'maxi_not_configured' });
   }
 
   const client = await pool.connect();
@@ -161,11 +167,11 @@ exports.syncNow = async (req, res) => {
 
     // (Opcional) si scope==='articles' acá guardarías el catálogo en tu tabla de artículos
 
-    return res.json({ ok:true, scope, from:f, to:t, upserted });
+    return res.json({ ok: true, scope, from: f, to: t, upserted });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch(_) {}
+    try { await client.query('ROLLBACK'); } catch (_) { }
     console.error('syncNow error:', e);
-    return res.status(500).json({ error:'internal', detail:e.message });
+    return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
     client.release();
   }
@@ -185,14 +191,14 @@ exports.salesSummaryFromDB = async (req, res) => {
     LEFT JOIN user_businesses ub ON ub.business_id=b.id
     WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
     LIMIT 1`, [businessId, uid]);
-  if (!ok[0]) return res.status(403).json({ error:'forbidden' });
+  if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
 
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
+  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
 
   const from = fmtDay(parseDate(req.query.from, startOfMonth));
-  const to   = fmtDay(parseDate(req.query.to,   yesterday));
+  const to = fmtDay(parseDate(req.query.to, yesterday));
 
   try {
     const { rows: items } = await pool.query(`
@@ -230,16 +236,16 @@ exports.salesSeriesFromDB = async (req, res) => {
     LEFT JOIN user_businesses ub ON ub.business_id=b.id
     WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
     LIMIT 1`, [businessId, uid]);
-  if (!ok[0]) return res.status(403).json({ error:'forbidden' });
+  if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
 
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
+  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
 
   const from = fmtDay(parseDate(req.query.from, startOfMonth));
-  const to   = fmtDay(parseDate(req.query.to,   yesterday));
+  const to = fmtDay(parseDate(req.query.to, yesterday));
 
-  groupBy = ['day','week','month'].includes(String(groupBy)) ? groupBy : 'day';
+  groupBy = ['day', 'week', 'month'].includes(String(groupBy)) ? groupBy : 'day';
 
   if (groupBy === 'day') {
     const { rows } = await pool.query(`
@@ -280,14 +286,14 @@ exports.salesSeriesFromDB = async (req, res) => {
 exports.listArticlesFromDB = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
-  if (!uid || !businessId) return res.status(400).json({ error:'bad_request' });
+  if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
   const { rows: ok } = await pool.query(`
     SELECT 1 FROM app_businesses b
     LEFT JOIN user_businesses ub ON ub.business_id=b.id
     WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
   `, [businessId, uid]);
-  if (!ok[0]) return res.status(403).json({ error:'forbidden' });
+  if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
 
   const { rows } = await pool.query(`
     SELECT
