@@ -60,7 +60,7 @@ async function maxiLogin({ email, password, codcli }) {
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
-  if (to)   u.searchParams.set('fechaFin', to);
+  if (to) u.searchParams.set('fechaFin', to);
 
   const r = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
   const j = await r.json().catch(() => ({}));
@@ -164,14 +164,15 @@ async function upsertArticles({ client, businessId, items }) {
 
 // ---------------- Handlers ----------------
 
-// POST /api/businesses/:id/sync  { scope: 'articles'|'sales'|'all', from?, to? }
+// controllers/syncController.js
+// POST /api/businesses/:id/sync  { scope: 'articles' | 'sales' | 'all', from?, to? }
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
   const { scope = 'articles', from, to } = req.body || {};
   if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
-  // pertenencia + props
+  // Verificación de pertenencia + props
   const { rows } = await pool.query(`
     SELECT b.props
       FROM app_businesses b
@@ -181,14 +182,7 @@ exports.syncNow = async (req, res) => {
   `, [businessId, uid]);
   if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
 
-  // rango por defecto: mes corriente hasta ayer
-  const today = new Date();
-  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
-  const f = ymd(parseDate(from, startOfMonth));
-  const t = ymd(parseDate(to, yesterday));
-
-  // credenciales MAXI
+  // Credenciales MAXI
   const mx = (rows[0].props || {}).maxi || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
   if (!(mx.email && password && mx.codcli)) {
@@ -199,21 +193,39 @@ exports.syncNow = async (req, res) => {
   try {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
-    let upserted = 0;
-
+    // ======================
+    //  ARTÍCULOS (FULL SYNC)
+    // ======================
     if (scope === 'articles' || scope === 'all') {
-      const items = await fetchMaxiArticles({ token, from: f, to: t });
+      const items = await fetchMaxiArticles({ token }); // <-- sin fechas
       await client.query('BEGIN');
-      upserted += await upsertArticles({ client, businessId, items });
+      const upserted = await upsertArticles({ client, businessId, items });
       await client.query('COMMIT');
+      return res.json({ ok: true, scope: 'articles', upserted });
     }
 
-    // Ventas: a implementar cuando tengamos endpoint real
+    // ======================
+    //  VENTAS (por rango) – aún no implementado aquí
+    // ======================
     if (scope === 'sales') {
-      return res.status(501).json({ error: 'not_implemented', detail: 'sales endpoint pending' });
+      // Cuando esté listo:
+      // const today = new Date();
+      // const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+      // const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
+      // const f = ymd(parseDate(from, startOfMonth));
+      // const t = ymd(parseDate(to,   yesterday));
+      // const ventas = await fetchMaxiSales({ token, from: f, to: t });
+      // await client.query('BEGIN');
+      // const upserted = await upsertSalesDaily({ client, businessId, ventas });
+      // await client.query('COMMIT');
+      // return res.json({ ok: true, scope: 'sales', from: f, to: t, upserted });
+
+      return res.status(501).json({ error: 'not_implemented', detail: 'sales_sync_pending' });
     }
 
-    return res.json({ ok: true, scope, from: f, to: t, upserted });
+    // Alcance desconocido
+    return res.status(400).json({ error: 'bad_request', detail: 'invalid_scope' });
+
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
     console.error('syncNow error:', e);
@@ -241,7 +253,7 @@ exports.salesSummaryFromDB = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to   = ymd(parseDate(req.query.to,   yesterday));
+  const to = ymd(parseDate(req.query.to, yesterday));
 
   try {
     const { rows: items } = await pool.query(`
@@ -284,7 +296,7 @@ exports.salesSeriesFromDB = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to   = ymd(parseDate(req.query.to,   yesterday));
+  const to = ymd(parseDate(req.query.to, yesterday));
 
   groupBy = ['day', 'week', 'month'].includes(String(groupBy)) ? groupBy : 'day';
 
@@ -375,7 +387,7 @@ exports.maxiArticlesProxy = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to   = ymd(parseDate(req.query.to,   yesterday));
+  const to = ymd(parseDate(req.query.to, yesterday));
 
   try {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
