@@ -48,30 +48,35 @@ async function upsertSalesDaily({ client, rows }) {
 // ------------- Llamadas a MAXI (ajustá endpoints reales) -------------
 const LOGIN_PATH = process.env.MAXI_LOGIN_PATH || '/auth/login';
 
-async function maxiLogin({ email, password }) {
-  const BASE = process.env.MAXI_BASE_URL;
-  const url  = `${BASE}${LOGIN_PATH}`;
+// controllers/syncController.js
+async function maxiLogin({ email, password, codcli }) {
+  const BASE = (process.env.MAXI_BASE_URL || '').replace(/\/+$/, '');
+  const url  = `${BASE}/login`;
 
   const r = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ email, password }) // 👈 importante: email, no username
+    headers: { 'Content-Type':'application/json', 'Accept':'application/json' },
+    body: JSON.stringify({
+      email: String(email || ''),
+      pass:  String(password || ''),
+      cod_cli: String(codcli || ''),
+    })
   });
 
   const text = await r.text();
-  if (!r.ok) {
-    console.error('MAXI login failed', r.status, text.slice(0, 800));
-    throw new Error(`maxi_login_failed_${r.status}`);
+  let j;
+  try { j = JSON.parse(text); } catch {
+    throw new Error(`maxi_login_bad_json_${r.status}`);
   }
 
-  let j = {};
-  try { j = JSON.parse(text); } catch {}
-  const token = j.token || j.access_token || j?.data?.token;
-  if (!token) {
-    console.error('MAXI login ok pero sin token:', j);
-    throw new Error('maxi_login_no_token');
+  if (j?.resultCode === 'SUCCESS' && j?.content?.tokenAccess) {
+    return j.content.tokenAccess;
   }
-  return token;
+
+  // logs útiles y error claro
+  console.log('MAXI login failed', r.status, text.slice(0, 300));
+  if (r.status === 404) throw new Error('maxi_login_failed_404');
+  throw new Error(`maxi_login_failed_${r.status || 'unknown'}`);
 }
 
 async function fetchMaxiSalesDaily({ token, codcli, from, to }) {
@@ -144,7 +149,7 @@ exports.syncNow = async (req, res) => {
 
   const client = await pool.connect();
   try {
-    const token = await maxiLogin({ email: mx.email, password });
+    const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     let upserted = 0;
 

@@ -253,26 +253,32 @@ exports.maxiSave = async (req, res) => {
     res.status(500).json({ error: 'internal' });
   }
 };
-
+// controllers/businessController.js
 async function callMaxiArticles({ email, password, codcli, from, to }) {
-  // ⚠️ Pega acá tu lógica actual de obtener token y luego artículos.
-  // Ejemplo-esqueleto:
-  const BASE = process.env.MAXI_BASE_URL;
-  // 1) token
-  const tRes = await fetch(`${BASE}/auth/login`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: email, password })
+  const BASE = (process.env.MAXI_BASE_URL || '').replace(/\/+$/, '');
+
+  // 1) login → tokenAccess
+  const rLogin = await fetch(`${BASE}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json', 'Accept':'application/json' },
+    body: JSON.stringify({ email, pass: password, cod_cli: String(codcli) })
   });
-  if (!tRes.ok) throw new Error('maxi_login_failed');
-  const { token } = await tRes.json();
+  const jLogin = await rLogin.json();
+  if (!(jLogin?.resultCode === 'SUCCESS' && jLogin?.content?.tokenAccess)) {
+    throw new Error(`maxi_login_failed_${rLogin.status}`);
+  }
+  const token = jLogin.content.tokenAccess;
 
   // 2) artículos
-  const aRes = await fetch(`${BASE}/articulos?codcli=${encodeURIComponent(codcli)}&desde=${from}&hasta=${to}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  if (!aRes.ok) throw new Error('maxi_fetch_failed');
-  const items = await aRes.json();
-  return Array.isArray(items) ? items : (items?.data || []);
+  const u = new URL(`${BASE}/menuweb/menuextendido`);
+  if (from) u.searchParams.set('fechaInicio', from);
+  if (to)   u.searchParams.set('fechaFin', to);
+
+  const rArt = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
+  const jArt = await rArt.json();
+
+  if (jArt?.resultCode === 'SUCCESS') return jArt.content || [];
+  throw new Error(`maxi_fetch_failed_${rArt.status}:${jArt?.resultDescription || ''}`);
 }
 
 exports.maxiArticles = async (req, res) => {
