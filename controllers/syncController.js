@@ -5,6 +5,28 @@ const fetch = global.fetch || require('node-fetch');
 
 const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 
+// helpers (ponelos arriba del archivo)
+function pickDeep(obj, paths) {
+  for (const p of paths) {
+    const v = p.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
+    if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+  }
+  return undefined;
+}
+function toIntLike(v) {
+  if (v == null) return NaN;
+  // extrae dígitos para casos como "0265" o "265A"
+  const s = String(v).match(/\d+/g)?.join('') ?? '';
+  return s ? Number.parseInt(s, 10) : NaN;
+}
+function toNum(v) {
+  if (v == null || v === '') return 0;
+  // "3.700,50" -> "3700.50"
+  const s = String(v).replace(/\./g, '').replace(',', '.');
+  const n = Number.parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
 // ---------- Helpers ----------
 function parseDate(d, fallback) {
   const x = new Date(d);
@@ -50,11 +72,15 @@ async function fetchMaxiArticles({ token, from, to }) {
 }
 
 // ---- UPSERT a public.maxi_articles (en chunks) ----
+// upsertArticles robusto
 async function upsertArticles({ client, businessId, items }) {
-  if (!items?.length) return 0;
+  if (!items.length) return 0;
 
   const CHUNK = 500;
   let total = 0;
+
+  // métricas para debug
+  const stats = { skippedNoId: 0, emptyName: 0, withPrice: 0, withCost: 0 };
 
   for (let i = 0; i < items.length; i += CHUNK) {
     const slice = items.slice(i, i + CHUNK);
@@ -64,17 +90,51 @@ async function upsertArticles({ client, businessId, items }) {
     let p = 1;
 
     for (const it of slice) {
-      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
-      if (!Number.isFinite(id)) continue;
+      // === ID: probar varias claves conocidas ===
+      const idRaw = pickDeep(it, [
+        'codigo', 'codart', 'codArt', 'id', 'codigoArticulo', 'codArticulo', 'articuloId'
+      ]);
+      const id = toIntLike(idRaw);
+      if (!Number.isFinite(id)) { stats.skippedNoId++; continue; }
 
-      const nombre    = String(it.descripcion ?? it.nombre ?? it.descripcionl ?? '').trim().slice(0, 200);
-      const categoria = it.categoria ?? it.rubro ?? null;
-      const subrubro  = it.subrubro ?? it.subRubro ?? null;
-      const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo     = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
+      // === Nombre ===
+      const nombreRaw = pickDeep(it, [
+        'descripcion', 'descripcionl', 'descripcionL', 'descrip', 'nombre',
+        'detalle', 'denominacion', 'descArticulo'
+      ]);
+      const nombre = (String(nombreRaw ?? '').trim() || String(id)).slice(0, 200);
+      if (!nombreRaw) stats.emptyName++;
 
-      //         biz    id     nombre ('' si null)     categoria default           subrubro default
-      values.push(`($${p++},$${p++},COALESCE($${p++},''),COALESCE($${p++},'Sin categoría'),COALESCE($${p++},'Sin subrubro'),$${p++},$${p++},$${p++}::jsonb,NOW())`);
+      // === Categoría / Subrubro (varias opciones y anidadas) ===
+      const categoria = String(
+        pickDeep(it, [
+          'rubro.descripcion', 'rubro',
+          'categoria.descripcion', 'categoria',
+          'familia.descripcion', 'familia',
+          'grupo.descripcion', 'grupo',
+        ]) ?? 'Sin categoría'
+      ).trim();
+
+      const subrubro = String(
+        pickDeep(it, [
+          'subRubro.descripcion', 'subRubro',
+          'subrubro.descripcion', 'subrubro',
+          'subfamilia.descripcion', 'subfamilia'
+        ]) ?? 'Sin subrubro'
+      ).trim();
+
+      // === Precio / Costo ===
+      const precio = toNum(pickDeep(it, [
+        'precioVenta', 'precio', 'precio1', 'pventa', 'p_venta', 'precioLista'
+      ]));
+      const costo = toNum(pickDeep(it, [
+        'costoPromedio', 'costo'
+      ]));
+      if (precio) stats.withPrice++;
+      if (costo) stats.withCost++;
+
+      // armar fila
+      values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
       params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it));
     }
 
@@ -95,9 +155,10 @@ async function upsertArticles({ client, businessId, items }) {
         updated_at = NOW()
     `;
     await client.query(sql, params);
-    total += slice.length; // aprox. (insert + update cuentan 1 cada una)
+    total += values.length;
   }
 
+  console.log('[upsertArticles]', { total, ...stats });
   return total;
 }
 
