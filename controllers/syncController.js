@@ -1,179 +1,131 @@
 // controllers/syncController.js
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
-const pool = require('../config/db');
 const fetch = global.fetch || require('node-fetch');
+const pool  = require('../config/db');
 
-// ---------- Helpers ----------
-function parseDate(d, fallback) {
-  const x = new Date(d);
-  return isNaN(x) ? new Date(fallback) : x;
-}
-function fmtDay(d) {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
+const BASE = process.env.MAXI_BASE_URL; // https://api-mconn.maxisistemas.com.ar
 
-// Agrega items a INSERT por chunks para no superar límites de parámetros
-async function upsertSalesDaily({ client, rows }) {
-  if (!rows.length) return 0;
-  const CHUNK = 500; // 500 filas por batch
-  let total = 0;
-
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const slice = rows.slice(i, i + CHUNK);
-    // (business_id, articulo_id, day, qty, amount, updated_at)
-    const values = [];
-    const params = [];
-    let p = 1;
-    for (const r of slice) {
-      values.push(`($${p++}, $${p++}, $${p++}::date, $${p++}::numeric, $${p++}::numeric, NOW())`);
-      params.push(r.business_id, r.articulo_id, r.day, r.qty, r.amount);
-    }
-    const sql = `
-      INSERT INTO maxi_sales_daily (business_id, articulo_id, day, qty, amount, updated_at)
-      VALUES ${values.join(',')}
-      ON CONFLICT (business_id, articulo_id, day)
-      DO UPDATE SET qty=EXCLUDED.qty, amount=EXCLUDED.amount, updated_at=NOW()
-    `;
-    const r = await client.query(sql, params);
-    total += r.rowCount || slice.length; // rowCount puede no reflejar updates; lo aproximamos
-  }
-  return total;
-}
-
-// ------------- Llamadas a MAXI (ajustá endpoints reales) -------------
-const LOGIN_PATH = process.env.MAXI_LOGIN_PATH || '/auth/login';
-
-// controllers/syncController.js
+// ---- LOGIN a MCONN ----
 async function maxiLogin({ email, password, codcli }) {
-  const BASE = (process.env.MAXI_BASE_URL || '').replace(/\/+$/, '');
-  const url  = `${BASE}/login`;
-
-  const r = await fetch(url, {
+  const r = await fetch(`${BASE}/login`, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json', 'Accept':'application/json' },
-    body: JSON.stringify({
-      email: String(email || ''),
-      pass:  String(password || ''),
-      cod_cli: String(codcli || ''),
-    })
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify({ email, pass: password, cod_cli: codcli }),
   });
-
-  const text = await r.text();
-  let j;
-  try { j = JSON.parse(text); } catch {
-    throw new Error(`maxi_login_bad_json_${r.status}`);
+  const j = await r.json().catch(()=> ({}));
+  if (!r.ok || j.resultCode !== 'SUCCESS') {
+    const id = j?.resultId || r.status;
+    console.error('MAXI login failed', id, j);
+    throw new Error(`maxi_login_failed_${id}`);
   }
-
-  if (j?.resultCode === 'SUCCESS' && j?.content?.tokenAccess) {
-    return j.content.tokenAccess;
-  }
-
-  // logs útiles y error claro
-  console.log('MAXI login failed', r.status, text.slice(0, 300));
-  if (r.status === 404) throw new Error('maxi_login_failed_404');
-  throw new Error(`maxi_login_failed_${r.status || 'unknown'}`);
+  return j.content.tokenAccess; // <-- token correcto
 }
 
-async function fetchMaxiSalesDaily({ token, codcli, from, to }) {
-  const BASE = process.env.MAXI_BASE_URL;
+// ---- ARTÍCULOS (menú extendido) ----
+async function fetchMaxiArticles({ token, from, to }) {
+  const u = new URL(`${BASE}/menuweb/menuextendido`);
+  if (from) u.searchParams.set('fechaInicio', from);
+  if (to)   u.searchParams.set('fechaFin',   to);
 
-  // ⚠️ Ajustá este endpoint a tu API real de MAXI
-  const url = `${BASE}/ventas?codcli=${encodeURIComponent(codcli)}&from=${from}&to=${to}`;
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error('maxi_sales_fetch_failed');
-
-  const raw = await r.json();
-  const list = Array.isArray(raw) ? raw : (raw?.data || []);
-
-  // Normalizar + agregar por día
-  const map = new Map(); // key: `${articuloId}|${day}`
-  for (const it of list) {
-    const day = String(it.fecha || it.day || '').slice(0, 10);
-    const articuloId = Number(it.articuloId ?? it.codigo ?? it.codigoArticulo ?? it.id);
-    const qty = Number(it.cantidad ?? it.qty ?? 0);
-    const amount = Number(it.monto ?? it.amount ?? 0);
-    if (!day || !Number.isFinite(articuloId)) continue;
-
-    const k = `${articuloId}|${day}`;
-    const prev = map.get(k) || { qty: 0, amount: 0 };
-    map.set(k, { qty: prev.qty + qty, amount: prev.amount + amount });
-  }
-
-  // -> [{ articulo_id, day, qty, amount }]
-  const out = [];
-  for (const [k, v] of map.entries()) {
-    const [aid, day] = k.split('|');
-    out.push({ articulo_id: Number(aid), day, qty: v.qty, amount: v.amount });
-  }
-  return out;
+  const r = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
+  const j = await r.json().catch(()=> ({}));
+  if (!r.ok || j.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
+  return Array.isArray(j.content) ? j.content : [];
 }
 
-// ------------- Handlers públicos -------------
+// Upsert a public.maxi_articles
+async function upsertArticles({ client, businessId, items }) {
+  if (!items.length) return 0;
+  const values = [];
+  const params = [];
+  let p = 1;
 
-// POST /api/businesses/:id/sync  body: { scope:'sales'|'articles'|'all', from?, to? }
+  for (const it of items) {
+    const id        = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
+    if (!Number.isFinite(id)) continue;
+    const nombre    = String(it.descripcion ?? it.nombre ?? it.descripcionl ?? '').slice(0,200) || null;
+    const categoria = String(it.categoria ?? it.rubro ?? '') || null;
+    const subrubro  = String(it.subrubro ?? it.subRubro ?? '') || null;
+    const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+    const costo     = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
+
+    values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},NOW())`);
+    params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it));
+  }
+
+  if (!values.length) return 0;
+  const sql = `
+    INSERT INTO public.maxi_articles
+      (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at)
+    VALUES ${values.join(',')}
+    ON CONFLICT (business_id, articulo_id)
+    DO UPDATE SET
+      nombre   = EXCLUDED.nombre,
+      categoria= EXCLUDED.categoria,
+      subrubro = EXCLUDED.subrubro,
+      precio   = EXCLUDED.precio,
+      costo    = EXCLUDED.costo,
+      raw      = EXCLUDED.raw,
+      updated_at = NOW()
+  `;
+  await client.query(sql, params);
+  return values.length;
+}
+
+// ---- dentro de exports.syncNow ----
+
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
-  const { scope = 'sales', from, to } = req.body || {};
+  const { scope = 'articles', from, to } = req.body || {};
   if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
   // pertenencia + props
   const { rows } = await pool.query(`
     SELECT b.props
-    FROM app_businesses b
-    LEFT JOIN user_businesses ub ON ub.business_id=b.id
-    WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-    LIMIT 1`, [businessId, uid]);
+      FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id = b.id
+     WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
+     LIMIT 1
+  `, [businessId, uid]);
   if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
 
-  // Rango por defecto: mes corriente hasta ayer
+  // rango de fechas
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
-
+  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   const f = fmtDay(parseDate(from, startOfMonth));
-  const t = fmtDay(parseDate(to, yesterday));
+  const t = fmtDay(parseDate(to,   yesterday));
 
-  // MAXI creds
+  // credenciales MAXI (descifradas si hace falta)
   const mx = (rows[0].props || {}).maxi || {};
-  const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
-
+  const password = mx.pass_enc ? decryptSecret(mx.pass_enc) : (mx.password || '');
   if (!(mx.email && password && mx.codcli)) {
     return res.status(400).json({ error: 'maxi_not_configured' });
   }
 
   const client = await pool.connect();
   try {
+    // 🔹 AQUÍ va el await (dentro del handler)
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     let upserted = 0;
 
-    if (scope === 'sales' || scope === 'all') {
-      const daily = await fetchMaxiSalesDaily({ token, codcli: mx.codcli, from: f, to: t });
-      // Agregar business_id y upsert
-      const rowsToUpsert = daily.map(d => ({
-        business_id: businessId,
-        articulo_id: d.articulo_id,
-        day: d.day,
-        qty: d.qty,
-        amount: d.amount
-      }));
-
+    // Sincronizar ARTÍCULOS (funciona hoy con MCONN)
+    if (scope === 'articles' || scope === 'all') {
+      const items = await fetchMaxiArticles({ token, from: f, to: t });
       await client.query('BEGIN');
-      upserted += await upsertSalesDaily({ client, rows: rowsToUpsert });
+      upserted += await upsertArticles({ client, businessId, items });
       await client.query('COMMIT');
     }
 
-    // (Opcional) si scope==='articles' acá guardarías el catálogo en tu tabla de artículos
+    // TODO: ventas cuando tengas el endpoint real
+    // if (scope === 'sales' || scope === 'all') { ... }
 
     return res.json({ ok: true, scope, from: f, to: t, upserted });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch (_) { }
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('syncNow error:', e);
     return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
