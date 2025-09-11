@@ -1,5 +1,5 @@
 // controllers/syncController.js
-const { decryptSecret } = require('../utils/cryptoField');
+const { decryptSecretCompat } = require('../utils/cryptoField');
 
 const pool = require('../config/db');
 const fetch = global.fetch || require('node-fetch');
@@ -136,7 +136,7 @@ exports.syncNow = async (req, res) => {
 
   // MAXI creds
   const mx = (rows[0].props || {}).maxi || {};
-  const password = mx.pass_enc ? decryptSecret(mx.pass_enc) : (mx.password || '');
+  const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
 
   if (!(mx.email && password && mx.codcli)) {
     return res.status(400).json({ error: 'maxi_not_configured' });

@@ -1,7 +1,7 @@
 // controllers/businessController.js
 
 const pool = require('../config/db');
-const { encryptSecret, decryptSecret } = require('../utils/cryptoField');
+const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
 
 exports.listMine = async (req, res) => {
   try {
@@ -289,7 +289,7 @@ exports.maxiArticles = async (req, res) => {
     if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
 
     const mx = (rows[0].props || {}).maxi || {};
-    const password = mx.pass_enc ? decryptSecret(mx.pass_enc) : mx.password;
+    const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : mx.password;
 
     if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
