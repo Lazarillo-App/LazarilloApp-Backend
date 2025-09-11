@@ -57,6 +57,7 @@ async function maxiLogin({ email, password, codcli }) {
 }
 
 // ---- ARTÍCULOS (menú extendido) ----
+// ---- ARTÍCULOS (menú extendido) ----
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
@@ -64,11 +65,56 @@ async function fetchMaxiArticles({ token, from, to }) {
 
   const r = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok || j?.resultCode !== 'SUCCESS') {
-    console.error('MAXI articles fetch failed', r.status, j);
-    throw new Error('maxi_articles_fetch_failed');
-  }
-  return Array.isArray(j.content) ? j.content : [];
+  if (!r.ok || j.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
+
+  const out = [];
+
+  const isArticle = (o = {}) => {
+    const keys = Object.keys(o);
+    const hasId   = ['id','idArticulo','codart','codigo','codigoArticulo'].some(k => k in o);
+    const hasInfo = ['descripcion','descripcionl','nombre','precio','precioVenta','importe'].some(k => k in o);
+    return hasId && hasInfo;
+  };
+
+  const pushArt = (o, ctx) => {
+    const id      = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
+    if (!Number.isFinite(id)) return;
+    const nombre  = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
+    const precio  = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
+    const costo   = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
+    out.push({
+      id,
+      nombre,
+      categoria: ctx.categoria ?? (o.categoria ?? o.rubro ?? null),
+      subrubro : ctx.subrubro  ?? (o.subrubro ?? o.subRubro ?? null),
+      precio,
+      costo,
+      raw: o,
+    });
+  };
+
+  const walk = (node, ctx = { categoria: null, subrubro: null }) => {
+    if (!node) return;
+    if (Array.isArray(node)) return node.forEach(n => walk(n, ctx));
+    if (typeof node !== 'object') return;
+
+    const next = {
+      categoria: (node.nombreRubro ?? node.rubroNombre ?? node.rubro?.descripcion ?? ctx.categoria) || ctx.categoria,
+      subrubro : (node.nombreSubRubro ?? node.subRubro?.descripcion ?? node.subrubro ?? ctx.subrubro) || ctx.subrubro,
+    };
+
+    if (isArticle(node)) pushArt(node, next);
+
+    for (const v of Object.values(node)) {
+      if (v && (Array.isArray(v) || typeof v === 'object')) walk(v, next);
+    }
+  };
+
+  walk(j.content);
+
+  // de-dupe por id
+  const seen = new Set();
+  return out.filter(a => !seen.has(a.id) && seen.add(a.id));
 }
 
 // ---- UPSERT a public.maxi_articles (en chunks) ----
