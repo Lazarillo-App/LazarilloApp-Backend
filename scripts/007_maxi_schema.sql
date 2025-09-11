@@ -1,7 +1,7 @@
 -- Recomendado si usas gen_random_uuid en sync_jobs
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- Función genérica para mantener updated_at
+-- Función para mantener updated_at
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -13,17 +13,17 @@ END $$;
 --  Catálogo de artículos
 -- =========================
 CREATE TABLE IF NOT EXISTS public.maxi_articles (
-  business_id   integer      NOT NULL REFERENCES public.app_businesses(id) ON DELETE CASCADE,
-  articulo_id   integer      NOT NULL,
-  nombre        text         NOT NULL DEFAULT '',
-  categoria     text         NOT NULL DEFAULT 'Sin categoría',
-  subrubro      text         NOT NULL DEFAULT 'Sin subrubro',
+  business_id   integer       NOT NULL REFERENCES public.app_businesses(id) ON DELETE CASCADE,
+  articulo_id   integer       NOT NULL,
+  nombre        text          NOT NULL DEFAULT '',
+  categoria     text          NOT NULL DEFAULT 'Sin categoría',
+  subrubro      text          NOT NULL DEFAULT 'Sin subrubro',
   precio        numeric(14,2) NOT NULL DEFAULT 0,
   costo         numeric(14,2) NOT NULL DEFAULT 0,
-  raw           jsonb        NOT NULL DEFAULT '{}'::jsonb,
-  is_active     boolean      NOT NULL DEFAULT true,
-  created_at    timestamptz  NOT NULL DEFAULT now(),
-  updated_at    timestamptz  NOT NULL DEFAULT now(),
+  raw           jsonb         NOT NULL DEFAULT '{}'::jsonb,
+  is_active     boolean       NOT NULL DEFAULT true,
+  created_at    timestamptz   NOT NULL DEFAULT now(),
+  updated_at    timestamptz   NOT NULL DEFAULT now(),
   PRIMARY KEY (business_id, articulo_id)
 );
 
