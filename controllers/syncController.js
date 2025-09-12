@@ -119,14 +119,19 @@ async function fetchMaxiArticles({ token, from, to }) {
 
 // ---- UPSERT a public.maxi_articles (en chunks) ----
 // upsertArticles robusto
+function firstText(...vals) {
+  for (const v of vals) {
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
 async function upsertArticles({ client, businessId, items }) {
   if (!items.length) return 0;
-
   const CHUNK = 500;
   let total = 0;
-
-  // métricas para debug
-  const stats = { skippedNoId: 0, emptyName: 0, withPrice: 0, withCost: 0 };
 
   for (let i = 0; i < items.length; i += CHUNK) {
     const slice = items.slice(i, i + CHUNK);
@@ -136,52 +141,55 @@ async function upsertArticles({ client, businessId, items }) {
     let p = 1;
 
     for (const it of slice) {
-      // === ID: probar varias claves conocidas ===
-      const idRaw = pickDeep(it, [
-        'codigo', 'codart', 'codArt', 'id', 'codigoArticulo', 'codArticulo', 'articuloId'
-      ]);
-      const id = toIntLike(idRaw);
-      if (!Number.isFinite(id)) { stats.skippedNoId++; continue; }
+      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
+      if (!Number.isFinite(id)) continue;
 
-      // === Nombre ===
-      const nombreRaw = pickDeep(it, [
-        'descripcion', 'descripcionl', 'descripcionL', 'descrip', 'nombre',
-        'detalle', 'denominacion', 'descArticulo'
-      ]);
-      const nombre = (String(nombreRaw ?? '').trim() || String(id)).slice(0, 200);
-      if (!nombreRaw) stats.emptyName++;
+      const nombre = firstText(
+        it.nombre, it.Nombre,
+        it.descripcion, it.descripcionL, it.descripcionl,
+        it.detalle, it.articulo, it.desc, it.Descripcion
+      ) || `#${id}`;
 
-      // === Categoría / Subrubro (varias opciones y anidadas) ===
-      const categoria = String(
-        pickDeep(it, [
-          'rubro.descripcion', 'rubro',
-          'categoria.descripcion', 'categoria',
-          'familia.descripcion', 'familia',
-          'grupo.descripcion', 'grupo',
-        ]) ?? 'Sin categoría'
-      ).trim();
+      // MUCHOS alias posibles que he visto en APIs similares
+      const categoria = firstText(
+        it.categoria, it.Categoria,
+        it.rubro, it.Rubro, it.rubroNombre, it.RubroNombre,
+        it.familia, it.Familia,
+        it.seccion, it.Seccion,
+        it.departamento, it.Departamento,
+        it.grupo, it.Grupo
+      ) || 'Sin categoría';
 
-      const subrubro = String(
-        pickDeep(it, [
-          'subRubro.descripcion', 'subRubro',
-          'subrubro.descripcion', 'subrubro',
-          'subfamilia.descripcion', 'subfamilia'
-        ]) ?? 'Sin subrubro'
-      ).trim();
+      const subrubro = firstText(
+        it.subrubro, it.Subrubro, it.subRubro, it.SubRubro,
+        it.subrubroNombre, it.SubrubroNombre,
+        it.subcategoria, it.Subcategoria, it.subCategoria, it.SubCategoria,
+        it.linea, it.Linea,
+        it.grupo2, it.Grupo2
+      ) || 'Sin subrubro';
 
-      // === Precio / Costo ===
-      const precio = toNum(pickDeep(it, [
-        'precioVenta', 'precio', 'precio1', 'pventa', 'p_venta', 'precioLista'
-      ]));
-      const costo = toNum(pickDeep(it, [
-        'costoPromedio', 'costo'
-      ]));
-      if (precio) stats.withPrice++;
-      if (costo) stats.withCost++;
+      const precio = Number(
+        it.precio ?? it.Precio ??
+        it.precioVenta ?? it.PrecioVenta ??
+        it.importe ?? it.Importe ?? 0
+      ) || 0;
 
-      // armar fila
+      const costo = Number(
+        it.costo ?? it.Costo ??
+        it.costoPromedio ?? it.CostoPromedio ?? 0
+      ) || 0;
+
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
-      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it));
+      params.push(
+        businessId,
+        id,
+        nombre,
+        categoria,
+        subrubro,
+        precio,
+        costo,
+        JSON.stringify(it)
+      );
     }
 
     if (!values.length) continue;
@@ -204,10 +212,8 @@ async function upsertArticles({ client, businessId, items }) {
     total += values.length;
   }
 
-  console.log('[upsertArticles]', { total, ...stats });
   return total;
 }
-
 // ---------------- Handlers ----------------
 
 // controllers/syncController.js
