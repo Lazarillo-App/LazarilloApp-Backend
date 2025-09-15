@@ -28,9 +28,7 @@ function toNum(v) {
 }
 
 // ---------- Helpers ----------
-// Convierte el árbol RUBRO → SUB_RUBRO → ARTICULO en una lista plana de artículos
-// ---------- Helpers de normalización ----------
-// ---------- Helpers nuevos ----------
+// ---------- NUEVO: aplanar árbol de Maxi ----------
 function flattenMaxiMenu(tree = []) {
   const out = [];
   const seen = new Set();
@@ -38,7 +36,7 @@ function flattenMaxiMenu(tree = []) {
   for (const rubro of (tree || [])) {
     const cat = String(rubro?.nombre || '').trim() || 'Sin categoría';
 
-    // Artículos sueltos directamente bajo RUBRO (a veces existen)
+    // (poco común) artículos sueltos bajo RUBRO
     for (const a of (rubro?.articulos || [])) {
       const id = Number(a?.id);
       if (!Number.isFinite(id) || seen.has(id)) continue;
@@ -74,7 +72,7 @@ function flattenMaxiMenu(tree = []) {
     }
   }
   return out;
-}
+};
 
 function parseDate(d, fallback) {
   const x = new Date(d);
@@ -258,16 +256,22 @@ exports.syncNow = async (req, res) => {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     let upserted = 0;
+
     if (scope === 'articles' || scope === 'all') {
-      const tree = await fetchMaxiArticles({ token, from: f, to: t }); // devuelve el ARBOL
-      const items = flattenMaxiMenu(tree); // ← ahora es plano con categoria/subrubro
+  // 1) Pido el ÁRBOL a Maxi
+  const tree = await fetchMaxiArticles({ token, from: f, to: t }); // devuelve rubros/subrubros/artículos
 
-      await client.query('BEGIN');
-      upserted += await upsertArticles({ client, businessId, items });
-      await client.query('COMMIT');
-    }
+  // 2) Aplano a {id,nombre,precio,categoria,subrubro,costo,_raw}
+  const items = flattenMaxiMenu(tree);
 
-    return res.json({ ok: true, scope, from: f, to: t, upserted });
+  // 3) Upsert
+  await client.query('BEGIN');
+  const n = await upsertArticles({ client, businessId, items });
+  await client.query('COMMIT');
+
+  return res.json({ ok: true, scope: 'articles', upserted: n });
+}
+
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('syncNow error:', e);
@@ -276,7 +280,6 @@ exports.syncNow = async (req, res) => {
     client.release();
   }
 };
-
 
 // GET /api/businesses/:id/sales/summary?from&to
 exports.salesSummaryFromDB = async (req, res) => {
