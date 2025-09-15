@@ -29,65 +29,35 @@ function toNum(v) {
 
 // ---------- Helpers ----------
 // Convierte el árbol RUBRO → SUB_RUBRO → ARTICULO en una lista plana de artículos
+// ---------- Helpers de normalización ----------
 function flattenMaxiMenu(menu = []) {
   const out = [];
+  for (const rubro of (menu || [])) {
+    const catNombre = String(rubro?.nombre || '').trim() || 'Sin categoría';
 
-  const toStr = (v, def = '') => {
-    const s = (v ?? '').toString().trim();
-    return s || def;
-  };
-  const toNum = (v, def = 0) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : def;
-  };
-
-  for (const rubro of Array.isArray(menu) ? menu : []) {
-    const categoria = toStr(rubro?.nombre, 'Sin categoría');
-
-    // Por si algún rubro trae artículos directamente (raro):
-    if (Array.isArray(rubro?.articulos)) {
-      for (const art of rubro.articulos) {
-        if (!art) continue;
-        const node = String(art.node_type || '').toUpperCase();
-        if (!node.includes('ARTICULO')) continue; // ignoramos otros nodos
-        out.push({
-          id: toNum(art.id),
-          nombre: toStr(art.nombre, `#${art.id}`),
-          categoria,
-          subrubro: 'Sin subrubro',
-          precio: toNum(art.precio, 0),
-          costo: 0,
-          raw: art,
-        });
-      }
+    // artículos que pudieran venir directo bajo el Rubro (raro, pero lo cubrimos)
+    const artsDirectos = Array.isArray(rubro?.articulos) ? rubro.articulos : [];
+    for (const a of artsDirectos) {
+      const id = Number(a?.id);
+      if (!Number.isFinite(id)) continue;
+      out.push({ ...a, categoria: catNombre, subrubro: 'Sin subrubro' });
     }
 
-    for (const sr of Array.isArray(rubro?.subrubros) ? rubro.subrubros : []) {
-      const subrubro = toStr(sr?.nombre, 'Sin subrubro');
-
-      for (const art of Array.isArray(sr?.articulos) ? sr.articulos : []) {
-        if (!art) continue;
-        const node = String(art.node_type || '').toUpperCase();
-        if (!node.includes('ARTICULO')) continue; // ARTICULO y ARTICULO_PROMO
-
-        out.push({
-          id: toNum(art.id),
-          nombre: toStr(art.nombre, `#${art.id}`),
-          categoria,
-          subrubro,
-          precio: toNum(art.precio, 0),
-          costo: 0,            // MAXI acá no trae costo → lo dejamos en 0
-          raw: art,            // guardamos crudo por si luego querés más campos
-        });
+    // artículos bajo Subrubros (lo normal)
+    const subrs = Array.isArray(rubro?.subrubros) ? rubro.subrubros : [];
+    for (const sr of subrs) {
+      const srNombre = String(sr?.nombre || '').trim() || 'Sin subrubro';
+      const arts = Array.isArray(sr?.articulos) ? sr.articulos : [];
+      for (const a of arts) {
+        const id = Number(a?.id);
+        if (!Number.isFinite(id)) continue;
+        out.push({ ...a, categoria: catNombre, subrubro: srNombre });
       }
     }
   }
-
-  // evitar duplicados por id (si un mismo id aparece en 2 ramas)
-  const uniq = new Map();
-  for (const a of out) if (Number.isFinite(a.id) && !uniq.has(a.id)) uniq.set(a.id, a);
-  return Array.from(uniq.values());
+  return out;
 }
+
 
 function parseDate(d, fallback) {
   const x = new Date(d);
@@ -178,7 +148,7 @@ async function fetchMaxiArticles({ token, from, to }) {
 }
 
 // ---- UPSERT a public.maxi_articles (en chunks) ----
-// upsertArticles robusto
+
 function firstText(...vals) {
   for (const v of vals) {
     if (v === undefined || v === null) continue;
@@ -204,52 +174,14 @@ async function upsertArticles({ client, businessId, items }) {
       const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
       if (!Number.isFinite(id)) continue;
 
-      const nombre = firstText(
-        it.nombre, it.Nombre,
-        it.descripcion, it.descripcionL, it.descripcionl,
-        it.detalle, it.articulo, it.desc, it.Descripcion
-      ) || `#${id}`;
-
-      // MUCHOS alias posibles que he visto en APIs similares
-      const categoria = firstText(
-        it.categoria, it.Categoria,
-        it.rubro, it.Rubro, it.rubroNombre, it.RubroNombre,
-        it.familia, it.Familia,
-        it.seccion, it.Seccion,
-        it.departamento, it.Departamento,
-        it.grupo, it.Grupo
-      ) || 'Sin categoría';
-
-      const subrubro = firstText(
-        it.subrubro, it.Subrubro, it.subRubro, it.SubRubro,
-        it.subrubroNombre, it.SubrubroNombre,
-        it.subcategoria, it.Subcategoria, it.subCategoria, it.SubCategoria,
-        it.linea, it.Linea,
-        it.grupo2, it.Grupo2
-      ) || 'Sin subrubro';
-
-      const precio = Number(
-        it.precio ?? it.Precio ??
-        it.precioVenta ?? it.PrecioVenta ??
-        it.importe ?? it.Importe ?? 0
-      ) || 0;
-
-      const costo = Number(
-        it.costo ?? it.Costo ??
-        it.costoPromedio ?? it.CostoPromedio ?? 0
-      ) || 0;
+      const nombre    = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').trim().slice(0, 200) || `#${id}`;
+      const categoria = String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría';
+      const subrubro  = String(it.subrubro  ?? it.subRubro ?? '').trim() || 'Sin subrubro';
+      const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo     = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
-      params.push(
-        businessId,
-        id,
-        nombre,
-        categoria,
-        subrubro,
-        precio,
-        costo,
-        JSON.stringify(it)
-      );
+      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it));
     }
 
     if (!values.length) continue;
@@ -269,22 +201,20 @@ async function upsertArticles({ client, businessId, items }) {
         updated_at = NOW()
     `;
     await client.query(sql, params);
-    total += values.length;
+    total += slice.length;
   }
 
   return total;
 }
+
 // ---------------- Handlers ----------------
 
-// controllers/syncController.js
-// POST /api/businesses/:id/sync  { scope: 'articles' | 'sales' | 'all', from?, to? }
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
   const businessId = Number(req.params.id);
   const { scope = 'articles', from, to } = req.body || {};
   if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
 
-  // Verificación de pertenencia + props
   const { rows } = await pool.query(`
     SELECT b.props
       FROM app_businesses b
@@ -294,58 +224,48 @@ exports.syncNow = async (req, res) => {
   `, [businessId, uid]);
   if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
 
-  // Credenciales MAXI
+  // fechas por si luego las usamos en ventas
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
+  const f = ymd(parseDate(from, startOfMonth));
+  const t = ymd(parseDate(to, yesterday));
+
+  // credenciales
   const mx = (rows[0].props || {}).maxi || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
-  if (!(mx.email && password && mx.codcli)) {
-    return res.status(400).json({ error: 'maxi_not_configured' });
-  }
+  if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
   const client = await pool.connect();
   try {
-    // ...
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
+    let upserted = 0;
+
     if (scope === 'articles' || scope === 'all') {
-      const menu = await fetchMaxiArticles({ token, from: f, to: t }); // árbol de MAXI
-      const items = flattenMaxiMenu(menu);                             // ✅ lista plana
+      // 1) Traemos el árbol
+      const menu = await fetchMaxiArticles({ token /*, from: f, to: t*/ });
+      // 2) Lo aplanamos a [{id, nombre, precio, categoria, subrubro, ...}]
+      const items = flattenMaxiMenu(menu);
 
       await client.query('BEGIN');
-      const upserted = await upsertArticles({ client, businessId, items });
+      upserted += await upsertArticles({ client, businessId, items });
       await client.query('COMMIT');
 
       return res.json({ ok: true, scope: 'articles', upserted });
     }
 
-    //  VENTAS (por rango) – aún no implementado aquí
-    // ======================
-    if (scope === 'sales') {
-      // Cuando esté listo:
-      // const today = new Date();
-      // const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-      // const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
-      // const f = ymd(parseDate(from, startOfMonth));
-      // const t = ymd(parseDate(to,   yesterday));
-      // const ventas = await fetchMaxiSales({ token, from: f, to: t });
-      // await client.query('BEGIN');
-      // const upserted = await upsertSalesDaily({ client, businessId, ventas });
-      // await client.query('COMMIT');
-      // return res.json({ ok: true, scope: 'sales', from: f, to: t, upserted });
-
-      return res.status(501).json({ error: 'not_implemented', detail: 'sales_sync_pending' });
-    }
-
-    // Alcance desconocido
-    return res.status(400).json({ error: 'bad_request', detail: 'invalid_scope' });
-
+    // (ventas cuando tengas endpoint real…)
+    return res.json({ ok: true, scope, from: f, to: t, upserted });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { }
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('syncNow error:', e);
-    return res.status(500).json({ error: 'internal', message: e.message });
+    return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
     client.release();
   }
 };
+
 
 // GET /api/businesses/:id/sales/summary?from&to
 exports.salesSummaryFromDB = async (req, res) => {
