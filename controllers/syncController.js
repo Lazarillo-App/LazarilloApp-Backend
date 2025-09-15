@@ -28,6 +28,67 @@ function toNum(v) {
 }
 
 // ---------- Helpers ----------
+// Convierte el árbol RUBRO → SUB_RUBRO → ARTICULO en una lista plana de artículos
+function flattenMaxiMenu(menu = []) {
+  const out = [];
+
+  const toStr = (v, def = '') => {
+    const s = (v ?? '').toString().trim();
+    return s || def;
+  };
+  const toNum = (v, def = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : def;
+  };
+
+  for (const rubro of Array.isArray(menu) ? menu : []) {
+    const categoria = toStr(rubro?.nombre, 'Sin categoría');
+
+    // Por si algún rubro trae artículos directamente (raro):
+    if (Array.isArray(rubro?.articulos)) {
+      for (const art of rubro.articulos) {
+        if (!art) continue;
+        const node = String(art.node_type || '').toUpperCase();
+        if (!node.includes('ARTICULO')) continue; // ignoramos otros nodos
+        out.push({
+          id: toNum(art.id),
+          nombre: toStr(art.nombre, `#${art.id}`),
+          categoria,
+          subrubro: 'Sin subrubro',
+          precio: toNum(art.precio, 0),
+          costo: 0,
+          raw: art,
+        });
+      }
+    }
+
+    for (const sr of Array.isArray(rubro?.subrubros) ? rubro.subrubros : []) {
+      const subrubro = toStr(sr?.nombre, 'Sin subrubro');
+
+      for (const art of Array.isArray(sr?.articulos) ? sr.articulos : []) {
+        if (!art) continue;
+        const node = String(art.node_type || '').toUpperCase();
+        if (!node.includes('ARTICULO')) continue; // ARTICULO y ARTICULO_PROMO
+
+        out.push({
+          id: toNum(art.id),
+          nombre: toStr(art.nombre, `#${art.id}`),
+          categoria,
+          subrubro,
+          precio: toNum(art.precio, 0),
+          costo: 0,            // MAXI acá no trae costo → lo dejamos en 0
+          raw: art,            // guardamos crudo por si luego querés más campos
+        });
+      }
+    }
+  }
+
+  // evitar duplicados por id (si un mismo id aparece en 2 ramas)
+  const uniq = new Map();
+  for (const a of out) if (Number.isFinite(a.id) && !uniq.has(a.id)) uniq.set(a.id, a);
+  return Array.from(uniq.values());
+}
+
 function parseDate(d, fallback) {
   const x = new Date(d);
   return Number.isNaN(x.getTime()) ? new Date(fallback) : x;
@@ -57,7 +118,6 @@ async function maxiLogin({ email, password, codcli }) {
 }
 
 // ---- ARTÍCULOS (menú extendido) ----
-// ---- ARTÍCULOS (menú extendido) ----
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
@@ -71,22 +131,22 @@ async function fetchMaxiArticles({ token, from, to }) {
 
   const isArticle = (o = {}) => {
     const keys = Object.keys(o);
-    const hasId   = ['id','idArticulo','codart','codigo','codigoArticulo'].some(k => k in o);
-    const hasInfo = ['descripcion','descripcionl','nombre','precio','precioVenta','importe'].some(k => k in o);
+    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
+    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
     return hasId && hasInfo;
   };
 
   const pushArt = (o, ctx) => {
-    const id      = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
+    const id = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
     if (!Number.isFinite(id)) return;
-    const nombre  = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
-    const precio  = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
-    const costo   = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
+    const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
+    const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
+    const costo = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
     out.push({
       id,
       nombre,
       categoria: ctx.categoria ?? (o.categoria ?? o.rubro ?? null),
-      subrubro : ctx.subrubro  ?? (o.subrubro ?? o.subRubro ?? null),
+      subrubro: ctx.subrubro ?? (o.subrubro ?? o.subRubro ?? null),
       precio,
       costo,
       raw: o,
@@ -100,7 +160,7 @@ async function fetchMaxiArticles({ token, from, to }) {
 
     const next = {
       categoria: (node.nombreRubro ?? node.rubroNombre ?? node.rubro?.descripcion ?? ctx.categoria) || ctx.categoria,
-      subrubro : (node.nombreSubRubro ?? node.subRubro?.descripcion ?? node.subrubro ?? ctx.subrubro) || ctx.subrubro,
+      subrubro: (node.nombreSubRubro ?? node.subRubro?.descripcion ?? node.subrubro ?? ctx.subrubro) || ctx.subrubro,
     };
 
     if (isArticle(node)) pushArt(node, next);
@@ -243,20 +303,20 @@ exports.syncNow = async (req, res) => {
 
   const client = await pool.connect();
   try {
+    // ...
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
-    // ======================
-    //  ARTÍCULOS (FULL SYNC)
-    // ======================
     if (scope === 'articles' || scope === 'all') {
-      const items = await fetchMaxiArticles({ token }); // <-- sin fechas
+      const menu = await fetchMaxiArticles({ token, from: f, to: t }); // árbol de MAXI
+      const items = flattenMaxiMenu(menu);                             // ✅ lista plana
+
       await client.query('BEGIN');
       const upserted = await upsertArticles({ client, businessId, items });
       await client.query('COMMIT');
+
       return res.json({ ok: true, scope: 'articles', upserted });
     }
 
-    // ======================
     //  VENTAS (por rango) – aún no implementado aquí
     // ======================
     if (scope === 'sales') {
@@ -279,7 +339,7 @@ exports.syncNow = async (req, res) => {
     return res.status(400).json({ error: 'bad_request', detail: 'invalid_scope' });
 
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('syncNow error:', e);
     return res.status(500).json({ error: 'internal', message: e.message });
   } finally {
