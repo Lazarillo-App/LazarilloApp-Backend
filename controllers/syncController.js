@@ -279,7 +279,10 @@ exports.syncNow = async (req, res) => {
     if (scope === 'articles' || scope === 'all') {
       const tree = await fetchMaxiArticles({ token, from: f, to: t }); // árbol Maxi
       const items = normalizeArticles(tree);                           // << aplanado
-
+      await pool.query(
+        'INSERT INTO public.maxi_menu_cache (business_id, payload) VALUES ($1, $2)',
+        [businessId, JSON.stringify(tree)]
+      );
       // Logs útiles para verificar en consola del backend
       console.log('[sync] maxi tree:', Array.isArray(tree) ? tree.length : 0,
         'normalized:', items.length,
