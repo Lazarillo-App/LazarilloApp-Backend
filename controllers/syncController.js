@@ -28,7 +28,7 @@ function toNum(v) {
 }
 
 // ---------- Helpers ----------
-// ---------- NUEVO: aplanar árbol de Maxi ----------
+// Aplana el árbol de Maxi: RUBRO → SUB_RUBRO → ARTICULO
 function flattenMaxiMenu(tree = []) {
   const out = [];
   const seen = new Set();
@@ -36,7 +36,7 @@ function flattenMaxiMenu(tree = []) {
   for (const rubro of (tree || [])) {
     const cat = String(rubro?.nombre || '').trim() || 'Sin categoría';
 
-    // (poco común) artículos sueltos bajo RUBRO
+    // (raro) artículos directo bajo RUBRO
     for (const a of (rubro?.articulos || [])) {
       const id = Number(a?.id);
       if (!Number.isFinite(id) || seen.has(id)) continue;
@@ -48,11 +48,10 @@ function flattenMaxiMenu(tree = []) {
         costo: 0,
         categoria: cat,
         subrubro: 'Sin subrubro',
-        _raw: a,
+        raw: a,
       });
     }
 
-    // SUB_RUBROS
     for (const sr of (rubro?.subrubros || [])) {
       const sub = String(sr?.nombre || '').trim() || 'Sin subrubro';
       for (const a of (sr?.articulos || [])) {
@@ -66,13 +65,33 @@ function flattenMaxiMenu(tree = []) {
           costo: 0,
           categoria: cat,
           subrubro: sub,
-          _raw: a,
+          raw: a,
         });
       }
     }
   }
   return out;
-};
+}
+
+// Normaliza cualquier input (árbol o plano) a registros planos
+function normalizeArticles(items = []) {
+  if (!Array.isArray(items)) return [];
+  const looksTree = items.some(it => it?.node_type === 'RUBRO' || it?.subrubros);
+  if (looksTree) return flattenMaxiMenu(items);
+
+  // ya vienen planos (por si en el futuro Maxi cambia)
+  return items
+    .map(it => ({
+      id: Number(it.id ?? it.codigo ?? it.codigoArticulo),
+      nombre: String(it.nombre ?? it.descripcion ?? '').trim(),
+      precio: Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0,
+      costo: Number(it.costo ?? it.costoPromedio ?? 0) || 0,
+      categoria: String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría',
+      subrubro: String(it.subrubro ?? it.subRubro ?? '').trim() || 'Sin subrubro',
+      raw: it,
+    }))
+    .filter(a => Number.isFinite(a.id));
+}
 
 function parseDate(d, fallback) {
   const x = new Date(d);
@@ -189,11 +208,11 @@ async function upsertArticles({ client, businessId, items }) {
       const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
       if (!Number.isFinite(id)) continue;
 
-      const nombre    = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
+      const nombre = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
       const categoria = String(it.categoria ?? '').trim() || 'Sin categoría';
-      const subrubro  = String(it.subrubro  ?? '').trim() || 'Sin subrubro';
-      const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo     = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
+      const subrubro = String(it.subrubro ?? '').trim() || 'Sin subrubro';
+      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
       params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it._raw ?? it));
@@ -258,19 +277,19 @@ exports.syncNow = async (req, res) => {
     let upserted = 0;
 
     if (scope === 'articles' || scope === 'all') {
-  // 1) Pido el ÁRBOL a Maxi
-  const tree = await fetchMaxiArticles({ token, from: f, to: t }); // devuelve rubros/subrubros/artículos
+      const tree = await fetchMaxiArticles({ token, from: f, to: t }); // árbol Maxi
+      const items = normalizeArticles(tree);                           // << aplanado
 
-  // 2) Aplano a {id,nombre,precio,categoria,subrubro,costo,_raw}
-  const items = flattenMaxiMenu(tree);
+      // Logs útiles para verificar en consola del backend
+      console.log('[sync] maxi tree:', Array.isArray(tree) ? tree.length : 0,
+        'normalized:', items.length,
+        'sample:', items[0]);
 
-  // 3) Upsert
-  await client.query('BEGIN');
-  const n = await upsertArticles({ client, businessId, items });
-  await client.query('COMMIT');
-
-  return res.json({ ok: true, scope: 'articles', upserted: n });
-}
+      await client.query('BEGIN');
+      const n = await upsertArticles({ client, businessId, items });
+      await client.query('COMMIT');
+      return res.json({ ok: true, scope: 'articles', upserted: n });
+    }
 
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }

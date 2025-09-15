@@ -9,6 +9,7 @@ const pool = require('../config/db');      // tu pool de PG
       console.error('Uso: node scripts/clear_maxi_articles.js <BUSINESS_ID>');
       process.exit(1);
     }
+console.log('[SCRIPT DB]', process.env.DATABASE_URL);
 
     // (opcional) ver cuántos hay antes
     const { rows: before } = await pool.query(
