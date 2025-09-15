@@ -30,34 +30,51 @@ function toNum(v) {
 // ---------- Helpers ----------
 // Convierte el árbol RUBRO → SUB_RUBRO → ARTICULO en una lista plana de artículos
 // ---------- Helpers de normalización ----------
-function flattenMaxiMenu(menu = []) {
+// ---------- Helpers nuevos ----------
+function flattenMaxiMenu(tree = []) {
   const out = [];
-  for (const rubro of (menu || [])) {
-    const catNombre = String(rubro?.nombre || '').trim() || 'Sin categoría';
+  const seen = new Set();
 
-    // artículos que pudieran venir directo bajo el Rubro (raro, pero lo cubrimos)
-    const artsDirectos = Array.isArray(rubro?.articulos) ? rubro.articulos : [];
-    for (const a of artsDirectos) {
+  for (const rubro of (tree || [])) {
+    const cat = String(rubro?.nombre || '').trim() || 'Sin categoría';
+
+    // Artículos sueltos directamente bajo RUBRO (a veces existen)
+    for (const a of (rubro?.articulos || [])) {
       const id = Number(a?.id);
-      if (!Number.isFinite(id)) continue;
-      out.push({ ...a, categoria: catNombre, subrubro: 'Sin subrubro' });
+      if (!Number.isFinite(id) || seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        id,
+        nombre: String(a?.nombre || '').trim(),
+        precio: Number(a?.precio || 0) || 0,
+        costo: 0,
+        categoria: cat,
+        subrubro: 'Sin subrubro',
+        _raw: a,
+      });
     }
 
-    // artículos bajo Subrubros (lo normal)
-    const subrs = Array.isArray(rubro?.subrubros) ? rubro.subrubros : [];
-    for (const sr of subrs) {
-      const srNombre = String(sr?.nombre || '').trim() || 'Sin subrubro';
-      const arts = Array.isArray(sr?.articulos) ? sr.articulos : [];
-      for (const a of arts) {
+    // SUB_RUBROS
+    for (const sr of (rubro?.subrubros || [])) {
+      const sub = String(sr?.nombre || '').trim() || 'Sin subrubro';
+      for (const a of (sr?.articulos || [])) {
         const id = Number(a?.id);
-        if (!Number.isFinite(id)) continue;
-        out.push({ ...a, categoria: catNombre, subrubro: srNombre });
+        if (!Number.isFinite(id) || seen.has(id)) continue;
+        seen.add(id);
+        out.push({
+          id,
+          nombre: String(a?.nombre || '').trim(),
+          precio: Number(a?.precio || 0) || 0,
+          costo: 0,
+          categoria: cat,
+          subrubro: sub,
+          _raw: a,
+        });
       }
     }
   }
   return out;
 }
-
 
 function parseDate(d, fallback) {
   const x = new Date(d);
@@ -174,14 +191,14 @@ async function upsertArticles({ client, businessId, items }) {
       const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
       if (!Number.isFinite(id)) continue;
 
-      const nombre    = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').trim().slice(0, 200) || `#${id}`;
-      const categoria = String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría';
-      const subrubro  = String(it.subrubro  ?? it.subRubro ?? '').trim() || 'Sin subrubro';
+      const nombre    = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
+      const categoria = String(it.categoria ?? '').trim() || 'Sin categoría';
+      const subrubro  = String(it.subrubro  ?? '').trim() || 'Sin subrubro';
       const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo     = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
+      const costo     = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
-      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it));
+      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it._raw ?? it));
     }
 
     if (!values.length) continue;
@@ -241,24 +258,18 @@ exports.syncNow = async (req, res) => {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     let upserted = 0;
-
     if (scope === 'articles' || scope === 'all') {
-      // 1) Traemos el árbol
-      const menu = await fetchMaxiArticles({ token /*, from: f, to: t*/ });
-      // 2) Lo aplanamos a [{id, nombre, precio, categoria, subrubro, ...}]
-      const items = flattenMaxiMenu(menu);
+      const tree = await fetchMaxiArticles({ token, from: f, to: t }); // devuelve el ARBOL
+      const items = flattenMaxiMenu(tree); // ← ahora es plano con categoria/subrubro
 
       await client.query('BEGIN');
       upserted += await upsertArticles({ client, businessId, items });
       await client.query('COMMIT');
-
-      return res.json({ ok: true, scope: 'articles', upserted });
     }
 
-    // (ventas cuando tengas endpoint real…)
     return res.json({ ok: true, scope, from: f, to: t, upserted });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('syncNow error:', e);
     return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
