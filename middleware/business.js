@@ -21,6 +21,7 @@ async function loadActiveBusiness(req, res, next) {
 
     if (!businessId) { // el usuario no tiene activo ninguno
       req.business = null;
+      req.businessId = null;
       return next();
     }
 

@@ -3,13 +3,15 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const morgan = require('morgan');
+const { randomUUID } = require('crypto');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
-const { randomUUID } = require('crypto');
+
+const authRequired = require('./middleware/authMiddleware');
+const { loadActiveBusiness } = require('./middleware/business');
 
 const app = express();
-
-const morgan = require('morgan');
 
 // ---------- Patch de logging (seguro y minimal) ----------
 app.set('trust proxy', 1); // Render/NGINX, IP real y HTTPS
@@ -19,7 +21,6 @@ app.use((req, res, next) => {
   const reqId = randomUUID().slice(0, 8);
   const start = Date.now();
 
-  // Enmascarar Authorization
   const auth = req.headers.authorization ? '***' : undefined;
   const hdrs = { ...req.headers, authorization: auth };
 
@@ -43,22 +44,28 @@ app.use(cors({
     'https://lazarillo.com.ar',
     'http://lazarillo.com.ar',
   ],
- methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'],
-  credentials: false, // true solo si usás cookies/sesiones entre dominios
+  credentials: false,
 }));
 
 // ---------- Parsers ----------
 app.use(express.json());
 
+// ---------- Logging HTTP ----------
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
-// ---------- Rutas ----------
+// ---------- Rutas públicas (SIN auth) ----------
+app.use('/api/auth', require('./routes/authRoutes')); // login/registro públicos
+
+// 🔒 Todo lo que siga en /api requiere auth + contexto de negocio
+app.use('/api', authRequired, loadActiveBusiness);
+
+// ---------- Rutas protegidas (CON auth + negocio activo/override) ----------
 app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
-app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/insumos', require('./routes/insumosRoutes'));
 app.use('/api', require('./routes/agrupacionesRoutes'));
-app.use('/api/ventas', require('./routes/ventasRoutes')); 
+app.use('/api/ventas', require('./routes/ventasRoutes'));
 app.use('/api/businesses', require('./routes/businessRoutes'));
 app.use('/api/branches', require('./routes/branchRoutes'));
 
@@ -73,7 +80,7 @@ app.get('/health/db', async (_req, res) => {
     res.status(500).json({ error: 'db down' });
   }
 });
-// en app.js, junto a /health/db
+
 app.get('/health/agrupaciones', async (_req, res) => {
   const { rows } = await pool.query(`
     SELECT
@@ -87,8 +94,6 @@ app.get('/health/agrupaciones', async (_req, res) => {
   res.json(rows[0]);
 });
 
-
-// en app.js (después de las otras health)
 app.get('/health/auth', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
@@ -105,7 +110,7 @@ app.get('/health/auth', async (_req, res) => {
   }
 });
 
-// ---------- 404 explícito (opcional) ----------
+// ---------- 404 explícito ----------
 app.use((req, res, _next) => {
   res.status(404).json({ error: 'not_found', path: req.originalUrl });
 });
@@ -137,10 +142,3 @@ const PORT = process.env.PORT || 4000;
   }
 })();
 
-app.use((err, req, res, next) => {
-  console.error('[UNCAUGHT]', {
-    method: req.method, url: req.originalUrl,
-    msg: err.message, code: err.code, detail: err.detail, stack: err.stack,
-  });
-  res.status(500).json({ ok:false, error: err.message, code: err.code, detail: err.detail });
-});

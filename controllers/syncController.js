@@ -245,28 +245,20 @@ async function upsertArticles({ client, businessId, items }) {
 
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = Number(req.params.id);
+  const businessId = req.businessId;              // ✅ viene del middleware (X-Business-Id, :id o activo)
   const { scope = 'articles', from, to } = req.body || {};
-  if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
+  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
-  const { rows } = await pool.query(`
-    SELECT b.props
-      FROM app_businesses b
-      LEFT JOIN user_businesses ub ON ub.business_id = b.id
-     WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-     LIMIT 1
-  `, [businessId, uid]);
-  if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
-
-  // fechas por si luego las usamos en ventas
+  // Fechas por defecto
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   const f = ymd(parseDate(from, startOfMonth));
   const t = ymd(parseDate(to, yesterday));
 
-  // credenciales
-  const mx = (rows[0].props || {}).maxi || {};
+  // Credenciales MAXI tomadas del negocio (ya validado por middleware)
+  const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
+  const mx = (bizRows[0]?.props || {}).maxi || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
   if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
@@ -274,19 +266,17 @@ exports.syncNow = async (req, res) => {
   try {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
-    let upserted = 0;
-
     if (scope === 'articles' || scope === 'all') {
-      const tree = await fetchMaxiArticles({ token, from: f, to: t }); // árbol Maxi
-      const items = normalizeArticles(tree);                           // << aplanado
+      const tree = await fetchMaxiArticles({ token, from: f, to: t });
+      const items = normalizeArticles(tree);
+
       await pool.query(
         'INSERT INTO public.maxi_menu_cache (business_id, payload) VALUES ($1, $2)',
         [businessId, JSON.stringify(tree)]
       );
-      // Logs útiles para verificar en consola del backend
+
       console.log('[sync] maxi tree:', Array.isArray(tree) ? tree.length : 0,
-        'normalized:', items.length,
-        'sample:', items[0]);
+        'normalized:', items.length, 'sample:', items[0]);
 
       await client.query('BEGIN');
       const n = await upsertArticles({ client, businessId, items });
@@ -294,8 +284,9 @@ exports.syncNow = async (req, res) => {
       return res.json({ ok: true, scope: 'articles', upserted: n });
     }
 
+    return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { }
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('syncNow error:', e);
     return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
@@ -306,16 +297,8 @@ exports.syncNow = async (req, res) => {
 // GET /api/businesses/:id/sales/summary?from&to
 exports.salesSummaryFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = Number(req.params.id);
-  if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
-
-  const { rows: ok } = await pool.query(`
-    SELECT 1
-    FROM app_businesses b
-    LEFT JOIN user_businesses ub ON ub.business_id=b.id
-    WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-    LIMIT 1`, [businessId, uid]);
-  if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
+  const businessId = req.businessId;              // ✅
+  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
@@ -345,20 +328,12 @@ exports.salesSummaryFromDB = async (req, res) => {
 // GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day|week|month
 exports.salesSeriesFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = Number(req.params.id);
+  const businessId = req.businessId;              // ✅
   const articuloId = Number(req.params.articuloId);
   let { groupBy = 'day' } = req.query || {};
   if (!uid || !businessId || !Number.isFinite(articuloId)) {
     return res.status(400).json({ error: 'bad_request' });
   }
-
-  const { rows: ok } = await pool.query(`
-    SELECT 1
-    FROM app_businesses b
-    LEFT JOIN user_businesses ub ON ub.business_id=b.id
-    WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-    LIMIT 1`, [businessId, uid]);
-  if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
 
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
@@ -400,18 +375,11 @@ exports.salesSeriesFromDB = async (req, res) => {
   res.json({ from, to, groupBy, articuloId, items: rows });
 };
 
-// GET /api/businesses/:id/articles (desde tu BD)
+// GET /api/businesses/:id/articles  (desde tu BD)
 exports.listArticlesFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = Number(req.params.id);
-  if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
-
-  const { rows: ok } = await pool.query(`
-    SELECT 1 FROM app_businesses b
-    LEFT JOIN user_businesses ub ON ub.business_id=b.id
-    WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2) LIMIT 1
-  `, [businessId, uid]);
-  if (!ok[0]) return res.status(403).json({ error: 'forbidden' });
+  const businessId = req.businessId;              // ✅
+  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
   const { rows } = await pool.query(`
     SELECT
@@ -424,32 +392,17 @@ exports.listArticlesFromDB = async (req, res) => {
       raw
     FROM public.maxi_articles
     WHERE business_id = $1
-    ORDER BY nombre ASC
+    ORDER BY categoria, subrubro, nombre
   `, [businessId]);
 
   res.json({ items: rows });
 };
 
-// (Opcional) GET /api/businesses/:id/maxi-articles?from&to  → proxy directo a MAXI (sin grabar)
+// (Opcional) proxy directo a MAXI
 exports.maxiArticlesProxy = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = Number(req.params.id);
-  if (!uid || !businessId) return res.status(400).json({ error: 'bad_request' });
-
-  const { rows } = await pool.query(`
-    SELECT b.props
-      FROM app_businesses b
-      LEFT JOIN user_businesses ub ON ub.business_id=b.id
-     WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-     LIMIT 1
-  `, [businessId, uid]);
-  if (!rows[0]) return res.status(403).json({ error: 'forbidden' });
-
-  const mx = (rows[0].props || {}).maxi || {};
-  const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
-  if (!(mx.email && password && mx.codcli)) {
-    return res.status(400).json({ error: 'maxi_not_configured' });
-  }
+  const businessId = req.businessId;              // ✅
+  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
@@ -458,6 +411,13 @@ exports.maxiArticlesProxy = async (req, res) => {
   const to = ymd(parseDate(req.query.to, yesterday));
 
   try {
+    const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
+    const mx = (rows[0]?.props || {}).maxi || {};
+    const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
+    if (!(mx.email && password && mx.codcli)) {
+      return res.status(400).json({ error: 'maxi_not_configured' });
+    }
+
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
     const items = await fetchMaxiArticles({ token, from, to });
     res.json({ from, to, items });
