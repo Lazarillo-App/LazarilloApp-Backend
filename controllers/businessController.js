@@ -162,26 +162,37 @@ exports.update = async (req, res) => {
 exports.select = async (req, res) => {
   try {
     const uid = req.user?.id;
-    const id = Number(req.params.id);
+    const id  = Number(req.params.id);
+
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
-    if (!id) return res.status(400).json({ error: 'id_required' });
+    if (!id)  return res.status(400).json({ error: 'id_required' });
 
     const { rows: belongs } = await pool.query(
       `SELECT 1
-       FROM app_businesses b
-       LEFT JOIN user_businesses ub ON ub.business_id=b.id
-       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-       LIMIT 1`, [id, uid]
+         FROM app_businesses b
+         LEFT JOIN user_businesses ub ON ub.business_id = b.id
+        WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
+        LIMIT 1`,
+      [id, uid]
     );
-    if (!belongs.length) return res.status(403).json({ error: 'forbidden' });
 
-    await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [id, uid]);
-    res.json({ ok: true, activeBusinessId: id });
+    if (!belongs.length) {
+      // return res.status(403).json({ error: 'forbidden' });
+      return res.status(404).json({ error: 'not_found' }); // si preferís ocultar
+    }
+
+    await pool.query(
+      `UPDATE app_users SET active_business_id = $1 WHERE id = $2`,
+      [id, uid]
+    );
+
+    return res.json({ ok: true, activeBusinessId: id });
   } catch (e) {
     console.error('POST /api/businesses/:id/select error:', e);
-    res.status(500).json({ error: 'internal' });
+    return res.status(500).json({ error: 'internal' });
   }
 };
+
 
 // controllers/businessController.js (solo el remove)
 exports.remove = async (req, res) => {
@@ -252,24 +263,48 @@ exports.maxiStatus = async (req, res) => {
   res.json({ configured, email: mx.email || null, codcli: mx.codcli || null });
 };
 
+// controllers/businessController.js
+
 exports.maxiSave = async (req, res) => {
-  const uid = req.user?.id;
-  const businessId = req.businessId;
+  const uid   = req.user?.id;                 // del JWT (authRequired)
+  const bizId = Number(req.params?.id);       // /businesses/:id/maxi-credentials
+
   if (!uid) return res.status(401).json({ error: 'unauthorized' });
-  if (!businessId) return res.status(404).json({ error: 'not_found' });
+  if (!bizId || Number.isNaN(bizId)) {
+    return res.status(400).json({ error: 'invalid_business_id' });
+  }
+
+  // ¿el usuario pertenece a este negocio? (owner o en tabla de membresías)
+  const { rows: belongs } = await pool.query(
+    `SELECT 1
+       FROM app_businesses b
+       LEFT JOIN user_businesses ub ON ub.business_id = b.id
+      WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
+      LIMIT 1`,
+    [bizId, uid]
+  );
+  if (!belongs.length) return res.status(404).json({ error: 'not_found' }); // o 403 si preferís
 
   const { email, password, codcli } = req.body || {};
-  if (!email || !password || !codcli) return res.status(400).json({ error: 'missing_fields' });
+  if (!email || !password || !codcli) {
+    return res.status(400).json({ error: 'missing_fields' });
+  }
 
-  const maxi = { email, codcli, pass_enc: encryptSecret(password) };
-  await pool.query(`
-    UPDATE app_businesses
-       SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
-           updated_at = NOW()
-     WHERE id=$1
-  `, [businessId, maxi]);
+  const maxi = {
+    email: String(email).trim(),
+    codcli: String(codcli).trim(),
+    pass_enc: encryptSecret(password),
+  };
 
-  res.json({ ok: true, maxi: { email, codcli, configured: true } });
+  await pool.query(
+    `UPDATE app_businesses
+        SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
+            updated_at = NOW()
+      WHERE id = $1`,
+    [bizId, maxi]
+  );
+
+  return res.json({ ok: true, maxi: { email: maxi.email, codcli: maxi.codcli, configured: true } });
 };
 
 // ------------------- MAXI (helpers y proxy opcional) -------------------
