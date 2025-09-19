@@ -183,16 +183,60 @@ exports.select = async (req, res) => {
   }
 };
 
+// controllers/businessController.js (solo el remove)
 exports.remove = async (req, res) => {
-  const uid = req.user?.id;
-  const businessId = req.businessId;
-  if (!uid) return res.status(401).json({ error: 'unauthorized' });
-  if (!businessId) return res.status(404).json({ error: 'not_found' });
+  const uid   = req.user?.id;             // setea authRequired (JWT)
+  const bizId = Number(req.params?.id);   // viene de /businesses/:id
 
-  await pool.query(`UPDATE app_users SET active_business_id=NULL WHERE id=$1 AND active_business_id=$2`, [uid, businessId]);
-  await pool.query(`DELETE FROM app_businesses WHERE id=$1`, [businessId]);
-  res.json({ ok: true });
+  if (!uid)   return res.status(401).json({ error: 'unauthorized' });
+  if (!bizId || Number.isNaN(bizId)) {
+    return res.status(400).json({ error: 'invalid_business_id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1) chequear que el negocio exista y sea del usuario (ajustá si usás memberships)
+    const owner = await client.query(
+      `SELECT id FROM app_businesses WHERE id=$1 AND owner_id=$2`,
+      [bizId, uid]
+    );
+    if (owner.rowCount === 0) {
+      await client.query('ROLLBACK');
+      // si no existe o no es tuyo, devolvemos 404 por seguridad
+      return res.status(404).json({ error: 'not_found' });
+    }
+
+    // 2) si este negocio estaba activo para el usuario, limpiarlo
+    await client.query(
+      `UPDATE app_users
+          SET active_business_id = NULL
+        WHERE id=$1 AND active_business_id=$2`,
+      [uid, bizId]
+    );
+
+    // 3) borrar el negocio (y en cascada si tenés FK con ON DELETE CASCADE)
+    const del = await client.query(
+      `DELETE FROM app_businesses WHERE id=$1 AND owner_id=$2`,
+      [bizId, uid]
+    );
+    if (del.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not_found' });
+    }
+
+    await client.query('COMMIT');
+    return res.status(204).end(); // o res.json({ok:true}) si preferís 200
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('DELETE /businesses/:id error', e);
+    return res.status(500).json({ error: 'server_error' });
+  } finally {
+    client.release();
+  }
 };
+
 
 // ------------------- MAXI (estado y credenciales) -------------------
 exports.maxiStatus = async (req, res) => {
