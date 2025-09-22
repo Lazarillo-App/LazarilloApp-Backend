@@ -6,6 +6,15 @@ const fetch = global.fetch || require('node-fetch');
 const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 
 // helpers (ponelos arriba del archivo)
+function simpleHash(str = '') {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = (h * 31 + str.charCodeAt(i)) | 0; // 32-bit
+  }
+  // lo devolvemos como string porque la columna es text
+  return String(h >>> 0); // sin signo
+}
+
 function pickDeep(obj, paths) {
   for (const p of paths) {
     const v = p.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
@@ -270,10 +279,16 @@ exports.syncNow = async (req, res) => {
       const tree = await fetchMaxiArticles({ token, from: f, to: t });
       const items = normalizeArticles(tree);
 
+      const rawStr = JSON.stringify(tree ?? []);
+      const hash = simpleHash(rawStr);
+
+      // Guarda payload + hash + updated_at (cumple NOT NULL)
       await pool.query(
-        'INSERT INTO public.maxi_menu_cache (business_id, payload) VALUES ($1, $2)',
-        [businessId, JSON.stringify(tree)]
+        `INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
+   VALUES ($1, $2::jsonb, $3, NOW())`,
+        [businessId, rawStr, hash]
       );
+
 
       console.log('[sync] maxi tree:', Array.isArray(tree) ? tree.length : 0,
         'normalized:', items.length, 'sample:', items[0]);
@@ -286,7 +301,7 @@ exports.syncNow = async (req, res) => {
 
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('syncNow error:', e);
     return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
