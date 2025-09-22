@@ -279,15 +279,17 @@ exports.syncNow = async (req, res) => {
       const tree = await fetchMaxiArticles({ token, from: f, to: t });
       const items = normalizeArticles(tree);
 
+      // justo después de obtener `tree`
       const rawStr = JSON.stringify(tree ?? []);
-      const hash = simpleHash(rawStr);
+      const hash = simpleHash(rawStr); // la misma función que ya agregaste
 
-      // Guarda payload + hash + updated_at (cumple NOT NULL)
-      await pool.query(
-        `INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
-   VALUES ($1, $2::jsonb, $3, NOW())`,
-        [businessId, rawStr, hash]
-      );
+      await pool.query(`
+  INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
+  VALUES ($1, $2::jsonb, $3, NOW())
+  ON CONFLICT (business_id, hash)
+  DO UPDATE SET updated_at = NOW()
+`, [businessId, rawStr, hash]);
+
 
 
       console.log('[sync] maxi tree:', Array.isArray(tree) ? tree.length : 0,
