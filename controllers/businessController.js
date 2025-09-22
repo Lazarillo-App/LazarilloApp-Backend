@@ -309,7 +309,7 @@ exports.maxiSave = async (req, res) => {
 
 // ------------------- MAXI (helpers y proxy opcional) -------------------
 async function callMaxiArticles({ email, password, codcli, from, to }) {
-  const BASE = (process.env.MAXI_BASE_URL || '').replace(/\/+$/, '');
+  const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 
   const rLogin = await fetch(`${BASE}/login`, {
     method: 'POST',
