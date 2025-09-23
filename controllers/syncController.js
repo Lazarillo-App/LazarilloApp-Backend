@@ -415,6 +415,53 @@ exports.listArticlesFromDB = async (req, res) => {
   res.json({ items: rows });
 };
 
+// GET /api/businesses/:id/articles/tree  (estructura para Sidebar)
+exports.listArticlesTreeFromDB = async (req, res) => {
+  const uid = req.user?.id;
+  const businessId = req.businessId; // ✅ del middleware
+  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
+
+  try {
+    const { rows } = await pool.query(`
+      SELECT articulo_id, nombre, categoria, subrubro, precio
+      FROM public.maxi_articles
+      WHERE business_id = $1
+      ORDER BY subrubro, categoria, nombre
+    `, [businessId]);
+
+    // Agrupar subrubro -> categorias -> articulos
+    const bySub = new Map();
+    for (const r of rows) {
+      const sub = r.subrubro || 'Sin subrubro';
+      const cat = r.categoria || 'Sin categoría';
+      if (!bySub.has(sub)) bySub.set(sub, new Map());
+      const byCat = bySub.get(sub);
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
+    }
+
+    const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
+      subrubro,
+      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({
+        categoria, articulos
+      }))
+    }));
+
+    res.json({
+      ok: true,
+      resumen: {
+        subrubros: tree.length,
+        categorias: tree.reduce((a,s)=>a+(s.categorias?.length||0),0),
+        articulos: tree.reduce((a,s)=>a+s.categorias.reduce((x,c)=>x+(c.articulos?.length||0),0),0),
+      },
+      tree
+    });
+  } catch (e) {
+    console.error('listArticlesTreeFromDB error:', e);
+    res.status(500).json({ error: 'internal', detail: e.message });
+  }
+};
+
 // (Opcional) proxy directo a MAXI
 exports.maxiArticlesProxy = async (req, res) => {
   const uid = req.user?.id;
