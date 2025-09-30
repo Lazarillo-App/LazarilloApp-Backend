@@ -1,58 +1,32 @@
-// controllers/agrupacionesController.js
 const pool = require('../config/db');
 
-// ========================= Helpers =========================
-const isArray = (v) => Array.isArray(v);
-const toItemsArray = (arr) =>
-  (isArray(arr) ? arr : [])
-    .map(a => ({
-      id: Number(a?.id ?? a?.articuloId ?? a?.codigo ?? a?.codigoArticulo),
-      nombre: String(a?.nombre ?? ''),
-      categoria: String(a?.categoria ?? 'Sin categoría'),
-      subrubro: String(a?.subrubro ?? 'Sin subrubro'),
-      precio: Number(a?.precio ?? 0)
-    }))
-    .filter(x => Number.isFinite(x.id) && x.id > 0);
+// --- helpers existentes (isArray, toItemsArray, parseJsonArrayLoose, mergeById) se mantienen ---
 
-    // helpers/agrupaciones.js (o al principio del controller)
-function parseJsonArrayLoose(val) {
-  if (Array.isArray(val)) return val;
-  if (val == null) return [];
-  try {
-    if (typeof val === 'string') {
-      const parsed = JSON.parse(val);
-      return Array.isArray(parsed) ? parsed : [];
-    }
-    // psql puede devolver objetos JS ya parseados si la col es jsonb
-    return Array.isArray(val) ? val : [];
-  } catch {
-    return []; // si hay texto inválido -> lo tratamos como []
-  }
-}
-
-
-// merge por id, preservando el orden del base
-function mergeById(base = [], incoming = []) {
-  const out = [...base];
-  const seen = new Set(base.map(x => x.id));
-  for (const it of incoming) {
-    if (!seen.has(it.id)) {
-      out.push(it);
-      seen.add(it.id);
-    }
-  }
-  return out;
-}
+const getBiz = (req) => {
+  // prioridad: param, luego resuelto por middleware, luego header
+  const p = Number(req.params?.businessId);
+  if (Number.isFinite(p)) return p;
+  if (Number.isFinite(req.businessId)) return Number(req.businessId);
+  const h = Number(req.header('X-Business-Id'));
+  if (Number.isFinite(h)) return h;
+  return NaN;
+};
 
 // ========================= CRUD Agrupaciones =========================
 
-// GET /agrupaciones
-exports.obtenerAgrupaciones = async (_req, res) => {
+// GET /businesses/:businessId/agrupaciones
+exports.obtenerAgrupaciones = async (req, res) => {
   try {
+    const businessId = getBiz(req);
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok:false, error:'businessId requerido' });
+
     const { rows } = await pool.query(
-      `SELECT id, nombre, 
-      COALESCE(NULLIF(articulos::text, '')::jsonb, '[]'::jsonb) AS articulos FROM agrupaciones
-        ORDER BY id ASC`
+      `SELECT id, nombre,
+              COALESCE(NULLIF(articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
+         FROM agrupaciones
+        WHERE business_id = $1
+        ORDER BY nombre ASC`,
+      [businessId]
     );
     return res.json(rows);
   } catch (e) {
@@ -61,35 +35,39 @@ exports.obtenerAgrupaciones = async (_req, res) => {
   }
 };
 
-// POST /agrupaciones
+// POST /businesses/:businessId/agrupaciones
 exports.crearAgrupacion = async (req, res) => {
   try {
+    const businessId = getBiz(req);
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok:false, error:'businessId requerido' });
+
     const nombre = String(req.body?.nombre ?? '').trim();
     const articulos = toItemsArray(req.body?.articulos);
     if (!nombre) return res.status(400).json({ ok:false, error:'El nombre es obligatorio' });
 
     const { rows } = await pool.query(
-      `INSERT INTO agrupaciones (nombre, articulos)
-       VALUES ($1, $2::jsonb)
+      `INSERT INTO agrupaciones (business_id, nombre, articulos)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (business_id, nombre)
+       DO UPDATE SET nombre = EXCLUDED.nombre
        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-      [nombre, JSON.stringify(articulos)]
+      [businessId, nombre, JSON.stringify(articulos)]
     );
     return res.status(201).json(rows[0]);
   } catch (e) {
-    if (e.code === '23505') {
-      return res.status(409).json({ ok:false, error:'Ya existe una agrupación con ese nombre' });
-    }
     console.error('crearAgrupacion error:', e);
     return res.status(500).json({ ok:false, error: e.message });
   }
 };
 
-// PUT /agrupaciones/:id
-// Permite cambiar nombre y/o reemplazar todo el array de artículos
+// PUT /businesses/:businessId/agrupaciones/:id
 exports.actualizarAgrupacion = async (req, res) => {
   try {
+    const businessId = getBiz(req);
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
+    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      return res.status(400).json({ ok:false, error:'parámetros inválidos' });
+    }
 
     const sets = [];
     const vals = [];
@@ -97,7 +75,7 @@ exports.actualizarAgrupacion = async (req, res) => {
 
     if (req.body?.nombre !== undefined) {
       const nombre = String(req.body.nombre ?? '').trim();
-      if (!nombre) return res.status(400).json({ ok: false, error: 'El nombre no puede quedar vacío' });
+      if (!nombre) return res.status(400).json({ ok:false, error:'El nombre no puede quedar vacío' });
       push('nombre', nombre);
     }
 
@@ -106,54 +84,59 @@ exports.actualizarAgrupacion = async (req, res) => {
       push('articulos', JSON.stringify(articulos));
     }
 
-    if (!sets.length) return res.json({ ok: true, data: null });
+    if (!sets.length) return res.json({ ok:true, data:null });
 
     const sql = `
       UPDATE agrupaciones
          SET ${sets.join(', ')}
-       WHERE id = $${vals.length + 1}
+       WHERE id = $${vals.length + 1} AND business_id = $${vals.length + 2}
        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`;
-    const { rows } = await pool.query(sql, [...vals, id]);
+    const { rows } = await pool.query(sql, [...vals, id, businessId]);
 
-    if (!rows.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    if (!rows.length) return res.status(404).json({ ok:false, error:'Agrupación no encontrada' });
     return res.json(rows[0]);
   } catch (e) {
-    if (e.code === '23505') {
-      return res.status(409).json({ ok: false, error: 'Ya existe una agrupación con ese nombre' });
-    }
     console.error('actualizarAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok:false, error: e.message });
   }
 };
 
-// DELETE /agrupaciones/:id
+// DELETE /businesses/:businessId/agrupaciones/:id
 exports.eliminarAgrupacion = async (req, res) => {
   try {
+    const businessId = getBiz(req);
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
+    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      return res.status(400).json({ ok:false, error:'parámetros inválidos' });
+    }
 
-    const r = await pool.query(`DELETE FROM agrupaciones WHERE id=$1`, [id]);
-    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    const r = await pool.query(
+      `DELETE FROM agrupaciones WHERE id=$1 AND business_id=$2`,
+      [id, businessId]
+    );
+    if (!r.rowCount) return res.status(404).json({ ok:false, error:'Agrupación no encontrada' });
 
-    // limpiar exclusiones si existen (tabla puede no existir en algunos entornos)
     try {
-      await pool.query(`DELETE FROM agrupacion_exclusiones WHERE agrupacion_id=$1`, [id]);
-    } catch (_e) { /* noop */ }
-
-    return res.json({ ok: true });
+      await pool.query(
+        `DELETE FROM agrupacion_exclusiones WHERE agrupacion_id=$1 AND business_id=$2`,
+        [id, businessId]
+      );
+    } catch (_) {}
+    return res.json({ ok:true });
   } catch (e) {
     console.error('eliminarAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok:false, error: e.message });
   }
 };
 
-// PUT /agrupaciones/:id/articulos
-// Agrega en “append” artículos nuevos SIN duplicar por id
-// controllers/agrupacionesController.js
+// PUT /businesses/:businessId/agrupaciones/:id/articulos
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
+    const businessId = getBiz(req);
     const id = Number(req.params.id ?? req.params.agrupacionId);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
+    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      return res.status(400).json({ ok:false, error:'parámetros inválidos' });
+    }
 
     const incomingArticulos = toItemsArray(req.body?.articulos);
     const incomingIds = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
@@ -161,10 +144,13 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
       ? incomingArticulos
       : incomingIds.map(x => ({ id: x, nombre:'', categoria:'Sin categoría', subrubro:'Sin subrubro', precio:0 }));
 
-    if (!incoming.length) return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
+    if (!incoming.length) return res.status(400).json({ ok:false, error:'Sin artículos para agregar' });
 
-    const { rows: r0 } = await pool.query(`SELECT articulos FROM agrupaciones WHERE id=$1`, [id]);
-    if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    const { rows: r0 } = await pool.query(
+      `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
+      [id, businessId]
+    );
+    if (!r0.length) return res.status(404).json({ ok:false, error:'Agrupación no encontrada' });
 
     const base = parseJsonArrayLoose(r0[0].articulos);
     const merged = mergeById(base, incoming);
@@ -172,30 +158,33 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     const { rows } = await pool.query(
       `UPDATE agrupaciones
           SET articulos = $1::jsonb
-        WHERE id = $2
+        WHERE id = $2 AND business_id = $3
         RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-      [JSON.stringify(merged), id]
+      [JSON.stringify(merged), id, businessId]
     );
 
     return res.json(rows[0]);
   } catch (e) {
     console.error('agregarArticulosAgrupacion error:', { code:e.code, detail:e.detail, msg:e.message });
-    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
+    return res.status(500).json({ ok:false, error: e.message, code: e.code, detail: e.detail });
   }
 };
 
-
-// DELETE /agrupaciones/:id/articulos/:articuloId
+// DELETE /businesses/:businessId/agrupaciones/:id/articulos/:articuloId
 exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   try {
+    const businessId = getBiz(req);
     const id = Number(req.params.id);
     const articuloId = Number(req.params.articuloId);
-    if (!Number.isFinite(id) || !Number.isFinite(articuloId)) {
-      return res.status(400).json({ ok: false, error: 'id/articuloId inválidos' });
+    if (!Number.isFinite(businessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
+      return res.status(400).json({ ok:false, error:'parámetros inválidos' });
     }
 
-    const { rows: r0 } = await pool.query(`SELECT articulos FROM agrupaciones WHERE id=$1`, [id]);
-    if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    const { rows: r0 } = await pool.query(
+      `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
+      [id, businessId]
+    );
+    if (!r0.length) return res.status(404).json({ ok:false, error:'Agrupación no encontrada' });
 
     const base = parseJsonArrayLoose(r0[0].articulos);
     const filtered = base.filter(a => Number(a.id) !== articuloId);
@@ -203,112 +192,98 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
     const { rows } = await pool.query(
       `UPDATE agrupaciones
           SET articulos = $1::jsonb
-        WHERE id = $2
+        WHERE id = $2 AND business_id = $3
         RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-      [JSON.stringify(filtered), id]
+      [JSON.stringify(filtered), id, businessId]
     );
 
     return res.json(rows[0]);
   } catch (e) {
     console.error('eliminarArticuloDeAgrupacion error:', { code:e.code, detail:e.detail, msg:e.message });
-    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
+    return res.status(500).json({ ok:false, error: e.message, code: e.code, detail: e.detail });
   }
 };
 
-
 // ========================= “TODO” + Exclusiones =========================
 
-exports.ensureTodoAgrupacion = async (_req, res) => {
+// PUT /businesses/:businessId/agrupaciones/todo
+exports.ensureTodoAgrupacion = async (req, res) => {
   try {
+    const businessId = getBiz(req);
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok:false, error:'businessId requerido' });
+
     const q1 = await pool.query(
-      `SELECT id, nombre FROM agrupaciones WHERE nombre='TODO' LIMIT 1`
+      `SELECT id, nombre FROM agrupaciones
+        WHERE business_id=$1 AND nombre='TODO'
+        LIMIT 1`,
+      [businessId]
     );
     if (q1.rows.length) return res.json(q1.rows[0]);
 
-    // ✅ columnas y valores alineados; requiere índice único por 'nombre'
     const q2 = await pool.query(
-      `INSERT INTO agrupaciones (nombre, articulos)
-       VALUES ('TODO', '[]'::jsonb)
-       ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
-       RETURNING id, nombre`
+      `INSERT INTO agrupaciones (business_id, nombre, articulos)
+       VALUES ($1, 'TODO', '[]'::jsonb)
+       ON CONFLICT (business_id, nombre) DO UPDATE SET nombre = EXCLUDED.nombre
+       RETURNING id, nombre`,
+      [businessId]
     );
     return res.status(201).json(q2.rows[0]);
   } catch (e) {
-    // Si no hay índice único y no querés crearlo aún:
-    // - podés capturar 42P10 y hacer un INSERT sin ON CONFLICT como fallback.
-    if (e.code === '42P10') {
-      const q = await pool.query(
-        `INSERT INTO agrupaciones (nombre, articulos)
-         VALUES ('TODO', '[]'::jsonb)
-         RETURNING id, nombre`
-      );
-      return res.status(201).json(q.rows[0]);
-    }
     console.error('ensureTodoAgrupacion error:', e);
     return res.status(500).json({ ok:false, error: e.message });
   }
 };
 
-
-// GET /agrupaciones/:id/exclusiones
+// GET /businesses/:businessId/agrupaciones/:id/exclusiones
 exports.listarExclusiones = async (req, res) => {
   try {
+    const businessId = getBiz(req);
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
+    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      return res.status(400).json({ ok:false, error:'parámetros inválidos' });
+    }
 
-    // si la tabla no existe aún, respondemos [] en vez de 500
     try {
       const { rows } = await pool.query(
         `SELECT scope, ref_id
            FROM agrupacion_exclusiones
-          WHERE agrupacion_id = $1
+          WHERE agrupacion_id = $1 AND business_id = $2
           ORDER BY scope, ref_id`,
-        [id]
+        [id, businessId]
       );
       return res.json(rows);
     } catch (e) {
-      // Tabla ausente: 42P01 undefined_table
       if (e.code === '42P01') return res.json([]);
       throw e;
     }
   } catch (e) {
     console.error('listarExclusiones error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok:false, error: e.message });
   }
 };
 
-// POST /agrupaciones/:id/exclusiones
-// body: { mode:'add'|'remove', items: [{ scope:'categoria'|'subrubro'|'articulo', ref_id:string|number }] }
+// POST /businesses/:businessId/agrupaciones/:id/exclusiones
 exports.upsertExclusiones = async (req, res) => {
   try {
+    const businessId = getBiz(req);
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
+    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      return res.status(400).json({ ok:false, error:'parámetros inválidos' });
+    }
 
     const mode = String(req.body?.mode || '').toLowerCase();
-    const items = isArray(req.body?.items) ? req.body.items : [];
-    if (!['add', 'remove'].includes(mode)) {
-      return res.status(400).json({ ok: false, error: 'mode debe ser "add" o "remove"' });
-    }
-    if (!items.length) {
-      return res.status(400).json({ ok: false, error: 'items vacío' });
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!['add','remove'].includes(mode) || !items.length) {
+      return res.status(400).json({ ok:false, error:'payload inválido' });
     }
 
-    const allowed = new Set(['categoria', 'subrubro', 'articulo']);
-    const norm = items.map(x => ({
-      scope: String(x.scope || '').toLowerCase(),
-      ref_id: String(x.ref_id ?? '').trim()
-    })).filter(x => allowed.has(x.scope) && x.ref_id !== '');
-
-    if (!norm.length) return res.status(400).json({ ok: false, error: 'items inválidos' });
-
-    // Si la tabla no existe aún, la creamos on-the-fly para no romper producción
     await pool.query(`
       CREATE TABLE IF NOT EXISTS agrupacion_exclusiones (
         id SERIAL PRIMARY KEY,
+        business_id INT NOT NULL,
         agrupacion_id INT NOT NULL REFERENCES agrupaciones(id) ON DELETE CASCADE,
         scope TEXT NOT NULL CHECK (scope IN ('categoria','subrubro','articulo')),
-        ref_id TEXT NOT NULL,
-        UNIQUE (agrupacion_id, scope, ref_id)
+        ref_id TEXT NOT NULL
       );
     `);
 
@@ -317,77 +292,77 @@ exports.upsertExclusiones = async (req, res) => {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        for (const it of norm) {
+        for (const raw of items) {
+          const scope = String(raw.scope || '').toLowerCase();
+          const ref_id = String(raw.ref_id ?? '').trim();
+          if (!['categoria','subrubro','articulo'].includes(scope) || !ref_id) continue;
+
           const r = await client.query(
-            `INSERT INTO agrupacion_exclusiones (agrupacion_id, scope, ref_id)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (agrupacion_id, scope, ref_id) DO NOTHING`,
-            [id, it.scope, it.ref_id]
+            `INSERT INTO agrupacion_exclusiones (business_id, agrupacion_id, scope, ref_id)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING`,
+            [businessId, id, scope, ref_id]
           );
           added += r.rowCount || 0;
         }
         await client.query('COMMIT');
       } catch (e) {
-        await client.query('ROLLBACK');
-        throw e;
+        await client.query('ROLLBACK'); throw e;
       } finally {
         client.release();
       }
-      return res.json({ ok: true, added, removed: 0, total: added });
+      return res.json({ ok:true, added, removed:0, total:added });
     } else {
       const params = [];
       const conds = [];
       let i = 1;
-      for (const it of norm) {
-        params.push(id, it.scope, it.ref_id);
-        conds.push(`(agrupacion_id = $${i++} AND scope = $${i++} AND ref_id = $${i++})`);
+      for (const raw of items) {
+        const scope = String(raw.scope || '').toLowerCase();
+        const ref_id = String(raw.ref_id ?? '').trim();
+        if (!['categoria','subrubro','articulo'].includes(scope) || !ref_id) continue;
+        params.push(businessId, id, scope, ref_id);
+        conds.push(`(business_id=$${i++} AND agrupacion_id=$${i++} AND scope=$${i++} AND ref_id=$${i++})`);
       }
+      if (!conds.length) return res.json({ ok:true, added:0, removed:0, total:0 });
+
       const sql = `DELETE FROM agrupacion_exclusiones WHERE ${conds.join(' OR ')}`;
       const r = await pool.query(sql, params);
-      return res.json({ ok: true, added: 0, removed: r.rowCount || 0, total: r.rowCount || 0 });
+      return res.json({ ok:true, added:0, removed:r.rowCount||0, total:r.rowCount||0 });
     }
   } catch (e) {
     console.error('upsertExclusiones error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok:false, error: e.message });
   }
 };
 
-// controllers/agrupacionesController.js
-
+// POST /businesses/:businessId/agrupaciones/:fromId/move-items
 exports.moveItemsBetweenGroups = async (req, res) => {
-  // Aceptar :id o :fromId según como esté declarada la ruta
+  const businessId = getBiz(req);
   const fromId = Number(req.params.id ?? req.params.fromId);
   const toId   = Number(req.body?.toId);
-  const ids    = (Array.isArray(req.body?.ids) ? req.body.ids : [])
-                  .map(Number).filter(Boolean);
+  const ids    = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
 
-  if (!Number.isFinite(fromId) || !Number.isFinite(toId) || !ids.length) {
-    return res.status(400).json({ ok:false, error:'Parámetros inválidos' });
+  if (!Number.isFinite(businessId) || !Number.isFinite(fromId) || !Number.isFinite(toId) || !ids.length) {
+    return res.status(400).json({ ok:false, error:'parámetros inválidos' });
   }
-  if (fromId === toId) return res.json({ ok:true, moved: 0 });
+  if (fromId === toId) return res.json({ ok:true, moved:0 });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Traer y bloquear ambas filas
     const { rows } = await client.query(
-      `SELECT id, articulos FROM agrupaciones WHERE id = ANY($1::int[]) FOR UPDATE`,
-      [[fromId, toId]]
+      `SELECT id, articulos FROM agrupaciones
+        WHERE business_id=$1 AND id = ANY($2::int[])
+        FOR UPDATE`,
+      [businessId, [fromId, toId]]
     );
 
-    // Normalizar ids y verificar presencia individual (evita el bug)
     const fromRow = rows.find(r => Number(r.id) === fromId);
     const toRow   = rows.find(r => Number(r.id) === toId);
-
     if (!fromRow || !toRow) {
       await client.query('ROLLBACK');
-      const faltantes = [fromId, toId]
-        .filter(x => !rows.some(r => Number(r.id) === x));
-      return res.status(404).json({
-        ok:false,
-        error:`Agrupación/es no encontrada/s: ${faltantes.join(', ')}`
-      });
+      return res.status(404).json({ ok:false, error:'Agrupación/es no encontrada/s' });
     }
 
     const fromList = parseJsonArrayLoose(fromRow.articulos);
@@ -395,12 +370,8 @@ exports.moveItemsBetweenGroups = async (req, res) => {
 
     const idsSet = new Set(ids);
     const moving = fromList.filter(a => idsSet.has(Number(a.id)));
-    if (!moving.length) {
-      await client.query('COMMIT');
-      return res.json({ ok:true, moved: 0 });
-    }
+    if (!moving.length) { await client.query('COMMIT'); return res.json({ ok:true, moved:0 }); }
 
-    // Merge a destino sin duplicar
     const seen = new Set(toList.map(x => Number(x.id)));
     const toMerged = [...toList];
     for (const it of moving) {
@@ -410,16 +381,16 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     const fromFiltered = fromList.filter(a => !idsSet.has(Number(a.id)));
 
     await client.query(
-      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2`,
-      [JSON.stringify(fromFiltered), fromId]
+      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
+      [JSON.stringify(fromFiltered), fromId, businessId]
     );
     await client.query(
-      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2`,
-      [JSON.stringify(toMerged), toId]
+      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
+      [JSON.stringify(toMerged), toId, businessId]
     );
 
     await client.query('COMMIT');
-    return res.json({ ok:true, moved: moving.length });
+    return res.json({ ok:true, moved:moving.length });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('moveItemsBetweenGroups error:', { code:e.code, detail:e.detail, msg:e.message });

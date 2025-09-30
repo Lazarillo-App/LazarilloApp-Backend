@@ -7,7 +7,7 @@ const morgan = require('morgan');
 const { randomUUID } = require('crypto');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
-
+const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const authRequired = require('./middleware/authMiddleware');
 const { loadActiveBusiness } = require('./middleware/business');
 
@@ -64,10 +64,12 @@ app.use('/api', authRequired, loadActiveBusiness);
 // ---------- Rutas protegidas (CON auth + negocio activo/override) ----------
 app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
 app.use('/api/insumos', require('./routes/insumosRoutes'));
-app.use('/api', require('./routes/agrupacionesRoutes'));
 app.use('/api/ventas', require('./routes/ventasRoutes'));
 app.use('/api/businesses', require('./routes/businessRoutes'));
 app.use('/api/branches', require('./routes/branchRoutes'));
+
+// 🔒 Agrupaciones (scoped por negocio) — una sola base:
+app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
 // ---------- Health ----------
 app.get('/health', (_req, res) => res.json({ ok: true }));
