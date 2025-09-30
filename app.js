@@ -112,6 +112,31 @@ app.get('/health/auth', async (_req, res) => {
   }
 });
 
+// en app.js, arriba del 404
+app.get('/health/dbinfo', async (_req, res) => {
+  try {
+    const cols = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name='agrupaciones'
+      ORDER BY 1
+    `);
+    const db = process.env.PGDATABASE || '(no PGDATABASE)';
+    const host = process.env.PGHOST || '(no PGHOST)';
+    res.json({
+      db,
+      host,
+      agrupaciones_columns: cols.rows.map(r => r.column_name),
+      routes: {
+        health: '/health',
+        agrupaciones: '/api/businesses/:businessId/agrupaciones'
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- 404 explícito ----------
 app.use((req, res, _next) => {
   res.status(404).json({ error: 'not_found', path: req.originalUrl });
