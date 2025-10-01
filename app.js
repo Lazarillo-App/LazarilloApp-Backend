@@ -41,13 +41,17 @@ app.use((req, res, next) => {
 app.use(cors({
   origin: [
     'http://localhost:5173',
+    'https://lazarillo-app.github.io', // 👈 GitHub Pages (sin /LazarilloApp)
     'https://lazarillo.com.ar',
     'http://lazarillo.com.ar',
   ],
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'],
-  credentials: false,
+  credentials: false, //si luego se usa cookies/sesión -> true, y en el front `credentials: 'include'`
 }));
+
+// Responder preflight siempre (muy importante para CORS)
+app.options('*', cors());
 
 // ---------- Parsers ----------
 app.use(express.json());
