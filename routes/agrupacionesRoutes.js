@@ -1,6 +1,5 @@
 // routes/agrupacionesRoutes.js
 const express = require('express');
-// 👇 mergeParams para acceder a req.params.businessId
 const router = express.Router({ mergeParams: true });
 
 const {
@@ -13,7 +12,8 @@ const {
   ensureTodoAgrupacion,
   listarExclusiones,
   upsertExclusiones,
-  moveItemsBetweenGroups
+  moveItemsBetweenGroups,
+  createOrMoveAgrupacion
 } = require('../controllers/agrupacionesController');
 
 // Todas las rutas quedan bajo /businesses/:businessId/...
@@ -30,5 +30,6 @@ router.delete('/agrupaciones/:id/articulos/:articuloId', eliminarArticuloDeAgrup
 router.get('/agrupaciones/:id/exclusiones', listarExclusiones);
 router.post('/agrupaciones/:id/exclusiones', upsertExclusiones);
 router.post('/agrupaciones/:fromId/move-items', moveItemsBetweenGroups);
+router.post('/agrupaciones/create-or-move', createOrMoveAgrupacion);
 
 module.exports = router;

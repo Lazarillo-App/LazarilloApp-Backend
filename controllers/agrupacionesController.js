@@ -241,6 +241,102 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   }
 };
 
+// POST /businesses/:businessId/agrupaciones/create-or-move
+// Body: { nombre: string, articulos?: [{id, precio?...}], ids?: number[] }
+exports.createOrMoveAgrupacion = async (req, res) => {
+  const businessId = getBiz(req);
+  if (!Number.isFinite(businessId)) {
+    return res.status(400).json({ ok: false, error: 'business_id requerido' });
+  }
+
+  const nombre = String(req.body?.nombre || '').trim();
+  if (!nombre) return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
+
+  // Normalizamos artículos entrantes (acepta ids sueltos o objetos)
+  const incomingArticulos = toItemsArray(req.body?.articulos);
+  const incomingIds =
+    Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  const incoming = incomingArticulos.length
+    ? incomingArticulos
+    : incomingIds.map(x => ({ id: x, nombre: '', categoria: 'Sin categoría', subrubro: 'Sin subrubro', precio: 0 }));
+
+  if (!incoming.length) {
+    return res.status(400).json({ ok: false, error: 'Sin artículos para procesar' });
+  }
+
+  const idsSet = new Set(incoming.map(a => Number(a.id)));
+  const isTodoName = ['TODO', 'SIN AGRUPACIÓN'].includes(nombre.toUpperCase());
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1) UPSERT agrupación destino por (business_id, nombre)
+    const { rows: gRows } = await client.query(
+      `
+      INSERT INTO agrupaciones (business_id, nombre, articulos)
+      VALUES ($1, $2, '[]'::jsonb)
+      ON CONFLICT (business_id, nombre)
+      DO UPDATE SET nombre = EXCLUDED.nombre
+      RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
+      `,
+      [businessId, nombre]
+    );
+    const destino = gRows[0];
+
+    // 2) Si destino NO es TODO => quitar artículos de todas las otras no-TODO
+    if (!isTodoName) {
+      const { rows: others } = await client.query(
+        `
+        SELECT id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
+          FROM agrupaciones
+         WHERE business_id = $1
+           AND id <> $2
+           AND UPPER(nombre) NOT IN ('TODO','SIN AGRUPACIÓN')
+        FOR UPDATE
+        `,
+        [businessId, destino.id]
+      );
+
+      for (const row of others) {
+        const base = parseJsonArrayLoose(row.articulos);
+        const filtered = base.filter(a => !idsSet.has(Number(a.id)));
+        if (filtered.length !== base.length) {
+          await client.query(
+            `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id=$2 AND business_id=$3`,
+            [JSON.stringify(filtered), row.id, businessId]
+          );
+        }
+      }
+    }
+    // (si destino es TODO, no tocamos otras no-TODO: puede coexistir)
+
+    // 3) Merge en destino (idempotente, sin duplicar dentro del grupo)
+    const destBase = parseJsonArrayLoose(destino.articulos);
+    const destMerged = mergeById(destBase, incoming);
+
+    const { rows: updated } = await client.query(
+      `UPDATE agrupaciones
+          SET articulos = $1::jsonb
+        WHERE id = $2 AND business_id = $3
+        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
+      [JSON.stringify(destMerged), destino.id, businessId]
+    );
+
+    await client.query('COMMIT');
+    return res.status(200).json({ ok: true, agrupacion: updated[0] });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('createOrMoveAgrupacion error:', { code: e.code, detail: e.detail, msg: e.message });
+    if (e.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'Ya existe una agrupación con ese nombre' });
+    }
+    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
+  } finally {
+    client.release();
+  }
+};
+
 // ========================= “TODO” + Exclusiones =========================
 
 // PUT /businesses/:businessId/agrupaciones/todo
