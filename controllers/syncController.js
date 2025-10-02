@@ -6,14 +6,16 @@ const fetch = global.fetch || require('node-fetch');
 const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 
 // helpers (ponelos arriba del archivo)
+// controllers/syncController.js  (agrega esto arriba con el resto de helpers)
 
+// Lee el JSON guardado en maxi_menu_cache y devuelve Map(articulo_id -> {categoria, subrubro})
 async function mapCategoriasFromCache(client, businessId) {
   const { rows } = await client.query(`
     SELECT payload
-      FROM public.maxi_menu_cache
-     WHERE business_id = $1
-     ORDER BY updated_at DESC
-     LIMIT 1
+    FROM public.maxi_menu_cache
+    WHERE business_id = $1
+    ORDER BY updated_at DESC
+    LIMIT 1
   `, [businessId]);
 
   if (!rows[0]) return new Map();
@@ -23,17 +25,49 @@ async function mapCategoriasFromCache(client, businessId) {
     try { payload = JSON.parse(payload); } catch { payload = []; }
   }
 
-  // Reutilizamos tu helper flattenMaxiMenu (ya presente en este archivo)
+  // Usa tu helper flattenMaxiMenu ya definido en este archivo
   const flat = Array.isArray(payload) ? flattenMaxiMenu(payload) : [];
   const out = new Map();
   for (const a of flat) {
-    if (!Number.isFinite(a.id)) continue;
-    out.set(a.id, {
-      categoria: a.categoria || null,
-      subrubro : a.subrubro  || null,
-    });
+    const id = Number(a?.id);
+    if (!Number.isFinite(id)) continue;
+    out.set(id, { categoria: a.categoria || null, subrubro: a.subrubro || null });
   }
   return out;
+}
+
+// Aplica el Map sobre public.maxi_articles en bloques
+async function applyCategoriasFromMap(client, businessId, map) {
+  const entries = Array.from(map.entries());
+  if (!entries.length) return 0;
+
+  const CHUNK = 500;
+  let total = 0;
+
+  for (let i = 0; i < entries.length; i += CHUNK) {
+    const slice = entries.slice(i, i + CHUNK);
+
+    const values = [];
+    const params = [businessId];
+    let p = 2;
+
+    for (const [id, v] of slice) {
+      values.push(`($${p++}, $${p++}, $${p++})`); // (articulo_id, categoria, subrubro)
+      params.push(Number(id), v.categoria, v.subrubro);
+    }
+
+    const sql = `
+      UPDATE public.maxi_articles AS m
+         SET categoria = COALESCE(v.categoria, m.categoria),
+             subrubro  = COALESCE(v.subrubro,  m.subrubro)
+        FROM (VALUES ${values.join(',')}) AS v(articulo_id, categoria, subrubro)
+       WHERE m.business_id = $1
+         AND m.articulo_id = v.articulo_id
+    `;
+    await client.query(sql, params);
+    total += slice.length;
+  }
+  return total;
 }
 
 // --- Aplica el Map anterior sobre maxi_articles en bloques grandes ---
@@ -318,37 +352,92 @@ async function upsertArticles({ client, businessId, items }) {
 // ---------------- Handlers ----------------
 
 exports.syncNow = async (req, res) => {
-  // ... lo que ya tenías arriba ...
+  const uid = req.user?.id;
+  const businessId = req.businessId;
+  const { scope = 'articles', from, to } = req.body || {};
+  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
+
+  // Fechas por defecto
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
+  const f = ymd(parseDate(from, startOfMonth));
+  const t = ymd(parseDate(to, yesterday));
+
+  // Credenciales MAXI
+  const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
+  const mx = (bizRows[0]?.props || {}).maxi || {};
+  const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
+  if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+
   const client = await pool.connect();
   try {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
-    if (scope === 'articles' || scope === 'all') {
-      const tree  = await fetchMaxiArticles({ token, from: f, to: t });
-      const items = normalizeArticles(tree);
-
-      // Guarda cache + hash (esto ya lo tenías)
-      const rawStr = JSON.stringify(tree ?? []);
-      const hash   = simpleHash(rawStr);
-      await pool.query(`
-        INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
-        VALUES ($1, $2::jsonb, $3, NOW())
-        ON CONFLICT (business_id, hash)
-        DO UPDATE SET updated_at = NOW()
-      `, [businessId, rawStr, hash]);
-
-      await client.query('BEGIN');
-      const n = await upsertArticles({ client, businessId, items });
-
-      // 👇 nuevo: reconstruye categoria/subrubro usando el cache recién guardado
-      const map = await mapCategoriasFromCache(client, businessId);
-      await applyCategoriasFromMap(client, businessId, map);
-
-      await client.query('COMMIT');
-      return res.json({ ok: true, scope: 'articles', upserted: n, categorized: map.size });
+    if (scope !== 'articles' && scope !== 'all') {
+      return res.json({ ok: true, scope, upserted: 0 });
     }
 
-    return res.json({ ok: true, scope, upserted: 0 });
+    // 1) Traer del API y normalizar
+    const tree  = await fetchMaxiArticles({ token, from: f, to: t });
+    const items = normalizeArticles(tree);
+
+    // 2) Guardar cache + hash (usar SIEMPRE el mismo client dentro de la tx)
+    const rawStr = JSON.stringify(tree ?? []);
+    const hash   = simpleHash(rawStr);
+
+    await client.query('BEGIN');
+
+    await client.query(`
+      INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
+      VALUES ($1, $2::jsonb, $3, NOW())
+      ON CONFLICT (business_id, hash)
+      DO UPDATE SET updated_at = NOW()
+    `, [businessId, rawStr, hash]);
+
+    // 3) Upsert a public.maxi_articles
+    const n = await upsertArticles({ client, businessId, items });
+
+    // 4) Completar categoria/subrubro desde el cache recién guardado (SQL puro)
+    const { rowCount: categorized } = await client.query(`
+      WITH raw AS (
+        SELECT payload
+        FROM public.maxi_menu_cache
+        WHERE business_id = $1
+        ORDER BY updated_at DESC
+        LIMIT 1
+      ),
+      rubros AS (
+        SELECT jsonb_array_elements(payload) AS r FROM raw
+      ),
+      subs AS (
+        SELECT (r->'raw'->>'nombre')::text AS categoria,
+               jsonb_array_elements(r->'raw'->'subrubros') AS s
+        FROM rubros
+      ),
+      arts AS (
+        SELECT categoria,
+               (s->>'nombre')::text AS subrubro,
+               jsonb_array_elements(s->'articulos') AS a
+        FROM subs
+      ),
+      map AS (
+        SELECT (a->>'id')::int AS articulo_id,
+               NULLIF(btrim(categoria), '') AS categoria,
+               NULLIF(btrim(subrubro),  '') AS subrubro
+        FROM arts
+      )
+      UPDATE public.maxi_articles m
+         SET categoria = COALESCE(map.categoria, m.categoria),
+             subrubro  = COALESCE(map.subrubro,  m.subrubro)
+      FROM map
+      WHERE m.business_id = $1
+        AND m.articulo_id = map.articulo_id
+    `, [businessId]);
+
+    await client.query('COMMIT');
+
+    return res.json({ ok: true, scope: 'articles', upserted: n, categorized: categorized ?? 0 });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
     console.error('syncNow error:', e);
@@ -498,8 +587,8 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       ok: true,
       resumen: {
         subrubros: tree.length,
-        categorias: tree.reduce((a,s)=>a+(s.categorias?.length||0),0),
-        articulos: tree.reduce((a,s)=>a+s.categorias.reduce((x,c)=>x+(c.articulos?.length||0),0),0),
+        categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
+        articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
       },
       tree
     });
@@ -793,9 +882,9 @@ exports.syncNow = async (req, res) => {
   // Fechas por defecto
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
+  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   const f = ymd(parseDate(from, startOfMonth));
-  const t = ymd(parseDate(to,   yesterday));
+  const t = ymd(parseDate(to, yesterday));
 
   // Credenciales MAXI
   const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
@@ -814,12 +903,12 @@ exports.syncNow = async (req, res) => {
     }
 
     // 1) Traer “menú extendido”
-    const tree  = await fetchMaxiArticles({ token, from: f, to: t });
+    const tree = await fetchMaxiArticles({ token, from: f, to: t });
     const items = normalizeArticles(tree);
 
     // 2) Cachear crudo con HASH (de-dupe por (business_id, hash))
     const rawStr = JSON.stringify(tree ?? []);
-    const hash   = simpleHash(rawStr);
+    const hash = simpleHash(rawStr);
     await pool.query(`
       INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
       VALUES ($1, $2::jsonb, $3, NOW())
@@ -830,7 +919,7 @@ exports.syncNow = async (req, res) => {
     // 3) Transacción: upsert + mapping de categoría/subrubro desde cache
     await client.query('BEGIN');
     const upserted = await upsertArticles({ client, businessId, items });
-    const mapped   = await mapCategoriesFromCache(client, businessId, hash);
+    const mapped = await mapCategoriesFromCache(client, businessId, hash);
     await client.query('COMMIT');
 
     // 4) Respuesta rica (el front puede mostrar métricas y refrescar tabla/sidebar)
@@ -844,7 +933,7 @@ exports.syncNow = async (req, res) => {
     });
 
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('syncNow error:', e);
     return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
@@ -992,8 +1081,8 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       ok: true,
       resumen: {
         subrubros: tree.length,
-        categorias: tree.reduce((a,s)=>a+(s.categorias?.length||0),0),
-        articulos: tree.reduce((a,s)=>a+s.categorias.reduce((x,c)=>x+(c.articulos?.length||0),0),0),
+        categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
+        articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
       },
       tree
     });
