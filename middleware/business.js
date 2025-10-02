@@ -6,34 +6,40 @@ async function loadActiveBusiness(req, res, next) {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
-    // Prioridad: header -> param (:id o :businessId) -> parseo URL -> active_business_id
+    // fuente: 'header' | 'param' | 'auto' | null
+    let source = null;
+
     let override =
       req.header('x-business-id') ||
       req.params?.id ||
       req.params?.businessId ||
       null;
 
-    if (!override) {
+    if (override) {
+      source = req.header('x-business-id') ? 'header' : 'param';
+    } else {
       const m = req.originalUrl.match(/\/api\/businesses\/(\d+)/);
-      if (m) override = m[1];
+      if (m) { override = m[1]; source = 'param'; }
     }
 
     let businessId = Number(override);
     if (!Number.isFinite(businessId)) {
+      // fallback: activo del usuario
       const { rows } = await pool.query(
         'SELECT active_business_id FROM app_users WHERE id=$1',
         [uid]
       );
       businessId = Number(rows[0]?.active_business_id);
+      source = Number.isFinite(businessId) ? 'auto' : null;
     }
 
     if (!Number.isFinite(businessId)) {
-      // No hay negocio → dejamos nulos; los controllers decidirán si lo requieren.
       req.businessId = null;
       req.business = null;
       return next();
     }
 
+    // validar pertenencia
     const { rows } = await pool.query(`
       SELECT b.id, b.name, b.slug, b.color_hex, b.props
       FROM app_businesses b
@@ -43,7 +49,17 @@ async function loadActiveBusiness(req, res, next) {
     `, [businessId, uid]);
 
     if (!rows[0]) {
-      // Sólo bloqueá si expresamente vino un id/override invalido
+      if (source === 'auto') {
+        // activo roto → limpiamos y seguimos sin cortar
+        await pool.query(
+          'UPDATE app_users SET active_business_id=NULL WHERE id=$1',
+          [uid]
+        );
+        req.businessId = null;
+        req.business = null;
+        return next();
+      }
+      // si fue explícito (header/param), sí bloqueamos
       return res.status(403).json({ error: 'no_access_to_business' });
     }
 
