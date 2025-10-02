@@ -6,65 +6,51 @@ async function loadActiveBusiness(req, res, next) {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
-    // fuente: 'header' | 'param' | 'auto' | null
-    let source = null;
+    // Prioridad y de dónde salió:
+    const headerId = req.header('x-business-id');
+    const paramId  = req.params.id || req.params.businessId;
+    let source = 'none';
+    let businessId = null;
 
-    let override =
-      req.header('x-business-id') ||
-      req.params?.id ||
-      req.params?.businessId ||
-      null;
-
-    if (override) {
-      source = req.header('x-business-id') ? 'header' : 'param';
-    } else {
-      const m = req.originalUrl.match(/\/api\/businesses\/(\d+)/);
-      if (m) { override = m[1]; source = 'param'; }
-    }
-
-    let businessId = Number(override);
-    if (!Number.isFinite(businessId)) {
-      // fallback: activo del usuario
+    if (headerId) { businessId = Number(headerId); source = 'header'; }
+    else if (paramId) { businessId = Number(paramId); source = 'param'; }
+    else {
+      // fallback: activo del usuario (no debe bloquear si no pertenece)
       const { rows } = await pool.query(
-        'SELECT active_business_id FROM app_users WHERE id=$1',
+        'SELECT active_business_id FROM app_users WHERE id = $1',
         [uid]
       );
       businessId = Number(rows[0]?.active_business_id);
-      source = Number.isFinite(businessId) ? 'auto' : null;
+      source = 'active';
     }
 
     if (!Number.isFinite(businessId)) {
-      req.businessId = null;
       req.business = null;
+      req.businessId = null;
       return next();
     }
 
-    // validar pertenencia
     const { rows } = await pool.query(`
       SELECT b.id, b.name, b.slug, b.color_hex, b.props
       FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id = b.id
       WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
-      LIMIT 1
+      LIMIT 1;
     `, [businessId, uid]);
 
     if (!rows[0]) {
-      if (source === 'auto') {
-        // activo roto → limpiamos y seguimos sin cortar
-        await pool.query(
-          'UPDATE app_users SET active_business_id=NULL WHERE id=$1',
-          [uid]
-        );
-        req.businessId = null;
-        req.business = null;
-        return next();
+      // Solo bloquear si el id vino EXPLÍCITO (header/param).
+      if (source === 'header' || source === 'param') {
+        return res.status(403).json({ error: 'no_access_to_business' });
       }
-      // si fue explícito (header/param), sí bloqueamos
-      return res.status(403).json({ error: 'no_access_to_business' });
+      // Si vino del "activo" y no pertenece, lo ignoramos y seguimos sin business.
+      req.business = null;
+      req.businessId = null;
+      return next();
     }
 
-    req.businessId = rows[0].id;
     req.business = rows[0];
+    req.businessId = rows[0].id;
     next();
   } catch (e) {
     next(e);
