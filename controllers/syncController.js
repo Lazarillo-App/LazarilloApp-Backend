@@ -6,6 +6,71 @@ const fetch = global.fetch || require('node-fetch');
 const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 
 // helpers (ponelos arriba del archivo)
+
+async function mapCategoriasFromCache(client, businessId) {
+  const { rows } = await client.query(`
+    SELECT payload
+      FROM public.maxi_menu_cache
+     WHERE business_id = $1
+     ORDER BY updated_at DESC
+     LIMIT 1
+  `, [businessId]);
+
+  if (!rows[0]) return new Map();
+
+  let payload = rows[0].payload;
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch { payload = []; }
+  }
+
+  // Reutilizamos tu helper flattenMaxiMenu (ya presente en este archivo)
+  const flat = Array.isArray(payload) ? flattenMaxiMenu(payload) : [];
+  const out = new Map();
+  for (const a of flat) {
+    if (!Number.isFinite(a.id)) continue;
+    out.set(a.id, {
+      categoria: a.categoria || null,
+      subrubro : a.subrubro  || null,
+    });
+  }
+  return out;
+}
+
+// --- Aplica el Map anterior sobre maxi_articles en bloques grandes ---
+async function applyCategoriasFromMap(client, businessId, map) {
+  const entries = Array.from(map.entries());
+  if (!entries.length) return 0;
+
+  const CHUNK = 500;
+  let total = 0;
+
+  for (let i = 0; i < entries.length; i += CHUNK) {
+    const slice = entries.slice(i, i + CHUNK);
+
+    const values = [];
+    const params = [businessId];
+    let p = 2;
+
+    for (const [id, v] of slice) {
+      values.push(`($${p++}, $${p++}, $${p++})`); // (articulo_id, categoria, subrubro)
+      params.push(Number(id), v.categoria, v.subrubro);
+    }
+
+    const sql = `
+      UPDATE public.maxi_articles AS m
+         SET categoria = COALESCE(v.categoria, m.categoria),
+             subrubro  = COALESCE(v.subrubro,  m.subrubro)
+        FROM (VALUES ${values.join(',')}) AS v(articulo_id, categoria, subrubro)
+       WHERE m.business_id = $1
+         AND m.articulo_id = v.articulo_id
+    `;
+    await client.query(sql, params);
+    total += slice.length;
+  }
+
+  return total;
+}
+
 function simpleHash(str = '') {
   let h = 0;
   for (let i = 0; i < str.length; i++) {
@@ -253,57 +318,39 @@ async function upsertArticles({ client, businessId, items }) {
 // ---------------- Handlers ----------------
 
 exports.syncNow = async (req, res) => {
-  const uid = req.user?.id;
-  const businessId = req.businessId;              // ✅ viene del middleware (X-Business-Id, :id o activo)
-  const { scope = 'articles', from, to } = req.body || {};
-  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
-
-  // Fechas por defecto
-  const today = new Date();
-  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
-  const f = ymd(parseDate(from, startOfMonth));
-  const t = ymd(parseDate(to, yesterday));
-
-  // Credenciales MAXI tomadas del negocio (ya validado por middleware)
-  const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
-  const mx = (bizRows[0]?.props || {}).maxi || {};
-  const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
-  if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
-
+  // ... lo que ya tenías arriba ...
   const client = await pool.connect();
   try {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     if (scope === 'articles' || scope === 'all') {
-      const tree = await fetchMaxiArticles({ token, from: f, to: t });
+      const tree  = await fetchMaxiArticles({ token, from: f, to: t });
       const items = normalizeArticles(tree);
 
-      // justo después de obtener `tree`
+      // Guarda cache + hash (esto ya lo tenías)
       const rawStr = JSON.stringify(tree ?? []);
-      const hash = simpleHash(rawStr); // la misma función que ya agregaste
-
+      const hash   = simpleHash(rawStr);
       await pool.query(`
-  INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
-  VALUES ($1, $2::jsonb, $3, NOW())
-  ON CONFLICT (business_id, hash)
-  DO UPDATE SET updated_at = NOW()
-`, [businessId, rawStr, hash]);
-
-
-
-      console.log('[sync] maxi tree:', Array.isArray(tree) ? tree.length : 0,
-        'normalized:', items.length, 'sample:', items[0]);
+        INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
+        VALUES ($1, $2::jsonb, $3, NOW())
+        ON CONFLICT (business_id, hash)
+        DO UPDATE SET updated_at = NOW()
+      `, [businessId, rawStr, hash]);
 
       await client.query('BEGIN');
       const n = await upsertArticles({ client, businessId, items });
+
+      // 👇 nuevo: reconstruye categoria/subrubro usando el cache recién guardado
+      const map = await mapCategoriasFromCache(client, businessId);
+      await applyCategoriasFromMap(client, businessId, map);
+
       await client.query('COMMIT');
-      return res.json({ ok: true, scope: 'articles', upserted: n });
+      return res.json({ ok: true, scope: 'articles', upserted: n, categorized: map.size });
     }
 
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { }
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('syncNow error:', e);
     return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
