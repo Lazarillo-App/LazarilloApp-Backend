@@ -4,16 +4,6 @@ const pool = require('../config/db');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret';
 
-/**
- * Auth + (opcional) resolución de negocio.
- * - Valida JWT y setea req.user
- * - Intenta resolver req.businessId y req.business:
- *    1) por :id en la ruta
- *    2) por header X-Business-Id
- *    3) por active_business_id del usuario
- * - Si hay businessId, valida pertenencia (owner o membership) y adjunta el negocio.
- * - Si NO hay businessId, no corta: deja que el controller decida si lo requiere.
- */
 module.exports = async function authRequired(req, res, next) {
   try {
     // ---- 1) JWT obligatorio

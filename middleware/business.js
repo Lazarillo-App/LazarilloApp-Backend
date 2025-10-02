@@ -1,31 +1,36 @@
-// middleware/businesses.js
+// middleware/business.js
 const pool = require('../config/db');
 
-// Lee el negocio activo (o el pasado por header/param) y valida pertenencia
 async function loadActiveBusiness(req, res, next) {
   try {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
-    // Prioridad: header X-Business-Id -> param :id -> active_business_id del usuario
-    const override = req.header('x-business-id') || req.params.id || null;
+    let override =
+      req.header('x-business-id') ||
+      req.params?.id ||
+      req.params?.businessId ||
+      null;
 
-    let businessId = override;
-    if (!businessId) {
+    if (!override) {
+      const m = req.originalUrl.match(/\/api\/businesses\/(\d+)/);
+      if (m) override = m[1];
+    }
+
+    let businessId = Number(override);
+    if (!Number.isFinite(businessId)) {
       const { rows } = await pool.query(
         'SELECT active_business_id FROM app_users WHERE id = $1',
         [uid]
       );
-      businessId = rows[0]?.active_business_id || null;
+      businessId = Number(rows[0]?.active_business_id);
     }
 
-    if (!businessId) { // el usuario no tiene activo ninguno
+    if (!Number.isFinite(businessId)) {
       req.business = null;
       req.businessId = null;
       return next();
     }
-
-    // Valida pertenencia (dueño o miembro)
     const { rows } = await pool.query(`
       SELECT b.id, b.name, b.slug, b.color_hex, b.props
       FROM app_businesses b
@@ -34,7 +39,10 @@ async function loadActiveBusiness(req, res, next) {
       LIMIT 1;
     `, [businessId, uid]);
 
-    if (!rows[0]) return res.status(403).json({ error: 'no_access_to_business' });
+    if (!rows[0]) {
+
+      return res.status(403).json({ error: 'no_access_to_business' });
+    }
 
     req.business = rows[0];
     req.businessId = rows[0].id;
@@ -45,7 +53,7 @@ async function loadActiveBusiness(req, res, next) {
 }
 
 function requireBusiness(req, res, next) {
-  if (!req.business) return res.status(400).json({ error: 'no_active_business' });
+  if (!req.businessId) return res.status(400).json({ error: 'no_active_business' });
   next();
 }
 
