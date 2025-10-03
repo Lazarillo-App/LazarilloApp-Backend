@@ -281,11 +281,9 @@ exports.syncNow = async (req, res) => {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     if (scope === 'articles' || scope === 'all') {
-      // 1) Traer menú/artículos desde Maxi y normalizar
       const tree  = await fetchMaxiArticles({ token, from: f, to: t });
       const items = normalizeArticles(tree);
 
-      // 2) Guardar cache crudo + hash (evita duplicados por contenido)
       const rawStr = JSON.stringify(tree ?? []);
       const hash   = simpleHash(rawStr);
       await pool.query(`
@@ -294,12 +292,10 @@ exports.syncNow = async (req, res) => {
         ON CONFLICT (business_id, hash) DO UPDATE SET updated_at = NOW()
       `, [businessId, rawStr, hash]);
 
-      // 3) Upsert de artículos + (por si vino en árbol) refrescar cat/subrubro desde cache
       await client.query('BEGIN');
 
       const upserted = await upsertArticles({ client, businessId, items });
 
-      // Rehidratar categoria/subrubro desde el payload cacheado (cuando viene como árbol)
       await client.query(`
 WITH raw AS (
   SELECT payload
@@ -342,7 +338,6 @@ UPDATE public.maxi_articles m
       return res.json({ ok: true, scope: 'articles', upserted });
     }
 
-    // Otros scopes
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
@@ -353,10 +348,9 @@ UPDATE public.maxi_articles m
   }
 };
 
-// GET /api/businesses/:id/sales/summary?from&to
 exports.salesSummaryFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = req.businessId;              // ✅
+  const businessId = req.businessId;              
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
   const today = new Date();

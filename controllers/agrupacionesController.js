@@ -3,29 +3,57 @@ const pool = require('../config/db');
 // --- helpers existentes (isArray, toItemsArray, parseJsonArrayLoose, mergeById) se mantienen ---
 
 const isArray = (v) => Array.isArray(v);
+const safeNum = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+const normalizeItem = (o = {}) => {
+  const id =
+    safeNum(o.id) ??
+    safeNum(o.articulo_id) ??
+    safeNum(o.codigo) ??
+    safeNum(o.codigoArticulo);
+
+  if (id == null) return null;
+
+  const nombre = String(o.nombre ?? o.descripcion ?? '').trim() || `#${id}`;
+  const categoria = String(o.categoria ?? o.rubro ?? 'Sin categoría').trim() || 'Sin categoría';
+  const subrubro  = String(o.subrubro ?? o.subRubro ?? 'Sin subrubro').trim() || 'Sin subrubro';
+  const precio    = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
+
+  return { id, nombre, categoria, subrubro, precio };
+};
+
+const parseJsonArrayLoose = (x) => {
+  try {
+    if (Array.isArray(x)) return x.filter(Boolean);
+    if (x == null) return [];
+    const j = JSON.parse(typeof x === 'string' ? x : String(x));
+    return Array.isArray(j) ? j.filter(Boolean) : [];
+  } catch { return []; }
+};
 
 const toItemsArray = (arr) =>
-  (Array.isArray(arr) ? arr : [])
-    .map(a => ({
-      id: Number(a?.id ?? a?.articuloId ?? a?.codigo ?? a?.codigoArticulo),
-      nombre: String(a?.nombre ?? ''),
-      categoria: String(a?.categoria ?? 'Sin categoría'),
-      subrubro: String(a?.subrubro ?? 'Sin subrubro'),
-      precio: Number(a?.precio ?? 0),
-    }))
-    .filter(x => Number.isFinite(x.id) && x.id > 0);
+  (Array.isArray(arr) ? arr : []).map(normalizeItem).filter(Boolean);
 
-function parseJsonArrayLoose(val) {
-  if (Array.isArray(val)) return val;
-  if (val == null) return [];
-  try {
-    if (typeof val === 'string') {
-      const parsed = JSON.parse(val);
-      return Array.isArray(parsed) ? parsed : [];
-    }
-    return Array.isArray(val) ? val : [];
-  } catch { return []; }
-} 
+/** Une base + incoming por id (sin duplicados). Si ya existe, actualiza campos. */
+const mergeJsonById = (base = [], incoming = []) => {
+  const map = new Map();
+  // base primero
+  for (const b of base) {
+    const it = normalizeItem(b);
+    if (it) map.set(it.id, it);
+  }
+  // incoming pisa/crea
+  for (const inc of incoming) {
+    const it = normalizeItem(inc);
+    if (!it) continue;
+    const prev = map.get(it.id);
+    map.set(it.id, prev ? { ...prev, ...it } : it);
+  }
+  return Array.from(map.values());
+};
 
 function getBizId(req) {
   const header = Number(req.header('X-Business-Id'));
@@ -169,37 +197,50 @@ exports.eliminarAgrupacion = async (req, res) => {
 // PUT /businesses/:businessId/agrupaciones/:id/articulos
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
-    const businessId = getBiz(req);
+    const businessId = Number(req.businessId ?? req.params.businessId);
     const id = Number(req.params.id ?? req.params.agrupacionId);
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
+    // Puede venir `articulos` (objetos) o `ids` (números)
     const incomingArticulos = toItemsArray(req.body?.articulos);
-    const incomingIds = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+    const incomingIds = Array.isArray(req.body?.ids)
+      ? [...new Set(req.body.ids.map(Number))].filter(Number.isFinite)
+      : [];
+
     const incoming = incomingArticulos.length
       ? incomingArticulos
-      : incomingIds.map(x => ({ id: x, nombre: '', categoria: 'Sin categoría', subrubro: 'Sin subrubro', precio: 0 }));
+      : incomingIds.map((x) => ({
+          id: x, nombre: '', categoria: 'Sin categoría', subrubro: 'Sin subrubro', precio: 0
+        }));
 
-    if (!incoming.length) return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
+    if (!incoming.length) {
+      return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
+    }
 
+    // Traer agrupación
     const { rows: r0 } = await pool.query(
       `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
       [id, businessId]
     );
-    if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    if (!r0.length) {
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    }
 
     const base = parseJsonArrayLoose(r0[0].articulos);
-    const merged = mergeById(base, incoming);
+    const merged = mergeJsonById(base, incoming);
 
     const { rows } = await pool.query(
       `UPDATE agrupaciones
-          SET articulos = $1::jsonb
-        WHERE id = $2 AND business_id = $3
-        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
+         SET articulos = $1::jsonb, updated_at = NOW()
+       WHERE id = $2 AND business_id = $3
+       RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
       [JSON.stringify(merged), id, businessId]
     );
 
+    // compat: devolvé lo mismo que antes o, si preferís:
+    // res.json({ ok:true, group: rows[0] })
     return res.json(rows[0]);
   } catch (e) {
     console.error('agregarArticulosAgrupacion error:', { code: e.code, detail: e.detail, msg: e.message });
