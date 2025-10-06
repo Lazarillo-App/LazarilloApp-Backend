@@ -1,24 +1,70 @@
 // utils/mailer.js
 const nodemailer = require('nodemailer');
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: false,
-  auth: process.env.SMTP_USER ? {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  } : undefined,
-});
+let transporter = null;
 
-exports.sendEmail = async (to, subject, html) => {
-  // Modo DEV: si no hay SMTP configurado, logueamos
-  if (!process.env.SMTP_HOST) {
-    console.log('[DEV email]', { to, subject, html });
-    return;
+async function getTransporter() {
+  if (transporter) return transporter;
+
+  // 1) SMTP real por env
+  const {
+    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS,
+    SMTP_SECURE, MAIL_FROM, MAIL_FROM_NAME,
+  } = process.env;
+
+  if (SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS) {
+    transporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: Number(SMTP_PORT),
+      secure: String(SMTP_SECURE || '').toLowerCase() === 'true',
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+    return transporter;
   }
-  await transporter.sendMail({
-    from: process.env.SMTP_FROM || '"Lazarillo" <no-reply@lazarillo>',
-    to, subject, html,
+
+  // 2) Modo dev con Ethereal
+  if (process.env.MAIL_DEV === '1') {
+    const testAcc = await nodemailer.createTestAccount();
+    transporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
+      auth: { user: testAcc.user, pass: testAcc.pass },
+    });
+    console.log('📧 MAIL_DEV=1 activado. Usando cuenta Ethereal:', testAcc.user);
+    return transporter;
+  }
+
+  // 3) Sin mail → transport "fake": no rompe
+  transporter = {
+    async sendMail(opts) {
+      console.log('📭 [mailer disabled] Simulando envío:', {
+        to: opts.to, subject: opts.subject,
+      });
+      return { messageId: 'disabled', previewUrl: null };
+    }
+  };
+  return transporter;
+}
+
+async function sendEmail(to, subject, html) {
+  const t = await getTransporter();
+
+  const from = process.env.MAIL_FROM || 'no-reply@lazarillo.com.ar';
+  const fromName = process.env.MAIL_FROM_NAME || 'Lazarillo';
+
+  const info = await t.sendMail({
+    from: `"${fromName}" <${from}>`,
+    to,
+    subject,
+    html,
   });
-};
+
+  // Si es Ethereal, mostrar preview
+  const preview = nodemailer.getTestMessageUrl?.(info);
+  if (preview) console.log('🔎 Preview URL:', preview);
+
+  return info;
+}
+
+module.exports = { sendEmail };

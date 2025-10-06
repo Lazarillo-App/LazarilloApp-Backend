@@ -2,8 +2,19 @@
 const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const { sendEmail } = require('../utils/mailer'); 
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret';
+
+// <<< URL helper para el frontend (soporta prefijo /LazarilloApp en gh-pages) >>>
+const FRONTEND_BASE_URL  = (process.env.FRONTEND_BASE_URL  || 'http://localhost:5173').replace(/\/+$/,'');
+const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || '').replace(/\/+$/,'');
+const makeFrontUrl = (p) =>
+  `${FRONTEND_BASE_URL}${FRONTEND_BASE_PATH}${p}`.replace(/([^:]\/)\/+/g,'$1');
+// Ejemplos:
+// local:  http://localhost:5173 + ''          + /reset-password?token=... -> http://localhost:5173/reset-password?token=...
+// ghpages:https://lazarillo-app.github.io + /LazarilloApp + /reset-password?token=... -> https://lazarillo-app.github.io/LazarilloApp/reset-password?token=...
 
 function signToken(user) {
   return jwt.sign({ uid: user.id, email: user.email }, SECRET, { expiresIn: '7d' });
@@ -16,7 +27,6 @@ exports.register = async (req, res) => {
       return res.status(400).json({ error: 'email_and_password_required' });
     }
 
-    // Chequeo case-insensitive
     const { rows: ex } = await pool.query(
       'SELECT 1 FROM app_users WHERE lower(email)=lower($1) LIMIT 1',
       [email]
@@ -25,7 +35,6 @@ exports.register = async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10);
 
-    // Si luego agregás "phone" a la tabla, añadí ", phone" y el cuarto valor
     const { rows } = await pool.query(
       'INSERT INTO app_users (name, email, password_hash) VALUES ($1,$2,$3) RETURNING id, name, email, active_business_id',
       [name || null, email.trim(), hash]
@@ -89,7 +98,6 @@ exports.me = async (req, res) => {
 exports.updateMe = async (req, res) => {
   try {
     const { name = null } = req.body || {};
-    // Si luego agregás "phone", podés armar un UPDATE dinámico o añadirlo aquí.
     const { rows } = await pool.query(
       'UPDATE app_users SET name=$1 WHERE id=$2 RETURNING id, name, email, active_business_id',
       [name, req.user.id]
@@ -111,20 +119,20 @@ exports.requestPasswordReset = async (req, res) => {
       [email]
     );
 
-    // Responder 200 siempre para no filtrar existencia
+    // Respondemos 200 siempre para no filtrar si existe o no
     if (!rows[0]) return res.json({ ok: true });
 
     const user = rows[0];
     const rawToken = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1h
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
 
     await pool.query(
       'UPDATE app_users SET reset_token_hash=$1, reset_token_expires_at=$2 WHERE id=$3',
       [tokenHash, expiresAt, user.id]
     );
 
-    const link = `${FRONTEND_BASE_URL}/reset-password?token=${rawToken}`;
+    const link = makeFrontUrl(`/reset-password?token=${rawToken}`);
     const html = `
       <p>Pediste restablecer tu contraseña en Lazarillo.</p>
       <p>Usá este enlace (válido por 1 hora):</p>
