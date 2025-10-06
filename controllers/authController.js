@@ -100,3 +100,75 @@ exports.updateMe = async (req, res) => {
     res.status(500).json({ error: 'internal' });
   }
 };
+
+exports.requestPasswordReset = async (req, res) => {
+  try {
+    const { email = '' } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'email_required' });
+
+    const { rows } = await pool.query(
+      'SELECT id, email FROM app_users WHERE lower(email)=lower($1) LIMIT 1',
+      [email]
+    );
+
+    // Responder 200 siempre para no filtrar existencia
+    if (!rows[0]) return res.json({ ok: true });
+
+    const user = rows[0];
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1h
+
+    await pool.query(
+      'UPDATE app_users SET reset_token_hash=$1, reset_token_expires_at=$2 WHERE id=$3',
+      [tokenHash, expiresAt, user.id]
+    );
+
+    const link = `${FRONTEND_BASE_URL}/reset-password?token=${rawToken}`;
+    const html = `
+      <p>Pediste restablecer tu contraseña en Lazarillo.</p>
+      <p>Usá este enlace (válido por 1 hora):</p>
+      <p><a href="${link}">${link}</a></p>
+      <p>Si no fuiste vos, ignorá este email.</p>
+    `;
+
+    try { await sendEmail(user.email, 'Restablecer contraseña', html); }
+    catch (e) { console.error('sendEmail error:', e); }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('requestPasswordReset error:', e);
+    return res.status(500).json({ error: 'internal' });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    const { token = '', password = '' } = req.body || {};
+    if (!token || !password) return res.status(400).json({ error: 'token_and_password_required' });
+
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const { rows } = await pool.query(
+      `SELECT id FROM app_users
+       WHERE reset_token_hash=$1 AND reset_token_expires_at > NOW()
+       LIMIT 1`,
+      [tokenHash]
+    );
+    if (!rows[0]) return res.status(400).json({ error: 'invalid_or_expired_token' });
+
+    const userId = rows[0].id;
+    const hash = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      `UPDATE app_users
+         SET password_hash=$1, reset_token_hash=NULL, reset_token_expires_at=NULL
+       WHERE id=$2`,
+      [hash, userId]
+    );
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('resetPassword error:', e);
+    return res.status(500).json({ error: 'internal' });
+  }
+};

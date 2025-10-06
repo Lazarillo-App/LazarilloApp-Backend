@@ -33,6 +33,9 @@ module.exports.up = async function up(pool) {
   await execSafe(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS active_business_id BIGINT;`);
   await execSafe(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
   await execSafe(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
+  await execSafe(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;`);
+  await execSafe(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPTZ;`);
+  await execSafe(`CREATE INDEX IF NOT EXISTS idx_app_users_reset_token_hash ON app_users (reset_token_hash);`);
 
   // índice único por lower(email) (expresión)
   await execSafe(`DROP INDEX IF EXISTS app_users_email_lower_key;`);
