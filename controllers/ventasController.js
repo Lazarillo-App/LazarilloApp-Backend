@@ -39,8 +39,12 @@ const cacheKey = (creds, req) =>
 async function readCredsFromDBOrEnv(req) {
   // 1) DB por negocio activo
   if (req?.business?.id) {
-    const c = await getCreds(req.business.id);
-    if (c) return c;
+    try {
+      const c = await getCreds(req.business.id);
+      if (c?.email && c?.pass && c?.cod_cli) return c;
+    } catch (e) {
+      console.warn('[ventas] getCreds falló:', e?.message);
+    }
   }
   // 2) Fallback .env (testing)
   const email   = process.env.MAXI_EMAIL  || process.env.EMAIL  || '';
