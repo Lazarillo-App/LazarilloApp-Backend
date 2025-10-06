@@ -9,6 +9,7 @@ const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const authRequired = require('./middleware/authMiddleware');
+const devRoutes = require('./routes/devRoutes');
 const { loadActiveBusiness } = require('./middleware/business');
 
 const app = express();
@@ -50,6 +51,7 @@ app.use(cors({
   credentials: false,
 }));
 
+app.use('/api/dev', devRoutes);
 
 // ---------- Parsers ----------
 app.use(express.json());

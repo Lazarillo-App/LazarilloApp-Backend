@@ -120,13 +120,13 @@ exports.requestPasswordReset = async (req, res) => {
       [email]
     );
 
-    // Respondemos 200 siempre para no filtrar si existe o no
-    if (!rows[0]) return res.json({ ok: true, previewUrl: null });
+    // No revelar existencia: misma respuesta, pero con flags técnicos neutros
+    if (!rows[0]) return res.json({ ok: true, delivered: true, accepted: [], rejected: [] });
 
     const user = rows[0];
-    const rawToken = crypto.randomBytes(32).toString('hex');
+    const rawToken  = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 h
 
     await pool.query(
       'UPDATE app_users SET reset_token_hash=$1, reset_token_expires_at=$2 WHERE id=$3',
@@ -141,12 +141,15 @@ exports.requestPasswordReset = async (req, res) => {
       <p>Si no fuiste vos, ignorá este email.</p>
     `;
 
-    const { previewUrl } = await sendEmail(user.email, 'Restablecer contraseña', html);
-    return res.json({ ok: true, previewUrl: previewUrl || null });
+    const { accepted = [], rejected = [] } = await sendEmail(user.email, 'Restablecer contraseña', html);
+    const delivered = Array.isArray(accepted) && accepted.includes(user.email);
+
+    // Nota: mantenemos 200 y ok:true. Agregamos flags diagnósticos.
+    return res.json({ ok: true, delivered, accepted, rejected });
   } catch (e) {
     console.error('requestPasswordReset error:', e);
-    // No exponemos detalles al cliente
-    return res.json({ ok: true, previewUrl: null });
+    // no filtramos: ok:true pero marcamos delivered=false
+    return res.json({ ok: true, delivered: false, accepted: [], rejected: [] });
   }
 };
 
