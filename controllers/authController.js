@@ -3,15 +3,15 @@ const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { sendEmail } = require('../utils/mailer'); 
+const { sendEmail } = require('../utils/mailer');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret';
 
 // <<< URL helper para el frontend (soporta prefijo /LazarilloApp en gh-pages) >>>
-const FRONTEND_BASE_URL  = (process.env.FRONTEND_BASE_URL  || 'http://localhost:5173').replace(/\/+$/,'');
-const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || '').replace(/\/+$/,'');
+const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
+const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || '').replace(/\/+$/, '');
 const makeFrontUrl = (p) =>
-  `${FRONTEND_BASE_URL}${FRONTEND_BASE_PATH}${p}`.replace(/([^:]\/)\/+/g,'$1');
+  `${FRONTEND_BASE_URL}${FRONTEND_BASE_PATH}${p}`.replace(/([^:]\/)\/+/g, '$1');
 // Ejemplos:
 // local:  http://localhost:5173 + ''          + /reset-password?token=... -> http://localhost:5173/reset-password?token=...
 // ghpages:https://lazarillo-app.github.io + /LazarilloApp + /reset-password?token=... -> https://lazarillo-app.github.io/LazarilloApp/reset-password?token=...
@@ -109,6 +109,7 @@ exports.updateMe = async (req, res) => {
   }
 };
 
+// backend/src/controllers/authController.js
 exports.requestPasswordReset = async (req, res) => {
   try {
     const { email = '' } = req.body || {};
@@ -120,7 +121,7 @@ exports.requestPasswordReset = async (req, res) => {
     );
 
     // Respondemos 200 siempre para no filtrar si existe o no
-    if (!rows[0]) return res.json({ ok: true });
+    if (!rows[0]) return res.json({ ok: true, previewUrl: null });
 
     const user = rows[0];
     const rawToken = crypto.randomBytes(32).toString('hex');
@@ -132,7 +133,7 @@ exports.requestPasswordReset = async (req, res) => {
       [tokenHash, expiresAt, user.id]
     );
 
-    const link = makeFrontUrl(`/reset-password?token=${rawToken}`);
+    const link = makeFrontUrl(`/reset-password?token=${rawToken}&email=${encodeURIComponent(user.email)}`);
     const html = `
       <p>Pediste restablecer tu contraseña en Lazarillo.</p>
       <p>Usá este enlace (válido por 1 hora):</p>
@@ -140,13 +141,12 @@ exports.requestPasswordReset = async (req, res) => {
       <p>Si no fuiste vos, ignorá este email.</p>
     `;
 
-    try { await sendEmail(user.email, 'Restablecer contraseña', html); }
-    catch (e) { console.error('sendEmail error:', e); }
-
-    return res.json({ ok: true });
+    const { previewUrl } = await sendEmail(user.email, 'Restablecer contraseña', html);
+    return res.json({ ok: true, previewUrl: previewUrl || null });
   } catch (e) {
     console.error('requestPasswordReset error:', e);
-    return res.status(500).json({ error: 'internal' });
+    // No exponemos detalles al cliente
+    return res.json({ ok: true, previewUrl: null });
   }
 };
 
