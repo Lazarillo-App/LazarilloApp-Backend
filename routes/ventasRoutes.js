@@ -9,6 +9,9 @@ const { requireBusiness } = require('../middleware/business');
 router.get('/ping', (_req, res) => res.json({ ok: true }));
 
 // GET /api/ventas  (ya viene con auth + loadActiveBusiness por app.js)
-router.get('/', requireBusiness, ventasCtrl.getVentas);
+router.get('/',
+  requireBusiness,       
+  ventasCtrl.getVentas
+);
 
 module.exports = router;
