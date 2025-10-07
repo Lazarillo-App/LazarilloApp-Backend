@@ -11,7 +11,18 @@ const maxiTokenCache = new Map(); // key: businessId -> { token, exp }
 // Obtiene las credenciales Maxi del negocio activo (ajusta a tu modelo/DAO)
 async function readMaxiCreds(req) {
   // Preferí id de negocio por URL (/api/businesses/:id/...) o el activo en sesión
-  const businessId = Number(req.params.id ?? req.user?.active_business_id ?? req.query.businessId);
+  const businessId = Number(
+  req.params?.id ??
+  req.query?.businessId ??
+  req.headers['x-business-id'] ??
+  req.user?.active_business_id
+);
+if (!businessId) {
+  const e = new Error('Seleccioná un comercio (businessId). Podés enviarlo por /businesses/:id, ?businessId= o X-Business-Id.');
+  e.status = 400;
+  throw e;
+}
+
   if (!businessId) throw new Error('Falta businessId para login Maxi');
 
   // TODO: Reemplaza por tu acceso real a DB

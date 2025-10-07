@@ -1,20 +1,14 @@
+// routes/ventasRoutes.js
 const express = require('express');
 const router = express.Router();
 
-const authRequired = require('../middleware/authMiddleware');
-const ventasCtrl = require('../controllers/ventasController'); // 👈 mismas letras que abajo
-const { loadActiveBusiness, requireBusiness } = require('../middleware/business');
+const ventasCtrl = require('../controllers/ventasController');
+const { requireBusiness } = require('../middleware/business');
 
-// ping para probar fácil
+// ping
 router.get('/ping', (_req, res) => res.json({ ok: true }));
 
-// GET /api/ventas
-router.get('/',
-  authRequired,
-  loadActiveBusiness,
-  requireBusiness,
-  ventasCtrl.getVentas     // 👈 usa el nombre real que exporta el controller
-);
+// GET /api/ventas  (ya viene con auth + loadActiveBusiness por app.js)
+router.get('/', requireBusiness, ventasCtrl.getVentas);
 
 module.exports = router;
-
