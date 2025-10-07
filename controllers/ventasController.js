@@ -11,7 +11,11 @@ const MAXI_BASE =
   'https://api-mconn.maxisistemas.com.ar';
 
 const LOGIN_URL = `${MAXI_BASE}/login`;
-const STATS_URL = `${MAXI_BASE}/estadisticas/fullinvoicebydate`;
+const STATS_URLS = [
+  `${MAXI_BASE}/estadisticas/invoicebydate`,     // el que muestra el portal
+  `${MAXI_BASE}/estadisticas/fullinvoicebydate`, // fallback por si tu server usa éste
+];
+
 
 const LOG_MAXI_RAW = process.env.LOG_MAXI_RAW === '1';
 const LOG_PARSER_DEBUG = process.env.LOG_PARSER_DEBUG === '1';
@@ -171,33 +175,52 @@ async function fetchStatsWithRetry({ from, to, req }) {
   const tryOnce = async (timeoutMs) => {
     const token = await getToken(req);
     const bearer = String(token).startsWith('Bearer ') ? token : `Bearer ${token}`;
-    const url = `${STATS_URL}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
-    logRaw('GET', url);
 
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
-    try {
-      const res = await fetch(url, { headers: { Authorization: bearer }, signal: ctrl.signal });
-      const txt = await res.text(); let json; try { json = JSON.parse(txt); } catch { json = null; }
-      logRaw('RESP /estadisticas/fullinvoicebydate', res.status, txt.slice(0, 500));
-      if (!res.ok) {
-        const apiCode = json?.resultCode ?? json?.content?.resultCode ?? json?.result?.resultCode ?? null;
-        const err = new Error(`HTTP ${res.status} ${txt || ''}`); err.status = res.status; err.apiCode = apiCode; throw err;
+    // probamos primero invoicebydate, luego fullinvoicebydate
+    let lastErr;
+    for (const baseUrl of STATS_URLS) {
+      const url = `${baseUrl}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+      logRaw('GET', url);
+
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
+      try {
+        const res = await fetch(url, { headers: { Authorization: bearer }, signal: ctrl.signal });
+        const txt = await res.text();
+        let json; try { json = JSON.parse(txt); } catch { json = null; }
+
+        logRaw(`[MAXI] ${res.status} ${url} ::`, txt.slice(0, 500));
+
+        if (!res.ok) {
+          const apiCode = json?.resultCode ?? json?.content?.resultCode ?? json?.result?.resultCode ?? null;
+          const err = new Error(`HTTP ${res.status} ${txt || ''}`);
+          err.status = res.status; err.apiCode = apiCode;
+          lastErr = err;
+          continue; // probá el siguiente endpoint
+        }
+
+        // si ok, devolveme el JSON parseado
+        return json ?? {};
+      } catch (e) {
+        lastErr = e;
+      } finally {
+        clearTimeout(timer);
       }
-      return json;
-    } finally { clearTimeout(timer); }
+    }
+    // si ninguno funcionó, tiro el último error
+    throw lastErr || new Error('No Maxi endpoint succeeded');
   };
 
   for (let attempt = 1; attempt <= MAXI_RETRIES; attempt++) {
     const timeoutMs = Math.min(MAXI_FETCH_TIMEOUT_MS * Math.pow(2, attempt - 1), MAXI_FETCH_TIMEOUT_CAP_MS);
-    try { return await tryOnce(timeoutMs); }
-    catch (e) {
+    try {
+      return await tryOnce(timeoutMs);
+    } catch (e) {
       if (e?.status === 401 || e?.status === 403) { await getToken(req, { force: true }); attempt--; continue; }
       if (isTransient(e) && attempt < MAXI_RETRIES) {
         const wait = Math.floor(MAXI_RETRY_BASE_MS * Math.pow(2, attempt - 1) * (1 + Math.random() * 0.25));
         logRaw(`Retry ${attempt}/${MAXI_RETRIES} en ${wait}ms por ${e.status || e.code || e.name || e.message}`);
-        await sleep(wait);
-        continue;
+        await sleep(wait); continue;
       }
       throw e;
     }
@@ -259,9 +282,23 @@ async function fetchStatsAll({ from, to, req, maxDays }) {
 
 // ====================== PARSER (ID, CÓDIGO y búsqueda por nombre) ======================
 function extractFacturas(json) {
-  const c = json?.content?.content ?? json?.content ?? json;
-  return Array.isArray(c?.facturas) ? c.facturas : [];
+  // Maxi a veces responde en distintos envoltorios:
+  // { content: { content: { facturas: [...] } } }
+  // { content: { facturas: [...] } }
+  // { content: [...] } o directamente { facturas: [...] }
+  const c1 = json?.content;
+  const c2 = (c1 && (c1.content ?? c1)) || json;
+
+  // si ya viene como array de facturas
+  if (Array.isArray(c2?.facturas)) return c2.facturas;
+  if (Array.isArray(c2)) return c2;
+
+  // a veces es una lista de facturas en 'content'
+  if (Array.isArray(c1)) return c1;
+
+  return [];
 }
+
 const normCode = (s) => String(s ?? '').trim().replace(/^0+/, '');
 
 function asNum(x) {
@@ -581,6 +618,43 @@ exports.getVentas = async (req, res) => {
     console.error('getVentas error:', e);
     res.status(500).json({ error: e.message || 'Error interno' });
   }
+  // --- DIAGNÓSTICO: probe=true (chequea ambos endpoints del proveedor) ---
+  if (String(req.query.probe) === 'true') {
+    const token = await getToken(req);
+    const bearer = String(token).startsWith('Bearer ') ? token : `Bearer ${token}`;
+
+    const make = async (url) => {
+      const r = await fetch(url, { headers: { Authorization: bearer } });
+      const txt = await r.text(); let json; try { json = JSON.parse(txt); } catch { }
+      logRaw('[PROBE]', r.status, url, txt.slice(0, 600));
+      return { ok: r.ok, url, status: r.status, body: json ?? txt };
+    };
+
+    const base = MAXI_BASE.replace(/\/+$/, '');
+    const u1 = `${base}/estadisticas/invoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
+    const u2 = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
+
+    const p1 = await make(u1);
+    const p2 = await make(u2);
+
+    // extractores súper defensivos:
+    const facturas1 = Array.isArray(p1.body?.content?.content?.facturas) ? p1.body.content.content.facturas
+      : Array.isArray(p1.body?.content?.facturas) ? p1.body.content.facturas
+        : Array.isArray(p1.body?.facturas) ? p1.body.facturas : [];
+
+    const facturas2 = Array.isArray(p2.body?.content?.content?.facturas) ? p2.body.content.content.facturas
+      : Array.isArray(p2.body?.content?.facturas) ? p2.body.content.facturas
+        : Array.isArray(p2.body?.facturas) ? p2.body.facturas : [];
+
+    return res.json({
+      rango: { from: F, to: T },
+      probe: {
+        invoicebydate: { status: p1.status, count: facturas1.length, sample: facturas1[0] ?? null },
+        fullinvoicebydate: { status: p2.status, count: facturas2.length, sample: facturas2[0]?.factura?.detalle?.[0] ?? facturas2[0] ?? null }
+      }
+    });
+  }
+
 };
 
 // === DIAGNÓSTICO (devuelve contadores y una muestra cruda) ===
