@@ -11,24 +11,21 @@ async function loadActiveBusiness(req, res, next) {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
-    // 1) Orden de prioridad para determinar el negocio
-    const headerId = parseId(req.header('x-business-id'));
-    const paramId  = parseId(req.params?.id || req.params?.businessId);
-    const queryId  = parseId(req.query?.businessId);
-
+    const headerId = req.header('x-business-id');
+    const paramId  = req.params.id || req.params.businessId;
+    const queryId  = req.query.businessId;              // 👈 NUEVO
     let source = 'none';
     let businessId = null;
 
-    if (headerId)      { businessId = headerId; source = 'header'; }
-    else if (paramId)  { businessId = paramId;  source = 'param'; }
-    else if (queryId)  { businessId = queryId;  source = 'query'; }
+    if (headerId)      { businessId = Number(headerId); source = 'header'; }
+    else if (paramId)  { businessId = Number(paramId);  source = 'param';  }
+    else if (queryId)  { businessId = Number(queryId);  source = 'query';  } // 👈 NUEVO
     else {
-      // 2) Fallback: activo del usuario (no bloquear si no pertenece)
       const { rows } = await pool.query(
         'SELECT active_business_id FROM app_users WHERE id = $1',
         [uid]
       );
-      businessId = parseId(rows[0]?.active_business_id);
+      businessId = Number(rows[0]?.active_business_id);
       source = 'active';
     }
 
