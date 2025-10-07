@@ -518,22 +518,30 @@ exports.ping = (_req, res) => res.json({ ok: true });
 /**
  * GET /api/ventas
  * query:
- *   - articuloId? (number)  OR  codigo?/articuloCode?/code? (string)  OR  q? (texto en nombre)
+ *   - articuloId? | codigo?/articuloCode?/code? | q?
  *   - from?, to? (YYYY-MM-DD; clamp a AYER)
  *   - groupBy=day | basic=true | peek=true
  *   - ignoreZero=true|false
  *   - limit? (para basic/peek)
+ *   - probe=true (diagnóstico directo a proveedor)
  */
 exports.getVentas = async (req, res) => {
   try {
-    let { articuloId, codigo, articuloCode, code, q, from, to, groupBy = 'day', ignoreZero, basic, peek, limit } = req.query;
+    let {
+      articuloId, codigo, articuloCode, code, q,
+      from, to, groupBy = 'day', ignoreZero,
+      basic, peek, limit, probe
+    } = req.query;
+
+    const isProbe = String(probe) === 'true';
     const hasId = articuloId !== undefined && articuloId !== '';
     const codeRaw = codigo ?? articuloCode ?? code;
     const hasCode = codeRaw !== undefined && String(codeRaw).trim() !== '';
     const hasQ = q !== undefined && String(q).trim() !== '';
     const LIM = Math.min(Number(limit || 200), 1000);
 
-    if (!hasId && !hasCode && !hasQ && String(peek) !== 'true') {
+    // Validación de parámetros (permitimos probe=true sin filtros)
+    if (!hasId && !hasCode && !hasQ && String(peek) !== 'true' && !isProbe) {
       return res.status(400).json({ error: 'Enviá articuloId o codigo o q (texto). También podés usar peek=true.' });
     }
     if (groupBy !== 'day' && String(basic) !== 'true' && String(peek) !== 'true') {
@@ -542,7 +550,33 @@ exports.getVentas = async (req, res) => {
 
     const { from: F, to: T, AYER } = clampToAyer({ from, to });
 
-    // MOCK
+    // --- PROBE: diagnóstico directo contra los endpoints del proveedor ---
+    if (isProbe) {
+      const token = await getToken(req);
+      const bearer = String(token).startsWith('Bearer ') ? token : `Bearer ${token}`;
+      const base = MAXI_BASE.replace(/\/+$/, '');
+      const u1 = `${base}/estadisticas/invoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
+      const u2 = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
+
+      const hit = async (url) => {
+        const r = await fetch(url, { headers: { Authorization: bearer } });
+        const txt = await r.text();
+        let json; try { json = JSON.parse(txt); } catch {}
+        logRaw('[PROBE]', r.status, url, txt.slice(0, 600));
+        const body = json ?? {};
+        const facts =
+          Array.isArray(body?.content?.content?.facturas) ? body.content.content.facturas :
+          Array.isArray(body?.content?.facturas)          ? body.content.facturas :
+          Array.isArray(body?.facturas)                   ? body.facturas : [];
+        return { status: r.status, count: facts.length, sample: facts[0] ?? null };
+      };
+
+      const head = await hit(u1);   // cabeceras
+      const full = await hit(u2);   // detalle (máx 7 días)
+      return res.json({ rango: { from: F, to: T, clampTo: AYER }, probe: { invoicebydate: head, fullinvoicebydate: full } });
+    }
+
+    // --- MOCK ---
     if (USE_MOCK) {
       if (String(basic) === 'true' || String(peek) === 'true') {
         return res.json({
@@ -567,12 +601,8 @@ exports.getVentas = async (req, res) => {
       });
     }
 
-    // Real
+    // --- Real ---
     const facturas = await fetchStatsAll({ from: F, to: T, req });
-    if (String(req.query.probe) === 'true') {
-      const probe = probeFromFacturas(facturas, AR_TIMEZONE, Math.min(Number(req.query.limit || 5), 20));
-      return res.json({ rango: { from: F, to: T, clampTo: AYER }, probe });
-    }
 
     const target = {
       targetId: hasId ? Number(articuloId) : null,
@@ -605,7 +635,7 @@ exports.getVentas = async (req, res) => {
     const filled = days.map(date => agg.byDay.find(d => d.date === date) || { date, qty: 0, amount: 0 });
     const out = (String(ignoreZero) === 'true') ? filled.filter(d => d.qty && d.amount) : filled;
 
-    res.json({
+    return res.json({
       rango: { from: F, to: T, clampTo: AYER },
       articuloId: target.targetId,
       codigo: target.targetCode,
@@ -614,47 +644,11 @@ exports.getVentas = async (req, res) => {
       totals: { qty: agg.totalQty, amount: agg.totalAmount },
       data: out
     });
+
   } catch (e) {
     console.error('getVentas error:', e);
-    res.status(500).json({ error: e.message || 'Error interno' });
+    return res.status(500).json({ error: e.message || 'Error interno' });
   }
-  // --- DIAGNÓSTICO: probe=true (chequea ambos endpoints del proveedor) ---
-  if (String(req.query.probe) === 'true') {
-    const token = await getToken(req);
-    const bearer = String(token).startsWith('Bearer ') ? token : `Bearer ${token}`;
-
-    const make = async (url) => {
-      const r = await fetch(url, { headers: { Authorization: bearer } });
-      const txt = await r.text(); let json; try { json = JSON.parse(txt); } catch { }
-      logRaw('[PROBE]', r.status, url, txt.slice(0, 600));
-      return { ok: r.ok, url, status: r.status, body: json ?? txt };
-    };
-
-    const base = MAXI_BASE.replace(/\/+$/, '');
-    const u1 = `${base}/estadisticas/invoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
-    const u2 = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
-
-    const p1 = await make(u1);
-    const p2 = await make(u2);
-
-    // extractores súper defensivos:
-    const facturas1 = Array.isArray(p1.body?.content?.content?.facturas) ? p1.body.content.content.facturas
-      : Array.isArray(p1.body?.content?.facturas) ? p1.body.content.facturas
-        : Array.isArray(p1.body?.facturas) ? p1.body.facturas : [];
-
-    const facturas2 = Array.isArray(p2.body?.content?.content?.facturas) ? p2.body.content.content.facturas
-      : Array.isArray(p2.body?.content?.facturas) ? p2.body.content.facturas
-        : Array.isArray(p2.body?.facturas) ? p2.body.facturas : [];
-
-    return res.json({
-      rango: { from: F, to: T },
-      probe: {
-        invoicebydate: { status: p1.status, count: facturas1.length, sample: facturas1[0] ?? null },
-        fullinvoicebydate: { status: p2.status, count: facturas2.length, sample: facturas2[0]?.factura?.detalle?.[0] ?? facturas2[0] ?? null }
-      }
-    });
-  }
-
 };
 
 // === DIAGNÓSTICO (devuelve contadores y una muestra cruda) ===
