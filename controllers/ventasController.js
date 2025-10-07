@@ -18,19 +18,19 @@ const LOG_PARSER_DEBUG = process.env.LOG_PARSER_DEBUG === '1';
 const AR_TIMEZONE = process.env.AR_TIMEZONE || 'America/Argentina/Buenos_Aires';
 const USE_MOCK = process.env.VENTAS_MOCK === '1';
 
-const MAXI_MAX_WINDOW_DAYS      = Number(process.env.MAXI_MAX_WINDOW_DAYS || 6);
-const MAXI_CONCURRENCY          = Number(process.env.MAXI_CONCURRENCY || 2);
-const MAXI_RETRIES              = Number(process.env.MAXI_RETRIES || 4);
-const MAXI_RETRY_BASE_MS        = Number(process.env.MAXI_RETRY_BASE_MS || 600);
-const MAXI_FETCH_TIMEOUT_MS     = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 20000);
+const MAXI_MAX_WINDOW_DAYS = Number(process.env.MAXI_MAX_WINDOW_DAYS || 6);
+const MAXI_CONCURRENCY = Number(process.env.MAXI_CONCURRENCY || 2);
+const MAXI_RETRIES = Number(process.env.MAXI_RETRIES || 4);
+const MAXI_RETRY_BASE_MS = Number(process.env.MAXI_RETRY_BASE_MS || 600);
+const MAXI_FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 20000);
 const MAXI_FETCH_TIMEOUT_CAP_MS = Number(process.env.MAXI_FETCH_TIMEOUT_CAP_MS || 90000);
 
 const logRaw = (...a) => { if (LOG_MAXI_RAW) console.log('[MAXI]', ...a); };
-const dbg    = (...a) => { if (LOG_PARSER_DEBUG) console.log('[PARSER]', ...a); };
-const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
+const dbg = (...a) => { if (LOG_PARSER_DEBUG) console.log('[PARSER]', ...a); };
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ====================== LOGIN (cache por negocio) ======================
-const TOKEN_CACHE    = new Map(); // key -> { token, expAt }
+const TOKEN_CACHE = new Map(); // key -> { token, expAt }
 const LOGIN_INFLIGHT = new Map(); // key -> Promise
 
 const cacheKey = (creds, req) =>
@@ -47,8 +47,8 @@ async function readCredsFromDBOrEnv(req) {
     }
   }
   // 2) Fallback .env (testing)
-  const email   = process.env.MAXI_EMAIL  || process.env.EMAIL  || '';
-  const pass    = process.env.MAXI_PASS   || process.env.PASS   || '';
+  const email = process.env.MAXI_EMAIL || process.env.EMAIL || '';
+  const pass = process.env.MAXI_PASS || process.env.PASS || '';
   const cod_cli = process.env.MAXI_CODCLI || process.env.CODCLI || process.env.MAXI_CLIENTE || '';
   return { email: String(email).trim(), pass: String(pass).trim(), cod_cli: String(cod_cli).trim() };
 }
@@ -56,13 +56,13 @@ async function readCredsFromDBOrEnv(req) {
 function pickTokenAndTTL(json) {
   const c = json?.content ?? json;
   const token = c?.access_token || c?.tokenAccess || c?.token || c?.accessToken || null;
-  const ttl   = Number(c?.expires_in ?? c?.aliveTime ?? 3600);
+  const ttl = Number(c?.expires_in ?? c?.aliveTime ?? 3600);
   return { token, ttl };
 }
 
 async function loginMaxiInner(req, creds, key) {
   const variants = [
-    { label: 'email/pass/cod_cli',       body: { email: creds.email, pass: creds.pass, cod_cli: creds.cod_cli } },
+    { label: 'email/pass/cod_cli', body: { email: creds.email, pass: creds.pass, cod_cli: creds.cod_cli } },
     { label: 'usuario/password/cliente', body: { usuario: creds.email, password: creds.pass, cliente: creds.cod_cli } },
   ];
   let lastTxt = '';
@@ -130,7 +130,7 @@ function getAyer(tz = AR_TIMEZONE) {
 function clampToAyer({ from, to, tz = AR_TIMEZONE }) {
   const AYER = getAyer(tz);
   let F = from ? normalizeInputYMD(from, tz) : AYER;
-  let T = to   ? normalizeInputYMD(to, tz)   : AYER;
+  let T = to ? normalizeInputYMD(to, tz) : AYER;
   if (!F) F = AYER; if (!T) T = AYER;
   if (T > AYER) T = AYER; if (F > T) F = T;
   return { from: F, to: T, AYER };
@@ -169,7 +169,7 @@ const isTransient = (e) =>
 
 async function fetchStatsWithRetry({ from, to, req }) {
   const tryOnce = async (timeoutMs) => {
-    const token  = await getToken(req);
+    const token = await getToken(req);
     const bearer = String(token).startsWith('Bearer ') ? token : `Bearer ${token}`;
     const url = `${STATS_URL}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
     logRaw('GET', url);
@@ -225,10 +225,10 @@ async function fetchSafe(a, b, req) {
     if (e?.status === 400 && (e.apiCode === 'LONG_PARAMS' || String(e.message).includes('LONG_PARAMS'))) {
       const span = diffDays(a, b) + 1;
       if (span <= 1) throw e;
-      const mid   = ymdAddDays(a, Math.floor(span / 2) - 1);
+      const mid = ymdAddDays(a, Math.floor(span / 2) - 1);
       const right = ymdAddDays(mid, 1);
-      const L = await fetchSafe(a,   mid,   req);
-      const R = await fetchSafe(right, b,    req);
+      const L = await fetchSafe(a, mid, req);
+      const R = await fetchSafe(right, b, req);
       return [...L, ...R];
     }
     throw e;
@@ -334,15 +334,15 @@ function getDetalleArray(f) {
   const unwrap = (d) => Array.isArray(d)
     ? d
     : Array.isArray(d?.detalle) ? d.detalle
-    : Array.isArray(d?.items)   ? d.items
-    : null;
+      : Array.isArray(d?.items) ? d.items
+        : null;
   return unwrap(d1) || unwrap(d2) || unwrap(d3) || unwrap(d4) || [];
 }
 function pickDateFromFactura(f, tz = AR_TIMEZONE) {
   const src = f?.factura?.cabecera?.fecha ?? f?.factura?.fecha ?? f?.fecha ?? null;
   return src ? ymdInTZ(new Date(src), tz) : null;
 }
-const normText  = (s) => String(s ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+const normText = (s) => String(s ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 const includesCI = (text, q) => normText(text).includes(normText(q));
 
 function pickFacturaSign(f) {
@@ -381,13 +381,13 @@ function buildByDayForArticulo(facturas, { targetId, targetCode, q }, tz = AR_TI
     for (const it of detalle) {
       cItems++;
       if (LOG_PARSER_DEBUG) Object.keys(it || {}).slice(0, 16).forEach(k => sampleKeys.add(k));
-      const id   = pickItemId(it);
+      const id = pickItemId(it);
       const code = pickItemCode(it);
       const name = pickItemName(it) || '';
 
-      const okId   = (targetId   != null) && (typeof id === 'number')    && id === targetId;
-      const okCode = (targetCode != null) && (typeof code === 'string')   && normCode(code) === targetCode;
-      const okQ    = (q != null && q !== '') && includesCI(name, q);
+      const okId = (targetId != null) && (typeof id === 'number') && id === targetId;
+      const okCode = (targetCode != null) && (typeof code === 'string') && normCode(code) === targetCode;
+      const okQ = (q != null && q !== '') && includesCI(name, q);
       if (!okId && !okCode && !okQ) continue;
 
       cMatch++;
@@ -398,7 +398,7 @@ function buildByDayForArticulo(facturas, { targetId, targetCode, q }, tz = AR_TI
       const amtSigned = sign < 0 ? (amt > 0 ? -amt : amt) : amt;
 
       const prev = byDay.get(dateKey) || { qty: 0, amount: 0 };
-      prev.qty    += qtySigned;
+      prev.qty += qtySigned;
       prev.amount += amtSigned;
       byDay.set(dateKey, prev);
     }
@@ -426,12 +426,12 @@ function buildBasicMatches(facturas, { targetId, targetCode, q }, tz = AR_TIMEZO
     const dateKey = pickDateFromFactura(f, tz); if (!dateKey) continue;
     const detalle = getDetalleArray(f);
     for (const it of detalle) {
-      const id   = pickItemId(it);
+      const id = pickItemId(it);
       const code = pickItemCode(it);
       const name = pickItemName(it) || '';
-      const okId   = (targetId   != null) && (typeof id === 'number')  && id === targetId;
+      const okId = (targetId != null) && (typeof id === 'number') && id === targetId;
       const okCode = (targetCode != null) && (typeof code === 'string') && normCode(code) === targetCode;
-      const okQ    = (q != null && q !== '') && includesCI(name, q);
+      const okQ = (q != null && q !== '') && includesCI(name, q);
       if (!okId && !okCode && !okQ) continue;
       out.push({ date: dateKey, code: code ?? null, name, unitPrice: pickUnitPrice(it), qty: pickQty(it), amount: pickAmount(it), id: id ?? null });
       if (out.length >= limit) return out;
@@ -490,11 +490,11 @@ exports.ping = (_req, res) => res.json({ ok: true });
 exports.getVentas = async (req, res) => {
   try {
     let { articuloId, codigo, articuloCode, code, q, from, to, groupBy = 'day', ignoreZero, basic, peek, limit } = req.query;
-    const hasId   = articuloId !== undefined && articuloId !== '';
+    const hasId = articuloId !== undefined && articuloId !== '';
     const codeRaw = codigo ?? articuloCode ?? code;
     const hasCode = codeRaw !== undefined && String(codeRaw).trim() !== '';
-    const hasQ    = q !== undefined && String(q).trim() !== '';
-    const LIM     = Math.min(Number(limit || 200), 1000);
+    const hasQ = q !== undefined && String(q).trim() !== '';
+    const LIM = Math.min(Number(limit || 200), 1000);
 
     if (!hasId && !hasCode && !hasQ && String(peek) !== 'true') {
       return res.status(400).json({ error: 'Enviá articuloId o codigo o q (texto). También podés usar peek=true.' });
@@ -512,8 +512,8 @@ exports.getVentas = async (req, res) => {
           rango: { from: F, to: T, clampTo: AYER },
           filtro: {
             articuloId: hasId ? Number(articuloId) : null,
-            codigo:     hasCode ? normCode(codeRaw) : null,
-            q:          hasQ ? String(q) : null
+            codigo: hasCode ? normCode(codeRaw) : null,
+            q: hasQ ? String(q) : null
           },
           basic: []
         });
@@ -522,7 +522,7 @@ exports.getVentas = async (req, res) => {
       return res.json({
         rango: { from: F, to: T, clampTo: AYER },
         articuloId: hasId ? Number(articuloId) : null,
-        codigo:     hasCode ? normCode(codeRaw) : null,
+        codigo: hasCode ? normCode(codeRaw) : null,
         groupBy: 'day',
         ignoreZero: String(ignoreZero) === 'true',
         totals: { qty: mock.totals.qty, amount: mock.totals.amount },
@@ -532,11 +532,15 @@ exports.getVentas = async (req, res) => {
 
     // Real
     const facturas = await fetchStatsAll({ from: F, to: T, req });
+    if (String(req.query.probe) === 'true') {
+      const probe = probeFromFacturas(facturas, AR_TIMEZONE, Math.min(Number(req.query.limit || 5), 20));
+      return res.json({ rango: { from: F, to: T, clampTo: AYER }, probe });
+    }
 
     const target = {
-      targetId:   hasId   ? Number(articuloId)     : null,
-      targetCode: hasCode ? normCode(codeRaw)      : null,
-      q:          hasQ    ? String(q)              : null
+      targetId: hasId ? Number(articuloId) : null,
+      targetCode: hasCode ? normCode(codeRaw) : null,
+      q: hasQ ? String(q) : null
     };
 
     if (String(peek) === 'true') {
@@ -559,15 +563,15 @@ exports.getVentas = async (req, res) => {
       });
     }
 
-    const agg    = buildByDayForArticulo(facturas, target, AR_TIMEZONE);
-    const days   = dateRangeDays(F, T);
+    const agg = buildByDayForArticulo(facturas, target, AR_TIMEZONE);
+    const days = dateRangeDays(F, T);
     const filled = days.map(date => agg.byDay.find(d => d.date === date) || { date, qty: 0, amount: 0 });
-    const out    = (String(ignoreZero) === 'true') ? filled.filter(d => d.qty && d.amount) : filled;
+    const out = (String(ignoreZero) === 'true') ? filled.filter(d => d.qty && d.amount) : filled;
 
     res.json({
       rango: { from: F, to: T, clampTo: AYER },
       articuloId: target.targetId,
-      codigo:     target.targetCode,
+      codigo: target.targetCode,
       groupBy: 'day',
       ignoreZero: String(ignoreZero) === 'true',
       totals: { qty: agg.totalQty, amount: agg.totalAmount },
@@ -578,3 +582,42 @@ exports.getVentas = async (req, res) => {
     res.status(500).json({ error: e.message || 'Error interno' });
   }
 };
+
+// === DIAGNÓSTICO (devuelve contadores y una muestra cruda) ===
+function probeFromFacturas(facturas, tz = AR_TIMEZONE, limit = 5) {
+  const sample = [];
+  let facturasConDetalle = 0, itemsTotal = 0;
+
+  for (const f of facturas) {
+    const detalle = getDetalleArray(f);
+    if (!Array.isArray(detalle) || detalle.length === 0) continue;
+    facturasConDetalle++;
+    for (const it of detalle) {
+      itemsTotal++;
+      if (sample.length < limit) {
+        sample.push({
+          // lo que vea el parser:
+          pickedId: pickItemId(it),
+          pickedCode: pickItemCode(it),
+          pickedName: pickItemName(it),
+          pickedQty: pickQty(it),
+          pickedUnit: pickUnitPrice(it),
+          pickedAmount: pickAmount(it),
+          // y además una foto del item crudo (acotado)
+          rawKeys: Object.keys(it || {}).slice(0, 25),
+          rawPeek: JSON.stringify(it).slice(0, 350)
+        });
+      }
+    }
+    if (sample.length >= limit) break;
+  }
+
+  return {
+    resumen: {
+      facturas: facturas.length,
+      facturasConDetalle,
+      itemsTotal,
+    },
+    sample
+  };
+}
