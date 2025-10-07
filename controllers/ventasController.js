@@ -257,18 +257,21 @@ async function fetchSafe(a, b, req) {
     throw e;
   }
 }
+
 async function fetchStatsAll({ from, to, req, maxDays }) {
   const size = maxDays || MAXI_MAX_WINDOW_DAYS;
   const wins = segmentWindows(from, to, size);
+
   const conc = Math.max(1, MAXI_CONCURRENCY);
   let cursor = 0;
   const collected = [];
 
   async function worker(id) {
-    // eslint-disable-next-line no-constant-condition
     while (true) {
+      // tomar y avanzar cursor de forma atómica
       const idx = cursor++;
       if (idx >= wins.length) break;
+
       const [a, b] = wins[idx];
       logRaw(`WORKER#${id} ventana ${idx + 1}/${wins.length}: ${a}..${b}`);
       const facts = await fetchSafe(a, b, req);
@@ -524,23 +527,18 @@ exports.ping = (_req, res) => res.json({ ok: true });
  *   - ignoreZero=true|false
  *   - limit? (para basic/peek)
  *   - probe=true (diagnóstico directo a proveedor)
- */
-exports.getVentas = async (req, res) => {
+ */exports.getVentas = async (req, res) => {
   try {
-    let {
-      articuloId, codigo, articuloCode, code, q,
-      from, to, groupBy = 'day', ignoreZero,
-      basic, peek, limit, probe
-    } = req.query;
+    let { articuloId, codigo, articuloCode, code, q, from, to,
+          groupBy = 'day', ignoreZero, basic, peek, limit, probe } = req.query;
 
     const isProbe = String(probe) === 'true';
-    const hasId = articuloId !== undefined && articuloId !== '';
+    const hasId   = articuloId !== undefined && articuloId !== '';
     const codeRaw = codigo ?? articuloCode ?? code;
     const hasCode = codeRaw !== undefined && String(codeRaw).trim() !== '';
-    const hasQ = q !== undefined && String(q).trim() !== '';
-    const LIM = Math.min(Number(limit || 200), 1000);
+    const hasQ    = q !== undefined && String(q).trim() !== '';
+    const LIM     = Math.min(Number(limit || 200), 1000);
 
-    // Validación de parámetros (permitimos probe=true sin filtros)
     if (!hasId && !hasCode && !hasQ && String(peek) !== 'true' && !isProbe) {
       return res.status(400).json({ error: 'Enviá articuloId o codigo o q (texto). También podés usar peek=true.' });
     }
@@ -550,19 +548,18 @@ exports.getVentas = async (req, res) => {
 
     const { from: F, to: T, AYER } = clampToAyer({ from, to });
 
-    // --- PROBE: diagnóstico directo contra los endpoints del proveedor ---
+    // ---- PROBE: golpea directamente los dos endpoints del proveedor ----
     if (isProbe) {
-      const token = await getToken(req);
+      const token  = await getToken(req);
       const bearer = String(token).startsWith('Bearer ') ? token : `Bearer ${token}`;
-      const base = MAXI_BASE.replace(/\/+$/, '');
-      const u1 = `${base}/estadisticas/invoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
-      const u2 = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`;
+      const base   = MAXI_BASE.replace(/\/+$/, '');
 
       const hit = async (url) => {
-        const r = await fetch(url, { headers: { Authorization: bearer } });
+        const r   = await fetch(url, { headers: { Authorization: bearer } });
         const txt = await r.text();
         let json; try { json = JSON.parse(txt); } catch {}
         logRaw('[PROBE]', r.status, url, txt.slice(0, 600));
+
         const body = json ?? {};
         const facts =
           Array.isArray(body?.content?.content?.facturas) ? body.content.content.facturas :
@@ -571,83 +568,47 @@ exports.getVentas = async (req, res) => {
         return { status: r.status, count: facts.length, sample: facts[0] ?? null };
       };
 
-      const head = await hit(u1);   // cabeceras
-      const full = await hit(u2);   // detalle (máx 7 días)
+      const u1 = `${base}/estadisticas/invoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`; // cabeceras
+      const u2 = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(F)}&to=${encodeURIComponent(T)}`; // detalle (máx 7d)
+      const head = await hit(u1);
+      const full = await hit(u2);
       return res.json({ rango: { from: F, to: T, clampTo: AYER }, probe: { invoicebydate: head, fullinvoicebydate: full } });
     }
 
-    // --- MOCK ---
-    if (USE_MOCK) {
-      if (String(basic) === 'true' || String(peek) === 'true') {
-        return res.json({
-          rango: { from: F, to: T, clampTo: AYER },
-          filtro: {
-            articuloId: hasId ? Number(articuloId) : null,
-            codigo: hasCode ? normCode(codeRaw) : null,
-            q: hasQ ? String(q) : null
-          },
-          basic: []
-        });
-      }
-      const mock = buildMock({ from: F, to: T, ignoreZero: String(ignoreZero) === 'true' });
-      return res.json({
-        rango: { from: F, to: T, clampTo: AYER },
-        articuloId: hasId ? Number(articuloId) : null,
-        codigo: hasCode ? normCode(codeRaw) : null,
-        groupBy: 'day',
-        ignoreZero: String(ignoreZero) === 'true',
-        totals: { qty: mock.totals.qty, amount: mock.totals.amount },
-        data: mock.data
-      });
-    }
-
-    // --- Real ---
+    // ---- FLUJO REAL ----
     const facturas = await fetchStatsAll({ from: F, to: T, req });
 
     const target = {
       targetId: hasId ? Number(articuloId) : null,
       targetCode: hasCode ? normCode(codeRaw) : null,
-      q: hasQ ? String(q) : null
+      q: hasQ ? String(q) : null,
     };
 
     if (String(peek) === 'true') {
       const items = collectDistinctItems(facturas, AR_TIMEZONE, LIM);
-      return res.json({
-        rango: { from: F, to: T, clampTo: AYER },
-        filtro: { articuloId: target.targetId, codigo: target.targetCode, q: target.q },
-        count: items.length,
-        peek: items
-      });
+      return res.json({ rango: { from: F, to: T, clampTo: AYER }, filtro: target, count: items.length, peek: items });
     }
 
     if (String(basic) === 'true') {
       const items = buildBasicMatches(facturas, target, AR_TIMEZONE, LIM);
-      return res.json({
-        rango: { from: F, to: T, clampTo: AYER },
-        filtro: { articuloId: target.targetId, codigo: target.targetCode, q: target.q },
-        count: items.length,
-        basic: items
-      });
+      return res.json({ rango: { from: F, to: T, clampTo: AYER }, filtro: target, count: items.length, basic: items });
     }
 
-    const agg = buildByDayForArticulo(facturas, target, AR_TIMEZONE);
-    const days = dateRangeDays(F, T);
-    const filled = days.map(date => agg.byDay.find(d => d.date === date) || { date, qty: 0, amount: 0 });
-    const out = (String(ignoreZero) === 'true') ? filled.filter(d => d.qty && d.amount) : filled;
+    const agg    = buildByDayForArticulo(facturas, target, AR_TIMEZONE);
+    const days   = dateRangeDays(F, T);
+    const filled = days.map(d => agg.byDay.find(x => x.date === d) || { date: d, qty: 0, amount: 0 });
+    const data   = String(ignoreZero) === 'true' ? filled.filter(d => d.qty && d.amount) : filled;
 
     return res.json({
       rango: { from: F, to: T, clampTo: AYER },
-      articuloId: target.targetId,
-      codigo: target.targetCode,
-      groupBy: 'day',
-      ignoreZero: String(ignoreZero) === 'true',
+      articuloId: target.targetId, codigo: target.targetCode,
+      groupBy: 'day', ignoreZero: String(ignoreZero) === 'true',
       totals: { qty: agg.totalQty, amount: agg.totalAmount },
-      data: out
+      data
     });
-
   } catch (e) {
     console.error('getVentas error:', e);
-    return res.status(500).json({ error: e.message || 'Error interno' });
+    res.status(500).json({ error: e.message || 'Error interno' });
   }
 };
 
