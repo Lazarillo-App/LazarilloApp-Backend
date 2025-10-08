@@ -2,7 +2,7 @@
 const fetch = require('node-fetch');
 
 // --- Config ---
-const MAXI_BASE  = process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas.com.ar';
+const MAXI_BASE = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
 const STATS_BASE = process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar';
 
 // Cache de tokens Maxi por negocio (key = biz:<id> | env)
@@ -10,14 +10,14 @@ const tokenCache = new Map(); // key -> { token, exp }
 
 // ---------- Utilidades de fecha ----------
 const pad2 = n => String(n).padStart(2, '0');
-const ymd  = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const at00 = d => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+const ymd = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const at00 = d => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 
 function resolveMacro(s) {
   if (!s) return s;
   const today = at00(new Date());
-  const ayer  = addDays(today, -1);
+  const ayer = addDays(today, -1);
   const m = String(s).trim();
   if (m === '<ayer>') return ymd(ayer);
   const rx = /^<ayer-(\d+)d>$/i;
@@ -31,7 +31,7 @@ function clampToAyer({ from, to }) {
   const AYERd = addDays(today, -1);
 
   const Fd = resolveMacro(from) ? at00(new Date(resolveMacro(from))) : addDays(AYERd, -29);
-  const Td = resolveMacro(to)   ? at00(new Date(resolveMacro(to)))   : AYERd;
+  const Td = resolveMacro(to) ? at00(new Date(resolveMacro(to))) : AYERd;
 
   // Nunca pasar de AYER
   const clampedT = Td > AYERd ? AYERd : Td;
@@ -43,10 +43,10 @@ function clampToAyer({ from, to }) {
 function getBizCreds(req) {
   const maxi = req.business?.props?.maxi || {};
   // fallback a env
-  const email  = maxi.email  || process.env.MAXI_EMAIL;
-  const pass   = maxi.pass   || process.env.MAXI_PASS;
+  const email = maxi.email || process.env.MAXI_EMAIL;
+  const pass = maxi.pass || process.env.MAXI_PASS;
   const codcli = maxi.codcli || process.env.MAXI_CODCLI;
-  const key    = req.businessId ? `biz:${req.businessId}` : 'env';
+  const key = req.businessId ? `biz:${req.businessId}` : 'env';
   return { email, pass, codcli, key };
 }
 
@@ -55,13 +55,13 @@ async function maxiLogin(creds) {
   const cached = tokenCache.get(creds.key);
   if (cached && cached.exp > now) return cached.token;
 
-  const r = await fetch(`${MAXI_BASE.replace(/\/+$/,'')}/login`, {
+  const r = await fetch(`${MAXI_BASE.replace(/\/+$/, '')}/login`, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: creds.email, pass: creds.pass, cod_cli: creds.codcli })
   });
 
-  const text = await r.text().catch(()=>''); let json; try { json = JSON.parse(text); } catch {}
+  const text = await r.text().catch(() => ''); let json; try { json = JSON.parse(text); } catch { }
   if (!r.ok || json?.resultCode !== 'SUCCESS') {
     const err = new Error(json?.resultDescription || r.statusText || 'login Maxi falló');
     err.status = 502; throw err;
@@ -75,15 +75,15 @@ async function maxiLogin(creds) {
 
 // ---------- Fetch con retry (7 días máx) ----------
 async function fetchFullByDate(fromYMD, toYMD, bearer) {
-  const url = `${STATS_BASE.replace(/\/+$/,'')}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
+  const url = `${STATS_BASE.replace(/\/+$/, '')}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
   for (let i = 0; i < 3; i++) {
     const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
-    const txt = await r.text().catch(()=> ''); let j; try { j = JSON.parse(txt); } catch {}
+    const txt = await r.text().catch(() => ''); let j; try { j = JSON.parse(txt); } catch { }
     if (r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS')) {
       return j?.content ?? j ?? {};
     }
     // reintentar en 429/502/503
-    if ([429,502,503].includes(r.status)) {
+    if ([429, 502, 503].includes(r.status)) {
       await new Promise(res => setTimeout(res, 500 * (i + 1) ** 2));
       continue;
     }
@@ -100,7 +100,7 @@ function extractItems(content) {
   const push = (fecha, id, qty) => {
     const nId = Number(id), nQty = Number(qty);
     if (fecha && Number.isFinite(nId) && Number.isFinite(nQty)) {
-      out.push({ fecha: String(fecha).slice(0,10), articuloId: nId, cantidad: nQty });
+      out.push({ fecha: String(fecha).slice(0, 10), articuloId: nId, cantidad: nQty });
     }
   };
 
@@ -113,7 +113,7 @@ function extractItems(content) {
       const items = f?.factura?.items ?? f?.items ?? [];
       if (Array.isArray(items)) {
         for (const it of items) {
-          const id  = it.cod_art ?? it.codigoArticulo ?? it.articuloId ?? it.idArticulo ?? it.codigo ?? it.id;
+          const id = it.cod_art ?? it.codigoArticulo ?? it.articuloId ?? it.idArticulo ?? it.codigo ?? it.id;
           const qty = it.cantidad ?? it.unidades ?? it.qty;
           push(fechaCab, id, qty);
         }
@@ -126,15 +126,15 @@ function extractItems(content) {
     if (!node) return;
     if (Array.isArray(node)) { node.forEach(n => walk(n, ctxFecha)); return; }
     if (typeof node === 'object') {
-      const fecha = node.cabecera?.fecha?.slice?.(0,10) ||
-                    node.fecha?.slice?.(0,10) ||
-                    node.fechaDocumento?.slice?.(0,10) ||
-                    ctxFecha;
-      const id  = node.cod_art ?? node.codigoArticulo ?? node.articuloId ?? node.idArticulo ?? node.codigo ?? node.id;
+      const fecha = node.cabecera?.fecha?.slice?.(0, 10) ||
+        node.fecha?.slice?.(0, 10) ||
+        node.fechaDocumento?.slice?.(0, 10) ||
+        ctxFecha;
+      const id = node.cod_art ?? node.codigoArticulo ?? node.articuloId ?? node.idArticulo ?? node.codigo ?? node.id;
       const qty = node.cantidad ?? node.unidades ?? node.qty ?? node.cantidadVendida;
       if (id != null && qty != null && fecha) push(fecha, id, qty);
       for (const k of Object.keys(node)) {
-        if (['items','detalle','detalles','lineas','detalleFactura'].includes(k)) walk(node[k], fecha);
+        if (['items', 'detalle', 'detalles', 'lineas', 'detalleFactura'].includes(k)) walk(node[k], fecha);
       }
     }
   };
@@ -166,9 +166,47 @@ exports.getVentas = async (req, res, next) => {
     }
     const bearer = await maxiLogin(creds);
 
-    // Ventanas de 7 días
-    const start = at00(new Date(F));
-    const end   = at00(new Date(T));
+    // ... dentro de getVentas, después de const bearer = await maxiLogin(creds);
+
+    const start = new Date(F), end = new Date(T);
+    const add = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+    const fmt = d => d.toISOString().slice(0, 10);
+
+    // construir ventanas de hasta 7 días
+    const windows = [];
+    for (let cur = new Date(start); cur <= end;) {
+      const a = new Date(cur);
+      const b = add(cur, 6);
+      const stop = b < end ? b : end;
+      windows.push([fmt(a), fmt(stop)]);
+      cur = add(stop, 1);
+    }
+
+    // descarga con concurrencia 2 + retry por ventana
+    async function fetchWithRetry(from, to, bearer, attempts = 2) {
+      for (let i = 0; i <= attempts; i++) {
+        try {
+          return await fetchFull(from, to, bearer);
+        } catch (e) {
+          if (i === attempts || (e.status && e.status < 500)) throw e;
+          await new Promise(r => setTimeout(r, 250 * (i + 1)));
+        }
+      }
+    }
+
+    const CONC = 2;
+    const fullPayload = [];
+    let idx = 0;
+    async function worker() {
+      while (idx < windows.length) {
+        const my = idx++;
+        const [a, b] = windows[my];
+        const chunk = await fetchWithRetry(a, b, bearer, 2);
+        fullPayload[my] = chunk;
+      }
+    }
+    await Promise.all([...Array(Math.min(CONC, windows.length))].map(worker));
+
     const chunks = [];
     for (let cur = new Date(start); cur <= end; cur = addDays(cur, 7)) {
       const a = cur;
@@ -183,9 +221,9 @@ exports.getVentas = async (req, res, next) => {
     const lines = chunks.flatMap(extractItems);
 
     // Filtros
-    const targetId   = (articuloId != null) ? Number(articuloId) : null;
+    const targetId = (articuloId != null) ? Number(articuloId) : null;
     const targetCode = (codigo ?? code)?.toString()?.trim()?.toUpperCase() || null;
-    const textQ      = q?.toString()?.trim()?.toLowerCase() || null;
+    const textQ = q?.toString()?.trim()?.toLowerCase() || null;
 
     // Si peek=true → devuelvo artículos distintos (id + qty total)
     if (String(peek) === 'true') {
@@ -195,7 +233,7 @@ exports.getVentas = async (req, res, next) => {
       }
       let items = Array.from(agg.entries())
         .map(([id, qty]) => ({ articuloId: id, qty }))
-        .sort((a,b) => b.qty - a.qty);
+        .sort((a, b) => b.qty - a.qty);
 
       // filtros básicos de peek
       if (targetId != null) items = items.filter(x => x.articuloId === targetId);
@@ -204,10 +242,10 @@ exports.getVentas = async (req, res, next) => {
       items = items.slice(0, LIM);
 
       return res.json({
-        rango:  { from: F, to: T, clampTo: AYER },
+        rango: { from: F, to: T, clampTo: AYER },
         filtro: { articuloId: targetId, codigo: targetCode, q: textQ },
-        count:  items.length,
-        peek:   items
+        count: items.length,
+        peek: items
       });
     }
 
@@ -216,7 +254,7 @@ exports.getVentas = async (req, res, next) => {
       if (targetId != null && l.articuloId !== targetId) return false;
       // (Si quisieras mapear código->id o buscar por nombre, acá)
       if (targetCode) return false;
-      if (textQ)     return false;
+      if (textQ) return false;
       return true;
     });
 
