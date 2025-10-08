@@ -4,9 +4,21 @@ const fetch = require('node-fetch');
 // --- Config ---
 const MAXI_BASE  = process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas.com.ar';
 const STATS_BASE = process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar';
+// Concurrencia para bajar ventanas de 7d (ajustable por env)
+const CONC = Math.max(1, Number(process.env.MAXI_FETCH_CONCURRENCY || 3));
 
-// Cache de tokens por negocio
+// --- Caches ---
 const tokenCache = new Map(); // key -> { token, exp }
+const lru = new Map();        // key -> { at, data }
+const TTL_MS = 10 * 60 * 1000; // 10 minutos
+
+function cacheGet(k) {
+  const v = lru.get(k);
+  if (!v) return null;
+  if (Date.now() - v.at > TTL_MS) { lru.delete(k); return null; }
+  return v.data;
+}
+function cacheSet(k, data) { lru.set(k, { at: Date.now(), data }); }
 
 // ---------- utils fecha ----------
 const pad2 = n => String(n).padStart(2, '0');
@@ -24,13 +36,12 @@ function resolveMacro(s) {
   if (m2) return ymd(addDays(ayer, -Number(m2[1] || 0)));
   return m;
 }
-
 function clampToAyer({ from, to }) {
   const today = at00(new Date());
   const AYERd = addDays(today, -1);
   const Fd = resolveMacro(from) ? at00(new Date(resolveMacro(from))) : addDays(AYERd, -29);
   const Td = resolveMacro(to)   ? at00(new Date(resolveMacro(to)))   : AYERd;
-  const T  = Td > AYERd ? AYERd : Td;
+  const T  = Td > AYERd ? AYERd : Td; // nunca futuro
   return { from: ymd(Fd), to: ymd(T), AYER: ymd(AYERd) };
 }
 
@@ -70,7 +81,7 @@ async function maxiLogin(creds) {
   return token;
 }
 
-// ---------- fetch de 7 días con retry ----------
+// ---------- fetch 7d con retry ----------
 async function fetchFullByDate(fromYMD, toYMD, bearer) {
   const url = `${STATS_BASE.replace(/\/+$/, '')}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
   for (let i = 0; i < 3; i++) {
@@ -79,7 +90,7 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
     if (r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS')) {
       return j?.content ?? j ?? {};
     }
-    if ([429,502,503].includes(r.status)) { // reintentos en errores transitorios
+    if ([429,502,503].includes(r.status)) { // errores transitorios
       await new Promise(res => setTimeout(res, 500 * (i+1)**2));
       continue;
     }
@@ -89,8 +100,8 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
   const e = new Error('Maxi retries exhausted'); e.status = 502; throw e;
 }
 
-// Particiona el rango en ventanas de 7 días y descarga con concurrencia fija
-async function fetchRange(fromYMD, toYMD, bearer, conc = 2) {
+// ---------- particionar y bajar todo el rango ----------
+async function fetchRange(fromYMD, toYMD, bearer, conc = CONC) {
   const start = new Date(fromYMD), end = new Date(toYMD);
   const windows = [];
   for (let cur = new Date(start); cur <= end; ) {
@@ -137,7 +148,6 @@ function extractItems(content) {
     }
   }
 
-  // fallback súper defensivo
   if (!out.length) {
     const walk = (node, ctxFecha) => {
       if (!node) return;
@@ -167,6 +177,13 @@ exports.getVentas = async (req, res) => {
     const { from, to, articuloId, codigo, code, q, groupBy='day', ignoreZero, peek, limit } = req.query;
     const { from: F, to: T, AYER } = clampToAyer({ from, to });
 
+    // Cache por request (negocio + query)
+    const cacheKey =
+      `${req.businessId || 'env'}|${F}|${T}|peek:${String(peek)==='true'}|aid:${articuloId ?? ''}|gb:${groupBy}|iz:${ignoreZero ? 1 : 0}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json(cached);
+
+    // Credenciales
     const creds = getBizCreds(req);
     if (!creds.email || !creds.pass || !creds.codcli) {
       return res.status(400).json({ error: 'Faltan credenciales Maxi para este comercio' });
@@ -174,7 +191,7 @@ exports.getVentas = async (req, res) => {
     const bearer = await maxiLogin(creds);
 
     // Descarga del rango completo (7d por ventana)
-    const payloads = await fetchRange(F, T, bearer, 2);
+    const payloads = await fetchRange(F, T, bearer); // usa CONC por defecto (env)
     const lines = payloads.flatMap(extractItems);
 
     const targetId   = (articuloId != null) ? Number(articuloId) : null;
@@ -189,20 +206,25 @@ exports.getVentas = async (req, res) => {
       }
       let items = Array.from(agg.entries()).map(([id, qty]) => ({ articuloId: id, qty }));
       if (targetId != null) items = items.filter(x => x.articuloId === targetId);
-      // (podrías filtrar por code/name acá si tuvieras mapeo)
       items.sort((a,b) => b.qty - a.qty);
       const LIM = Math.min(Number(limit || 200), 1000);
       items = items.slice(0, LIM);
 
-      return res.json({
+      const out = {
         rango: { from: F, to: T, clampTo: AYER },
         filtro: { articuloId: targetId, codigo: targetCode, q: textQ },
         count: items.length,
         peek: items,
-      });
+      };
+      cacheSet(cacheKey, out);
+      return res.json(out);
     }
 
-    // ---- serie por día (lo usa el gráfico y la tabla) ----
+    // ---- serie por día ----
+    if (groupBy !== 'day') {
+      return res.status(400).json({ error: 'Por ahora sólo groupBy=day' });
+    }
+
     const filtered = lines.filter(l => {
       if (targetId != null && l.articuloId !== targetId) return false;
       if (targetCode) return false; // placeholder para mapear código->id
@@ -223,7 +245,7 @@ exports.getVentas = async (req, res) => {
 
     const totals = data.reduce((acc, x) => (acc.qty += x.qty, acc), { qty: 0, amount: 0 });
 
-    return res.json({
+    const out = {
       rango: { from: F, to: T, clampTo: AYER },
       articuloId: targetId,
       codigo: targetCode,
@@ -231,7 +253,9 @@ exports.getVentas = async (req, res) => {
       ignoreZero: String(ignoreZero) === 'true',
       totals,
       data,
-    });
+    };
+    cacheSet(cacheKey, out);
+    return res.json(out);
   } catch (err) {
     console.error('getVentas error:', err);
     res.status(err.status || 500).json({ error: err.message || 'internal' });
