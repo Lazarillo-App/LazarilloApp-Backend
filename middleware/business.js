@@ -21,66 +21,49 @@ async function loadActiveBusiness(req, res, next) {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
-    // 1) resolver businessId
-    const h = req.get('X-Business-Id') || req.get('x-business-id');
-    const q = req.query?.businessId;
-    const p = req.params?.businessId || req.params?.id;
+    // prioridad: header -> param -> query -> activo del usuario
+    const hId = req.header('X-Business-Id');
+    const pId = req.params.businessId || req.params.id;
+    const qId = req.query.businessId;
 
-    let source = 'none';
-    let businessId =
-      (h && toNum(h)) || (q && toNum(q)) || (p && toNum(p)) || null;
-
-    if (!businessId) {
+    let bizId = Number(hId ?? pId ?? qId);
+    if (!Number.isFinite(bizId)) {
       const { rows } = await pool.query(
         'SELECT active_business_id FROM app_users WHERE id=$1',
-        [uid],
+        [uid]
       );
-      businessId = toNum(rows[0]?.active_business_id);
-      source = 'active';
-    } else {
-      source = h ? 'header' : q ? 'query' : 'param';
+      bizId = Number(rows[0]?.active_business_id);
     }
-
-    if (!businessId) {
-      // Este middleware lo usamos sólo en rutas que requieren negocio,
-      // así que devolvemos 404/semantic “no active”.
+    if (!Number.isFinite(bizId)) {
       return res.status(404).json({ error: 'no_active_business' });
     }
 
-    // 2) validar acceso (owner o miembro)
+    // dueño O miembro
     const { rows } = await pool.query(
-      `
-      SELECT b.*
-        FROM app_businesses b
-        LEFT JOIN user_businesses ub ON ub.business_id = b.id
-       WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
-       LIMIT 1
-      `,
-      [businessId, uid],
+      `SELECT b.*
+         FROM app_businesses b
+         LEFT JOIN user_businesses ub
+           ON ub.business_id = b.id AND ub.user_id = $2
+        WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id IS NOT NULL)
+        LIMIT 1`,
+      [bizId, uid]
     );
+    const biz = rows[0];
+    if (!biz) return res.status(403).json({ error: 'no_access_to_business' });
 
-    const row = rows[0];
-    if (!row) {
-      // Si lo eligieron explícitamente y no pertenece → 403,
-      // si vino por "active" pero ya no pertenece → 404 para resetear en front.
-      return res
-        .status(source === 'active' ? 404 : 403)
-        .json({ error: source === 'active' ? 'no_active_business' : 'no_access_to_business' });
-    }
+    // normalizar props
+    const props = (biz.props && typeof biz.props === 'object') ? biz.props : {};
+    if (!props.maxi) props.maxi = {};
 
-    // 3) normalizar props (siempre objeto; maxi también)
-    const props = row.props && typeof row.props === 'object' ? row.props : {};
-    if (!props.maxi || typeof props.maxi !== 'object') props.maxi = {};
-    if (!props.maxi.email && props.Maxi?.email) props.maxi = { ...props.maxi, ...props.Maxi };
-
-    req.businessId = row.id;
-    req.business   = { ...row, props };
+    req.businessId = biz.id;       // <— muchos controllers leen esto
+    req.bizId = biz.id;            // <— compat
+    req.business = { ...biz, props };
     next();
   } catch (e) {
     console.error('loadActiveBusiness error:', e);
     res.status(500).json({ error: 'internal' });
   }
-}
+};
 
 /** Úsalo si querés forzar que exista negocio resuelto antes de entrar */
 function requireBusiness(req, res, next) {
