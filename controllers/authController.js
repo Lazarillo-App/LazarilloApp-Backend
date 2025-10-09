@@ -36,12 +36,14 @@ exports.register = async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
 
     const { rows } = await pool.query(
-      'INSERT INTO app_users (name, email, password_hash) VALUES ($1,$2,$3) RETURNING id, name, email, active_business_id',
+      `INSERT INTO app_users (name, email, password_hash)
+   VALUES ($1,$2,$3)
+   RETURNING id, name, email, active_business_id, role, status`,
       [name || null, email.trim(), hash]
     );
 
     const user = rows[0];
-    const token = signToken(user);
+    const token = signToken(user); // ahora tiene user.role
     res.status(201).json({ token, user });
   } catch (e) {
     console.error('register error:', e);

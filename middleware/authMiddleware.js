@@ -15,7 +15,7 @@ module.exports = async function authRequired(req, res, next) {
       return res.status(401).json({ error: 'invalid_token' });
     }
 
-    req.user = { id: payload.uid, email: payload.email };
+    req.user = { id: payload.uid, email: payload.email, role: payload.role || null };
     next();
   } catch (e) {
     console.error('authRequired error:', e);
