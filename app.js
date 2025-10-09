@@ -12,6 +12,8 @@ const authRequired = require('./middleware/authMiddleware');
 const devRoutes = require('./routes/devRoutes');
 const { loadActiveBusiness } = require('./middleware/business');
 const authRoutes = require('./routes/authRoutes');
+const requireAdmin = require('./middleware/requireAdmin');
+const adminRoutes  = require('./routes/admin.routes');
 
 const app = express();
 
@@ -62,6 +64,10 @@ app.use(morgan('➡️ :method :url :status :response-time ms'));
 // ---------- Rutas públicas (SIN auth) ----------
 app.use('/api/auth', authRoutes); // ✅ ahora con body parseado
 app.use('/api/dev', devRoutes);
+
+// ---------- ADMIN (auth SÍ, negocio NO) ----------
+// No aplicar loadActiveBusiness acá. Solo JWT + rol admin.
+app.use('/api/admin', authRequired, requireAdmin, adminRoutes);
 
 // 🔒 Todo lo que siga en /api requiere auth + contexto de negocio
 app.use('/api', authRequired, loadActiveBusiness);
