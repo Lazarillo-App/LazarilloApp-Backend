@@ -1,6 +1,6 @@
 // scripts/sql.js
 require('dotenv').config();
-const pool = require('../config/db');
+const pool = require('../../config/db');
 
 const sql = process.argv.slice(2).join(' ');
 if (!sql) {

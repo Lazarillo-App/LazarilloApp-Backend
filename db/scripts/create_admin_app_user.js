@@ -1,7 +1,7 @@
 // scripts/create_admin_app_user.js
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
-const pool = require('../config/db');
+const pool = require('../../config/db');
 
 async function ensureSchema() {
   // Crea tabla si no existe

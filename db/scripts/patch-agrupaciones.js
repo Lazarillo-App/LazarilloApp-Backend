@@ -1,5 +1,5 @@
 // scripts/patch-agrupaciones.js
-const pool = require('../config/db');
+const pool = require('../../config/db');
 
 async function main() {
   await pool.query(`ALTER TABLE agrupaciones
