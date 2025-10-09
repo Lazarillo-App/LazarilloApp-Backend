@@ -65,18 +65,16 @@ app.use(morgan('➡️ :method :url :status :response-time ms'));
 app.use('/api/auth', authRoutes); // ✅ ahora con body parseado
 app.use('/api/dev', devRoutes);
 
-// ---------- ADMIN (auth SÍ, negocio NO) ----------
-// No aplicar loadActiveBusiness acá. Solo JWT + rol admin.
-app.use('/api/admin', authRequired, requireAdmin, adminRoutes);
+// 👇 Negocios: SOLO requieren auth (NO contexto de negocio)
+app.use('/api/businesses', authRequired, require('./routes/businessRoutes'));
 
-// 🔒 Todo lo que siga en /api requiere auth + contexto de negocio
+// 🔒 Todo lo demás bajo /api SÍ requiere negocio activo (o X-Business-Id)
 app.use('/api', authRequired, loadActiveBusiness);
 
 // ---------- Rutas protegidas (CON auth + negocio activo/override) ----------
 app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
 app.use('/api/insumos', require('./routes/insumosRoutes'));
 app.use('/api/ventas', require('./routes/ventasRoutes'));
-app.use('/api/businesses', require('./routes/businessRoutes'));
 app.use('/api/branches', require('./routes/branchRoutes'));
 
 // 🔒 Agrupaciones (scoped por negocio) — una sola base:
