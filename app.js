@@ -11,7 +11,7 @@ const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const authRequired = require('./middleware/authMiddleware');
 const devRoutes = require('./routes/devRoutes');
 const { loadActiveBusiness } = require('./middleware/business');
-const adminRoutes = require('./routes/admin.routes');
+const authRoutes = require('./routes/auth.routes');
 
 const app = express();
 
@@ -52,7 +52,7 @@ app.use(cors({
   credentials: false,
 }));
 
-app.use('/api/admin', adminRoutes);
+app.use('/api/auth', authRoutes);
 
 app.use('/api/dev', devRoutes);
 
