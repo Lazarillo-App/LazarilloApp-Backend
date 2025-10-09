@@ -11,7 +11,7 @@ const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const authRequired = require('./middleware/authMiddleware');
 const devRoutes = require('./routes/devRoutes');
 const { loadActiveBusiness } = require('./middleware/business');
-const authRoutes = require('./routes/auth.routes');
+const authRoutes = require('./routes/authRoutes');
 
 const app = express();
 
