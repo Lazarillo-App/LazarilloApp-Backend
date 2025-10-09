@@ -1,6 +1,6 @@
 // scripts/clear_maxi_articles.js
 require('dotenv').config();                // por si usás .env
-const pool = require('../../config/db');      // tu pool de PG
+const pool = require('../config/db');      // tu pool de PG
 
 (async () => {
   try {

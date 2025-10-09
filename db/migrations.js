@@ -1,9 +1,9 @@
 // db/migrations.js
 const pool = require('../config/db');
-const m004 = require('./migrations/004_auth');
-const m005 = require('./migrations/005_business_branding');
-const m006 = require('./migrations/006_branches');
-const m007 = require('./migrations/007_agrupaciones_fix');
+const m004 = require('./004_auth');
+const m005 = require('./005_business_branding');
+const m006 = require('./006_branches');
+const m007 = require('./007_agrupaciones_fix');
 const fs = require('fs');
 const path = require('path');
 

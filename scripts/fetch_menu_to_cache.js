@@ -24,7 +24,7 @@ async function getMaxiCredsFromDB(pg, bizId) {
   let password = mx.password || null;
   if (!password && mx.pass_enc) {
     // reusa tu helper de backend sin romper el script:
-    const { decryptSecretCompat } = require('../../utils/cryptoField');
+    const { decryptSecretCompat } = require('../utils/cryptoField');
     password = decryptSecretCompat(mx.pass_enc);
   }
   if (!(mx.email && password && mx.codcli)) {

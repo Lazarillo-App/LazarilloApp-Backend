@@ -82,36 +82,65 @@ exports.listUsers = async (req, res) => {
 exports.updateUser = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { name, role, status } = req.body || {};
-    const allowedRoles = new Set(['admin', 'owner', 'staff', 'viewer']);
-    const allowedStatus = new Set(['active', 'suspended', 'deleted']);
+    const { name, role, status, email } = req.body || {};
 
-    if (role != null && !allowedRoles.has(String(role))) {
-      return res.status(400).json({ error: 'INVALID_ROLE' });
-    }
-    if (status != null && !allowedStatus.has(String(status))) {
-      return res.status(400).json({ error: 'INVALID_STATUS' });
+    const { rows } = await db.query(
+      `SELECT id, role, email FROM app_users WHERE id=$1 LIMIT 1`, [id]
+    );
+    const target = rows[0];
+    if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
+
+    // Si se intenta cambiar email, validar unicidad
+    if (email && email !== target.email) {
+      const { rows: clash } = await db.query(
+        `SELECT 1 FROM app_users WHERE lower(email)=lower($1) AND id<>$2 LIMIT 1`,
+        [email, id]
+      );
+      if (clash[0]) return res.status(409).json({ error: 'EMAIL_IN_USE' });
     }
 
     const fields = [];
     const values = [];
     let i = 1;
+
     if (name != null)  { fields.push(`name=$${i++}`);  values.push(name); }
-    if (role != null)  { fields.push(`role=$${i++}`);  values.push(role); }
-    if (status != null){ fields.push(`status=$${i++}`);values.push(status); }
+    if (email != null) { fields.push(`email=$${i++}`); values.push(email); }
+
+    if (target.role !== 'admin') {
+      // Para NO-admin se permite rol/estado
+      const allowedRoles  = new Set(['admin','owner','staff','viewer']);
+      const allowedStatus = new Set(['active','suspended','deleted']);
+      if (role   != null) { 
+        if (!allowedRoles.has(String(role)))  return res.status(400).json({ error: 'INVALID_ROLE' });
+        fields.push(`role=$${i++}`);  values.push(role);
+      }
+      if (status != null) { 
+        if (!allowedStatus.has(String(status))) return res.status(400).json({ error: 'INVALID_STATUS' });
+        fields.push(`status=$${i++}`); values.push(status);
+      }
+    } else {
+      // Para admin NUNCA permitir cambiar rol/estado
+      if (role   != null || status != null) {
+        return res.status(403).json({ error: 'CANNOT_MODIFY_ADMIN_ROLE_OR_STATUS' });
+      }
+    }
+
     if (!fields.length) return res.json({ ok: true });
 
     values.push(id);
-    const { rows } = await db.query(
-      `UPDATE app_users SET ${fields.join(', ')} WHERE id=$${i}
-         RETURNING id, email, COALESCE(name,'') AS name, role, status`,
-      values
-    );
+    const sql = `UPDATE app_users SET ${fields.join(', ')} WHERE id=$${i}
+                 RETURNING id, email, name, role, status`;
+    const up = await db.query(sql, values);
 
-    Promise.resolve(logAdmin(req.user?.id || null, 'user.update', 'app_users', String(id), { name, role, status })).catch(()=>{});
-    res.json({ ok: true, user: rows[0] });
+    Promise.resolve(
+      logAdmin(req.user?.id || null, 'user.update', 'app_users', String(id),
+               { name, email, role: target.role==='admin' ? undefined : role,
+                 status: target.role==='admin' ? undefined : status })
+    ).catch(()=>{});
+
+    res.json({ ok: true, user: up.rows[0] });
   } catch (e) {
-    console.error('ADMIN_USER_UPDATE_FAILED:', e);
+    console.error(e);
     res.status(500).json({ error: 'ADMIN_USER_UPDATE_FAILED' });
   }
 };
@@ -142,5 +171,28 @@ exports.resetPassword = async (req, res) => {
   } catch (e) {
     console.error('ADMIN_USER_RESET_FAILED:', e);
     res.status(500).json({ error: 'ADMIN_USER_RESET_FAILED' });
+  }
+};
+
+// NO borrar usuarios con role=admin
+exports.softDeleteUser = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { rows } = await db.query(
+      `SELECT id, role FROM app_users WHERE id=$1 LIMIT 1`, [id]
+    );
+    const target = rows[0];
+    if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
+
+    if (target.role === 'admin') {
+      return res.status(403).json({ error: 'CANNOT_DELETE_ADMIN' });
+    }
+
+    await db.query(`UPDATE app_users SET status='deleted' WHERE id=$1`, [id]);
+    Promise.resolve(logAdmin(req.user?.id || null, 'user.soft_delete', 'app_users', String(id))).catch(()=>{});
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'ADMIN_USER_DELETE_FAILED' });
   }
 };

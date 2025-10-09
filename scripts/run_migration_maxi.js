@@ -2,7 +2,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const pool = require('../../config/db');
+const pool = require('../config/db');
 
 (async () => {
   const file = path.join(__dirname, '007_maxi_schema.sql');

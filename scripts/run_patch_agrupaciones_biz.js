@@ -1,6 +1,6 @@
 // scripts/run_patch_agrupaciones_biz.js
 require('dotenv').config();
-const pool = require('../../config/db');
+const pool = require('../config/db');
 
 (async () => {
   const DEFAULT_BIZ = Number(process.argv[2]);
