@@ -41,30 +41,36 @@ exports.overview = async (_req, res) => {
 exports.listUsers = async (req, res) => {
   try {
     const q = (req.query.q || '').trim();
-    const page = parseIntSafe(req.query.page, 1);
-    const pageSize = Math.min(parseIntSafe(req.query.pageSize, 20), 100);
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '20', 10), 1), 100);
     const offset = (page - 1) * pageSize;
 
     const params = [];
     let where = '';
-
     if (q) {
       params.push(`%${q}%`, `%${q}%`);
       where = `WHERE email ILIKE $1 OR COALESCE(name,'') ILIKE $2`;
     }
 
-    const countSql = `SELECT COUNT(*)::int count FROM app_users ${where}`;
-    const rowsSql = `
-      SELECT id, email, COALESCE(name,'') AS name, COALESCE(role,'owner') AS role,
-             status, last_login_at, created_at
-        FROM app_users
-        ${where}
-       ORDER BY created_at DESC
-       LIMIT ${pageSize} OFFSET ${offset}
-    `;
+    const [{ count }] = (await db.query(
+      `SELECT COUNT(*)::int count FROM app_users ${where}`, params
+    )).rows;
 
-    const [{ count }] = (await db.query(countSql, params)).rows;
-    const rows = (await db.query(rowsSql, params)).rows;
+    const rows = (await db.query(
+      `
+      SELECT id,
+             email,
+             COALESCE(name,'')     AS name,
+             COALESCE(role,'owner') AS role,
+             status,
+             created_at            -- 👈 dejamos created_at; quitamos last_login_at
+      FROM app_users
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT ${pageSize} OFFSET ${offset}
+      `,
+      params
+    )).rows;
 
     res.json({ page, pageSize, total: count, rows });
   } catch (e) {
