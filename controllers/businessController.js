@@ -117,6 +117,13 @@ exports.create = async (req, res) => {
     );
     const biz = rows[0];
 
+    await pool.query(
+      `INSERT INTO user_businesses (user_id, business_id, role)
+   VALUES ($1,$2,'owner')
+   ON CONFLICT (user_id, business_id) DO NOTHING`,
+      [uid, biz.id]
+    );
+
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
 
     return res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
@@ -162,10 +169,10 @@ exports.update = async (req, res) => {
 exports.select = async (req, res) => {
   try {
     const uid = req.user?.id;
-    const id  = Number(req.params.id);
+    const id = Number(req.params.id);
 
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
-    if (!id)  return res.status(400).json({ error: 'id_required' });
+    if (!id) return res.status(400).json({ error: 'id_required' });
 
     const { rows: belongs } = await pool.query(
       `SELECT 1
@@ -196,10 +203,10 @@ exports.select = async (req, res) => {
 
 // controllers/businessController.js (solo el remove)
 exports.remove = async (req, res) => {
-  const uid   = req.user?.id;             // setea authRequired (JWT)
+  const uid = req.user?.id;             // setea authRequired (JWT)
   const bizId = Number(req.params?.id);   // viene de /businesses/:id
 
-  if (!uid)   return res.status(401).json({ error: 'unauthorized' });
+  if (!uid) return res.status(401).json({ error: 'unauthorized' });
   if (!bizId || Number.isNaN(bizId)) {
     return res.status(400).json({ error: 'invalid_business_id' });
   }
@@ -266,7 +273,7 @@ exports.maxiStatus = async (req, res) => {
 // controllers/businessController.js
 
 exports.maxiSave = async (req, res) => {
-  const uid   = req.user?.id;                 // del JWT (authRequired)
+  const uid = req.user?.id;                 // del JWT (authRequired)
   const bizId = Number(req.params?.id);       // /businesses/:id/maxi-credentials
 
   if (!uid) return res.status(401).json({ error: 'unauthorized' });
@@ -313,7 +320,7 @@ async function callMaxiArticles({ email, password, codcli, from, to }) {
 
   const rLogin = await fetch(`${BASE}/login`, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json', 'Accept':'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({ email, pass: password, cod_cli: String(codcli) })
   });
   const jLogin = await rLogin.json();
@@ -324,7 +331,7 @@ async function callMaxiArticles({ email, password, codcli, from, to }) {
 
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
-  if (to)   u.searchParams.set('fechaFin', to);
+  if (to) u.searchParams.set('fechaFin', to);
 
   const rArt = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
   const jArt = await rArt.json();
