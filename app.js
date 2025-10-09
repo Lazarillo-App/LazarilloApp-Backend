@@ -52,18 +52,17 @@ app.use(cors({
   credentials: false,
 }));
 
-app.use('/api/auth', authRoutes);
-
-app.use('/api/dev', devRoutes);
-
-// ---------- Parsers ----------
+// ---------- Parsers (ANTES de montar rutas) ----------
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // opcional
 
 // ---------- Logging HTTP ----------
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
 // ---------- Rutas públicas (SIN auth) ----------
 app.use('/api/auth', require('./routes/authRoutes')); // login/registro públicos
+app.use('/api/auth', authRoutes); // ✅ ahora con body parseado
+app.use('/api/dev', devRoutes);
 
 // 🔒 Todo lo que siga en /api requiere auth + contexto de negocio
 app.use('/api', authRequired, loadActiveBusiness);
