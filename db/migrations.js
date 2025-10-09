@@ -26,6 +26,25 @@ async function runMigrations() {
   await m004.up(pool);
   await m005.up(pool);   // 🔹 sucursales
   await m006.up(pool);
+
+  +  await execSafe(`
+    ALTER TABLE app_users
+      ADD COLUMN IF NOT EXISTS role   TEXT NOT NULL DEFAULT 'owner',
+      ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
+      ADD COLUMN IF NOT EXISTS reset_token_hash TEXT NULL,
+      ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPTZ NULL;
+  `);
+  await execSafe(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes WHERE indexname = 'app_users_email_lower_idx'
+      ) THEN
+        CREATE UNIQUE INDEX app_users_email_lower_idx ON app_users (lower(email));
+      END IF;
+    END$$;
+  `);
+
   // ========== 1) INSUMOS ==========
   await execSafe(`
     CREATE TABLE IF NOT EXISTS insumos (
@@ -309,14 +328,6 @@ async function runMigrations() {
     BEFORE UPDATE ON agrupaciones
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
-
-  // ========== 7) AUTH / MULTITENANT ==========
-  if (m004?.up) {
-    console.log('➡️ Ejecutando 004_auth...');
-    await m004.up(pool);
-    console.log('✅ 004_auth OK');
-  }
-
 }
 
 module.exports = { runMigrations };
