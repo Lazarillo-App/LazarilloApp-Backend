@@ -17,7 +17,7 @@ const makeFrontUrl = (p) =>
 // ghpages:https://lazarillo-app.github.io + /LazarilloApp + /reset-password?token=... -> https://lazarillo-app.github.io/LazarilloApp/reset-password?token=...
 
 function signToken(user) {
-  return jwt.sign({ uid: user.id, email: user.email }, SECRET, { expiresIn: '7d' });
+  return jwt.sign({ uid: user.id, email: user.email, role: user.role }, SECRET, { expiresIn: '7d' });
 }
 
 exports.register = async (req, res) => {
@@ -57,11 +57,14 @@ exports.login = async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      'SELECT id, name, email, password_hash, active_business_id FROM app_users WHERE lower(email)=lower($1) LIMIT 1',
+      `SELECT id, name, email, password_hash, active_business_id, role, status
+        FROM app_users WHERE lower(email)=lower($1) LIMIT 1`,
       [email]
     );
     const user = rows[0];
-    if (!user) return res.status(401).json({ error: 'invalid_credentials' });
+    if (!user || user.status !== 'active') {
+      return res.status(401).json({ error: 'invalid_credentials' });
+    }
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'invalid_credentials' });
@@ -74,6 +77,7 @@ exports.login = async (req, res) => {
         name: user.name,
         email: user.email,
         active_business_id: user.active_business_id || null,
+        role: user.role || 'owner',
       },
     });
   } catch (e) {
@@ -124,7 +128,7 @@ exports.requestPasswordReset = async (req, res) => {
     if (!rows[0]) return res.json({ ok: true, delivered: true, accepted: [], rejected: [] });
 
     const user = rows[0];
-    const rawToken  = crypto.randomBytes(32).toString('hex');
+    const rawToken = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 h
 
