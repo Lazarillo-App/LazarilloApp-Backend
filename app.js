@@ -46,47 +46,48 @@ app.use((req, res, next) => {
   next();
 });
 
-/* --------------- CORS --------------- */
+/* CORS */
 app.use(cors({
   origin: [
     'http://localhost:5173',
+    'http://127.0.0.1:5173',
     'https://lazarillo.com.ar',
     'http://lazarillo.com.ar',
+    'https://www.lazarillo.com.ar',
     'https://lazarillo-app.github.io',
   ],
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'], // Header correcto
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'],
   credentials: false,
+  optionsSuccessStatus: 204,
 }));
+app.options(/.*/, cors());
 
-/* --------------- Parsers --------------- */
+// Parsers + logs
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-/* --------------- HTTP log --------------- */
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
-/* --------------- Rutas públicas --------------- */
+// Públicas
 app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
 
-// ✅ Admin de plataforma
+// Admin de plataforma (solo app_admin)
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
-app.use('/api/admin', authRequired, requireAppAdmin, require('./routes/admin.routes'));
-
-// ✅ Negocios: requieren auth y NO ser app_admin
+// Negocios: auth y NO ser app_admin
 app.use('/api/businesses', authRequired, forbidAppAdmin, businessRoutes);
 
-// ✅ Todo lo demás bajo /api requiere negocio activo (o X-Business-Id)
+// Guard de negocio activo o X-Business-Id para el resto de /api
 app.use('/api', authRequired, loadActiveBusiness);
 
+// Rutas que requieren negocio
 app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
 app.use('/api/insumos',             insumosRoutes);
 app.use('/api/ventas',              ventasRoutes);
 app.use('/api/branches',            branchesRoutes);
 
-// (histórico)
+// (histórico) rutas bajo :businessId
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
 /* --------------- Health --------------- */
