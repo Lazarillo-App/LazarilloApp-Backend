@@ -8,6 +8,7 @@ r.get('/users',    adminCtrl.listUsers);
 r.patch('/users/:id', adminCtrl.updateUser);
 r.delete('/users/:id', adminCtrl.softDeleteUser);
 r.post('/users/:id/reset-password', adminCtrl.resetPassword);
+r.post('/users/:id/restore', adminCtrl.restoreUser);
 
 module.exports = r;
 

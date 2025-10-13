@@ -153,3 +153,27 @@ exports.resetPassword = async (req, res) => {
   // si migraste a columnas de app_users, podés eliminarlo)
   res.status(501).json({ error: 'NOT_IMPLEMENTED' });
 };
+
+// + NUEVO: restaurar usuario soft-deleted
+exports.restoreUser = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    // Solo restaura si estaba deleted
+    const { rows } = await db.query(
+      `UPDATE app_users
+         SET status='active'
+       WHERE id=$1 AND status='deleted'
+       RETURNING id, email, name, role, status`,
+      [id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'NOT_FOUND_OR_NOT_DELETED' });
+
+    // auditar opcional
+    Promise.resolve(logAdmin(req.user?.id || null, 'user.restore', 'app_users', String(id))).catch(()=>{});
+
+    res.json({ ok: true, user: rows[0] });
+  } catch (e) {
+    console.error('ADMIN_USER_RESTORE_FAILED:', e);
+    res.status(500).json({ error: 'ADMIN_USER_RESTORE_FAILED' });
+  }
+};
