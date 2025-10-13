@@ -47,19 +47,25 @@ module.exports.up = async function up(pool) {
     ON app_users ((lower(email)));
   `);
 
-  // CHECK del role alineado con el backend
-  await execSafe(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'app_users_role_allowed_check'
-      ) THEN
-        ALTER TABLE app_users
-        ADD CONSTRAINT app_users_role_allowed_check
-        CHECK (role IN ('admin','owner','staff','viewer'));
-      END IF;
-    END$$;
-  `);
+await execSafe(`
+  DO $$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint WHERE conname = 'app_users_role_allowed_check'
+    ) THEN
+      -- Normalizar datos existentes para que no rompa el CHECK
+      UPDATE app_users
+      SET role = 'owner'
+      WHERE role IS NULL
+         OR role NOT IN ('app_admin','owner','staff','viewer');
+
+      -- Crear el CHECK con el set correcto de roles
+      ALTER TABLE app_users
+      ADD CONSTRAINT app_users_role_allowed_check
+      CHECK (role IN ('app_admin','owner','staff','viewer'));
+    END IF;
+  END$$;
+`);
 
   /* ================== app_businesses ================== */
   await execSafe(`
