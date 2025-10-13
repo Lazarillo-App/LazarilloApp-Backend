@@ -47,24 +47,22 @@ exports.getActive = async (req, res) => {
 exports.setActive = async (req, res) => {
   try {
     const uid = req.user?.id;
-    const { businessId } = req.body || {};
+    const body = req.body || {};
+    const businessId = body.businessId ?? body.activeBusinessId;   // ✅ acepta ambos
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
     if (!businessId) return res.status(400).json({ error: 'businessId requerido' });
 
     const { rows: belongs } = await pool.query(`
       SELECT 1
-      FROM app_businesses b
-      LEFT JOIN user_businesses ub ON ub.business_id = b.id
-      WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
-      LIMIT 1;
+        FROM app_businesses b
+        LEFT JOIN user_businesses ub ON ub.business_id=b.id
+       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
+       LIMIT 1
     `, [businessId, uid]);
     if (!belongs.length) return res.status(403).json({ error: 'forbidden' });
 
-    await pool.query(
-      `UPDATE app_users SET active_business_id = $1 WHERE id = $2`,
-      [businessId, uid]
-    );
-    res.json({ ok: true, activeBusinessId: businessId });
+    await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [businessId, uid]);
+    res.json({ ok: true, activeBusinessId: Number(businessId) });
   } catch (e) {
     console.error('PATCH /api/businesses/active error:', e);
     res.status(500).json({ error: 'internal' });

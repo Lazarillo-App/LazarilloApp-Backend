@@ -1,9 +1,10 @@
 const pool = require('../config/db');
 
 exports.loadActiveBusiness = async (req, res, next) => {
-  try {
-    const uid = req.user?.id;
-    if (!uid) return res.status(401).json({ error: 'unauthorized' });
+try {
+    if (req.user?.role === 'app_admin') {
+      return res.status(403).json({ error: 'forbidden_for_app_admin' });
+    }
 
     const headerId = req.header('X-Business-Id');
     const queryId  = req.query.businessId;

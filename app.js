@@ -7,41 +7,46 @@ const morgan = require('morgan');
 const { randomUUID } = require('crypto');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
-const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
-const authRequired = require('./middleware/authMiddleware');
-const devRoutes = require('./routes/devRoutes');
+
+const authRequired      = require('./middleware/authMiddleware');
+const forbidAppAdmin    = require('./middleware/forbidAppAdmin');
 const { loadActiveBusiness } = require('./middleware/business');
-const authRoutes = require('./routes/authRoutes');
-const requireAdmin = require('./middleware/requireAdmin');
-const adminRoutes  = require('./routes/admin.routes');
+const requireAppAdmin   = require('./middleware/requireAppAdmin'); // ✅ nuevo nombre
+
+// Rutas
+const authRoutes        = require('./routes/authRoutes');
+const devRoutes         = require('./routes/devRoutes');
+const businessRoutes    = require('./routes/businessRoutes');
+const adminRoutes       = require('./routes/admin.routes');
+const agrupacionesRoutes= require('./routes/agrupacionesRoutes');
+
+const ventasRoutes      = require('./routes/ventasRoutes');
+const insumosRoutes     = require('./routes/insumosRoutes');
+const branchesRoutes    = require('./routes/branchRoutes');
+const agrupInsumosRoutes= require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
 
-// ---------- Patch de logging (seguro y minimal) ----------
-app.set('trust proxy', 1); // Render/NGINX, IP real y HTTPS
+/* ------------ logging de entrada ------------- */
+app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 app.use((req, res, next) => {
   const reqId = randomUUID().slice(0, 8);
   const start = Date.now();
-
-  const auth = req.headers.authorization ? '***' : undefined;
-  const hdrs = { ...req.headers, authorization: auth };
+  const hdrs = { ...req.headers, authorization: req.headers.authorization ? '***' : undefined };
 
   console.log(`➡️ [${reqId}] ${req.method} ${req.originalUrl}`);
   if (process.env.LOG_REQUEST_HEADERS === '1') {
     console.log(`   [${reqId}] headers:`, hdrs);
   }
-
   res.on('finish', () => {
-    const ms = Date.now() - start;
-    console.log(`⬅️ [${reqId}] ${res.statusCode} ${req.method} ${req.originalUrl} (${ms}ms)`);
+    console.log(`⬅️ [${reqId}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now()-start}ms)`);
   });
-
   next();
 });
 
-// ---------- CORS primero ----------
+/* --------------- CORS --------------- */
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -50,38 +55,43 @@ app.use(cors({
     'https://lazarillo-app.github.io',
   ],
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'], // Header correcto
   credentials: false,
 }));
 
-// ---------- Parsers (ANTES de montar rutas) ----------
+/* --------------- Parsers --------------- */
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // opcional
+app.use(express.urlencoded({ extended: true }));
 
-// ---------- Logging HTTP ----------
+/* --------------- HTTP log --------------- */
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
-// ---------- Rutas públicas (SIN auth) ----------
-app.use('/api/auth', authRoutes); // ✅ ahora con body parseado
-app.use('/api/dev', devRoutes);
+/* --------------- Rutas públicas --------------- */
+app.use('/api/auth', authRoutes);
+app.use('/api/dev',  devRoutes);
 
-// 👇 Negocios: SOLO requieren auth (NO contexto de negocio)
-app.use('/api/businesses', authRequired, require('./routes/businessRoutes'));
+// ✅ Admin de plataforma
+app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
-// 🔒 Todo lo demás bajo /api SÍ requiere negocio activo (o X-Business-Id)
+app.use('/api/admin', authRequired, requireAppAdmin, require('./routes/admin.routes'));
+
+// ✅ Negocios: requieren auth y NO ser app_admin
+app.use('/api/businesses', authRequired, forbidAppAdmin, businessRoutes);
+
+// ✅ Todo lo demás bajo /api requiere negocio activo (o X-Business-Id)
 app.use('/api', authRequired, loadActiveBusiness);
 
-// ---------- Rutas protegidas (CON auth + negocio activo/override) ----------
-app.use('/api/agrupaciones-insumos', require('./routes/agrupacionesInsumosRoutes'));
-app.use('/api/insumos', require('./routes/insumosRoutes'));
-app.use('/api/ventas', require('./routes/ventasRoutes'));
-app.use('/api/branches', require('./routes/branchRoutes'));
+app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
+app.use('/api/insumos',             insumosRoutes);
+app.use('/api/ventas',              ventasRoutes);
+app.use('/api/branches',            branchesRoutes);
 
-// 🔒 Agrupaciones (scoped por negocio) — una sola base:
+// (histórico)
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
-// ---------- Health ----------
+/* --------------- Health --------------- */
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
 app.get('/health/db', async (_req, res) => {
   try {
     const { rows } = await pool.query('SELECT 1 AS ok');
@@ -121,7 +131,6 @@ app.get('/health/auth', async (_req, res) => {
   }
 });
 
-// en app.js, arriba del 404
 app.get('/health/dbinfo', async (_req, res) => {
   try {
     const cols = await pool.query(`
@@ -133,8 +142,7 @@ app.get('/health/dbinfo', async (_req, res) => {
     const db = process.env.PGDATABASE || '(no PGDATABASE)';
     const host = process.env.PGHOST || '(no PGHOST)';
     res.json({
-      db,
-      host,
+      db, host,
       agrupaciones_columns: cols.rows.map(r => r.column_name),
       routes: {
         health: '/health',
@@ -146,12 +154,11 @@ app.get('/health/dbinfo', async (_req, res) => {
   }
 });
 
-// ---------- 404 explícito ----------
+/* ---------------   / error handler --------------- */
 app.use((req, res, _next) => {
   res.status(404).json({ error: 'not_found', path: req.originalUrl });
 });
 
-// ---------- Handler de errores AL FINAL ----------
 app.use((err, req, res, _next) => {
   console.error('❌ Error:', err);
   res.status(err.status || 500).json({

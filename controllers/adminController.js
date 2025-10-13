@@ -1,8 +1,6 @@
-// controllers/admin.controller.js
+// controllers/admincontroller.js
 const db = require('../config/db');
 const { logAdmin } = require('../utils/audit');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 
 const parseIntSafe = (v, d) => {
   const n = Number.parseInt(v, 10);
@@ -13,10 +11,8 @@ exports.overview = async (_req, res) => {
   try {
     const [{ count: total_users }] =
       (await db.query(`SELECT COUNT(*)::int count FROM app_users`)).rows;
-
     const [{ count: active_users }] =
-      (await db.query(`SELECT COUNT(*)::int count FROM app_users WHERE status = 'active'`)).rows;
-
+      (await db.query(`SELECT COUNT(*)::int count FROM app_users WHERE status='active'`)).rows;
     const [{ count: total_businesses }] =
       (await db.query(`SELECT COUNT(*)::int count FROM app_businesses`)).rows;
 
@@ -28,10 +24,7 @@ exports.overview = async (_req, res) => {
         LIMIT 5`
     )).rows;
 
-    res.json({
-      totals: { users: total_users, active_users, businesses: total_businesses },
-      recentUsers,
-    });
+    res.json({ totals: { users: total_users, active_users, businesses: total_businesses }, recentUsers });
   } catch (e) {
     console.error('ADMIN_OVERVIEW_FAILED:', e);
     res.status(500).json({ error: 'ADMIN_OVERVIEW_FAILED' });
@@ -57,18 +50,12 @@ exports.listUsers = async (req, res) => {
     )).rows;
 
     const rows = (await db.query(
-      `
-      SELECT id,
-             email,
-             COALESCE(name,'')     AS name,
-             COALESCE(role,'owner') AS role,
-             status,
-             created_at            -- 👈 dejamos created_at; quitamos last_login_at
-      FROM app_users
-      ${where}
-      ORDER BY created_at DESC
-      LIMIT ${pageSize} OFFSET ${offset}
-      `,
+      `SELECT id, email, COALESCE(name,'') AS name, COALESCE(role,'owner') AS role,
+              status, created_at
+         FROM app_users
+        ${where}
+        ORDER BY created_at DESC
+        LIMIT ${pageSize} OFFSET ${offset}`,
       params
     )).rows;
 
@@ -90,7 +77,6 @@ exports.updateUser = async (req, res) => {
     const target = rows[0];
     if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
 
-    // Si se intenta cambiar email, validar unicidad
     if (email && email !== target.email) {
       const { rows: clash } = await db.query(
         `SELECT 1 FROM app_users WHERE lower(email)=lower($1) AND id<>$2 LIMIT 1`,
@@ -103,24 +89,22 @@ exports.updateUser = async (req, res) => {
     const values = [];
     let i = 1;
 
-    if (name != null)  { fields.push(`name=$${i++}`);  values.push(name); }
+    if (name  != null) { fields.push(`name=$${i++}`);  values.push(name); }
     if (email != null) { fields.push(`email=$${i++}`); values.push(email); }
 
     if (target.role !== 'admin') {
-      // Para NO-admin se permite rol/estado
       const allowedRoles  = new Set(['admin','owner','staff','viewer']);
       const allowedStatus = new Set(['active','suspended','deleted']);
-      if (role   != null) { 
+      if (role   != null) {
         if (!allowedRoles.has(String(role)))  return res.status(400).json({ error: 'INVALID_ROLE' });
         fields.push(`role=$${i++}`);  values.push(role);
       }
-      if (status != null) { 
+      if (status != null) {
         if (!allowedStatus.has(String(status))) return res.status(400).json({ error: 'INVALID_STATUS' });
         fields.push(`status=$${i++}`); values.push(status);
       }
     } else {
-      // Para admin NUNCA permitir cambiar rol/estado
-      if (role   != null || status != null) {
+      if (role != null || status != null) {
         return res.status(403).json({ error: 'CANNOT_MODIFY_ADMIN_ROLE_OR_STATUS' });
       }
     }
@@ -148,45 +132,12 @@ exports.updateUser = async (req, res) => {
 exports.softDeleteUser = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    await db.query(`UPDATE app_users SET status='deleted' WHERE id=$1`, [id]);
-    Promise.resolve(logAdmin(req.user?.id || null, 'user.soft_delete', 'app_users', String(id))).catch(()=>{});
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('ADMIN_USER_DELETE_FAILED:', e);
-    res.status(500).json({ error: 'ADMIN_USER_DELETE_FAILED' });
-  }
-};
-
-exports.resetPassword = async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const token = Math.random().toString(36).slice(2);
-    await db.query(
-      `INSERT INTO password_reset_tokens(user_id, token, expires_at)
-       VALUES ($1,$2, NOW() + INTERVAL '1 day')`,
-      [id, token]
-    );
-    Promise.resolve(logAdmin(req.user?.id || null, 'user.reset_password_token', 'app_users', String(id))).catch(()=>{});
-    res.json({ ok: true, token_preview: token });
-  } catch (e) {
-    console.error('ADMIN_USER_RESET_FAILED:', e);
-    res.status(500).json({ error: 'ADMIN_USER_RESET_FAILED' });
-  }
-};
-
-// NO borrar usuarios con role=admin
-exports.softDeleteUser = async (req, res) => {
-  try {
-    const id = Number(req.params.id);
     const { rows } = await db.query(
       `SELECT id, role FROM app_users WHERE id=$1 LIMIT 1`, [id]
     );
     const target = rows[0];
     if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
-
-    if (target.role === 'admin') {
-      return res.status(403).json({ error: 'CANNOT_DELETE_ADMIN' });
-    }
+    if (target.role === 'admin') return res.status(403).json({ error: 'CANNOT_DELETE_ADMIN' });
 
     await db.query(`UPDATE app_users SET status='deleted' WHERE id=$1`, [id]);
     Promise.resolve(logAdmin(req.user?.id || null, 'user.soft_delete', 'app_users', String(id))).catch(()=>{});
@@ -195,4 +146,10 @@ exports.softDeleteUser = async (req, res) => {
     console.error(e);
     res.status(500).json({ error: 'ADMIN_USER_DELETE_FAILED' });
   }
+};
+
+exports.resetPassword = async (req, res) => {
+  // (si usás tokens en tabla aparte, mantené este flujo;
+  // si migraste a columnas de app_users, podés eliminarlo)
+  res.status(501).json({ error: 'NOT_IMPLEMENTED' });
 };

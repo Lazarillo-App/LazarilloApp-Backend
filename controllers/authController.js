@@ -91,12 +91,11 @@ exports.login = async (req, res) => {
 exports.me = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, email, active_business_id FROM app_users WHERE id=$1',
+      'SELECT id, name, email, active_business_id, role, status FROM app_users WHERE id=$1',
       [req.user.id]
     );
     res.json(rows[0] || null);
   } catch (e) {
-    console.error('me error:', e);
     res.status(500).json({ error: 'internal' });
   }
 };
@@ -105,12 +104,11 @@ exports.updateMe = async (req, res) => {
   try {
     const { name = null } = req.body || {};
     const { rows } = await pool.query(
-      'UPDATE app_users SET name=$1 WHERE id=$2 RETURNING id, name, email, active_business_id',
+      'UPDATE app_users SET name=$1 WHERE id=$2 RETURNING id, name, email, active_business_id, role, status',
       [name, req.user.id]
     );
     res.json(rows[0] || null);
   } catch (e) {
-    console.error('updateMe error:', e);
     res.status(500).json({ error: 'internal' });
   }
 };
