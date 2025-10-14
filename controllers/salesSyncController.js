@@ -1,6 +1,9 @@
 // controllers/salesSyncController.js
 const { fetchSalesRanged } = require('../services/maxiSalesService');
 const { upsertSalesBatch, setLastSalesSyncAt, getLastSalesSyncAt } = require('../services/salesStore');
+const fetch = require('node-fetch');
+const pool = require('../config/db');
+const { getBearer, STATS_BASE } = require('../services/maxiSalesService');
 
 async function syncSalesForBusiness(business, { mode = 'auto' } = {}) {
   const now = new Date();
@@ -38,4 +41,27 @@ async function syncSalesForBusiness(business, { mode = 'auto' } = {}) {
   };
 }
 
-module.exports = { syncSalesForBusiness };
+// NUEVO: quick ping para diagnosticar login Maxi desde backend
+async function maxiPing  (req, res) {
+  try {
+    const bizId = req.businessId || req.params.id || req.business?.id;
+    if (!bizId) return res.status(400).json({ error: 'invalid_business_id' });
+
+    const bearer = await getBearer(bizId, req);
+    // usa una ventana chica cualquiera, no importa la data, solo chequear acceso
+    const url = `${STATS_BASE.replace(/\/+$/, '')}/estadisticas/fullinvoicebydate?from=2025-08-01&to=2025-08-07`;
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
+    const txt = await r.text(); let j; try { j = JSON.parse(txt); } catch {}
+    res.json({
+      ok: r.ok && (j?.resultCode === 'SUCCESS' || !j?.resultCode),
+      http: r.status,
+      resultCode: j?.resultCode,
+      used: 'getBearer',
+      note: 'Si ok=true, el login/override a Maxi funciona desde el backend.'
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: 'internal', message: e.message });
+  }
+};
+
+module.exports = { syncSalesForBusiness, maxiPing };

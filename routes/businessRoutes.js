@@ -15,7 +15,7 @@ const {
 } = require('../controllers/syncController');
 
 // Nuevo: sync de ventas
-const { syncSalesForBusiness } = require('../controllers/salesSyncController');
+const { maxiPing } = require('../controllers/salesSyncController');
 
 /**
  * Valida pertenencia y adjunta req.businessId / req.business
@@ -64,6 +64,8 @@ router.param('id', async (req, res, next, id) => {
   }
 });
 
+router.get('/:id/maxi-ping', maxiPing);
+
 /* ===== CRUD base (sin activo requerido) ===== */
 router.get('/',         businesses.listMine);
 router.post('/',        businesses.create);
@@ -91,14 +93,13 @@ router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 //Sync de ventas (backfill 30d o incremental)
 router.post('/:id/sync-sales', async (req, res, next) => {
   try {
-    // req.business viene precargado por router.param('id')
     const business = req.business;
     const mode = (req.query.mode === 'backfill') ? 'backfill_30d' : 'auto';
-    const out = await syncSalesForBusiness(business, { mode });
+    // tu función syncSalesForBusiness debe usar getBearer(bizId, req)
+    const { syncSalesForBusiness } = require('../controllers/salesSyncController');
+    const out = await syncSalesForBusiness(business, { mode, req }); // pasa req por opciones
     res.json({ ok: true, business_id: business.id, sales: out });
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
 module.exports = router;
