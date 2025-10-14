@@ -15,10 +15,9 @@ async function maxiPing(req, res, next) {
       return res.status(400).json({ error: 'invalid_business_id' });
     }
 
-    // Verifica que podamos obtener token
     const bearer = await getBearer(bizId, req);
 
-    // Si vienen ?from&to probamos una llamada real; si no, probamos una ventana corta (ayer)
+    // rango: from/to si vienen, si no AYER (para no pisar política)
     const now = new Date();
     const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const AYER = new Date(todayUTC.getTime() - 86400000);
@@ -26,18 +25,45 @@ async function maxiPing(req, res, next) {
     const from = req.query.from ? new Date(req.query.from) : AYER;
     const to   = req.query.to   ? new Date(req.query.to)   : AYER;
 
-    // Llamamos a Maxi a través de nuestro servicio (no escribe en DB)
+    // Traemos por ventanas de 7 días como en el service
+    const payloads = await (async () => {
+      const bearerTok = bearer; // ya resuelto
+      const a = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
+      const b = new Date(Date.UTC(to.getUTCFullYear(),   to.getUTCMonth(),   to.getUTCDate()));
+      const windows7 = require('../services/maxiSalesService').buildWindows
+        ? require('../services/maxiSalesService').buildWindows(a, b, 7)
+        : [[
+            `${a.getUTCFullYear()}-${String(a.getUTCMonth()+1).padStart(2,'0')}-${String(a.getUTCDate()).padStart(2,'0')}`,
+            `${b.getUTCFullYear()}-${String(b.getUTCMonth()+1).padStart(2,'0')}-${String(b.getUTCDate()).padStart(2,'0')}`
+          ]];
+
+      const out = [];
+      for (const [fa, fb] of windows7) {
+        try {
+          const p = await require('../services/maxiSalesService').fetchFullByDate(fa, fb, bearerTok);
+          out.push({ window: [fa, fb], keys: Object.keys(p || {}), facturas_len:
+            Array.isArray(p?.facturas) ? p.facturas.length :
+            Array.isArray(p?.content?.facturas) ? p.content.facturas.length :
+            Array.isArray(p?.content) ? p.content.length : 0
+          });
+        } catch (e) {
+          out.push({ window: [fa, fb], error: e?.status || 500, preview: e?._maxi?.bodyPreview });
+        }
+      }
+      return out;
+    })();
+
+    // Además, usamos el extractor real para contar “facturas” totales
+    const { fetchSalesRanged } = require('../services/maxiSalesService');
     const facturas = await fetchSalesRanged({ businessId: bizId, from, to, req });
 
     return res.json({
       ok: true,
       business_id: bizId,
       token_ok: Boolean(bearer),
-      range: {
-        from: from.toISOString().slice(0,10),
-        to:   to.toISOString().slice(0,10),
-      },
+      range: { from: from.toISOString().slice(0,10), to: to.toISOString().slice(0,10) },
       sample_count: Array.isArray(facturas) ? facturas.length : 0,
+      windows: payloads    // 👈 debug por ventana (keys y tamaños)
     });
   } catch (e) {
     return next(e);

@@ -163,6 +163,30 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
  * fetchSalesRanged({ businessId, from, to, req })
  * Devuelve un array "facturas" crudas (sin normalizar) listas para pasar a salesStore.
  */
+// services/maxiSalesService.js
+// ... (tu código previo)
+
+// ===== Nuevo: extractor robusto =====
+function extractFacturas(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+
+  if (Array.isArray(payload.facturas)) return payload.facturas;
+  if (Array.isArray(payload.content?.facturas)) return payload.content.facturas;
+  if (Array.isArray(payload.content)) return payload.content;
+
+  // fallback: primera propiedad que sea array de objetos
+  for (const [, v] of Object.entries(payload)) {
+    if (Array.isArray(v) && v.length && typeof v[0] === 'object') return v;
+  }
+  return [];
+}
+
+// --------- API principal usada por el controlador ---------
+/**
+ * fetchSalesRanged({ businessId, from, to, req })
+ * Devuelve un array "facturas" crudas (sin normalizar) listas para pasar a salesStore.
+ */
 async function fetchSalesRanged({ businessId, from, to, req }) {
   if (!businessId) { const e=new Error('businessId requerido'); e.status=400; throw e; }
 
@@ -174,13 +198,15 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   const toClamp = Td > AYER ? AYER : Td;
 
   const bearer = await getBearer(businessId, req);
+
+  // 👉 acá definimos payloads correctamente
   const payloads = await fetchRangeWithFallback(Fd, toClamp, bearer, CONC);
 
   // Extraer facturas de cada payload defensivamente
   const facturas = [];
   for (const p of (payloads || [])) {
-    const arr = p?.facturas ?? p?.content?.facturas ?? p?.content ?? [];
-    if (Array.isArray(arr)) facturas.push(...arr);
+    const arr = extractFacturas(p);
+    if (Array.isArray(arr) && arr.length) facturas.push(...arr);
   }
   return facturas;
 }
@@ -190,4 +216,7 @@ module.exports = {
   STATS_BASE,
   getBearer,
   fetchSalesRanged,
+  // (si no usas los siguientes afuera, no los exportes)
+  // fetchFullByDate,
+  // buildWindows,
 };
