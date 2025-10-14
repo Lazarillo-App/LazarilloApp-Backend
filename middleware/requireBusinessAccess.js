@@ -4,11 +4,10 @@ const pool = require('../config/db');
 module.exports = async function requireBusinessAccess(req, res, next, rawId) {
   try {
     const uid = req.user?.id;
-    const id = Number(rawId);
+    const id = Number(rawId ?? req.business?.id ?? req.businessId ?? req.header('X-Business-Id'));
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid_business_id' });
 
-    // Verifica acceso (owner o miembro) y trae la fila
     const { rows } = await pool.query(
       `SELECT b.id, b.owner_id, b.name, b.slug, b.color_hex, b.brand_logo_url, b.brand_font, b.props
          FROM app_businesses b
@@ -18,7 +17,7 @@ module.exports = async function requireBusinessAccess(req, res, next, rawId) {
       [id, uid]
     );
     const biz = rows[0];
-    if (!biz) return res.status(404).json({ error: 'not_found' }); // o 403 si preferís
+    if (!biz) return res.status(404).json({ error: 'not_found' });
 
     req.businessId = biz.id;
     req.business   = biz;

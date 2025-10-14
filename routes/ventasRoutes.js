@@ -2,26 +2,21 @@
 const express = require('express');
 const router = express.Router();
 
-// 👇 estos SÍ son funciones
-const {
-  salesSummaryFromDB,
-  salesSeriesFromDB,
-  listArticlesFromDB,
-  listArticlesTreeFromDB,
-  syncNow,
-} = require('../controllers/syncController');
+const { authRequired, loadActiveBusiness } = require('../middleware/authMiddleware');
+const forbidAppAdmin = require('../middleware/forbidAppAdmin');
+const requireBusinessAccess = require('../middleware/requireBusinessAccess');
 
-// GET /api/ventas/summary
-router.get('/summary', salesSummaryFromDB);
+const { getVentas, getSummary, getArticleSeries } = require('../controllers/ventasController');
 
-// GET /api/ventas/:articuloId/series
-router.get('/:articuloId/series', salesSeriesFromDB);
+// Wrapper: pasa el businessId correcto a requireBusinessAccess(req,res,next, id)
+const requireBiz = (req, res, next) => {
+  const id = req.business?.id || req.businessId || Number(req.header('X-Business-Id'));
+  return requireBusinessAccess(req, res, next, id);
+};
 
-// utilitarios (si los usas desde /api/ventas)
-router.get('/articles', listArticlesFromDB);
-router.get('/articles/tree', listArticlesTreeFromDB);
-
-// POST /api/ventas/sync
-router.post('/sync', syncNow);
+// Rutas principales (desde DB)
+router.get('/', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getVentas);
+router.get('/summary', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getSummary);
+router.get('/:articuloId/series', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getArticleSeries);
 
 module.exports = router;

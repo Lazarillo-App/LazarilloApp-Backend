@@ -19,18 +19,40 @@ function encrypt(plain) {
   return `${iv.toString('base64')}:${tag.toString('base64')}:${enc.toString('base64')}`;
 }
 
-function decrypt(encStr) {
+function decryptCompat(encStr) {
   const key = ensureKey();
-  const [ivB64, tagB64, dataB64] = String(encStr || '').split(':');
-  if (!ivB64 || !tagB64 || !dataB64) return null;
-  const iv = Buffer.from(ivB64, 'base64');
-  const tag = Buffer.from(tagB64, 'base64');
-  const data = Buffer.from(dataB64, 'base64');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(tag);
-  const dec = Buffer.concat([decipher.update(data), decipher.final()]);
-  return dec.toString('utf8');
+  const s = String(encStr || '').trim();
+  if (!s) return null;
+
+  // a) Formato "iv:tag:data"
+  if (s.includes(':')) {
+    const [ivB64, tagB64, dataB64] = s.split(':');
+    if (!ivB64 || !tagB64 || !dataB64) return null;
+    const iv = Buffer.from(ivB64, 'base64');
+    const tag = Buffer.from(tagB64, 'base64');
+    const data = Buffer.from(dataB64, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    const dec = Buffer.concat([decipher.update(data), decipher.final()]);
+    return dec.toString('utf8');
+  }
+
+  // b) Formato base64(JSON con {v,iv,tag,ct})
+  try {
+    const jsonStr = Buffer.from(s, 'base64').toString('utf8');
+    const obj = JSON.parse(jsonStr);
+    const iv  = Buffer.from(obj.iv,  'base64');
+    const tag = Buffer.from(obj.tag, 'base64');
+    const ct  = Buffer.from(obj.ct,  'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    const dec = Buffer.concat([decipher.update(ct), decipher.final()]);
+    return dec.toString('utf8');
+  } catch {
+    return null;
+  }
 }
+
 
 /**
  * Guarda credenciales en app_businesses.props.maxi
@@ -70,15 +92,18 @@ async function getCreds(businessId) {
   const maxi = rows[0]?.maxi || null;
   if (!maxi) return null;
 
-  const email = maxi.email || '';
-  const codcli = maxi.codcli || maxi.cod_cli || '';
-  const pass_enc = maxi.pass_enc || null;
+  const email   = maxi.email || '';
+  const codcli  = maxi.codcli || maxi.cod_cli || '';
+  const passEnc = maxi.pass_enc || null;
+
   let pass = null;
-  if (pass_enc) {
-    try { pass = decrypt(pass_enc); } catch { pass = null; }
+  if (passEnc) {
+    try { pass = decryptCompat(passEnc); } catch { pass = null; }
   }
-  return (email && codcli && pass) ? { email, pass, cod_cli: codcli, codcli } : null;
+  return (email && codcli && pass) ? { email, pass, codcli } : null;
 }
+
+module.exports = { saveCreds, getCreds, getStatus };
 
 /**
  * Estado simple para UI/diagnóstico

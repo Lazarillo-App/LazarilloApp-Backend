@@ -8,22 +8,28 @@ const { randomUUID } = require('crypto');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 
-const authRequired      = require('./middleware/authMiddleware');
-const forbidAppAdmin    = require('./middleware/forbidAppAdmin');
-const { loadActiveBusiness } = require('./middleware/business');
-const requireAppAdmin   = require('./middleware/requireAppAdmin'); // ✅ nuevo nombre
+// 🔧 Mitigación dev del warning MaxListeners (opcional)
+if (process.env.NODE_ENV !== 'production') {
+  require('events').defaultMaxListeners = 30;
+}
+
+// ✅ Importa ambos desde authMiddleware (exporta { authRequired, loadActiveBusiness })
+const { authRequired, loadActiveBusiness } = require('./middleware/authMiddleware');
+
+const forbidAppAdmin  = require('./middleware/forbidAppAdmin');
+const requireAppAdmin = require('./middleware/requireAppAdmin'); // admin-only
 
 // Rutas
-const authRoutes        = require('./routes/authRoutes');
-const devRoutes         = require('./routes/devRoutes');
-const businessRoutes    = require('./routes/businessRoutes');
-const adminRoutes       = require('./routes/admin.routes');
-const agrupacionesRoutes= require('./routes/agrupacionesRoutes');
+const authRoutes         = require('./routes/authRoutes'); 
+const devRoutes          = require('./routes/devRoutes');
+const businessRoutes     = require('./routes/businessRoutes');
+const adminRoutes        = require('./routes/admin.routes');
+const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 
-const ventasRoutes      = require('./routes/ventasRoutes');
-const insumosRoutes     = require('./routes/insumosRoutes');
-const branchesRoutes    = require('./routes/branchRoutes');
-const agrupInsumosRoutes= require('./routes/agrupacionesInsumosRoutes');
+const ventasRoutes       = require('./routes/ventasRoutes');
+const insumosRoutes      = require('./routes/insumosRoutes');
+const branchesRoutes     = require('./routes/branchRoutes');
+const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
 
@@ -78,10 +84,19 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 // Negocios: auth y NO ser app_admin
 app.use('/api/businesses', authRequired, forbidAppAdmin, businessRoutes);
 
-// Guard de negocio activo o X-Business-Id para el resto de /api
+// Guard global de negocio activo o X-Business-Id para el resto de /api
 app.use('/api', authRequired, loadActiveBusiness);
 
-// Rutas que requieren negocio
+app.get('/api/_debug/whoami', authRequired, (req, res) => {
+  res.json({
+    uid: req.user?.id,
+    role: req.user?.role,
+    active_business_id: req.user?.active_business_id, // si lo pones en el token
+    headers_x_business_id: req.header('X-Business-Id')
+  });
+});
+
+// Rutas que requieren negocio (heredan el guard anterior)
 app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
 app.use('/api/insumos',             insumosRoutes);
 app.use('/api/ventas',              ventasRoutes);
@@ -185,4 +200,5 @@ const PORT = process.env.PORT || 4000;
     process.exit(1);
   }
 })();
+
 
