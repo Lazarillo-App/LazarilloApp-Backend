@@ -5,8 +5,8 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS app_sales (
   id            BIGSERIAL PRIMARY KEY,
   business_id   BIGINT      NOT NULL REFERENCES app_businesses(id) ON DELETE CASCADE,
-  external_id   TEXT        NOT NULL,  -- id de Maxi/tercero
-  occurred_at   TIMESTAMPTZ NOT NULL,  -- fecha/hora efectiva de la venta
+  external_id   TEXT        NOT NULL,  -- id de Maxi/tercero (estable)
+  occurred_at   TIMESTAMPTZ NOT NULL,  -- fecha/hora efectiva de la venta (UTC)
   total         NUMERIC(14,2) NOT NULL DEFAULT 0,
   props         JSONB        NOT NULL DEFAULT '{}',
   created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -75,3 +75,4 @@ BEFORE UPDATE ON app_sales
 FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 
 COMMIT;
+

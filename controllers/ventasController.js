@@ -1,46 +1,42 @@
 // controllers/ventasController.js
 // Fuente de verdad: nuestra DB (NO llama a Maxi).
-// Endpoints soportados:
+// Endpoints:
 //   - GET /api/ventas?peek=true&limit=N
-//   - GET /api/ventas?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month
-// Compatibilidad (rutas legadas):
-//   - GET /api/ventas/summary           -> ranking artículos últimos 30d (desde app_sales_items)
-//   - GET /api/ventas/:articuloId/series?from&to  -> series por día para un artículo
+//   - GET /api/ventas?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month  (from/to opcionales; default últimos 30 días)
+//   - LEGADO: GET /api/ventas/summary
+//   - LEGADO: GET /api/ventas/:articuloId/series?from&to
 
-const { Pool } = require('pg');
+const pool = require('../config/db');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || undefined,
-  ssl: (process.env.PGSSLMODE === 'disable') ? false : { rejectUnauthorized: false }
-});
-
-// ---------- helpers fecha ----------
+// ====== Helpers fecha ======
 const pad2 = n => String(n).padStart(2, '0');
 const ymd  = d => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
 const at00 = d => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 const addDays = (d, n) => new Date(at00(d).getTime() + n * 86400000);
+const toDate = (s) => (s ? new Date(s) : null);
 
-// Clamp a AYER (evita “hoy” por inconsistencias de origen)
-function clampToAyer({ from, to }) {
-  const today = at00(new Date());
-  const AYERd = addDays(today, -1);
-  const Fd = from ? at00(new Date(from)) : addDays(AYERd, -29);
-  const Td = to   ? at00(new Date(to))   : AYERd;
-  const T  = Td > AYERd ? AYERd : Td;
-  return { from: ymd(Fd), to: ymd(T), AYER: ymd(AYERd) };
+// Clamp a AYER (evita “hoy” por inconsistencias del origen)
+function clampRange(fromStr, toStr) {
+  const now = new Date();
+  const todayUTC = at00(now);
+  const AYER = addDays(todayUTC, -1);
+
+  const F = toDate(fromStr) || addDays(todayUTC, -29);
+  const T = toDate(toStr)   || AYER;
+
+  const Tclamped = T > AYER ? AYER : T;
+  return { F, T: Tclamped, AYER };
 }
 
-// ------------------------------------------------------------------
-// GET /api/ventas?peek=true&limit=N  (últimos comprobantes)
-// GET /api/ventas?from&to&groupBy=day|week|month  (series agregadas)
-// ------------------------------------------------------------------
+// ====== GET /api/ventas ======
 async function getVentas(req, res, next) {
   try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id;
+    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
     const { peek, limit, from, to, groupBy } = req.query;
 
+    // ---- Peek: últimos comprobantes ----
     if (String(peek) === 'true') {
       const lim = Math.min(Math.max(parseInt(limit || '20', 10), 1), 200);
       const { rows } = await pool.query(
@@ -51,12 +47,11 @@ async function getVentas(req, res, next) {
           LIMIT ${lim}`,
         [businessId]
       );
-      return res.json({ business_id: businessId, peek: rows });
+      return res.json({ ok: true, business_id: businessId, peek: rows });
     }
 
-    if (!from || !to) {
-      return res.status(400).json({ error: 'from/to requeridos (YYYY-MM-DD)' });
-    }
+    // ---- Series: day/week/month (from/to opcionales -> defaults) ----
+    const { F, T } = clampRange(from, to);
     const gb = (groupBy || 'day').toLowerCase();
     if (!['day','week','month'].includes(gb)) {
       return res.status(400).json({ error: 'groupBy debe ser day|week|month' });
@@ -69,9 +64,9 @@ async function getVentas(req, res, next) {
           WHERE business_id = $1
             AND day BETWEEN $2::date AND $3::date
           ORDER BY day ASC`,
-        [businessId, from, to]
+        [businessId, ymd(F), ymd(T)]
       );
-      return res.json({ business_id: businessId, groupBy: 'day', series: rows });
+      return res.json({ ok: true, business_id: businessId, groupBy: 'day', series: rows });
     } else {
       const bucket = gb === 'week' ? 'week' : 'month';
       const { rows } = await pool.query(
@@ -83,27 +78,22 @@ async function getVentas(req, res, next) {
             AND day BETWEEN $2::date AND $3::date
           GROUP BY 1
           ORDER BY 1 ASC`,
-        [businessId, from, to]
+        [businessId, ymd(F), ymd(T)]
       );
-      return res.json({ business_id: businessId, groupBy: gb, series: rows });
+      return res.json({ ok: true, business_id: businessId, groupBy: gb, series: rows });
     }
   } catch (err) {
     next(err);
   }
 }
 
-// ------------------------------------------------------------------
-// LEGADO: GET /api/ventas/summary
-// Ranking de artículos por cantidad (últimos 30 días), desde app_sales_items.
-// Requiere que app_sales_items.article_id esté mapeado (si no, devuelve vacío).
-// Query opcional: ?limit=N (default 200)
-// ------------------------------------------------------------------
+// ====== LEGADO: ranking artículos (últimos 30 días) ======
 async function getSummary(req, res, next) {
   try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id;
+    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
-    const { from, to } = clampToAyer({}); // últimos 30 días
+    const { F, T } = clampRange(null, null); // default 30d hasta AYER
     const lim = Math.min(Math.max(parseInt(req.query.limit || '200', 10), 1), 1000);
 
     const { rows } = await pool.query(
@@ -117,12 +107,13 @@ async function getSummary(req, res, next) {
         GROUP BY 1
         ORDER BY qty DESC
         LIMIT ${lim}`,
-      [businessId, from, to]
+      [businessId, ymd(F), ymd(T)]
     );
 
     return res.json({
+      ok: true,
       business_id: businessId,
-      rango: { from, to },
+      rango: { from: ymd(F), to: ymd(T) },
       count: rows.length,
       items: rows
     });
@@ -131,14 +122,10 @@ async function getSummary(req, res, next) {
   }
 }
 
-// ------------------------------------------------------------------
-// LEGADO: GET /api/ventas/:articuloId/series?from&to
-// Serie diaria por cantidad para un artículo específico.
-// Si no pasan fechas, usa últimos 30 días hasta AYER.
-// ------------------------------------------------------------------
+// ====== LEGADO: serie diaria por artículo ======
 async function getArticleSeries(req, res, next) {
   try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id;
+    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
     const articuloId = Number(req.params.articuloId);
@@ -146,16 +133,15 @@ async function getArticleSeries(req, res, next) {
       return res.status(400).json({ error: 'articuloId inválido' });
     }
 
-    const clamp = clampToAyer({ from: req.query.from, to: req.query.to });
-    const F = clamp.from, T = clamp.to;
+    const { F, T } = clampRange(req.query.from, req.query.to);
 
-    // Construimos calendario de días
+    // Calendario de días
     const days = [];
-    for (let d = new Date(F + 'T00:00:00Z'); d <= new Date(T + 'T00:00:00Z'); d = addDays(d, 1)) {
+    for (let d = new Date(`${ymd(F)}T00:00:00Z`); d <= new Date(`${ymd(T)}T00:00:00Z`); d = addDays(d, 1)) {
       days.push(ymd(d));
     }
 
-    // Agregamos desde items
+    // Agregado desde items
     const { rows } = await pool.query(
       `SELECT (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
               SUM(i.quantity)::numeric(14,3)         AS qty
@@ -166,16 +152,17 @@ async function getArticleSeries(req, res, next) {
           AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
         GROUP BY 1
         ORDER BY 1`,
-      [businessId, articuloId, F, T]
+      [businessId, articuloId, ymd(F), ymd(T)]
     );
 
     const map = new Map(rows.map(r => [String(r.day), Number(r.qty)]));
     const series = days.map(d => ({ date: d, qty: map.get(d) || 0 }));
 
     return res.json({
+      ok: true,
       business_id: businessId,
       articuloId,
-      rango: { from: F, to: T },
+      rango: { from: ymd(F), to: ymd(T) },
       groupBy: 'day',
       data: series
     });
@@ -185,9 +172,7 @@ async function getArticleSeries(req, res, next) {
 }
 
 module.exports = {
-  // Nuevo handler “oficial” para /api/ventas
   getVentas,
-  // Compatibilidad con rutas legadas
   getSummary,
   getArticleSeries,
 };

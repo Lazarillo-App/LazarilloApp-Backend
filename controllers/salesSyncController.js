@@ -1,97 +1,113 @@
 // controllers/salesSyncController.js
 const { fetchSalesRanged } = require('../services/maxiSalesService');
 const { upsertSalesBatch, setLastSalesSyncAt, getLastSalesSyncAt } = require('../services/salesStore');
-const fetch = require('node-fetch');
-const { getBearer, STATS_BASE } = require('../services/maxiSalesService');
+const { getBearer } = require('../services/maxiSalesService');
 
-function parseDate(d) {
-  if (!d) return null;
-  const [y,m,day] = String(d).split('-').map(Number);
-  if (!y || !m || !day) return null;
-  return new Date(Date.UTC(y, m-1, day));
+// === NUEVO: handler simple para diagnosticar credenciales/alcance ===
+async function maxiPing(req, res, next) {
+  try {
+    const bizId =
+      Number(req.business?.id) ||
+      Number(req.params.id) ||
+      Number(req.headers['x-business-id']);
+
+    if (!Number.isFinite(bizId)) {
+      return res.status(400).json({ error: 'invalid_business_id' });
+    }
+
+    // Verifica que podamos obtener token
+    const bearer = await getBearer(bizId, req);
+
+    // Si vienen ?from&to probamos una llamada real; si no, probamos una ventana corta (ayer)
+    const now = new Date();
+    const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const AYER = new Date(todayUTC.getTime() - 86400000);
+
+    const from = req.query.from ? new Date(req.query.from) : AYER;
+    const to   = req.query.to   ? new Date(req.query.to)   : AYER;
+
+    // Llamamos a Maxi a través de nuestro servicio (no escribe en DB)
+    const facturas = await fetchSalesRanged({ businessId: bizId, from, to, req });
+
+    return res.json({
+      ok: true,
+      business_id: bizId,
+      token_ok: Boolean(bearer),
+      range: {
+        from: from.toISOString().slice(0,10),
+        to:   to.toISOString().slice(0,10),
+      },
+      sample_count: Array.isArray(facturas) ? facturas.length : 0,
+    });
+  } catch (e) {
+    return next(e);
+  }
 }
 
-async function syncSalesForBusiness(business, { mode='auto', dryrun=false, from, to, req } = {}) {
+async function syncSalesForBusiness(business, { mode = 'auto', from = null, to = null, dryrun = false, req } = {}) {
+  if (!business || !business.id) {
+    throw new TypeError('business.id required');
+  }
+
   const now = new Date();
   const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const oneDay = 86400000;
 
-  // rango manual si viene en query
-  let fromDt = parseDate(from);
-  let toDt   = parseDate(to);
+  let rangeFrom = from ? new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate())) : null;
+  let rangeTo   = to   ? new Date(Date.UTC(to.getUTCFullYear(),   to.getUTCMonth(),   to.getUTCDate()))   : null;
 
-  if (!fromDt || !toDt) {
-    // lógica anterior
+  if (!rangeFrom || !rangeTo) {
     const lastTs = await getLastSalesSyncAt(business.id);
+    let chosen = mode;
+
     if (mode === 'backfill_30d' || !lastTs) {
-      toDt   = new Date(todayUTC.getTime() - oneDay);
-      fromDt = new Date(toDt.getTime() - (30-1)*oneDay);
-      mode   = 'backfill_30d';
+      rangeTo   = new Date(todayUTC.getTime() - oneDay);
+      rangeFrom = new Date(rangeTo.getTime() - (30 - 1) * oneDay);
+      chosen = 'backfill_30d';
     } else {
       const last = new Date(lastTs);
       const nextDay = new Date(Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), last.getUTCDate()) + oneDay);
-      toDt   = new Date(todayUTC.getTime() - oneDay);
-      fromDt = nextDay;
-      mode   = 'incremental';
+      rangeTo   = new Date(todayUTC.getTime() - oneDay);
+      rangeFrom = nextDay;
+      chosen = 'incremental';
     }
+    mode = chosen;
   }
 
-  if (fromDt > toDt) {
-    return { synced:false, mode, reason:'up-to-date', range:{ from:null, to:null } };
+  if (rangeFrom > rangeTo) {
+    return { synced: false, dryrun, mode, reason: 'up-to-date', range: { from: rangeFrom.toISOString().slice(0,10), to: rangeTo.toISOString().slice(0,10) } };
   }
 
-  // trae ventas (usa req para permitir X-Maxi-Token si lo mandás)
-  const sales = await fetchSalesRanged({ businessId: business.id, from: fromDt, to: toDt, req });
+  const sales = await fetchSalesRanged({
+    businessId: business.id,
+    from: rangeFrom,
+    to: rangeTo,
+    req,
+    preview: dryrun
+  });
 
   if (dryrun) {
     return {
       synced: false,
       dryrun: true,
       mode,
-      range: { from: fromDt.toISOString().slice(0,10), to: toDt.toISOString().slice(0,10) },
-      rawCount: Array.isArray(sales) ? sales.length : 0
+      range: { from: rangeFrom.toISOString().slice(0,10), to: rangeTo.toISOString().slice(0,10) },
+      rawCount: Array.isArray(sales) ? sales.length : (sales?.length ?? 0)
     };
   }
 
   const { upserted, updated, minDay, maxDay } = await upsertSalesBatch(business.id, sales);
 
-  const toIso = new Date(Date.UTC(toDt.getUTCFullYear(), toDt.getUTCMonth(), toDt.getUTCDate(), 23,59,59)).toISOString();
+  const toIso = new Date(Date.UTC(rangeTo.getUTCFullYear(), rangeTo.getUTCMonth(), rangeTo.getUTCDate(), 23,59,59)).toISOString();
   await setLastSalesSyncAt(business.id, toIso);
 
   return {
     synced: true,
     mode,
-    range: { from: fromDt.toISOString().slice(0,10), to: toDt.toISOString().slice(0,10) },
-    counts: { upserted, updated },
+    range: { from: rangeFrom.toISOString().slice(0,10), to: rangeTo.toISOString().slice(0,10) },
+    counts: { upserted, updated, raw: Array.isArray(sales) ? sales.length : (sales?.length ?? 0) },
     touched: { minDay, maxDay }
   };
 }
 
-// Quick ping (acepta ?from&to)
-async function maxiPing(req, res) {
-  try {
-    const bizId = req.businessId || req.params.id || req.business?.id;
-    if (!bizId) return res.status(400).json({ error: 'invalid_business_id' });
-
-    const bearer = await getBearer(bizId, req);
-    const from = req.query.from || '2025-08-01';
-    const to   = req.query.to   || '2025-08-07';
-    const url  = `${STATS_BASE.replace(/\/+$/, '')}/estadisticas/fullinvoicebydate?from=${from}&to=${to}`;
-
-    const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
-    const txt = await r.text(); let j; try { j = JSON.parse(txt); } catch {}
-    res.json({
-      ok: r.ok && (j?.resultCode === 'SUCCESS' || !j?.resultCode),
-      http: r.status,
-      resultCode: j?.resultCode || null,
-      resultDescription: j?.resultDescription || null,
-      used: 'getBearer',
-      preview: j?.content?.facturas ? j.content.facturas.slice(0, 1) : null,
-      from, to
-    });
-  } catch (e) {
-    res.status(e.status || 500).json({ error: 'internal', message: e.message });
-  }
-}
-
-module.exports = { syncSalesForBusiness, maxiPing };
+module.exports = { maxiPing, syncSalesForBusiness };

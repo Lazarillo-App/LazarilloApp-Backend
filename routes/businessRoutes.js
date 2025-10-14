@@ -44,20 +44,37 @@ router.post('/:id/sync',             syncNow);
 router.get('/:id/sales/summary',     salesSummaryFromDB);
 router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 
-// ⬇️ Sync de ventas con soporte ?mode=backfill|auto&dryrun=1&from=YYYY-MM-DD&to=YYYY-MM-DD
+// POST /:id/sync-sales?mode=backfill&dryrun=1&from=YYYY-MM-DD&to=YYYY-MM-DD
 router.post('/:id/sync-sales', async (req, res, next) => {
   try {
-    const { mode, dryrun, from, to } = req.query;
-    const chosen = (mode === 'backfill') ? 'backfill_30d' : 'auto';
-    const out = await syncSalesForBusiness(req.business, {
-      mode: chosen,
-      dryrun: dryrun === '1',
-      from,
-      to,
-      req, // pasa headers p/ X-Maxi-Token opcional
-    });
-    res.json({ ok: true, business_id: req.businessId || req.business.id, sales: out });
-  } catch (e) { next(e); }
+    const bizId =
+      Number(req.business?.id) ||
+      Number(req.params.id) ||
+      Number(req.headers['x-business-id']);
+
+    if (!Number.isFinite(bizId)) {
+      return res.status(400).json({ error: 'invalid_business_id' });
+    }
+
+    // "business" mínimo: alcanza con el id
+    const business = req.business || { id: bizId };
+
+    const mode = req.query.mode === 'backfill' ? 'backfill_30d' : 'auto';
+    const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
+
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to   = req.query.to   ? new Date(req.query.to)   : null;
+    if ((from && isNaN(+from)) || (to && isNaN(+to))) {
+      return res.status(400).json({ error: 'invalid_date' });
+    }
+
+    const { syncSalesForBusiness } = require('../controllers/salesSyncController');
+    const out = await syncSalesForBusiness(business, { mode, from, to, dryrun, req });
+
+    res.json({ ok: true, business_id: bizId, sales: out });
+  } catch (e) {
+    next(e);
+  }
 });
 
 module.exports = router;
