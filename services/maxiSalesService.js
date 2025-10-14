@@ -9,6 +9,7 @@ const CONC = Math.max(1, Number(process.env.MAXI_FETCH_CONCURRENCY || 3));
 // ---- cache de token por negocio ----
 const tokenCache = new Map(); // key -> { token, expMs }
 
+// Utils fechas (UTC)
 function pad2(n){ return String(n).padStart(2,'0'); }
 function ymd(d){ return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`; }
 function at00UTC(d){ return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
@@ -71,7 +72,6 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
 
     if (ok) return j?.content ?? j ?? {};
 
-    // Errores transitorios
     if ([429,502,503].includes(r.status)) {
       if (i === 2) {
         const e = new Error(j?.resultDescription || r.statusText || 'Maxi 5xx');
@@ -110,7 +110,6 @@ function buildWindows(fromDate, toDate, winDays) {
 async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   const windows7 = buildWindows(fromDate, toDate, 7);
 
-  // Primero intentamos 7d en paralelo
   const results = new Array(windows7.length);
   const errors  = new Array(windows7.length).fill(null);
 
@@ -128,7 +127,6 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   }
   await Promise.all(Array.from({length: Math.min(conc, windows7.length)}, worker));
 
-  // Para las que fallaron con 5xx, reintentar día por día
   const outPayloads = [];
   for (let i=0;i<windows7.length;i++){
     if (!errors[i]) {
@@ -149,7 +147,6 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
         }
       }
     } else {
-      // error no 5xx → lo propagamos
       throw err;
     }
   }
@@ -160,14 +157,10 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
 function extractFacturas(payload) {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload;
-
-  // rutas conocidas
   if (Array.isArray(payload.facturas)) return payload.facturas;
   if (Array.isArray(payload.content?.facturas)) return payload.content.facturas;
-  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas;
+  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas; // <- clave
   if (Array.isArray(payload.content)) return payload.content;
-
-  // fallback: primera propiedad que sea array de objetos
   for (const [, v] of Object.entries(payload)) {
     if (Array.isArray(v) && v.length && typeof v[0] === 'object') return v;
   }
@@ -197,8 +190,6 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   for (const p of (payloads || [])) {
     let arr = extractFacturas(p);
     if (!Array.isArray(arr) || !arr.length) continue;
-
-    // aplanar si viene como [{ factura: {...} }, ...]
     if (arr[0] && typeof arr[0] === 'object' && Object.prototype.hasOwnProperty.call(arr[0], 'factura')) {
       arr = arr.map(x => x?.factura || x).filter(Boolean);
     }
@@ -207,73 +198,11 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   return facturas;
 }
 
-// === Compat: GET /api/ventas?articuloId=&from=&to=&groupBy= ===
-// Responde en el formato { total, items: [{ label, qty }] } leyendo desde la DB.
-async function getArticleSeriesQuery(req, res, next) {
-  try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
-    if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
-
-    const articuloId = Number(req.query.articuloId);
-    if (!Number.isFinite(articuloId)) {
-      return res.status(400).json({ error: 'articuloId inválido' });
-    }
-
-    const gb = (req.query.groupBy || 'day').toLowerCase();
-    if (!['day','week','month'].includes(gb)) {
-      return res.status(400).json({ error: 'groupBy debe ser day|week|month' });
-    }
-
-    // Reutilizamos clampRange de este mismo archivo
-    const { F, T } = clampRange(req.query.from, req.query.to);
-
-    if (gb === 'day') {
-      // Serie diaria directa
-      const { rows } = await pool.query(
-        `SELECT (s.occurred_at AT TIME ZONE 'UTC')::date AS label,
-                SUM(i.quantity)::numeric(14,3)         AS qty
-           FROM app_sales_items i
-           JOIN app_sales s ON s.id = i.sale_id
-          WHERE s.business_id = $1
-            AND i.article_id = $2
-            AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
-          GROUP BY 1
-          ORDER BY 1`,
-        [businessId, articuloId, ymd(F), ymd(T)]
-      );
-
-      const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
-      const total = items.reduce((a, x) => a + x.qty, 0);
-      return res.json({ total, items });
-    }
-
-    // week / month: agregamos por bucket
-    const bucket = gb === 'week' ? 'week' : 'month';
-    const { rows } = await pool.query(
-      `SELECT date_trunc('${bucket}', (s.occurred_at AT TIME ZONE 'UTC')::date)::date AS label,
-              SUM(i.quantity)::numeric(14,3)                                          AS qty
-         FROM app_sales_items i
-         JOIN app_sales s ON s.id = i.sale_id
-        WHERE s.business_id = $1
-          AND i.article_id = $2
-          AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
-        GROUP BY 1
-        ORDER BY 1`,
-      [businessId, articuloId, ymd(F), ymd(T)]
-    );
-
-    const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
-    const total = items.reduce((a, x) => a + x.qty, 0);
-    return res.json({ total, items });
-  } catch (err) {
-    next(err);
-  }
-}
-
 module.exports = {
   MAXI_BASE,
   STATS_BASE,
   getBearer,
   fetchSalesRanged,
-  getArticleSeriesQuery, // 👈 export nuevo
+  // helpers si alguna vez los querés testear:
+  // fetchFullByDate, buildWindows, extractFacturas
 };
