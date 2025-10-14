@@ -6,7 +6,9 @@ const { authRequired, loadActiveBusiness } = require('../middleware/authMiddlewa
 const forbidAppAdmin = require('../middleware/forbidAppAdmin');
 const requireBusinessAccess = require('../middleware/requireBusinessAccess');
 
-const { getVentas, getSummary, getArticleSeries } = require('../controllers/ventasController');
+// ⬇️ importa también getArticleSeriesQuery
+const { getVentas, getSummary, getArticleSeries, getArticleSeriesQuery } =
+  require('../controllers/ventasController');
 
 // Wrapper para validar pertenencia al negocio activo
 const requireBiz = (req, res, next) => {
@@ -14,10 +16,25 @@ const requireBiz = (req, res, next) => {
   return requireBusinessAccess(req, res, next, id);
 };
 
-// Sirve TODO desde nuestra DB
-router.get('/',                  authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getVentas);
-router.get('/summary',           authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getSummary);
-router.get('/:articuloId/series',authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getArticleSeries);
+/**
+ * Rutas:
+ * - GET /api/ventas/series?from&to&groupBy=day|week|month   -> series agregadas desde sales_daily
+ * - GET /api/ventas/summary                                 -> ranking (legado)
+ * - GET /api/ventas/:articuloId/series?from&to              -> serie por artículo (legado)
+ * - GET /api/ventas?articuloId=&from=&to=&groupBy=          -> COMPAT vieja firma (lee DB) -> { total, items:[{label,qty}] }
+ */
+
+// Series agregadas por negocio (desde sales_daily)
+router.get('/series', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getVentas);
+
+// Ranking artículos (legado)
+router.get('/summary', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getSummary);
+
+// Serie por artículo (legado por path param)
+router.get('/:articuloId/series', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getArticleSeries);
+
+// Compat: misma firma que usabas antes (?articuloId=&from=&to=&groupBy=)
+router.get('/', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getArticleSeriesQuery);
 
 module.exports = router;
 

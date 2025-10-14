@@ -207,12 +207,73 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   return facturas;
 }
 
+// === Compat: GET /api/ventas?articuloId=&from=&to=&groupBy= ===
+// Responde en el formato { total, items: [{ label, qty }] } leyendo desde la DB.
+async function getArticleSeriesQuery(req, res, next) {
+  try {
+    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
+    if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
+
+    const articuloId = Number(req.query.articuloId);
+    if (!Number.isFinite(articuloId)) {
+      return res.status(400).json({ error: 'articuloId inválido' });
+    }
+
+    const gb = (req.query.groupBy || 'day').toLowerCase();
+    if (!['day','week','month'].includes(gb)) {
+      return res.status(400).json({ error: 'groupBy debe ser day|week|month' });
+    }
+
+    // Reutilizamos clampRange de este mismo archivo
+    const { F, T } = clampRange(req.query.from, req.query.to);
+
+    if (gb === 'day') {
+      // Serie diaria directa
+      const { rows } = await pool.query(
+        `SELECT (s.occurred_at AT TIME ZONE 'UTC')::date AS label,
+                SUM(i.quantity)::numeric(14,3)         AS qty
+           FROM app_sales_items i
+           JOIN app_sales s ON s.id = i.sale_id
+          WHERE s.business_id = $1
+            AND i.article_id = $2
+            AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
+          GROUP BY 1
+          ORDER BY 1`,
+        [businessId, articuloId, ymd(F), ymd(T)]
+      );
+
+      const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
+      const total = items.reduce((a, x) => a + x.qty, 0);
+      return res.json({ total, items });
+    }
+
+    // week / month: agregamos por bucket
+    const bucket = gb === 'week' ? 'week' : 'month';
+    const { rows } = await pool.query(
+      `SELECT date_trunc('${bucket}', (s.occurred_at AT TIME ZONE 'UTC')::date)::date AS label,
+              SUM(i.quantity)::numeric(14,3)                                          AS qty
+         FROM app_sales_items i
+         JOIN app_sales s ON s.id = i.sale_id
+        WHERE s.business_id = $1
+          AND i.article_id = $2
+          AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
+        GROUP BY 1
+        ORDER BY 1`,
+      [businessId, articuloId, ymd(F), ymd(T)]
+    );
+
+    const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
+    const total = items.reduce((a, x) => a + x.qty, 0);
+    return res.json({ total, items });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   MAXI_BASE,
   STATS_BASE,
   getBearer,
   fetchSalesRanged,
-  // Exportá los de abajo solo si los usás fuera:
-  // fetchFullByDate,
-  // buildWindows,
+  getArticleSeriesQuery, // 👈 export nuevo
 };

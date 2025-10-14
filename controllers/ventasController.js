@@ -170,9 +170,74 @@ async function getArticleSeries(req, res, next) {
     next(err);
   }
 }
+// controllers/ventasController.js
+// ... (resto del archivo con getVentas, getSummary, getArticleSeries, helpers, pool, etc.)
+
+async function getArticleSeriesQuery(req, res, next) {
+  try {
+    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
+    if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
+
+    const articuloId = Number(req.query.articuloId);
+    if (!Number.isFinite(articuloId)) {
+      return res.status(400).json({ error: 'articuloId inválido' });
+    }
+
+    const gb = (req.query.groupBy || 'day').toLowerCase();
+    if (!['day','week','month'].includes(gb)) {
+      return res.status(400).json({ error: 'groupBy debe ser day|week|month' });
+    }
+
+    const F = req.query.from ? new Date(req.query.from) : null;
+    const T = req.query.to   ? new Date(req.query.to)   : null;
+    if (!F || !T || isNaN(F) || isNaN(T) || F > T) {
+      return res.status(400).json({ error: 'from/to inválidos (YYYY-MM-DD)' });
+    }
+    const ymd = d => d.toISOString().slice(0,10);
+
+    if (gb === 'day') {
+      const { rows } = await pool.query(
+        `SELECT (s.occurred_at AT TIME ZONE 'UTC')::date AS label,
+                SUM(i.quantity)::numeric(14,3)         AS qty
+           FROM app_sales_items i
+           JOIN app_sales s ON s.id = i.sale_id
+          WHERE s.business_id = $1
+            AND i.article_id = $2
+            AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
+          GROUP BY 1
+          ORDER BY 1`,
+        [businessId, articuloId, ymd(F), ymd(T)]
+      );
+      const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
+      const total = items.reduce((a,x)=>a+x.qty,0);
+      return res.json({ total, items });
+    }
+
+    const bucket = gb === 'week' ? 'week' : 'month';
+    const { rows } = await pool.query(
+      `SELECT date_trunc('${bucket}', (s.occurred_at AT TIME ZONE 'UTC')::date)::date AS label,
+              SUM(i.quantity)::numeric(14,3)                                          AS qty
+         FROM app_sales_items i
+         JOIN app_sales s ON s.id = i.sale_id
+        WHERE s.business_id = $1
+          AND i.article_id = $2
+          AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
+        GROUP BY 1
+        ORDER BY 1`,
+      [businessId, articuloId, ymd(F), ymd(T)]
+    );
+    const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
+    const total = items.reduce((a,x)=>a+x.qty,0);
+    return res.json({ total, items });
+  } catch (err) {
+    next(err);
+  }
+}
+
 
 module.exports = {
   getVentas,
   getSummary,
   getArticleSeries,
+  getArticleSeriesQuery, 
 };
