@@ -42,9 +42,9 @@ async function loginMaxi(email, pass, codcli) {
  * 3) Credenciales cifradas en props.maxi -> login
  */
 async function getBearer(businessId, req) {
-  const hdrTok = req?.headers?.['x-maxi-token'];       // Node lowercasa headers
+  const hdrTok = req?.headers?.['x-maxi-token']; // Node lowercasa headers
   if (hdrTok && String(hdrTok).trim()) {
-    // 🔧 quita "Bearer " si viene
+    // quita "Bearer " si vino prefijado
     return String(hdrTok).replace(/^Bearer\s+/i, '').trim();
   }
 
@@ -73,7 +73,12 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
     let j; try { j = JSON.parse(txt); } catch {}
     const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
 
-    if (ok) return j?.content ?? j ?? {};
+    if (ok) {
+      // aplanar envolturas content/content
+      return (j?.content?.content) ? j.content.content
+           : (j?.content)          ? j.content
+           : j ?? {};
+    }
 
     if ([429,502,503].includes(r.status)) {
       if (i === 2) {
@@ -162,7 +167,7 @@ function extractFacturas(payload) {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload.facturas)) return payload.facturas;
   if (Array.isArray(payload.content?.facturas)) return payload.content.facturas;
-  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas; // <- clave
+  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas;
   if (Array.isArray(payload.content)) return payload.content;
   for (const [, v] of Object.entries(payload)) {
     if (Array.isArray(v) && v.length && typeof v[0] === 'object') return v;
@@ -206,6 +211,5 @@ module.exports = {
   STATS_BASE,
   getBearer,
   fetchSalesRanged,
-  // helpers si alguna vez los querés testear:
-  // fetchFullByDate, buildWindows, extractFacturas
+  // opcional para tests: fetchFullByDate, buildWindows, extractFacturas
 };

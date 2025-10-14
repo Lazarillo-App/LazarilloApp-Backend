@@ -1,3 +1,4 @@
+// routes/ventasRoutes.js
 const express = require('express');
 const router = express.Router();
 
@@ -6,10 +7,10 @@ const forbidAppAdmin = require('../middleware/forbidAppAdmin');
 const requireBusinessAccess = require('../middleware/requireBusinessAccess');
 
 const {
-  getVentas,              // NUEVO: /api/ventas?peek=|from&to&groupBy=
+  getVentas,              // /api/ventas?peek=... | /api/ventas?from&to&groupBy=
   getSummary,             // legado
   getArticleSeries,       // legado /:articuloId/series
-  getArticleSeriesQuery,  // compat por query -> la movemos a /by-article
+  getArticleSeriesQuery,  // compat por query -> /by-article
 } = require('../controllers/ventasController');
 
 const requireBiz = (req, res, next) => {
@@ -17,21 +18,17 @@ const requireBiz = (req, res, next) => {
   return requireBusinessAccess(req, res, next, id);
 };
 
-// ✅ La raíz vuelve a apuntar al handler nuevo (soporta peek=true)
-router.get('/', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getVentas);
-
-// Series agregadas por negocio (equivalente explícito)
-router.get('/series', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getVentas);
+// Raíz (peek + series agregadas desde DB)
+router.get('/',        authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getVentas);
+router.get('/series',  authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getVentas);
 
 // Ranking (legado)
 router.get('/summary', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getSummary);
 
-// Serie por artículo por path param (legado)
+// Serie por artículo por path param (ID de Maxi == article_id)
 router.get('/:articuloId/series', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getArticleSeries);
 
-// 🔀 Compat de firma antigua por QUERY, pero en una URL separada para no interferir:
+// Compat por query en ruta separada
 router.get('/by-article', authRequired, forbidAppAdmin, loadActiveBusiness, requireBiz, getArticleSeriesQuery);
 
 module.exports = router;
-
-

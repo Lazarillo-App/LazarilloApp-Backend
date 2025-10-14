@@ -5,6 +5,7 @@
 //   - GET /api/ventas?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month  (from/to opcionales; default últimos 30 días)
 //   - LEGADO: GET /api/ventas/summary
 //   - LEGADO: GET /api/ventas/:articuloId/series?from&to
+//   - COMPAT: GET /api/ventas/by-article?articuloId=&from=&to=&groupBy=
 
 const pool = require('../config/db');
 
@@ -122,7 +123,7 @@ async function getSummary(req, res, next) {
   }
 }
 
-// ====== LEGADO: serie diaria por artículo ======
+// ====== LEGADO/COMPAT: serie por artículo (ID de Maxi == article_id) ======
 async function getArticleSeries(req, res, next) {
   try {
     const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
@@ -170,9 +171,8 @@ async function getArticleSeries(req, res, next) {
     next(err);
   }
 }
-// controllers/ventasController.js
-// ... (resto del archivo con getVentas, getSummary, getArticleSeries, helpers, pool, etc.)
 
+// ====== COMPAT: /api/ventas/by-article?articuloId=&from=&to=&groupBy= ======
 async function getArticleSeriesQuery(req, res, next) {
   try {
     const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
@@ -193,7 +193,7 @@ async function getArticleSeriesQuery(req, res, next) {
     if (!F || !T || isNaN(F) || isNaN(T) || F > T) {
       return res.status(400).json({ error: 'from/to inválidos (YYYY-MM-DD)' });
     }
-    const ymd = d => d.toISOString().slice(0,10);
+    const y = d => d.toISOString().slice(0,10);
 
     if (gb === 'day') {
       const { rows } = await pool.query(
@@ -206,7 +206,7 @@ async function getArticleSeriesQuery(req, res, next) {
             AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
           GROUP BY 1
           ORDER BY 1`,
-        [businessId, articuloId, ymd(F), ymd(T)]
+        [businessId, articuloId, y(F), y(T)]
       );
       const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
       const total = items.reduce((a,x)=>a+x.qty,0);
@@ -224,7 +224,7 @@ async function getArticleSeriesQuery(req, res, next) {
           AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
         GROUP BY 1
         ORDER BY 1`,
-      [businessId, articuloId, ymd(F), ymd(T)]
+      [businessId, articuloId, y(F), y(T)]
     );
     const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
     const total = items.reduce((a,x)=>a+x.qty,0);
@@ -234,10 +234,9 @@ async function getArticleSeriesQuery(req, res, next) {
   }
 }
 
-
 module.exports = {
   getVentas,
   getSummary,
   getArticleSeries,
-  getArticleSeriesQuery, 
+  getArticleSeriesQuery,
 };
