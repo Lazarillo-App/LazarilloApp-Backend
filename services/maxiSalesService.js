@@ -42,8 +42,11 @@ async function loginMaxi(email, pass, codcli) {
  * 3) Credenciales cifradas en props.maxi -> login
  */
 async function getBearer(businessId, req) {
-  const hdrTok = (req?.headers?.['x-maxi-token'] || req?.headers?.['X-Maxi-Token']);
-  if (hdrTok && String(hdrTok).trim()) return String(hdrTok).trim();
+  const hdrTok = req?.headers?.['x-maxi-token'];       // Node lowercasa headers
+  if (hdrTok && String(hdrTok).trim()) {
+    // 🔧 quita "Bearer " si viene
+    return String(hdrTok).replace(/^Bearer\s+/i, '').trim();
+  }
 
   const now = Date.now();
   const cached = tokenCache.get(String(businessId));
