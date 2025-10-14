@@ -11,8 +11,8 @@ const tokenCache = new Map(); // key -> { token, expMs }
 
 function pad2(n){ return String(n).padStart(2,'0'); }
 function ymd(d){ return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`; }
-function at00UTC(d){ const x=new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); return x; }
-function addDaysUTC(d, n){ const x=new Date(d.getTime() + n*86400000); return x; }
+function at00UTC(d){ return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
+function addDaysUTC(d, n){ return new Date(d.getTime() + n*86400000); }
 
 // ------------------ bearer ------------------
 async function loginMaxi(email, pass, codcli) {
@@ -22,7 +22,7 @@ async function loginMaxi(email, pass, codcli) {
     headers: { 'Content-Type':'application/json' },
     body: JSON.stringify({ email, pass, cod_cli: codcli })
   });
-  const txt = await r.text().catch(()=>'');
+  const txt = await r.text().catch(()=> '');
   let j; try { j = JSON.parse(txt); } catch {}
   if (!r.ok || j?.resultCode !== 'SUCCESS') {
     const err = new Error(j?.resultDescription || r.statusText || 'login Maxi falló');
@@ -62,7 +62,7 @@ async function getBearer(businessId, req) {
 // ------------------ fetch low-level ------------------
 async function fetchFullByDate(fromYMD, toYMD, bearer) {
   const url = `${STATS_BASE.replace(/\/+$/,'')}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
-  // 3 intentos con backoff; si es 500, lo propagamos para que el caller decida fallback
+  // 3 intentos con backoff; si es 5xx, dejamos que el caller decida fallback
   for (let i=0;i<3;i++){
     const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
     const txt = await r.text().catch(()=> '');
@@ -73,7 +73,6 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
 
     // Errores transitorios
     if ([429,502,503].includes(r.status)) {
-      // si es el último intento devolvemos error
       if (i === 2) {
         const e = new Error(j?.resultDescription || r.statusText || 'Maxi 5xx');
         e.status = r.status || 502;
@@ -146,7 +145,6 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
           const dayPayload = await fetchFullByDate(da, db, bearer);
           outPayloads.push(dayPayload);
         } catch (e2) {
-          // si sigue fallando un día puntual, lo registramos y seguimos
           console.warn('[maxi fallback] falló día', { da, db, status: e2?.status, info: e2?._maxi });
         }
       }
@@ -158,21 +156,15 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   return outPayloads;
 }
 
-// --------- API principal usada por el controlador ---------
-/**
- * fetchSalesRanged({ businessId, from, to, req })
- * Devuelve un array "facturas" crudas (sin normalizar) listas para pasar a salesStore.
- */
-// services/maxiSalesService.js
-// ... (tu código previo)
-
-// ===== Nuevo: extractor robusto =====
+// ===== Extractor robusto + aplanado =====
 function extractFacturas(payload) {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload;
 
+  // rutas conocidas
   if (Array.isArray(payload.facturas)) return payload.facturas;
   if (Array.isArray(payload.content?.facturas)) return payload.content.facturas;
+  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas;
   if (Array.isArray(payload.content)) return payload.content;
 
   // fallback: primera propiedad que sea array de objetos
@@ -198,15 +190,19 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   const toClamp = Td > AYER ? AYER : Td;
 
   const bearer = await getBearer(businessId, req);
-
-  // 👉 acá definimos payloads correctamente
   const payloads = await fetchRangeWithFallback(Fd, toClamp, bearer, CONC);
 
-  // Extraer facturas de cada payload defensivamente
+  // Extraer facturas de cada payload y aplanar { factura: {...} }
   const facturas = [];
   for (const p of (payloads || [])) {
-    const arr = extractFacturas(p);
-    if (Array.isArray(arr) && arr.length) facturas.push(...arr);
+    let arr = extractFacturas(p);
+    if (!Array.isArray(arr) || !arr.length) continue;
+
+    // aplanar si viene como [{ factura: {...} }, ...]
+    if (arr[0] && typeof arr[0] === 'object' && Object.prototype.hasOwnProperty.call(arr[0], 'factura')) {
+      arr = arr.map(x => x?.factura || x).filter(Boolean);
+    }
+    if (arr.length) facturas.push(...arr);
   }
   return facturas;
 }
@@ -216,7 +212,7 @@ module.exports = {
   STATS_BASE,
   getBearer,
   fetchSalesRanged,
-  // (si no usas los siguientes afuera, no los exportes)
+  // Exportá los de abajo solo si los usás fuera:
   // fetchFullByDate,
   // buildWindows,
 };
