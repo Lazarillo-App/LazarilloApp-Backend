@@ -80,11 +80,11 @@ router.get('/:id/maxi-status', businesses.maxiStatus);
 // POST /:id/maxi-credentials  { email, pass, codcli }
 router.post('/:id/maxi-credentials', async (req, res, next) => {
   try {
-    const { email, pass, codcli } = req.body || {};
-    if (!email || !pass || !codcli) {
+    const { email, codcli } = req.body || {};
+    const password = req.body?.password ?? req.body?.pass; // ✅ acepta ambos
+    if (!email || !password || !codcli) {
       return res.status(400).json({ error: 'missing_fields' });
     }
-    // delega en el controller existente
     return businesses.maxiSave(req, res, next);
   } catch (e) {
     next(e);

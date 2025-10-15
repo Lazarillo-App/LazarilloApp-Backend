@@ -288,38 +288,32 @@ exports.maxiStatus = async (req, res) => {
 exports.maxiSave = async (req, res) => {
   const uid = req.user?.id;
   const bizId = Number(req.params?.id);
-
   if (!uid) return res.status(401).json({ error: 'unauthorized' });
   if (!bizId || Number.isNaN(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
 
-  const { email, password, pass, codcli } = req.body || {};
-  const pwd = (password || pass || '').toString().trim();
+  const { email, codcli } = req.body || {};
+  const password = (req.body?.password ?? req.body?.pass)?.toString().trim(); // ✅
 
-  if (!email || !pwd || !codcli) {
-    return res.status(400).json({ error: 'missing_fields' });
-  }
-
-  const { rows: belongs } = await pool.query(`
-    SELECT 1
-      FROM app_businesses b
-      LEFT JOIN user_businesses ub ON ub.business_id = b.id
-     WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
-     LIMIT 1`, [bizId, uid]);
+  const { rows: belongs } = await pool.query(
+    `SELECT 1
+       FROM app_businesses b
+       LEFT JOIN user_businesses ub ON ub.business_id = b.id
+      WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
+      LIMIT 1`,
+    [bizId, uid]
+  );
   if (!belongs.length) return res.status(404).json({ error: 'not_found' });
+  if (!email || !password || !codcli) return res.status(400).json({ error: 'missing_fields' });
 
-  const maxi = {
-    email: String(email).trim(),
-    codcli: String(codcli).trim(),
-    pass_enc: encryptSecret(pwd),
-  };
-
-  await pool.query(`
-    UPDATE app_businesses
-       SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
-           updated_at = NOW()
-     WHERE id = $1`, [bizId, maxi]);
-
-  return res.json({ ok: true, maxi: { email: maxi.email, codcli: maxi.codcli, configured: true } });
+  const maxi = { email: String(email).trim(), codcli: String(codcli).trim(), pass_enc: encryptSecret(password) };
+  await pool.query(
+    `UPDATE app_businesses
+        SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
+            updated_at = NOW()
+      WHERE id = $1`,
+    [bizId, maxi]
+  );
+  res.json({ ok: true, maxi: { email: maxi.email, codcli: maxi.codcli, configured: true } });
 };
 
 // ------------------- MAXI (helpers y proxy opcional) -------------------
