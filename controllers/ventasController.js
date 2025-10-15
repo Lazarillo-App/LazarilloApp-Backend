@@ -11,7 +11,7 @@ const pool = require('../config/db');
 
 // ====== Helpers fecha ======
 const pad2 = n => String(n).padStart(2, '0');
-const ymd  = d => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+const ymd = d => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 const at00 = d => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 const addDays = (d, n) => new Date(at00(d).getTime() + n * 86400000);
 const toDate = (s) => (s ? new Date(s) : null);
@@ -23,7 +23,7 @@ function clampRange(fromStr, toStr) {
   const AYER = addDays(todayUTC, -1);
 
   const F = toDate(fromStr) || addDays(todayUTC, -29);
-  const T = toDate(toStr)   || AYER;
+  const T = toDate(toStr) || AYER;
 
   const Tclamped = T > AYER ? AYER : T;
   return { F, T: Tclamped, AYER };
@@ -54,7 +54,7 @@ async function getVentas(req, res, next) {
     // ---- Series: day/week/month (from/to opcionales -> defaults) ----
     const { F, T } = clampRange(from, to);
     const gb = (groupBy || 'day').toLowerCase();
-    if (!['day','week','month'].includes(gb)) {
+    if (!['day', 'week', 'month'].includes(gb)) {
       return res.status(400).json({ error: 'groupBy debe ser day|week|month' });
     }
 
@@ -184,16 +184,16 @@ async function getArticleSeriesQuery(req, res, next) {
     }
 
     const gb = (req.query.groupBy || 'day').toLowerCase();
-    if (!['day','week','month'].includes(gb)) {
+    if (!['day', 'week', 'month'].includes(gb)) {
       return res.status(400).json({ error: 'groupBy debe ser day|week|month' });
     }
 
     const F = req.query.from ? new Date(req.query.from) : null;
-    const T = req.query.to   ? new Date(req.query.to)   : null;
+    const T = req.query.to ? new Date(req.query.to) : null;
     if (!F || !T || isNaN(F) || isNaN(T) || F > T) {
       return res.status(400).json({ error: 'from/to inválidos (YYYY-MM-DD)' });
     }
-    const y = d => d.toISOString().slice(0,10);
+    const y = d => d.toISOString().slice(0, 10);
 
     if (gb === 'day') {
       const { rows } = await pool.query(
@@ -209,7 +209,7 @@ async function getArticleSeriesQuery(req, res, next) {
         [businessId, articuloId, y(F), y(T)]
       );
       const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
-      const total = items.reduce((a,x)=>a+x.qty,0);
+      const total = items.reduce((a, x) => a + x.qty, 0);
       return res.json({ total, items });
     }
 
@@ -226,9 +226,12 @@ async function getArticleSeriesQuery(req, res, next) {
         ORDER BY 1`,
       [businessId, articuloId, y(F), y(T)]
     );
-    const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
-    const total = items.reduce((a,x)=>a+x.qty,0);
-    return res.json({ total, items });
+    const items = rows.map(r => ({
+      label: (r.label instanceof Date)
+        ? r.label.toISOString().slice(0, 10)  // "YYYY-MM-DD"
+        : String(r.label).slice(0, 10),
+      qty: Number(r.qty) || 0
+    }));
   } catch (err) {
     next(err);
   }
