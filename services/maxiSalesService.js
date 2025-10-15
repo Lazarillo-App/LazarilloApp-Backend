@@ -1,6 +1,7 @@
 // services/maxiSalesService.js
 const fetch = require('node-fetch');
 const { getCreds } = require('../services/maxiCredsService');
+const { decryptSecretCompat } = require('../utils/cryptoField');
 
 const MAXI_BASE  = process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas.com.ar';
 const STATS_BASE = process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar';
@@ -42,24 +43,37 @@ async function loginMaxi(email, pass, codcli) {
  * 3) Credenciales cifradas en props.maxi -> login
  */
 async function getBearer(businessId, req) {
-  const hdrTok = req?.headers?.['x-maxi-token']; // Node lowercasa headers
+  // 1) override opcional por header
+  const hdrTok = req?.headers?.['x-maxi-token'];
   if (hdrTok && String(hdrTok).trim()) {
-    // quita "Bearer " si vino prefijado
     return String(hdrTok).replace(/^Bearer\s+/i, '').trim();
   }
 
+  // 2) cache
   const now = Date.now();
   const cached = tokenCache.get(String(businessId));
   if (cached && cached.expMs > now) return cached.token;
 
+  // 3) credenciales desde DB
   const creds = await getCreds(businessId);
-  if (!creds?.email || !creds?.pass || !(creds?.cod_cli || creds?.codcli)) {
+
+  const email = creds?.email?.trim();
+  const codcli = (creds?.cod_cli || creds?.codcli || '').trim();
+
+  // 👇 aceptar pass, password o pass_enc (cifrado)
+  const password =
+    creds?.pass ??
+    creds?.password ??
+    (creds?.pass_enc ? decryptSecretCompat(creds.pass_enc) : null);
+
+  if (!email || !codcli || !password) {
     const e = new Error('Faltan credenciales Maxi (email/codcli/pass) en props.maxi');
-    e.status = 400; throw e;
+    e.status = 400;
+    throw e;
   }
-  const codcli = creds.cod_cli || creds.codcli;
-  const token = await loginMaxi(creds.email, creds.pass, codcli);
-  tokenCache.set(String(businessId), { token, expMs: now + 9*60*1000 });
+
+  const token = await loginMaxi(email, password, codcli);
+  tokenCache.set(String(businessId), { token, expMs: now + 9 * 60 * 1000 });
   return token;
 }
 
