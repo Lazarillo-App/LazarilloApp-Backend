@@ -1,6 +1,8 @@
 // src/services/maxiCredsService.js
 const pool = require('../config/db');
 const crypto = require('crypto');
+const { decryptSecretCompat } = require('../utils/cryptoField');
+
 
 const ENC_KEY_HEX = process.env.ENCRYPTION_KEY; // 32 bytes en hex
 function ensureKey() {
@@ -84,26 +86,17 @@ async function saveCreds(businessId, { email, codcli, pass, pass_enc }) {
  * Retorna { email, codcli, pass } si hay datos, sino null
  */
 async function getCreds(businessId) {
-  if (!businessId) return null;
-  const { rows } = await pool.query(
-    `SELECT (props->'maxi') AS maxi FROM app_businesses WHERE id=$1`,
-    [businessId]
-  );
-  const maxi = rows[0]?.maxi || null;
-  if (!maxi) return null;
-
-  const email   = maxi.email || '';
-  const codcli  = maxi.codcli || maxi.cod_cli || '';
-  const passEnc = maxi.pass_enc || null;
-
-  let pass = null;
-  if (passEnc) {
-    try { pass = decryptCompat(passEnc); } catch { pass = null; }
-  }
-  return (email && codcli && pass) ? { email, pass, codcli } : null;
+  const { rows } = await pool.query('SELECT props FROM app_businesses WHERE id=$1 LIMIT 1', [businessId]);
+  const mx = rows[0]?.props?.maxi || {};
+  return {
+    email: mx.email || null,
+    cod_cli: mx.cod_cli || mx.codcli || null,
+    // dejamos pasar todas las variantes para que getBearer resuelva
+    pass: mx.pass || null,
+    password: mx.password || null,
+    pass_enc: mx.pass_enc || null,
+  };
 }
-
-module.exports = { saveCreds, getCreds, getStatus };
 
 /**
  * Estado simple para UI/diagnóstico
