@@ -253,58 +253,71 @@ exports.remove = async (req, res) => {
 
 // ------------------- MAXI (estado y credenciales) -------------------
 exports.maxiStatus = async (req, res) => {
-  const uid = req.user?.id;
-  const businessId = req.businessId;
-  if (!uid) return res.status(401).json({ error: 'unauthorized' });
-  if (!businessId) return res.status(404).json({ error: 'not_found' });
+  try {
+    const uid   = req.user?.id;
+    const bizId =
+      Number(req.business?.id) ||
+      Number(req.params?.id) ||
+      Number(req.headers['x-business-id']);
 
-  const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [businessId]);
-  const props = rows[0]?.props || {};
-  const mx = props.maxi || {};
-  const configured = !!(mx.email && mx.codcli && (mx.pass_enc || mx.password));
-  res.json({ configured, email: mx.email || null, codcli: mx.codcli || null });
+    if (!uid) return res.status(401).json({ error: 'unauthorized' });
+    if (!Number.isFinite(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
+
+    // validar acceso (owner o vínculo)
+    const { rows: access } = await pool.query(`
+      SELECT b.props
+        FROM app_businesses b
+        LEFT JOIN user_businesses ub ON ub.business_id=b.id AND ub.user_id=$2
+       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id IS NOT NULL)
+       LIMIT 1`, [bizId, uid]);
+    if (!access[0]) return res.status(404).json({ error: 'not_found' });
+
+    const props = access[0].props || {};
+    const mx = props.maxi || {};
+    const configured = !!(mx.email && mx.codcli && (mx.pass_enc || mx.password));
+    return res.json({ ok: true, business_id: bizId, configured, email: mx.email || null, codcli: mx.codcli || null });
+  } catch (e) {
+    console.error('GET /:id/maxi-status error:', e);
+    return res.status(500).json({ error: 'internal' });
+  }
 };
 
 // controllers/businessController.js
 
+// controllers/businessController.js
 exports.maxiSave = async (req, res) => {
-  const uid = req.user?.id;                 // del JWT (authRequired)
-  const bizId = Number(req.params?.id);       // /businesses/:id/maxi-credentials
+  const uid = req.user?.id;
+  const bizId = Number(req.params?.id);
 
   if (!uid) return res.status(401).json({ error: 'unauthorized' });
-  if (!bizId || Number.isNaN(bizId)) {
-    return res.status(400).json({ error: 'invalid_business_id' });
-  }
+  if (!bizId || Number.isNaN(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
 
-  // ¿el usuario pertenece a este negocio? (owner o en tabla de membresías)
-  const { rows: belongs } = await pool.query(
-    `SELECT 1
-       FROM app_businesses b
-       LEFT JOIN user_businesses ub ON ub.business_id = b.id
-      WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
-      LIMIT 1`,
-    [bizId, uid]
-  );
-  if (!belongs.length) return res.status(404).json({ error: 'not_found' }); // o 403 si preferís
+  const { email, password, pass, codcli } = req.body || {};
+  const pwd = (password || pass || '').toString().trim();
 
-  const { email, password, codcli } = req.body || {};
-  if (!email || !password || !codcli) {
+  if (!email || !pwd || !codcli) {
     return res.status(400).json({ error: 'missing_fields' });
   }
+
+  const { rows: belongs } = await pool.query(`
+    SELECT 1
+      FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id = b.id
+     WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
+     LIMIT 1`, [bizId, uid]);
+  if (!belongs.length) return res.status(404).json({ error: 'not_found' });
 
   const maxi = {
     email: String(email).trim(),
     codcli: String(codcli).trim(),
-    pass_enc: encryptSecret(password),
+    pass_enc: encryptSecret(pwd),
   };
 
-  await pool.query(
-    `UPDATE app_businesses
-        SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
-            updated_at = NOW()
-      WHERE id = $1`,
-    [bizId, maxi]
-  );
+  await pool.query(`
+    UPDATE app_businesses
+       SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
+           updated_at = NOW()
+     WHERE id = $1`, [bizId, maxi]);
 
   return res.json({ ok: true, maxi: { email: maxi.email, codcli: maxi.codcli, configured: true } });
 };

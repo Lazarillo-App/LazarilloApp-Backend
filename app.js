@@ -82,7 +82,7 @@ app.use('/api/dev',  devRoutes);
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
 // Negocios: auth y NO ser app_admin
-app.use('/api/businesses', authRequired, forbidAppAdmin, businessRoutes);
+app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
 
 // Guard global de negocio activo o X-Business-Id para el resto de /api
 app.use('/api', authRequired, loadActiveBusiness);
