@@ -44,6 +44,28 @@ router.post('/:id/sync',             syncNow);
 router.get('/:id/sales/summary',     salesSummaryFromDB);
 router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 
+router.param('id', async (req, res, next, id) => {
+  try {
+    const bizId = Number(id);
+    if (!Number.isFinite(bizId)) return res.status(404).json({ error: 'not_found' });
+
+    const userId = req.user.id;
+    const { rows } = await pool.query(`
+      SELECT b.*
+      FROM app_businesses b
+      LEFT JOIN user_businesses ub
+        ON ub.business_id = b.id AND ub.user_id = $2
+      WHERE b.id = $1
+        AND (b.owner_id = $2 OR ub.user_id IS NOT NULL)
+      LIMIT 1
+    `, [bizId, userId]);
+
+    if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+    req.business = rows[0];
+    next();
+  } catch (e) { next(e); }
+});
+
 // POST /:id/sync-sales?mode=backfill&dryrun=1&from=YYYY-MM-DD&to=YYYY-MM-DD
 router.post('/:id/sync-sales', async (req, res, next) => {
   try {

@@ -131,16 +131,13 @@ exports.create = async (req, res) => {
   }
 };
 
+// controllers/businessController.js
 exports.getOne = async (req, res) => {
-  try {
-    // Gracias al middleware ya tenemos req.business si el :id es válido y pertenece
-    if (!req.user?.id) return res.status(401).json({ error: 'unauthorized' });
-    if (!req.business) return res.status(404).json({ error: 'not_found' });
-    res.json({ business: req.business });
-  } catch (e) {
-    console.error('GET /api/businesses/:id error:', e);
-    res.status(500).json({ error: 'internal' });
-  }
+  // si el loader ya lo puso, úsalo
+  if (req.business) return res.json(req.business);
+
+  // fallback (raro que ocurra)
+  return res.status(404).json({ error: 'not_found' });
 };
 
 exports.update = async (req, res) => {
