@@ -16,19 +16,20 @@ if (process.env.NODE_ENV !== 'production') {
 // ✅ Importa ambos desde authMiddleware (exporta { authRequired, loadActiveBusiness })
 const { authRequired, loadActiveBusiness } = require('./middleware/authMiddleware');
 
-const forbidAppAdmin  = require('./middleware/forbidAppAdmin');
+const forbidAppAdmin = require('./middleware/forbidAppAdmin');
 const requireAppAdmin = require('./middleware/requireAppAdmin'); // admin-only
 
 // Rutas
-const authRoutes         = require('./routes/authRoutes'); 
-const devRoutes          = require('./routes/devRoutes');
-const businessRoutes     = require('./routes/businessRoutes');
-const adminRoutes        = require('./routes/admin.routes');
+const authRoutes = require('./routes/authRoutes');
+const devRoutes = require('./routes/devRoutes');
+const businessRoutes = require('./routes/businessRoutes');
+const adminRoutes = require('./routes/admin.routes');
+const adminCronRoutes = require('./routes/adminCronRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 
-const ventasRoutes       = require('./routes/ventasRoutes');
-const insumosRoutes      = require('./routes/insumosRoutes');
-const branchesRoutes     = require('./routes/branchRoutes');
+const ventasRoutes = require('./routes/ventasRoutes');
+const insumosRoutes = require('./routes/insumosRoutes');
+const branchesRoutes = require('./routes/branchRoutes');
 const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
@@ -47,7 +48,7 @@ app.use((req, res, next) => {
     console.log(`   [${reqId}] headers:`, hdrs);
   }
   res.on('finish', () => {
-    console.log(`⬅️ [${reqId}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now()-start}ms)`);
+    console.log(`⬅️ [${reqId}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - start}ms)`);
   });
   next();
 });
@@ -62,8 +63,8 @@ app.use(cors({
     'https://www.lazarillo.com.ar',
     'https://lazarillo-app.github.io',
   ],
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id', 'X-Maxi-Token'],
   credentials: false,
   optionsSuccessStatus: 204,
 }));
@@ -76,10 +77,11 @@ app.use(morgan('➡️ :method :url :status :response-time ms'));
 
 // Públicas
 app.use('/api/auth', authRoutes);
-app.use('/api/dev',  devRoutes);
+app.use('/api/dev', devRoutes);
 
 // Admin de plataforma (solo app_admin)
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
+app.use('/api/admin/cron', authRequired, requireAppAdmin, adminCronRoutes);
 
 // Negocios: auth y NO ser app_admin
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
@@ -98,9 +100,9 @@ app.get('/api/_debug/whoami', authRequired, (req, res) => {
 
 // Rutas que requieren negocio (heredan el guard anterior)
 app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
-app.use('/api/insumos',             insumosRoutes);
-app.use('/api/ventas',              ventasRoutes);
-app.use('/api/branches',            branchesRoutes);
+app.use('/api/insumos', insumosRoutes);
+app.use('/api/ventas', ventasRoutes);
+app.use('/api/branches', branchesRoutes);
 
 // (histórico) rutas bajo :businessId
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
