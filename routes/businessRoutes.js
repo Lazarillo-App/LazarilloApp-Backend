@@ -152,4 +152,30 @@ router.post('/:id/sync', async (req, res, next) => {
   }
 });
 
+// routes/businessRoutes.js (abajo de otras rutas :id)
+router.get('/:id/default-group', async (req, res, next) => {
+  try {
+    const biz = req.business; // lo cargó router.param
+    const defaultId = biz?.props?.default_group_id ?? null;
+    res.json({ ok: true, business_id: biz.id, default_group_id: defaultId });
+  } catch (e) { next(e); }
+});
+
+router.patch('/:id/default-group', async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const groupId = (req.body?.groupId === null) ? null : Number(req.body?.groupId);
+    if (groupId !== null && !Number.isFinite(groupId)) {
+      return res.status(400).json({ error: 'invalid_group_id' });
+    }
+    await pool.query(
+      `UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb) || jsonb_build_object('default_group_id', $2::int)
+       WHERE id = $1`,
+      [biz.id, groupId]
+    );
+    res.json({ ok: true, business_id: biz.id, default_group_id: groupId });
+  } catch (e) { next(e); }
+});
+
 module.exports = router;
