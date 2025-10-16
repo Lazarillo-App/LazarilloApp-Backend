@@ -60,18 +60,18 @@ router.param('id', async (req, res, next, id) => {
 router.get('/:id/maxi-ping', maxiPing);
 
 /* ========================= CRUD base ======================= */
-router.get('/',         businesses.listMine);
-router.post('/',        businesses.create);
+router.get('/', businesses.listMine);
+router.post('/', businesses.create);
 
 // Negocio activo (no usa :id)
-router.get('/active',   businesses.getActive);
+router.get('/active', businesses.getActive);
 router.patch('/active', businesses.setActive);
 
 // Por :id  (usan req.business cargado por router.param)
-router.get('/:id',                 (req, res) => res.json(req.business));
-router.patch('/:id',               businesses.update);
-router.delete('/:id',              businesses.remove);
-router.post('/:id/select',         businesses.select);
+router.get('/:id', (req, res) => res.json(req.business));
+router.patch('/:id', businesses.update);
+router.delete('/:id', businesses.remove);
+router.post('/:id/select', businesses.select);
 
 /* ============== Maxi credenciales / estado ================= */
 // GET /:id/maxi-status
@@ -93,14 +93,14 @@ router.post('/:id/maxi-credentials', async (req, res, next) => {
 
 /* ================ Datos / Sync “viejos” ==================== */
 // Catálogo
-router.get('/:id/articles',          listArticlesFromDB);
-router.get('/:id/articles/tree',     listArticlesTreeFromDB);
+router.get('/:id/articles', listArticlesFromDB);
+router.get('/:id/articles/tree', listArticlesTreeFromDB);
 
 // Sync legacy de catálogo y otras cosas
-router.post('/:id/sync',             syncNow);
+router.post('/:id/sync', syncNow);
 
 // Ventas (peek & series) legacy
-router.get('/:id/sales/summary',     salesSummaryFromDB);
+router.get('/:id/sales/summary', salesSummaryFromDB);
 router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 
 /* ================ Sync ventas (nuevo) ====================== */
@@ -119,14 +119,12 @@ router.post('/:id/sync-sales', async (req, res, next) => {
     // business mínimo: alcanza con el id; si router.param cargó más, ya viene en req.business
     const business = req.business || { id: bizId };
 
-    const mode = req.query.mode === 'backfill' || req.query.mode === 'backfill_30d'
-      ? 'backfill_30d'
-      : 'auto';
+    const mode = (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d') ? 'backfill_30d' : 'auto';
 
     const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
 
     const from = req.query.from ? new Date(req.query.from) : null;
-    const to   = req.query.to   ? new Date(req.query.to)   : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
     if ((from && isNaN(+from)) || (to && isNaN(+to))) {
       return res.status(400).json({ error: 'invalid_date' });
     }

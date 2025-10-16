@@ -1,7 +1,7 @@
 // controllers/salesSyncController.js
-const { fetchSalesRanged } = require('../services/maxiSalesService');
-const { upsertSalesBatch, setLastSalesSyncAt, getLastSalesSyncAt } = require('../services/salesStore');
-const { getBearer } = require('../services/maxiSalesService');
+const { fetchSalesRanged, getBearer, fetchFullByDate, buildWindows } = require('../services/maxiSalesService');
+const { upsertSalesBatch } = require('../services/salesStore');
+const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
 
 // === NUEVO: handler simple para diagnosticar credenciales/alcance ===
 async function maxiPing(req, res, next) {
@@ -23,117 +23,79 @@ async function maxiPing(req, res, next) {
     const AYER = new Date(todayUTC.getTime() - 86400000);
 
     const from = req.query.from ? new Date(req.query.from) : AYER;
-    const to   = req.query.to   ? new Date(req.query.to)   : AYER;
+    const to = req.query.to ? new Date(req.query.to) : AYER;
 
-    // Traemos por ventanas de 7 días como en el service
-    const payloads = await (async () => {
-      const bearerTok = bearer; // ya resuelto
-      const a = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
-      const b = new Date(Date.UTC(to.getUTCFullYear(),   to.getUTCMonth(),   to.getUTCDate()));
-      const windows7 = require('../services/maxiSalesService').buildWindows
-        ? require('../services/maxiSalesService').buildWindows(a, b, 7)
-        : [[
-            `${a.getUTCFullYear()}-${String(a.getUTCMonth()+1).padStart(2,'0')}-${String(a.getUTCDate()).padStart(2,'0')}`,
-            `${b.getUTCFullYear()}-${String(b.getUTCMonth()+1).padStart(2,'0')}-${String(b.getUTCDate()).padStart(2,'0')}`
-          ]];
+    // Traemos por ventanas de 7 días como en el service (diagnóstico)
 
-      const out = [];
-      for (const [fa, fb] of windows7) {
-        try {
-          const p = await require('../services/maxiSalesService').fetchFullByDate(fa, fb, bearerTok);
-          out.push({ window: [fa, fb], keys: Object.keys(p || {}), facturas_len:
+    const bearerTok = bearer;
+    const a = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
+    const b = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()));
+    const windows7 = typeof buildWindows === 'function'
+      ? buildWindows(a, b, 7)
+      : [[
+        `${a.getUTCFullYear()}-${String(a.getUTCMonth(),1).padStart(2, '0')}-${String(a.getUTCDate()).padStart(2, '0')}`,
+        `${b.getUTCFullYear()}-${String(b.getUTCMonth(),1).padStart(2, '0')}-${String(b.getUTCDate()).padStart(2, '0')}`
+      ]];
+
+    const out = [];
+    for (const [fa, fb] of windows7) {
+      try {
+        const p = await fetchFullByDate(fa, fb, bearerTok);
+        out.push({
+          window: [fa, fb], keys: Object.keys(p || {}), facturas_len:
             Array.isArray(p?.facturas) ? p.facturas.length :
-            Array.isArray(p?.content?.facturas) ? p.content.facturas.length :
-            Array.isArray(p?.content) ? p.content.length : 0
-          });
-        } catch (e) {
-          out.push({ window: [fa, fb], error: e?.status || 500, preview: e?._maxi?.bodyPreview });
-        }
+              Array.isArray(p?.content?.facturas) ? p.content.facturas.length :
+                Array.isArray(p?.content) ? p.content.length : 0
+        });
+      } catch (e) {
+        out.push({ window: [fa, fb], error: e?.status || 500, preview: e?._maxi?.bodyPreview });
       }
-      return out;
-    })();
-
+    }
     // Además, usamos el extractor real para contar “facturas” totales
-    const { fetchSalesRanged } = require('../services/maxiSalesService');
     const facturas = await fetchSalesRanged({ businessId: bizId, from, to, req });
 
     return res.json({
       ok: true,
       business_id: bizId,
       token_ok: Boolean(bearer),
-      range: { from: from.toISOString().slice(0,10), to: to.toISOString().slice(0,10) },
+      range: { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) },
       sample_count: Array.isArray(facturas) ? facturas.length : 0,
-      windows: payloads    // 👈 debug por ventana (keys y tamaños)
+      windows: out    // 👈 debug por ventana (keys y tamaños)
     });
   } catch (e) {
     return next(e);
   }
 }
 
+// === NUEVO: fachada del controller que usa la policy ===
 async function syncSalesForBusiness(business, { mode = 'auto', from = null, to = null, dryrun = false, req } = {}) {
   if (!business || !business.id) {
     throw new TypeError('business.id required');
   }
-
-  const now = new Date();
-  const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const oneDay = 86400000;
-
-  let rangeFrom = from ? new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate())) : null;
-  let rangeTo   = to   ? new Date(Date.UTC(to.getUTCFullYear(),   to.getUTCMonth(),   to.getUTCDate()))   : null;
-
-  if (!rangeFrom || !rangeTo) {
-    const lastTs = await getLastSalesSyncAt(business.id);
-    let chosen = mode;
-
-    if (mode === 'backfill_30d' || !lastTs) {
-      rangeTo   = new Date(todayUTC.getTime() - oneDay);
-      rangeFrom = new Date(rangeTo.getTime() - (30 - 1) * oneDay);
-      chosen = 'backfill_30d';
-    } else {
-      const last = new Date(lastTs);
-      const nextDay = new Date(Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), last.getUTCDate()) + oneDay);
-      rangeTo   = new Date(todayUTC.getTime() - oneDay);
-      rangeFrom = nextDay;
-      chosen = 'incremental';
+  // 1) modos canónicos
+  if (mode === 'backfill' || mode === 'backfill_30d') {
+    if (dryrun) {
+      // previsualización: solo contaríamos sin persistir
+      const r = await ensureInitialBackfillOnce({ businessId: business.id, req });
+      // ensureInitialBackfillOnce ya persiste; si querés dryrun real, comenta la línea anterior
+      return { ...r, note: 'ensureInitialBackfillOnce executed (policy). Dryrun real no implementado aquí.' };
     }
-    mode = chosen;
+    return await ensureInitialBackfillOnce({ businessId: business.id, req });
   }
-
-  if (rangeFrom > rangeTo) {
-    return { synced: false, dryrun, mode, reason: 'up-to-date', range: { from: rangeFrom.toISOString().slice(0,10), to: rangeTo.toISOString().slice(0,10) } };
+  if (!from && !to) {
+    // 2) auto incremental
+    return await runDailyAuto({ businessId: business.id, req });
   }
-
-  const sales = await fetchSalesRanged({
-    businessId: business.id,
-    from: rangeFrom,
-    to: rangeTo,
-    req,
-    preview: dryrun
-  });
-
-  if (dryrun) {
-    return {
-      synced: false,
-      dryrun: true,
-      mode,
-      range: { from: rangeFrom.toISOString().slice(0,10), to: rangeTo.toISOString().slice(0,10) },
-      rawCount: Array.isArray(sales) ? sales.length : (sales?.length ?? 0)
-    };
+  // 3) rango puntual (soporte opcional)
+  if (from && to) {
+    const sales = await fetchSalesRanged({ businessId: business.id, from, to, req });
+    if (dryrun) {
+      return { ok: true, dryrun: true, rawCount: Array.isArray(sales) ? sales.length : 0, range: { from, to } };
+    }
+    const r = await upsertSalesBatch(business.id, sales);
+    return { ok: true, mode: 'range', range: { from, to }, ...r };
   }
-
-  const { upserted, updated, minDay, maxDay } = await upsertSalesBatch(business.id, sales);
-
-  const toIso = new Date(Date.UTC(rangeTo.getUTCFullYear(), rangeTo.getUTCMonth(), rangeTo.getUTCDate(), 23,59,59)).toISOString();
-  await setLastSalesSyncAt(business.id, toIso);
-
-  return {
-    synced: true,
-    mode,
-    range: { from: rangeFrom.toISOString().slice(0,10), to: rangeTo.toISOString().slice(0,10) },
-    counts: { upserted, updated, raw: Array.isArray(sales) ? sales.length : (sales?.length ?? 0) },
-    touched: { minDay, maxDay }
-  };
+  return { ok: false, error: 'invalid_range_or_mode' };
 }
 
 module.exports = { maxiPing, syncSalesForBusiness };
