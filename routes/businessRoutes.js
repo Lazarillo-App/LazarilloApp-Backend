@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
-
+const { ensureInitialBackfillOnce } = require('../services/salesSyncPolicy');
 const businesses = require('../controllers/businessController');
 const {
   listArticlesFromDB,
@@ -96,9 +96,6 @@ router.post('/:id/maxi-credentials', async (req, res, next) => {
 router.get('/:id/articles', listArticlesFromDB);
 router.get('/:id/articles/tree', listArticlesTreeFromDB);
 
-// Sync legacy de catálogo y otras cosas
-router.post('/:id/sync', syncNow);
-
 // Ventas (peek & series) legacy
 router.get('/:id/sales/summary', salesSummaryFromDB);
 router.get('/:id/sales/:articuloId', salesSeriesFromDB);
@@ -116,21 +113,40 @@ router.post('/:id/sync-sales', async (req, res, next) => {
       return res.status(400).json({ error: 'invalid_business_id' });
     }
 
-    // business mínimo: alcanza con el id; si router.param cargó más, ya viene en req.business
     const business = req.business || { id: bizId };
 
-    const mode = (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d') ? 'backfill_30d' : 'auto';
+    const mode =
+      (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d')
+        ? 'backfill_30d'
+        : 'auto';
 
     const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
 
     const from = req.query.from ? new Date(req.query.from) : null;
-    const to = req.query.to ? new Date(req.query.to) : null;
+    const to   = req.query.to   ? new Date(req.query.to)   : null;
     if ((from && isNaN(+from)) || (to && isNaN(+to))) {
       return res.status(400).json({ error: 'invalid_date' });
     }
 
     const out = await syncSalesForBusiness(business, { mode, from, to, dryrun, req });
     res.json({ ok: true, business_id: bizId, sales: out });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Sync legacy de catálogo y otras cosas
+router.post('/:id/sync', async (req, res, next) => {
+  try {
+    // ejecutás tu syncNow “como hoy”
+    const resp = await syncNow(req, res, next);
+
+    // Disparar el backfill UNA SOLA VEZ (no bloquea la respuesta al front)
+    ensureInitialBackfillOnce({ businessId: req.business.id, req })
+      .then(r => console.log('[backfill-on-first-sync]', req.business.id, r))
+      .catch(e => console.error('[backfill-on-first-sync] FAIL', req.business.id, e));
+
+    return resp; // o res.json(...) si vos respondés acá
   } catch (e) {
     next(e);
   }
