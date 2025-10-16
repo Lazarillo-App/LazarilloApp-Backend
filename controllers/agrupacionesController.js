@@ -388,28 +388,26 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 // PUT /businesses/:businessId/agrupaciones/todo
 exports.ensureTodoAgrupacion = async (req, res) => {
   try {
-    const businessId = getBiz(req);
+    const businessId = getBiz(req); // lee :businessId o X-Business-Id
     if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'businessId requerido' });
 
     const q1 = await pool.query(
       `SELECT id, nombre FROM agrupaciones
-        WHERE business_id=$1 AND nombre='TODO'
-        LIMIT 1`,
-      [businessId]
+       WHERE business_id=$1 AND nombre='TODO'
+       LIMIT 1`, [businessId]
     );
     if (q1.rows.length) return res.json(q1.rows[0]);
 
     const q2 = await pool.query(
       `INSERT INTO agrupaciones (business_id, nombre, articulos)
        VALUES ($1, 'TODO', '[]'::jsonb)
-       ON CONFLICT (business_id, nombre) DO UPDATE SET nombre = EXCLUDED.nombre
-       RETURNING id, nombre`,
-      [businessId]
+       ON CONFLICT (business_id, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
+       RETURNING id, nombre`, [businessId]
     );
     return res.status(201).json(q2.rows[0]);
   } catch (e) {
-    console.error('ensureTodoAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    console.error('ensureTodoAgrupacion error:', { code: e.code, detail: e.detail, msg: e.message });
+    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
   }
 };
 
