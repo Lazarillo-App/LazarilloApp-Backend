@@ -4,6 +4,7 @@ const m004 = require('../db/migrations/004_auth');
 const m005 = require('../db/migrations/005_business_branding');
 const m006 = require('../db/migrations/006_branches');
 const m007 = require('../db/migrations/007_agrupaciones_fix');
+const m008 = require('../db//migrations/008_agrupaciones_multitenant');
 const fs = require('fs');
 const path = require('path');
 
@@ -26,6 +27,8 @@ async function runMigrations() {
   await m004.up(pool);
   await m005.up(pool);   // 🔹 sucursales
   await m006.up(pool);
+  await m007.up(pool);
+  await m008.up(pool);
 
   +  await execSafe(`
     ALTER TABLE app_users
