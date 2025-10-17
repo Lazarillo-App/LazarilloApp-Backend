@@ -1,11 +1,19 @@
-// utils/cryptoField.js
 const crypto = require('crypto');
 
-// misma key de 32 bytes
-const KEY_STR = (process.env.ENCRYPTION_KEY || 'dev-key-dev-key-dev-key-32!!').slice(0, 32);
-const KEY = Buffer.from(KEY_STR, 'utf8');
+/**
+ * Resuelve la clave de 32 bytes:
+ * - Si ENCRYPTION_KEY es un hex de 64 chars -> se usa directo (32 bytes)
+ * - Si no, se deriva con SHA-256 desde la passphrase provista
+ */
+function resolveKey() {
+  const raw = String(process.env.ENCRYPTION_KEY || 'dev-key').trim();
+  return /^[0-9a-fA-F]{64}$/.test(raw)
+    ? Buffer.from(raw, 'hex')                           // 32 bytes en hex
+    : crypto.createHash('sha256').update(raw).digest(); // 32 bytes desde passphrase
+}
+const KEY = resolveKey();
 
-// ============ FORMATO NUEVO: AES-256-GCM (JSON -> base64) ============
+// ============ NUEVO: AES-256-GCM (JSON -> base64) ============
 function encryptSecret(plain = '') {
   const iv = crypto.randomBytes(12);
   const ciph = crypto.createCipheriv('aes-256-gcm', KEY, iv);
@@ -20,41 +28,53 @@ function encryptSecret(plain = '') {
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
 }
 
+/**
+ * Devuelve string si descifra OK, o null si falla (no lanza)
+ */
 function decryptSecret(b64 = '') {
-  const txt = Buffer.from(b64, 'base64').toString('utf8');       // <-- espera JSON
-  const payload = JSON.parse(txt);
-  const iv  = Buffer.from(payload.iv,  'base64');
-  const tag = Buffer.from(payload.tag, 'base64');
-  const ct  = Buffer.from(payload.ct,  'base64');
-  const dec = crypto.createDecipheriv('aes-256-gcm', KEY, iv);
-  dec.setAuthTag(tag);
-  return Buffer.concat([dec.update(ct), dec.final()]).toString('utf8');
+  try {
+    const txt = Buffer.from(b64, 'base64').toString('utf8');
+    const payload = JSON.parse(txt);
+    const iv  = Buffer.from(payload.iv,  'base64');
+    const tag = Buffer.from(payload.tag, 'base64');
+    const ct  = Buffer.from(payload.ct,  'base64');
+    const dec = crypto.createDecipheriv('aes-256-gcm', KEY, iv);
+    dec.setAuthTag(tag);
+    return Buffer.concat([dec.update(ct), dec.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
 }
 
-// ============ COMPAT: detectar formato viejo (AES-CTR en HEX) ============
-const LEGACY_IV = Buffer.from('00000000000000000000000000000000'.slice(0, 32), 'hex'); // 16 bytes 0x00
+// ============ COMPAT: AES-CTR (HEX plano) ============
+// IV legacy fijo = 16 bytes 0x00
+const LEGACY_IV = Buffer.alloc(16, 0);
 
+/**
+ * Intenta descifrar en este orden:
+ * 1) Formato nuevo (base64 → JSON con {v,iv,tag,ct})
+ * 2) Formato viejo (HEX puro AES-CTR con IV=0)
+ * 3) Falla -> null
+ */
 function decryptSecretCompat(value = '') {
-  if (!value) return '';
+  const s = String(value || '').trim();
+  if (!s) return null;
 
-  // ¿Nuevo formato? (base64 que decodifica a JSON con {"v":...})
-  try {
-    const txt = Buffer.from(value, 'base64').toString('utf8');
-    if (txt.startsWith('{"v":')) {
-      return decryptSecret(value); // nuevo OK
-    }
-  } catch (_) {/* no es base64->JSON */}
+  // ¿Nuevo formato base64->JSON?
+  const maybe = decryptSecret(s);
+  if (typeof maybe === 'string') return maybe;
 
-  // ¿Viejo formato? (HEX puro, largo par)
-  if (/^[0-9a-f]+$/i.test(value) && (value.length % 2 === 0)) {
+  // ¿Viejo formato HEX?
+  if (/^[0-9a-f]{2,}$/i.test(s) && s.length % 2 === 0) {
     try {
-      const dec = crypto.createDecipheriv('aes-256-ctr', Buffer.from(KEY_STR), LEGACY_IV);
-      return Buffer.concat([dec.update(Buffer.from(value, 'hex')), dec.final()]).toString('utf8');
-    } catch (_) { /* fallback abajo */ }
+      const dec = crypto.createDecipheriv('aes-256-ctr', KEY, LEGACY_IV);
+      return Buffer.concat([dec.update(Buffer.from(s, 'hex')), dec.final()]).toString('utf8');
+    } catch {
+      // sigue abajo -> null
+    }
   }
 
-  // Último intento: quizá sí era base64 válido pero JSON raro
-  try { return decryptSecret(value); } catch (_) { return ''; }
+  return null;
 }
 
 module.exports = { encryptSecret, decryptSecret, decryptSecretCompat };

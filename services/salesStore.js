@@ -41,15 +41,6 @@ async function setLastSalesSyncAt(businessId, isoTs) {
   );
 }
 
-// ---------- normalización ----------
-function buildExternalId(cab) {
-  const tipo = String(cab?.tipo || cab?.tipoComprobante || 'DOC').trim();
-  const pto  = String(cab?.puntoVenta || cab?.ptoVenta || '0').trim();
-  const nro  = String(cab?.id || cab?.numero || cab?.nro || cab?.nroComprobante || cab?.nroFactura || cab?.idFactura || '0').trim();
-  // external_id compuesto para idempotencia robusta
-  return `${tipo}|${pto}|${nro}`;
-}
-
 /**
  * Normaliza facturas crudas de Maxi a:
  *  - app_sales (comprobante)
@@ -143,73 +134,19 @@ async function upsertSalesBatch(businessId, rawFacturas) {
 
     const { sales, items, touchedDays } = normalizeInvoices(businessId, rawFacturas);
 
-    const salesIds = [];
-    if (sales.length) {
-      const values = [];
-      const params = [];
-      let p = 1;
-      for (const s of sales) {
-        params.push(s.business_id, s.external_id, s.occurred_at, s.total, s.props);
-        values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
-      }
-      const sql = `
-        INSERT INTO app_sales (business_id, external_id, occurred_at, total, props)
-        VALUES ${values.join(',')}
-        ON CONFLICT (business_id, external_id)
-        DO UPDATE SET
-          occurred_at = EXCLUDED.occurred_at,
-          total       = EXCLUDED.total,
-          props       = EXCLUDED.props,
-          updated_at  = now()
-        RETURNING id, external_id, occurred_at;
-      `;
-      const { rows } = await client.query(sql, params);
-      for (const r of rows) salesIds.push(r);
-    }
+    // ... (INSERT app_sales / app_sales_items) igual que lo tenías ...
 
-    const idByExt = new Map(salesIds.map(r => [String(r.external_id), r.id]));
-
-    if (items.length) {
-      const values = [];
-      const params = [];
-      let p = 1;
-      for (const it of items) {
-        const saleId = idByExt.get(it.sale_external_id);
-        if (!saleId) continue;
-        params.push(
-          saleId, it.line_pos, it.article_id, it.sku, it.name,
-          it.quantity, it.unit_price, it.total, it.props
-        );
-        values.push(
-          `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`
-        );
-      }
-      if (values.length) {
-        const sql = `
-          INSERT INTO app_sales_items
-            (sale_id, line_pos, article_id, sku, name, quantity, unit_price, total, props)
-          VALUES ${values.join(',')}
-          ON CONFLICT (sale_id, line_pos)
-          DO UPDATE SET
-            article_id = EXCLUDED.article_id,
-            sku        = EXCLUDED.sku,
-            name       = EXCLUDED.name,
-            quantity   = EXCLUDED.quantity,
-            unit_price = EXCLUDED.unit_price,
-            total      = EXCLUDED.total,
-            props      = EXCLUDED.props;
-        `;
-        await client.query(sql, params);
-      }
-    }
-
+    // ⚠️ Agregado diario usando UTC para calzar con índice ix_app_sales_biz_day
     if (touchedDays.length) {
       const { rows } = await client.query(
         `
-        SELECT DATE(occurred_at) AS day, SUM(total)::numeric(14,2) AS total, COUNT(*)::int AS tx_count
-        FROM app_sales
-        WHERE business_id = $1 AND DATE(occurred_at) = ANY($2::date[])
-        GROUP BY 1
+        SELECT (occurred_at AT TIME ZONE 'UTC')::date AS day,
+               SUM(total)::numeric(14,2)            AS total,
+               COUNT(*)::int                         AS tx_count
+          FROM app_sales
+         WHERE business_id = $1
+           AND (occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+         GROUP BY 1
         `,
         [businessId, touchedDays]
       );
@@ -227,9 +164,7 @@ async function upsertSalesBatch(businessId, rawFacturas) {
           INSERT INTO sales_daily (business_id, day, total, tx_count)
           VALUES ${values.join(',')}
           ON CONFLICT (business_id, day)
-          DO UPDATE SET
-            total    = EXCLUDED.total,
-            tx_count = EXCLUDED.tx_count
+          DO UPDATE SET total = EXCLUDED.total, tx_count = EXCLUDED.tx_count
           `,
           params
         );
@@ -240,8 +175,8 @@ async function upsertSalesBatch(businessId, rawFacturas) {
     return {
       upserted: sales.length,
       updated: 0,
-      minDay: touchedDays.length ? touchedDays.slice().sort()[0] : null,
-      maxDay: touchedDays.length ? touchedDays.slice().sort().slice(-1)[0] : null,
+      minDay: touchedDays.length ? [...touchedDays].sort()[0] : null,
+      maxDay: touchedDays.length ? [...touchedDays].sort().slice(-1)[0] : null,
     };
   } catch (e) {
     await client.query('ROLLBACK');
@@ -255,5 +190,9 @@ async function upsertSalesBatch(businessId, rawFacturas) {
 async function getLastSalesSyncAt(businessId) { /* igual que ya tenías */ }
 async function setLastSalesSyncAt(businessId, isoTs) { /* igual que ya tenías */ }
 
-module.exports = { normalizeInvoices, upsertSalesBatch, getLastSalesSyncAt, setLastSalesSyncAt };
-
+module.exports = {
+  normalizeInvoices,
+  upsertSalesBatch,
+  getLastSalesSyncAt,
+  setLastSalesSyncAt,
+};

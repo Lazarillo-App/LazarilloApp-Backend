@@ -1,4 +1,3 @@
-// routes/agrupacionesRoutes.js
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
@@ -16,7 +15,7 @@ const {
   createOrMoveAgrupacion
 } = require('../controllers/agrupacionesController');
 
-// Todas las rutas quedan bajo /businesses/:businessId/...
+// Todas bajo /businesses/:businessId/...
 router.post('/agrupaciones', crearAgrupacion);
 router.get('/agrupaciones', obtenerAgrupaciones);
 router.put('/agrupaciones/todo', ensureTodoAgrupacion);
@@ -33,3 +32,4 @@ router.post('/agrupaciones/:fromId/move-items', moveItemsBetweenGroups);
 router.post('/agrupaciones/create-or-move', createOrMoveAgrupacion);
 
 module.exports = router;
+

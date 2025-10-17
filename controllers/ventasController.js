@@ -26,13 +26,23 @@ function clampRange(fromStr, toStr) {
   const T = toDate(toStr) || AYER;
 
   const Tclamped = T > AYER ? AYER : T;
-  return { F, T: Tclamped, AYER };
+  return { F: at00(F), T: at00(Tclamped), AYER };
+}
+
+function getBusinessId(req) {
+  return (
+    Number(req.businessId) ||
+    Number(req?.business?.id) ||
+    Number(req?.activeBusiness?.id) ||
+    Number(req.headers['x-business-id']) ||
+    null
+  );
 }
 
 // ====== GET /api/ventas ======
 async function getVentas(req, res, next) {
   try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
+    const businessId = getBusinessId(req);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
     const { peek, limit, from, to, groupBy } = req.query;
@@ -45,8 +55,8 @@ async function getVentas(req, res, next) {
            FROM app_sales
           WHERE business_id = $1
           ORDER BY occurred_at DESC
-          LIMIT ${lim}`,
-        [businessId]
+          LIMIT $2`,
+        [businessId, lim]
       );
       return res.json({ ok: true, business_id: businessId, peek: rows });
     }
@@ -91,7 +101,7 @@ async function getVentas(req, res, next) {
 // ====== LEGADO: ranking artículos (últimos 30 días) ======
 async function getSummary(req, res, next) {
   try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
+    const businessId = getBusinessId(req);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
     const { F, T } = clampRange(null, null); // default 30d hasta AYER
@@ -126,7 +136,7 @@ async function getSummary(req, res, next) {
 // ====== LEGADO/COMPAT: serie por artículo (ID de Maxi == article_id) ======
 async function getArticleSeries(req, res, next) {
   try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
+    const businessId = getBusinessId(req);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
     const articuloId = Number(req.params.articuloId);
@@ -175,7 +185,7 @@ async function getArticleSeries(req, res, next) {
 // ====== COMPAT: /api/ventas/by-article?articuloId=&from=&to=&groupBy= ======
 async function getArticleSeriesQuery(req, res, next) {
   try {
-    const businessId = req?.business?.id || req?.activeBusiness?.id || Number(req.headers['x-business-id']);
+    const businessId = getBusinessId(req);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
     const articuloId = Number(req.query.articuloId);
@@ -188,12 +198,12 @@ async function getArticleSeriesQuery(req, res, next) {
       return res.status(400).json({ error: 'groupBy debe ser day|week|month' });
     }
 
-    const F = req.query.from ? new Date(req.query.from) : null;
-    const T = req.query.to ? new Date(req.query.to) : null;
-    if (!F || !T || isNaN(F) || isNaN(T) || F > T) {
+    const F = req.query.from ? at00(new Date(req.query.from)) : null;
+    const T = req.query.to ? at00(new Date(req.query.to)) : null;
+    if (!F || !T || Number.isNaN(F.getTime()) || Number.isNaN(T.getTime()) || F > T) {
       return res.status(400).json({ error: 'from/to inválidos (YYYY-MM-DD)' });
     }
-    const y = d => d.toISOString().slice(0, 10);
+    const yf = ymd(F), yt = ymd(T);
 
     if (gb === 'day') {
       const { rows } = await pool.query(
@@ -206,7 +216,7 @@ async function getArticleSeriesQuery(req, res, next) {
             AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
           GROUP BY 1
           ORDER BY 1`,
-        [businessId, articuloId, y(F), y(T)]
+        [businessId, articuloId, yf, yt]
       );
       const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
       const total = items.reduce((a, x) => a + x.qty, 0);
@@ -224,14 +234,16 @@ async function getArticleSeriesQuery(req, res, next) {
           AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
         GROUP BY 1
         ORDER BY 1`,
-      [businessId, articuloId, y(F), y(T)]
+      [businessId, articuloId, yf, yt]
     );
     const items = rows.map(r => ({
       label: (r.label instanceof Date)
-        ? r.label.toISOString().slice(0, 10)  // "YYYY-MM-DD"
+        ? r.label.toISOString().slice(0, 10)
         : String(r.label).slice(0, 10),
       qty: Number(r.qty) || 0
     }));
+    const total = items.reduce((a, x) => a + x.qty, 0);
+    return res.json({ total, items });
   } catch (err) {
     next(err);
   }

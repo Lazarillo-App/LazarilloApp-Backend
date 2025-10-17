@@ -16,6 +16,7 @@ router.post('/bulk-csv', upload.single('file'), ctrl.bulkUpsertCSV);
 // Mantenimiento
 router.post('/admin/cleanup-null', ctrl.__cleanupNullInsumos);
 
+// (opcional)
 router.post('/sync-compras', ctrl.syncDesdeCompras);
 
 module.exports = router;

@@ -7,14 +7,150 @@ const pool = require('../config/db');
  *  - { insumos: [1,2,3] }  // o [{id:1}, {id:2}]
  */
 function normalizeIds(body) {
-  if (Array.isArray(body?.insumoIds)) return body.insumoIds.map(Number).filter(Boolean);
-  if (Array.isArray(body?.insumos)) {
-    return body.insumos.map(x => Number(x?.id ?? x)).filter(Boolean);
+  const toNum = (v) => {
+    const n = Number(v?.id ?? v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const base =
+    Array.isArray(body?.insumoIds) ? body.insumoIds :
+    Array.isArray(body?.insumos)   ? body.insumos   : [];
+  const set = new Set();
+  for (const raw of base) {
+    const n = toNum(raw);
+    if (n) set.add(n);
   }
-  return [];
+  return Array.from(set.values());
 }
 
-// ===== Grupos =====
+exports.crear = async (req, res) => {
+  const nombre = String(req.body?.nombre ?? '').trim();
+  const descripcion = req.body?.descripcion ?? null;
+  const orden = Number.isFinite(Number(req.body?.orden)) ? Number(req.body.orden) : 0;
+  const ids = normalizeIds(req.body);
+
+  if (!nombre) {
+    return res.status(400).json({ ok: false, error: 'Nombre requerido' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `INSERT INTO insumo_grupos (nombre, descripcion, orden, activo)
+       VALUES ($1,$2,$3, TRUE)
+       RETURNING id, nombre, descripcion, orden, activo`,
+      [nombre, descripcion, orden]
+    );
+    const grupo = rows[0];
+
+    let added = 0;
+    if (ids.length) {
+      const values = [];
+      const params = [];
+      ids.forEach((id, i) => {
+        params.push(grupo.id, id, i);
+        values.push(`($${params.length - 2}, $${params.length - 1}, $${params.length})`);
+      });
+      const r = await client.query(
+        `INSERT INTO insumo_grupo_items (grupo_id, insumo_id, orden)
+         VALUES ${values.join(', ')}
+         ON CONFLICT (grupo_id, insumo_id) DO NOTHING`,
+        params
+      );
+      added = r.rowCount || 0;
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({ ok: true, data: grupo, added });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('crear grupo error:', e);
+    res.status(500).json({ ok: false, error: 'internal' });
+  } finally {
+    client.release();
+  }
+};
+
+exports.eliminar = async (req, res) => {
+  try {
+    const id = Number(req.params?.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
+
+    const r = await pool.query(
+      `UPDATE insumo_grupos SET activo=FALSE, updated_at=NOW() WHERE id=$1`,
+      [id]
+    );
+    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('eliminar grupo error:', e);
+    res.status(500).json({ ok: false, error: 'internal' });
+  }
+};
+
+// ===== Items =====
+exports.agregarItems = async (req, res) => {
+  const id = Number(req.params?.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'id inválido' });
+
+  const ids = normalizeIds(req.body);
+  if (!ids.length) return res.status(400).json({ ok: false, error: 'insumoIds vacío' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const g = await client.query(`SELECT id FROM insumo_grupos WHERE id=$1 AND activo=TRUE`, [id]);
+    if (!g.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
+    }
+
+    const values = [];
+    const params = [];
+    ids.forEach((insumoId, i) => {
+      params.push(id, insumoId, i);
+      values.push(`($${params.length - 2}, $${params.length - 1}, $${params.length})`);
+    });
+    const r = await client.query(
+      `INSERT INTO insumo_grupo_items (grupo_id, insumo_id, orden)
+       VALUES ${values.join(', ')}
+       ON CONFLICT (grupo_id, insumo_id) DO NOTHING`,
+      params
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true, added: r.rowCount || 0 });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('agregarItems error:', e);
+    res.status(500).json({ ok: false, error: 'internal' });
+  } finally {
+    client.release();
+  }
+};
+
+exports.quitarItem = async (req, res) => {
+  try {
+    const id = Number(req.params?.id);
+    const insumoId = Number(req.params?.insumoId);
+    if (!Number.isFinite(id) || !Number.isFinite(insumoId)) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    const r = await pool.query(
+      `DELETE FROM insumo_grupo_items WHERE grupo_id=$1 AND insumo_id=$2`,
+      [id, insumoId]
+    );
+    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Item no encontrado' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('quitarItem error:', e);
+    res.status(500).json({ ok: false, error: 'internal' });
+  }
+};
+
 exports.listar = async (_req, res) => {
   try {
     const sql = `
@@ -30,126 +166,9 @@ exports.listar = async (_req, res) => {
       ORDER BY g.orden, g.nombre;
     `;
     const { rows } = await pool.query(sql);
-    res.json(rows);
+    res.json(rows || []);
   } catch (e) {
-    console.error('listar grupos error:', e.message);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-exports.crear = async (req, res) => {
-  const { nombre, descripcion = null, orden = 0 } = req.body || {};
-  const ids = normalizeIds(req.body);
-  if (!nombre || !String(nombre).trim()) {
-    return res.status(400).json({ ok: false, error: 'Nombre requerido' });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const { rows } = await client.query(
-      `INSERT INTO insumo_grupos (nombre, descripcion, orden, activo)
-       VALUES ($1,$2,$3, TRUE)
-       RETURNING id, nombre, descripcion, orden, activo`,
-      [String(nombre).trim(), descripcion, Number(orden) || 0]
-    );
-    const grupo = rows[0];
-
-    if (ids.length) {
-      const values = [];
-      const params = [];
-      ids.forEach((id, i) => {
-        params.push(grupo.id, id, i);
-        values.push(`($${params.length - 2}, $${params.length - 1}, $${params.length})`);
-      });
-      await client.query(
-        `INSERT INTO insumo_grupo_items (grupo_id, insumo_id, orden)
-         VALUES ${values.join(', ')}
-         ON CONFLICT (grupo_id, insumo_id) DO NOTHING`,
-        params
-      );
-    }
-
-    await client.query('COMMIT');
-    res.status(201).json({ ok: true, data: grupo, added: ids.length });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('crear grupo error:', e.message);
-    res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    client.release();
-  }
-};
-
-exports.eliminar = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const r = await pool.query(
-      `UPDATE insumo_grupos SET activo=FALSE, updated_at=NOW() WHERE id=$1`,
-      [id]
-    );
-    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('eliminar grupo error:', e.message);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-// ===== Items =====
-exports.agregarItems = async (req, res) => {
-  const { id } = req.params;
-  const ids = normalizeIds(req.body);
-  if (!ids.length) return res.status(400).json({ ok: false, error: 'insumoIds vacío' });
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Validar que exista el grupo
-    const g = await client.query(`SELECT id FROM insumo_grupos WHERE id=$1 AND activo=TRUE`, [id]);
-    if (!g.rowCount) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
-    }
-
-    // Insert masivo con ON CONFLICT
-    const values = [];
-    const params = [];
-    ids.forEach((insumoId, i) => {
-      params.push(id, insumoId, i);
-      values.push(`($${params.length - 2}, $${params.length - 1}, $${params.length})`);
-    });
-    const r = await client.query(
-      `INSERT INTO insumo_grupo_items (grupo_id, insumo_id, orden)
-       VALUES ${values.join(', ')}
-       ON CONFLICT (grupo_id, insumo_id) DO NOTHING`,
-      params
-    );
-
-    await client.query('COMMIT');
-    res.json({ ok: true, added: r.rowCount });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('agregarItems error:', e.message);
-    res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    client.release();
-  }
-};
-
-exports.quitarItem = async (req, res) => {
-  try {
-    const { id, insumoId } = req.params;
-    const r = await pool.query(
-      `DELETE FROM insumo_grupo_items WHERE grupo_id=$1 AND insumo_id=$2`,
-      [id, insumoId]
-    );
-    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Item no encontrado' });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('quitarItem error:', e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    console.error('listar grupos error:', e);
+    res.status(500).json({ ok: false, error: 'internal' });
   }
 };

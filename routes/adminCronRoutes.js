@@ -1,25 +1,20 @@
-// routes/adminCronRoutes.js
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const { runDailyAuto } = require('../services/salesSyncPolicy');
 
-// --- Protecciones opcionales ---
-const { authRequired } = require('../middleware/authMiddleware') || {};
-const requireAdmin = (req, res, next) =>
-  req.user?.role === 'app_admin' ? next() : res.status(403).json({ error: 'forbidden' });
+// Middlewares (opcional según flag)
+const { authRequired } = require('../middleware/authMiddleware');
+const requireAppAdmin = require('../middleware/requireAppAdmin');
 
 function isCronAllowed(req) {
   const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // si no hay secreto, no filtramos por header
+  if (!secret) return true;
   return req.get('X-Cron-Secret') === secret;
 }
 
-// Handler principal del cron
 async function handleDailySync(req, res) {
-  if (!isCronAllowed(req)) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
+  if (!isCronAllowed(req)) return res.status(401).json({ error: 'unauthorized' });
 
   const { rows } = await pool.query(`
     SELECT id
@@ -46,9 +41,9 @@ async function handleDailySync(req, res) {
   return res.json({ ok: true, ran: rows.length, ok_count: ok, fail_count: fail, details });
 }
 
-// Montaje de la ruta, con o sin JWT admin según env
-if (process.env.CRON_REQUIRE_ADMIN === '1' && authRequired) {
-  router.post('/cron/sync-sales-daily', authRequired, requireAdmin, handleDailySync);
+// Exigir admin por flag
+if (process.env.CRON_REQUIRE_ADMIN === '1') {
+  router.post('/cron/sync-sales-daily', authRequired, requireAppAdmin, handleDailySync);
 } else {
   router.post('/cron/sync-sales-daily', handleDailySync);
 }

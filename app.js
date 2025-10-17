@@ -81,7 +81,7 @@ app.use('/api/dev', devRoutes);
 
 // Admin de plataforma (solo app_admin)
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
-app.use('/api/admin/cron', authRequired, requireAppAdmin, adminCronRoutes);
+app.use('/api/admin/cron', adminCronRoutes);
 
 // Negocios: auth y NO ser app_admin
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);

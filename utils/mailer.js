@@ -1,112 +1,59 @@
-// backend/src/utils/mailer.js
-const nodemailer = require('nodemailer');
+// utils/cryptoField.js
+const crypto = require('crypto');
 
-let transporter = null;
+function resolveKey() {
+  const raw = String(process.env.ENCRYPTION_KEY || 'dev-key').trim();
+  return /^[0-9a-fA-F]{64}$/.test(raw)
+    ? Buffer.from(raw, 'hex')                          // 32 bytes hex
+    : crypto.createHash('sha256').update(raw).digest(); // 32 bytes desde passphrase
+}
+const KEY = resolveKey();
 
-function coerceBool(v, def = false) {
-  if (v === undefined || v === null || v === '') return def;
-  const s = String(v).toLowerCase();
-  return s === '1' || s === 'true' || s === 'yes';
+// ============ NUEVO: AES-256-GCM (JSON -> base64) ============
+function encryptSecret(plain = '') {
+  const iv = crypto.randomBytes(12);
+  const ciph = crypto.createCipheriv('aes-256-gcm', KEY, iv);
+  const ct = Buffer.concat([ciph.update(String(plain), 'utf8'), ciph.final()]);
+  const tag = ciph.getAuthTag();
+  const payload = { v: 1, iv: iv.toString('base64'), tag: tag.toString('base64'), ct: ct.toString('base64') };
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
 }
 
-async function getTransporter() {
-  if (transporter) return transporter;
+function decryptSecret(b64 = '') {
+  try {
+    const txt = Buffer.from(b64, 'base64').toString('utf8');
+    const payload = JSON.parse(txt);
+    const iv  = Buffer.from(payload.iv,  'base64');
+    const tag = Buffer.from(payload.tag, 'base64');
+    const ct  = Buffer.from(payload.ct,  'base64');
+    const dec = crypto.createDecipheriv('aes-256-gcm', KEY, iv);
+    dec.setAuthTag(tag);
+    return Buffer.concat([dec.update(ct), dec.final()]).toString('utf8');
+  } catch {
+    return null; // ← más claro para el caller
+  }
+}
 
-  const {
-    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SECURE, MAIL_DEV,
-  } = process.env;
+// ============ COMPAT: AES-CTR (HEX plano) ============
+const LEGACY_IV = Buffer.alloc(16, 0); // 16 bytes 0x00 (igual que antes)
 
-  if (SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS) {
-    const portNum = Number(SMTP_PORT);
-    const secureBool = coerceBool(SMTP_SECURE, portNum === 465);
+function decryptSecretCompat(value = '') {
+  const s = String(value || '').trim();
+  if (!s) return null;
 
-    transporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: portNum,
-      secure: secureBool,
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-      logger: true,   // 👈 log SMTP en consola (Render logs)
-      debug: true,    // 👈 log detallado
-    });
+  // ¿Nuevo formato base64->JSON?
+  const maybe = decryptSecret(s);
+  if (typeof maybe === 'string') return maybe;
 
-    console.log('📧 Mailer: SMTP real', { host: SMTP_HOST, port: portNum, secure: secureBool, user: SMTP_USER });
-    try { await transporter.verify(); console.log('✅ SMTP verificado'); }
-    catch (e) { console.error('❌ SMTP verify error:', e?.message || e); }
-    return transporter;
+  // ¿Viejo formato HEX?
+  if (/^[0-9a-f]{2,}$/i.test(s) && s.length % 2 === 0) {
+    try {
+      const dec = crypto.createDecipheriv('aes-256-ctr', KEY, LEGACY_IV);
+      return Buffer.concat([dec.update(Buffer.from(s, 'hex')), dec.final()]).toString('utf8');
+    } catch {}
   }
 
-  if (MAIL_DEV === '1') {
-    const test = await nodemailer.createTestAccount();
-    transporter = nodemailer.createTransport({
-      host: 'smtp.ethereal.email',
-      port: 587,
-      secure: false,
-      auth: { user: test.user, pass: test.pass },
-      logger: true,
-      debug: true,
-    });
-    console.log('📧 Mailer: Ethereal (DEV)', { user: test.user });
-    return transporter;
-  }
-
-  transporter = {
-    async sendMail(opts) {
-      console.warn('📭 [mailer disabled] Simulando envío:', { to: opts.to, subject: opts.subject });
-      return { messageId: 'disabled', accepted: [], rejected: [], response: 'DISABLED' };
-    }
-  };
-  console.warn('⚠️ Mailer deshabilitado (sin SMTP_* y sin MAIL_DEV=1)');
-  return transporter;
+  return null;
 }
 
-function sanitizeFrom(fromRaw, smtpUser) {
-  // Gmail exige que el "from" sea el user autenticado o un alias verificado.
-  if (!fromRaw) return `"Lazarillo" <${smtpUser}>`;
-  const m = fromRaw.match(/<([^>]+)>/);
-  const email = m ? m[1] : fromRaw;
-  if (smtpUser && email.toLowerCase() !== String(smtpUser).toLowerCase()) {
-    console.warn('ℹ️ Forzando FROM a SMTP_USER para evitar rechazo de Gmail:', { fromRaw, smtpUser });
-    return `"Lazarillo" <${smtpUser}>`;
-  }
-  return fromRaw;
-}
-
-/**
- * Envía email y retorna detalles útiles para diagnóstico
- * @returns {Promise<{messageId:string|null, previewUrl:string|null, accepted:string[], rejected:string[], response?:string}>}
- */
-async function sendEmail(to, subject, html) {
-  const t = await getTransporter();
-  const smtpUser = process.env.SMTP_USER || '';
-  const fromRaw  = process.env.MAIL_FROM || '';
-  const replyTo  = process.env.MAIL_REPLY_TO || '';
-  const from     = sanitizeFrom(fromRaw, smtpUser);
-
-  const info = await t.sendMail({
-    from,
-    to,
-    subject,
-    html,
-    ...(replyTo ? { replyTo } : {})
-  });
-
-  const previewUrl = (nodemailer.getTestMessageUrl && nodemailer.getTestMessageUrl(info)) || null;
-  if (previewUrl) console.log('🔎 Preview URL:', previewUrl);
-
-  console.log('📨 sendMail result:', {
-    messageId: info?.messageId,
-    accepted : info?.accepted,
-    rejected : info?.rejected,
-    response : info?.response,
-  });
-
-  return {
-    messageId: info?.messageId || null,
-    previewUrl,
-    accepted: info?.accepted || [],
-    rejected: info?.rejected || [],
-    response: info?.response || '',
-  };
-}
-
-module.exports = { sendEmail };
+module.exports = { encryptSecret, decryptSecret, decryptSecretCompat };

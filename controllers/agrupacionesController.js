@@ -1,8 +1,7 @@
+// controllers/agrupacionesController.js
 const pool = require('../config/db');
 
-// --- helpers existentes (isArray, toItemsArray, parseJsonArrayLoose, mergeById) se mantienen ---
-
-const isArray = (v) => Array.isArray(v);
+/* ========================= Helpers ========================= */
 const safeNum = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
@@ -17,7 +16,7 @@ const normalizeItem = (o = {}) => {
 
   if (id == null) return null;
 
-  const nombre = String(o.nombre ?? o.descripcion ?? '').trim() || `#${id}`;
+  const nombre    = String(o.nombre ?? o.descripcion ?? '').trim() || `#${id}`;
   const categoria = String(o.categoria ?? o.rubro ?? 'Sin categoría').trim() || 'Sin categoría';
   const subrubro  = String(o.subrubro ?? o.subRubro ?? 'Sin subrubro').trim() || 'Sin subrubro';
   const precio    = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
@@ -40,12 +39,10 @@ const toItemsArray = (arr) =>
 /** Une base + incoming por id (sin duplicados). Si ya existe, actualiza campos. */
 const mergeJsonById = (base = [], incoming = []) => {
   const map = new Map();
-  // base primero
   for (const b of base) {
     const it = normalizeItem(b);
     if (it) map.set(it.id, it);
   }
-  // incoming pisa/crea
   for (const inc of incoming) {
     const it = normalizeItem(inc);
     if (!it) continue;
@@ -55,29 +52,23 @@ const mergeJsonById = (base = [], incoming = []) => {
   return Array.from(map.values());
 };
 
-function getBizId(req) {
-  const header = Number(req.header('X-Business-Id'));
-  const param = Number(req.params?.businessId);
+/** Prioridad: middleware (req.businessId) > param (:businessId) > header (X-Business-Id) */
+function getBusinessId(req) {
   const ctx = Number(req.businessId);
-  return [ctx, param, header].find(Number.isFinite);
-}
-
-const getBiz = (req) => {
-  // prioridad: param, luego resuelto por middleware, luego header
+  if (Number.isFinite(ctx)) return ctx;
   const p = Number(req.params?.businessId);
   if (Number.isFinite(p)) return p;
-  if (Number.isFinite(req.businessId)) return Number(req.businessId);
   const h = Number(req.header('X-Business-Id'));
   if (Number.isFinite(h)) return h;
   return NaN;
-};
+}
 
-// ========================= CRUD Agrupaciones =========================
+/* ========================= CRUD Agrupaciones ========================= */
 
-// GET /businesses/:businessId/agrupaciones  (o con header X-Business-Id)
+// GET /businesses/:businessId/agrupaciones
 exports.obtenerAgrupaciones = async (req, res) => {
   try {
-    const bizId = getBizId(req);
+    const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) {
       return res.status(400).json({ ok: false, error: 'business_id requerido' });
     }
@@ -99,7 +90,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
 // POST /businesses/:businessId/agrupaciones
 exports.crearAgrupacion = async (req, res) => {
   try {
-    const bizId = getBizId(req);
+    const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) {
       return res.status(400).json({ ok: false, error: 'business_id requerido' });
     }
@@ -127,7 +118,7 @@ exports.crearAgrupacion = async (req, res) => {
 // PUT /businesses/:businessId/agrupaciones/:id
 exports.actualizarAgrupacion = async (req, res) => {
   try {
-    const businessId = getBiz(req);
+    const businessId = getBusinessId(req);
     const id = Number(req.params.id);
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
@@ -151,13 +142,12 @@ exports.actualizarAgrupacion = async (req, res) => {
     if (!sets.length) return res.json({ ok: true, data: null });
 
     const sql = `
-  UPDATE agrupaciones
-     SET ${sets.join(', ')}
-   WHERE id = $${vals.length + 1}
-     AND business_id = $${vals.length + 2}
-   RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`;
-    const { rows } = await pool.query(sql, [...vals, id, getBizId(req)]);
-
+      UPDATE agrupaciones
+         SET ${sets.join(', ')}, updated_at = NOW()
+       WHERE id = $${vals.length + 1}
+         AND business_id = $${vals.length + 2}
+       RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`;
+    const { rows } = await pool.query(sql, [...vals, id, businessId]);
     if (!rows.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
     return res.json(rows[0]);
   } catch (e) {
@@ -169,7 +159,7 @@ exports.actualizarAgrupacion = async (req, res) => {
 // DELETE /businesses/:businessId/agrupaciones/:id
 exports.eliminarAgrupacion = async (req, res) => {
   try {
-    const businessId = getBiz(req);
+    const businessId = getBusinessId(req);
     const id = Number(req.params.id);
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
@@ -181,12 +171,13 @@ exports.eliminarAgrupacion = async (req, res) => {
     );
     if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
+    // Limpieza de exclusiones (si existen)
     try {
       await pool.query(
         `DELETE FROM agrupacion_exclusiones WHERE agrupacion_id=$1 AND business_id=$2`,
         [id, businessId]
       );
-    } catch (_) { }
+    } catch (_) {}
     return res.json({ ok: true });
   } catch (e) {
     console.error('eliminarAgrupacion error:', e);
@@ -197,7 +188,7 @@ exports.eliminarAgrupacion = async (req, res) => {
 // PUT /businesses/:businessId/agrupaciones/:id/articulos
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
-    const businessId = Number(req.businessId ?? req.params.businessId);
+    const businessId = getBusinessId(req);
     const id = Number(req.params.id ?? req.params.agrupacionId);
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
@@ -239,8 +230,6 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
       [JSON.stringify(merged), id, businessId]
     );
 
-    // compat: devolvé lo mismo que antes o, si preferís:
-    // res.json({ ok:true, group: rows[0] })
     return res.json(rows[0]);
   } catch (e) {
     console.error('agregarArticulosAgrupacion error:', { code: e.code, detail: e.detail, msg: e.message });
@@ -251,7 +240,7 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 // DELETE /businesses/:businessId/agrupaciones/:id/articulos/:articuloId
 exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   try {
-    const businessId = getBiz(req);
+    const businessId = getBusinessId(req);
     const id = Number(req.params.id);
     const articuloId = Number(req.params.articuloId);
     if (!Number.isFinite(businessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
@@ -269,7 +258,7 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
 
     const { rows } = await pool.query(
       `UPDATE agrupaciones
-          SET articulos = $1::jsonb
+          SET articulos = $1::jsonb, updated_at = NOW()
         WHERE id = $2 AND business_id = $3
         RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
       [JSON.stringify(filtered), id, businessId]
@@ -283,11 +272,9 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
 };
 
 // POST /businesses/:businessId/agrupaciones/create-or-move
-// Body: { nombre: string, articulos?: [{id, precio?...}], ids?: number[] }
-// controllers/agrupacionesController.js (agregar al final)
-
+// Body: { nombre: string, ids?: number[] }  (opcional: articulos:[{...}] si querés enriquecer)
 exports.createOrMoveAgrupacion = async (req, res) => {
-  const businessId = getBiz(req);
+  const businessId = getBusinessId(req);
   const nombre = String(req.body?.nombre || '').trim();
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
 
@@ -385,36 +372,42 @@ exports.createOrMoveAgrupacion = async (req, res) => {
   }
 };
 
-// PUT /businesses/:businessId/agrupaciones/todo
+// PUT /businesses/:businessId/agrupaciones/todo  (nombre canónico)
 exports.ensureTodoAgrupacion = async (req, res) => {
   try {
-    const businessId = getBiz(req); // lee :businessId o X-Business-Id
-    if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'businessId requerido' });
+    const businessId = getBusinessId(req);
+    if (!Number.isFinite(businessId)) {
+      return res.status(400).json({ ok: false, error: 'businessId requerido' });
+    }
+
+    const NAME = 'Sin Agrupacion';
 
     const q1 = await pool.query(
       `SELECT id, nombre FROM agrupaciones
-       WHERE business_id=$1 AND nombre='TODO'
-       LIMIT 1`, [businessId]
+       WHERE business_id=$1 AND nombre=$2
+       LIMIT 1`,
+      [businessId, NAME]
     );
     if (q1.rows.length) return res.json(q1.rows[0]);
 
     const q2 = await pool.query(
       `INSERT INTO agrupaciones (business_id, nombre, articulos)
-       VALUES ($1, 'TODO', '[]'::jsonb)
+       VALUES ($1, $2, '[]'::jsonb)
        ON CONFLICT (business_id, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
-       RETURNING id, nombre`, [businessId]
+       RETURNING id, nombre`,
+      [businessId, NAME]
     );
     return res.status(201).json(q2.rows[0]);
   } catch (e) {
-    console.error('ensureTodoAgrupacion error:', { code: e.code, detail: e.detail, msg: e.message });
-    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
+    console.error('ensureTodoAgrupacion error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
 // GET /businesses/:businessId/agrupaciones/:id/exclusiones
 exports.listarExclusiones = async (req, res) => {
   try {
-    const businessId = getBiz(req);
+    const businessId = getBusinessId(req);
     const id = Number(req.params.id);
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
@@ -430,7 +423,7 @@ exports.listarExclusiones = async (req, res) => {
       );
       return res.json(rows);
     } catch (e) {
-      if (e.code === '42P01') return res.json([]);
+      if (e.code === '42P01') return res.json([]); // tabla aún no creada
       throw e;
     }
   } catch (e) {
@@ -442,7 +435,7 @@ exports.listarExclusiones = async (req, res) => {
 // POST /businesses/:businessId/agrupaciones/:id/exclusiones
 exports.upsertExclusiones = async (req, res) => {
   try {
-    const businessId = getBiz(req);
+    const businessId = getBusinessId(req);
     const id = Number(req.params.id);
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
@@ -454,6 +447,7 @@ exports.upsertExclusiones = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'payload inválido' });
     }
 
+    // tabla (por si aún no existe)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS agrupacion_exclusiones (
         id SERIAL PRIMARY KEY,
@@ -514,7 +508,7 @@ exports.upsertExclusiones = async (req, res) => {
 
 // POST /businesses/:businessId/agrupaciones/:fromId/move-items
 exports.moveItemsBetweenGroups = async (req, res) => {
-  const businessId = getBiz(req);
+  const businessId = getBusinessId(req);
   const fromId = Number(req.params.id ?? req.params.fromId);
   const toId = Number(req.body?.toId);
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
@@ -575,4 +569,40 @@ exports.moveItemsBetweenGroups = async (req, res) => {
   } finally {
     client.release();
   }
+};
+
+/* ========================= Default Group ========================= */
+
+// PATCH /businesses/:businessId/agrupaciones/default
+exports.setDefaultGroup = async (req, res) => {
+  const businessId = getBusinessId(req);
+  const groupId = Number(req.body?.groupId);
+  if (!Number.isFinite(businessId) || !Number.isFinite(groupId)) {
+    return res.status(400).json({ ok:false, error:'parámetros inválidos' });
+  }
+
+  // validar pertenencia del grupo al negocio
+  const { rows } = await pool.query(
+    `SELECT 1 FROM agrupaciones WHERE id=$1 AND business_id=$2`,
+    [groupId, businessId]
+  );
+  if (!rows[0]) return res.status(404).json({ ok:false, error:'group_not_found' });
+
+  await pool.query(
+    `UPDATE app_businesses SET default_group_id=$1 WHERE id=$2`,
+    [groupId, businessId]
+  );
+  res.json({ ok:true, default_group_id: groupId });
+};
+
+// GET /businesses/:businessId/agrupaciones/default
+exports.getDefaultGroup = async (req, res) => {
+  const businessId = getBusinessId(req);
+  if (!Number.isFinite(businessId)) {
+    return res.status(400).json({ ok:false, error:'businessId requerido' });
+  }
+  const { rows } = await pool.query(
+    `SELECT default_group_id FROM app_businesses WHERE id=$1`, [businessId]
+  );
+  res.json({ default_group_id: rows[0]?.default_group_id ?? null });
 };

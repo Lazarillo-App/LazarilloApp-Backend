@@ -1,18 +1,21 @@
+// db/008_agrupaciones_multitenant.js
 module.exports.up = async function up(pool) {
   const q = (sql, params = []) => pool.query(sql, params);
   const safe = async (sql, params = []) => {
     try { await q(sql, params); }
     catch (e) {
-      // ignora: ya existe / duplicado / etc.
+      // ya existe / duplicado / objeto ya definido / dependencias FK, etc.
       if (['42710','42701','23505','42P07','23503'].includes(e.code)) return;
       throw e;
     }
   };
 
-
   console.log('➡️ Ejecutando 008_agrupaciones_multitenant...');
 
-  // 1) Crear tabla si no existiera
+  /* 0) extensiones requeridas */
+  await safe(`CREATE EXTENSION IF NOT EXISTS citext;`);
+
+  /* 1) Tabla agrupaciones (si no existiera) */
   await safe(`
     CREATE TABLE IF NOT EXISTS public.agrupaciones (
       id          SERIAL PRIMARY KEY,
@@ -23,7 +26,7 @@ module.exports.up = async function up(pool) {
     );
   `);
 
-  // 2) Asegurar tipo jsonb + default en articulos (idempotente)
+  /* 2) Asegurar tipo jsonb + default en articulos (idempotente) */
   await safe(`
     ALTER TABLE public.agrupaciones
       ALTER COLUMN articulos TYPE jsonb
@@ -33,11 +36,11 @@ module.exports.up = async function up(pool) {
       END)
   `);
   await safe(`ALTER TABLE public.agrupaciones ALTER COLUMN articulos SET DEFAULT '[]'::jsonb;`);
+  await safe(`UPDATE public.agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
+  await safe(`ALTER TABLE public.agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
 
-  // 3) business_id (nullable para no romper datos existentes)
+  /* 3) Columna multi-tenant + FK */
   await safe(`ALTER TABLE public.agrupaciones ADD COLUMN IF NOT EXISTS business_id BIGINT;`);
-
-  // 4) FK a app_businesses(id)
   await safe(`
     DO $$
     BEGIN
@@ -56,13 +59,30 @@ module.exports.up = async function up(pool) {
     END $$;
   `);
 
-  // 5) Índices/constraints:
-  //    - Quitamos únicos viejos/expresionales que no matchean (p.ej. lower(nombre))
-  await safe(`ALTER TABLE public.agrupaciones DROP CONSTRAINT IF EXISTS agrupaciones_nombre_key;`);
-  await safe(`DROP INDEX IF EXISTS uq_agrupaciones_nombre;`);
-  await safe(`DROP INDEX IF EXISTS agrupaciones_biz_nombre_uidx;`);
+  /* 4) Normalizar nombre a CITEXT (para case-insensitive UNIQUE) */
+  await safe(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='agrupaciones'
+          AND column_name='nombre'
+          AND data_type <> 'citext'
+      ) THEN
+        ALTER TABLE public.agrupaciones
+          ALTER COLUMN nombre TYPE CITEXT;
+      END IF;
+    END $$;
+  `);
 
-  //    - Constraint único EXACTO (business_id, nombre) para ON CONFLICT (business_id, nombre)
+  /* 5) Constraints/índices de unicidad y lookups */
+  // Quitamos unique anteriores conflictivos, pero NO intentamos dropear índices usados por constraints.
+  await safe(`ALTER TABLE public.agrupaciones DROP CONSTRAINT IF EXISTS agrupaciones_nombre_key;`);
+  await safe(`ALTER TABLE public.agrupaciones DROP CONSTRAINT IF EXISTS agrupaciones_biz_nombre_key;`);
+
+  // Unicidad: (business_id, nombre) — con CITEXT => case-insensitive por negocio
   await safe(`
     DO $$
     BEGIN
@@ -80,10 +100,10 @@ module.exports.up = async function up(pool) {
     END $$;
   `);
 
-  //    - Índice helper por business_id
+  // Índice helper por business_id
   await safe(`CREATE INDEX IF NOT EXISTS agrupaciones_biz_idx ON public.agrupaciones (business_id);`);
 
-  // 6) Trigger updated_at (idempotente)
+  /* 6) Trigger updated_at (idempotente) */
   await safe(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS trigger LANGUAGE plpgsql AS $$
@@ -100,20 +120,41 @@ module.exports.up = async function up(pool) {
     EXECUTE FUNCTION set_updated_at();
   `);
 
-  // 7) Tabla de exclusiones (si no existe) + índice compuesto
+  /* 7) Exclusiones por agrupación */
   await safe(`
     CREATE TABLE IF NOT EXISTS public.agrupacion_exclusiones (
-      id SERIAL PRIMARY KEY,
-      business_id BIGINT NOT NULL,
-      agrupacion_id INT NOT NULL REFERENCES public.agrupaciones(id) ON DELETE CASCADE,
-      scope TEXT NOT NULL CHECK (scope IN ('categoria','subrubro','articulo')),
-      ref_id TEXT NOT NULL
+      id            SERIAL PRIMARY KEY,
+      business_id   BIGINT NOT NULL,
+      agrupacion_id INT    NOT NULL REFERENCES public.agrupaciones(id) ON DELETE CASCADE,
+      scope         TEXT   NOT NULL CHECK (scope IN ('categoria','subrubro','articulo')),
+      ref_id        TEXT   NOT NULL
     );
   `);
-    await safe(`
-    CREATE INDEX IF NOT EXISTS agrupacion_exclusiones_biz_gid_idx
+
+  // Índice único compuesto (evita duplicados exactos por negocio/agrupación)
+  await safe(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.table_constraints
+        WHERE table_schema='public'
+          AND table_name='agrupacion_exclusiones'
+          AND constraint_type='UNIQUE'
+          AND constraint_name='ux_agrup_excl_unique'
+      ) THEN
+        ALTER TABLE public.agrupacion_exclusiones
+          ADD CONSTRAINT ux_agrup_excl_unique
+          UNIQUE (business_id, agrupacion_id, scope, ref_id);
+      END IF;
+    END $$;
+  `);
+
+  // Lookup por negocio+grupo
+  await safe(`
+    CREATE INDEX IF NOT EXISTS ix_agrup_excl_biz_group
       ON public.agrupacion_exclusiones (business_id, agrupacion_id);
   `);
 
-    console.log('✅ 008_agrupaciones_multitenant OK');
+  console.log('✅ 008_agrupaciones_multitenant OK');
 };

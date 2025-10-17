@@ -33,8 +33,8 @@ async function maxiPing(req, res, next) {
     const windows7 = typeof buildWindows === 'function'
       ? buildWindows(a, b, 7)
       : [[
-        `${a.getUTCFullYear()}-${String(a.getUTCMonth(),1).padStart(2, '0')}-${String(a.getUTCDate()).padStart(2, '0')}`,
-        `${b.getUTCFullYear()}-${String(b.getUTCMonth(),1).padStart(2, '0')}-${String(b.getUTCDate()).padStart(2, '0')}`
+        `${a.getUTCFullYear()}-${String(a.getUTCMonth() + 1).padStart(2, '0')}-${String(a.getUTCDate()).padStart(2, '0')}`,
+        `${b.getUTCFullYear()}-${String(b.getUTCMonth() + 1).padStart(2, '0')}-${String(b.getUTCDate()).padStart(2, '0')}`
       ]];
 
     const out = [];

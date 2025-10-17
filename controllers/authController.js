@@ -7,18 +7,40 @@ const { sendEmail } = require('../utils/mailer');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret';
 
-// <<< URL helper para el frontend (soporta prefijo /LazarilloApp en gh-pages) >>>
+// ===== Helpers =========================================================
+const normEmail = (e = '') => String(e).trim().toLowerCase();
+
+// URL helper para el frontend (soporta prefijo /LazarilloApp en gh-pages)
 const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
 const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || '').replace(/\/+$/, '');
-const makeFrontUrl = (p) =>
-  `${FRONTEND_BASE_URL}${FRONTEND_BASE_PATH}${p}`.replace(/([^:]\/)\/+/g, '$1');
-// Ejemplos:
-// local:  http://localhost:5173 + ''          + /reset-password?token=... -> http://localhost:5173/reset-password?token=...
-// ghpages:https://lazarillo-app.github.io + /LazarilloApp + /reset-password?token=... -> https://lazarillo-app.github.io/LazarilloApp/reset-password?token=...
+const makeFrontUrl = (p = '') => {
+  const path = `/${String(p).replace(/^\/*/, '')}`; // asegura único slash adelante
+  return `${FRONTEND_BASE_URL}${FRONTEND_BASE_PATH}${path}`.replace(/([^:]\/)\/+/g, '$1');
+};
 
+// Firmado de JWT con iss/aud (puede validarse luego en el middleware)
 function signToken(user) {
-  return jwt.sign({ uid: user.id, email: user.email, role: user.role }, SECRET, { expiresIn: '7d' });
+  const opts = { expiresIn: '7d', issuer: 'lazarillo-api', audience: 'lazarillo-web' };
+  return jwt.sign({ uid: user.id, email: user.email, role: user.role }, SECRET, opts);
 }
+
+/* ===================== OPCIONAL: rate-limit simple de login ===================== */
+// Muy simple, en memoria. Activar si querés proteger de bruteforce sin Redis.
+// const loginHits = new Map(); // ip -> { count, ts }
+// const HIT_WINDOW_MS = 60_000;
+// const HIT_MAX = 20;
+// function tooMany(req) {
+//   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+//           || req.socket?.remoteAddress || 'unknown';
+//   const now = Date.now();
+//   const rec = loginHits.get(ip) || { count: 0, ts: now };
+//   if (now - rec.ts > HIT_WINDOW_MS) { rec.count = 0; rec.ts = now; }
+//   rec.count++;
+//   loginHits.set(ip, rec);
+//   return rec.count > HIT_MAX;
+// }
+
+/* ================================================================================ */
 
 exports.register = async (req, res) => {
   try {
@@ -27,9 +49,11 @@ exports.register = async (req, res) => {
       return res.status(400).json({ error: 'email_and_password_required' });
     }
 
+    const rawEmail = normEmail(email);
+
     const { rows: ex } = await pool.query(
-      'SELECT 1 FROM app_users WHERE lower(email)=lower($1) LIMIT 1',
-      [email]
+      'SELECT 1 FROM app_users WHERE email=$1 LIMIT 1',
+      [rawEmail]
     );
     if (ex[0]) return res.status(409).json({ error: 'email_in_use' });
 
@@ -37,13 +61,22 @@ exports.register = async (req, res) => {
 
     const { rows } = await pool.query(
       `INSERT INTO app_users (name, email, password_hash)
-   VALUES ($1,$2,$3)
-   RETURNING id, name, email, active_business_id, role, status`,
-      [name || null, email.trim(), hash]
+       VALUES ($1,$2,$3)
+       RETURNING id, name, email, active_business_id, role, status`,
+      [name || null, rawEmail, hash]
     );
 
     const user = rows[0];
-    const token = signToken(user); // ahora tiene user.role
+    user.role = user.role || 'owner'; // fallback por si la tabla no tiene DEFAULT
+
+    const token = signToken(user);
+
+    // (OPCIONAL) invalidar tokens de reset históricos para el usuario recién creado
+    // await pool.query(
+    //   `UPDATE app_users SET reset_token_hash=NULL, reset_token_expires_at=NULL WHERE id=$1`,
+    //   [user.id]
+    // );
+
     res.status(201).json({ token, user });
   } catch (e) {
     console.error('register error:', e);
@@ -53,15 +86,19 @@ exports.register = async (req, res) => {
 
 exports.login = async (req, res) => {
   try {
+    // if (tooMany(req)) return res.status(429).json({ error: 'too_many_attempts' }); // (OPCIONAL)
+
     const { email = '', password = '' } = req.body || {};
     if (!email || !password) {
       return res.status(400).json({ error: 'email_and_password_required' });
     }
 
+    const rawEmail = normEmail(email);
+
     const { rows } = await pool.query(
       `SELECT id, name, email, password_hash, active_business_id, role, status
-        FROM app_users WHERE lower(email)=lower($1) LIMIT 1`,
-      [email]
+         FROM app_users WHERE email=$1 LIMIT 1`,
+      [rawEmail]
     );
     const user = rows[0];
     if (!user || user.status !== 'active') {
@@ -72,6 +109,13 @@ exports.login = async (req, res) => {
     if (!ok) return res.status(401).json({ error: 'invalid_credentials' });
 
     const token = signToken(user);
+
+    // (OPCIONAL) al loguearse, borrar tokens de reset pendientes
+    // await pool.query(
+    //   `UPDATE app_users SET reset_token_hash=NULL, reset_token_expires_at=NULL WHERE id=$1`,
+    //   [user.id]
+    // );
+
     res.json({
       token,
       user: {
@@ -113,18 +157,19 @@ exports.updateMe = async (req, res) => {
   }
 };
 
-// backend/src/controllers/authController.js
 exports.requestPasswordReset = async (req, res) => {
   try {
     const { email = '' } = req.body || {};
     if (!email) return res.status(400).json({ error: 'email_required' });
 
+    const rawEmail = normEmail(email);
+
     const { rows } = await pool.query(
-      'SELECT id, email FROM app_users WHERE lower(email)=lower($1) LIMIT 1',
-      [email]
+      'SELECT id, email FROM app_users WHERE email=$1 LIMIT 1',
+      [rawEmail]
     );
 
-    // No revelar existencia: misma respuesta, pero con flags técnicos neutros
+    // Respuesta neutra para no revelar existencia
     if (!rows[0]) return res.json({ ok: true, delivered: true, accepted: [], rejected: [] });
 
     const user = rows[0];
@@ -146,13 +191,14 @@ exports.requestPasswordReset = async (req, res) => {
     `;
 
     const { accepted = [], rejected = [] } = await sendEmail(user.email, 'Restablecer contraseña', html);
-    const delivered = Array.isArray(accepted) && accepted.includes(user.email);
+    const delivered =
+      Array.isArray(accepted) &&
+      accepted.some(v => String(v).toLowerCase() === String(user.email).toLowerCase());
 
-    // Nota: mantenemos 200 y ok:true. Agregamos flags diagnósticos.
     return res.json({ ok: true, delivered, accepted, rejected });
   } catch (e) {
     console.error('requestPasswordReset error:', e);
-    // no filtramos: ok:true pero marcamos delivered=false
+    // No filtrar error: devolvemos ok:true pero delivered=false para UX consistente
     return res.json({ ok: true, delivered: false, accepted: [], rejected: [] });
   }
 };

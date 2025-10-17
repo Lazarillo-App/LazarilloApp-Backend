@@ -1,8 +1,11 @@
 const router = require('express').Router();
-const { authRequired, loadActiveBusiness } = require('../middleware/authMiddleware');
+const { authRequired, loadActiveBusiness } = require('../middleware/authMiddleware'); 
+const { requireBusinessAccess } = require('../middleware/requireBusinessAccess');
 const branches = require('../controllers/branchController');
 
-router.get('/',    authRequired, branches.list);   // usa X-Business-Id
-router.post('/',   authRequired, branches.create);
+const requireBiz = (req, res, next) => requireBusinessAccess(req, res, next);
+
+router.get('/',  authRequired, loadActiveBusiness, requireBiz, branches.list);
+router.post('/', authRequired, loadActiveBusiness, requireBiz, branches.create);
 
 module.exports = router;

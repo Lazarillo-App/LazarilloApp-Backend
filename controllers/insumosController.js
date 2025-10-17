@@ -4,7 +4,9 @@ const { parse } = require('csv-parse/sync');
 
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
-console.log('💡 insumosController.js cargado (modo limpio)');
+if (process.env.NODE_ENV !== 'production') {
+  console.log('💡 insumosController.js cargado (modo limpio)');
+}
 
 // ===================== LISTAR / CRUD BÁSICO =====================
 exports.listar = async (req, res) => {
@@ -33,7 +35,11 @@ exports.listar = async (req, res) => {
     if (origen)    { params.push(origen);    where.push(`origen = $${params.length}`); }
     if (activo !== 'all') { params.push(activo === 'true'); where.push(`activo = $${params.length}`); }
 
-    const offset   = (Number(page) - 1) * Number(limit);
+    const rawLimit = Number(limit) || 50;
+    const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
+    const currentPage = Math.max(Number(page) || 1, 1);
+    const offset   = (currentPage - 1) * hardLimit;
+
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     // No incluimos "codigo_mostrar" en el ORDER BY porque es un alias calculado.
@@ -49,19 +55,20 @@ exports.listar = async (req, res) => {
          ${whereSql}
          ORDER BY ${validOrderBy} ${validOrder}
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-        [...params, Number(limit), Number(offset)]
+        [...params, hardLimit, offset]
       ),
       pool.query(`SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`, params)
     ]);
 
+    const total = countRes.rows[0].total;
     res.json({
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page : Number(page),
-        limit: Number(limit),
-        total: countRes.rows[0].total,
-        pages: Math.ceil(countRes.rows[0].total / Number(limit))
+        page : currentPage,
+        limit: hardLimit,
+        total,
+        pages: Math.max(Math.ceil(total / hardLimit), 1)
       }
     });
   } catch (e) {
@@ -70,10 +77,15 @@ exports.listar = async (req, res) => {
   }
 };
 
-
 exports.crearManual = async (req, res) => {
   try {
     const b = req.body || {};
+
+    // 🔒 exigir nombre válido (evitar basura que luego se limpia)
+    if (!b.nombre || !String(b.nombre).trim()) {
+      return res.status(400).json({ ok: false, error: 'Nombre requerido' });
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO insumos
         (codigo_maxi, nombre, unidad_med, precio_ref, rubro,
@@ -210,7 +222,6 @@ exports.bulkUpsert = async (req, res) => {
   }
 };
 
-
 exports.bulkUpsertCSV = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:'Subí un CSV en el campo "file"' });
@@ -257,11 +268,11 @@ exports.__cleanupNullInsumos = async (req, res) => {
           OR (unidad_med IS NOT NULL AND unidad_med <> TRIM(unidad_med))
     `);
 
-    // 3) Colapsa duplicados por codigo_maxi (solo si codigo_maxi NO es null)
+    // 3) Colapsa duplicados por codigo_maxi conservando el más antiguo (id menor)
     const r3 = await client.query(`
       DELETE FROM insumos a
       USING insumos b
-      WHERE a.id < b.id
+      WHERE a.id > b.id
         AND a.codigo_maxi IS NOT NULL
         AND a.codigo_maxi = b.codigo_maxi
     `);

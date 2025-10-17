@@ -1,7 +1,11 @@
-// routes/admin.routes.js
 const express = require('express');
 const r = express.Router();
+
 const adminCtrl = require('../controllers/adminController');
+const { authRequired } = require('../middleware/authMiddleware');
+const requireAppAdmin = require('../middleware/requireAppAdmin');
+
+r.use(authRequired, requireAppAdmin);
 
 r.get('/overview', adminCtrl.overview);
 r.get('/users',    adminCtrl.listUsers);
@@ -11,4 +15,3 @@ r.post('/users/:id/reset-password', adminCtrl.resetPassword);
 r.post('/users/:id/restore', adminCtrl.restoreUser);
 
 module.exports = r;
-

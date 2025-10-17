@@ -1,43 +1,78 @@
 // controllers/syncController.js
 const { decryptSecretCompat } = require('../utils/cryptoField');
 const pool = require('../config/db');
-const fetch = global.fetch || require('node-fetch');
+const fetchNative = global.fetch || require('node-fetch');
 
 const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
+const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
+const FETCH_RETRIES = Number(process.env.MAXI_FETCH_RETRIES || 2);
 
-// helpers (ponelos arriba del archivo)
+// -------------------- Utils básicos --------------------
 function simpleHash(str = '') {
   let h = 0;
-  for (let i = 0; i < str.length; i++) {
-    h = (h * 31 + str.charCodeAt(i)) | 0; // 32-bit
-  }
-  // lo devolvemos como string porque la columna es text
-  return String(h >>> 0); // sin signo
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return String(h >>> 0);
 }
 
-function pickDeep(obj, paths) {
-  for (const p of paths) {
-    const v = p.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
-    if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+function parseDate(d, fallback) {
+  const x = new Date(d);
+  return Number.isNaN(x.getTime()) ? new Date(fallback) : x;
+}
+function ymd(d) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
+
+// -------------------- Fetch con timeout + reintentos --------------------
+async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort('timeout'), timeout);
+    try {
+      const res = await fetchNative(url, { ...options, signal: ctrl.signal });
+      clearTimeout(t);
+      if (res.ok) return res;
+      // Reintentar en 429/5xx
+      if ([429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
+        await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2));
+        continue;
+      }
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`HTTP ${res.status} - ${txt.slice(0, 200)}`);
+      err.status = res.status;
+      throw err;
+    } catch (e) {
+      clearTimeout(t);
+      lastErr = e;
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2));
+        continue;
+      }
+      throw lastErr;
+    }
   }
-  return undefined;
-}
-function toIntLike(v) {
-  if (v == null) return NaN;
-  // extrae dígitos para casos como "0265" o "265A"
-  const s = String(v).match(/\d+/g)?.join('') ?? '';
-  return s ? Number.parseInt(s, 10) : NaN;
-}
-function toNum(v) {
-  if (v == null || v === '') return 0;
-  // "3.700,50" -> "3700.50"
-  const s = String(v).replace(/\./g, '').replace(',', '.');
-  const n = Number.parseFloat(s);
-  return Number.isFinite(n) ? n : 0;
+  throw lastErr || new Error('fetchWithRetry unknown error');
 }
 
-// ---------- Helpers ----------
-// Aplana el árbol de Maxi: RUBRO → SUB_RUBRO → ARTICULO
+// -------------------- MAXI: login y artículos --------------------
+async function maxiLogin({ email, password, codcli }) {
+  const res = await fetchWithRetry(`${BASE}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, pass: password, cod_cli: String(codcli) })
+  });
+  const j = await res.json().catch(() => ({}));
+  if (j?.resultCode !== 'SUCCESS' || !j?.content?.tokenAccess) {
+    const id = j?.resultId || 'login_failed';
+    throw new Error(`maxi_login_failed_${id}`);
+  }
+  return j.content.tokenAccess;
+}
+
 function flattenMaxiMenu(tree = []) {
   const out = [];
   const seen = new Set();
@@ -45,7 +80,7 @@ function flattenMaxiMenu(tree = []) {
   for (const rubro of (tree || [])) {
     const cat = String(rubro?.nombre || '').trim() || 'Sin categoría';
 
-    // (raro) artículos directo bajo RUBRO
+    // artículos directamente bajo rubro (por si existiera)
     for (const a of (rubro?.articulos || [])) {
       const id = Number(a?.id);
       if (!Number.isFinite(id) || seen.has(id)) continue;
@@ -82,16 +117,14 @@ function flattenMaxiMenu(tree = []) {
   return out;
 }
 
-// Normaliza cualquier input (árbol o plano) a registros planos
 function normalizeArticles(items = []) {
   if (!Array.isArray(items)) return [];
   const looksTree = items.some(it => it?.node_type === 'RUBRO' || it?.subrubros);
   if (looksTree) return flattenMaxiMenu(items);
 
-  // ya vienen planos (por si en el futuro Maxi cambia)
   return items
     .map(it => ({
-      id: Number(it.id ?? it.codigo ?? it.codigoArticulo),
+      id: Number(it.id ?? it.codigo ?? it.codigoArticulo ?? it.codart),
       nombre: String(it.nombre ?? it.descripcion ?? '').trim(),
       precio: Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0,
       costo: Number(it.costo ?? it.costoPromedio ?? 0) || 0,
@@ -102,70 +135,42 @@ function normalizeArticles(items = []) {
     .filter(a => Number.isFinite(a.id));
 }
 
-function parseDate(d, fallback) {
-  const x = new Date(d);
-  return Number.isNaN(x.getTime()) ? new Date(fallback) : x;
-}
-function ymd(d) {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
-
-// ---- LOGIN a MCONN ----
-async function maxiLogin({ email, password, codcli }) {
-  const r = await fetch(`${BASE}/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, pass: password, cod_cli: codcli }),
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j?.resultCode !== 'SUCCESS' || !j?.content?.tokenAccess) {
-    const id = j?.resultId || r.status;
-    console.error('MAXI login failed', id, j);
-    throw new Error(`maxi_login_failed_${id}`);
-  }
-  return j.content.tokenAccess;
-}
-
-// ---- ARTÍCULOS (menú extendido) ----
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
   if (to) u.searchParams.set('fechaFin', to);
 
-  const r = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
+  const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` } });
+  const j = await res.json().catch(() => ({}));
+  if (j?.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
+  const content = j?.content ?? [];
 
+  // Caminata flexible (por si cambia el formato)
   const out = [];
-
+  const seen = new Set();
   const isArticle = (o = {}) => {
-    const keys = Object.keys(o);
+    const keys = Object.keys(o || {});
     const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
     const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
     return hasId && hasInfo;
   };
-
   const pushArt = (o, ctx) => {
     const id = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
-    if (!Number.isFinite(id)) return;
+    if (!Number.isFinite(id) || seen.has(id)) return;
+    seen.add(id);
     const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
     const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
     const costo = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
     out.push({
       id,
       nombre,
-      categoria: ctx.categoria ?? (o.categoria ?? o.rubro ?? null),
-      subrubro: ctx.subrubro ?? (o.subrubro ?? o.subRubro ?? null),
+      categoria: ctx.categoria ?? (o.categoria ?? o.rubro ?? null) ?? 'Sin categoría',
+      subrubro: ctx.subrubro ?? (o.subrubro ?? o.subRubro ?? null) ?? 'Sin subrubro',
       precio,
       costo,
       raw: o,
     });
   };
-
   const walk = (node, ctx = { categoria: null, subrubro: null }) => {
     if (!node) return;
     if (Array.isArray(node)) return node.forEach(n => walk(n, ctx));
@@ -182,25 +187,12 @@ async function fetchMaxiArticles({ token, from, to }) {
       if (v && (Array.isArray(v) || typeof v === 'object')) walk(v, next);
     }
   };
+  walk(content);
 
-  walk(j.content);
-
-  // de-dupe por id
-  const seen = new Set();
-  return out.filter(a => !seen.has(a.id) && seen.add(a.id));
+  return out;
 }
 
-// ---- UPSERT a public.maxi_articles (en chunks) ----
-
-function firstText(...vals) {
-  for (const v of vals) {
-    if (v === undefined || v === null) continue;
-    const s = String(v).trim();
-    if (s) return s;
-  }
-  return null;
-}
-
+// -------------------- Upsert en public.maxi_articles --------------------
 async function upsertArticles({ client, businessId, items }) {
   if (!items.length) return 0;
   const CHUNK = 500;
@@ -224,7 +216,7 @@ async function upsertArticles({ client, businessId, items }) {
       const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
-      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it._raw ?? it));
+      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it.raw ?? it._raw ?? it));
     }
 
     if (!values.length) continue;
@@ -250,41 +242,36 @@ async function upsertArticles({ client, businessId, items }) {
   return total;
 }
 
-// ---------------- Handlers ----------------
-
+// -------------------- Handlers --------------------
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
   const businessId = req.businessId;
   const { scope = 'articles', from, to } = req.body || {};
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
-  // Fechas por defecto
+  // Fechas por defecto (half-open [from, to) para series en BD)
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   const f = ymd(parseDate(from, startOfMonth));
   const t = ymd(parseDate(to, yesterday));
 
-  // Credenciales Maxi
-  const { rows: bizRows } = await pool.query(
-    `SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`,
-    [businessId]
-  );
+  // Credenciales Maxi (solo en este endpoint)
+  const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
   const mx = (bizRows[0]?.props || {}).maxi || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
-  if (!(mx.email && password && mx.codcli)) {
-    return res.status(400).json({ error: 'maxi_not_configured' });
-  }
+  if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
   const client = await pool.connect();
   try {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     if (scope === 'articles' || scope === 'all') {
-      const tree  = await fetchMaxiArticles({ token, from: f, to: t });
-      const items = normalizeArticles(tree);
+      const rawItems = await fetchMaxiArticles({ token, from: f, to: t });
+      const items = normalizeArticles(rawItems);
 
-      const rawStr = JSON.stringify(tree ?? []);
+      // Cachear payload por hash para evitar duplicaciones innecesarias
+      const rawStr = JSON.stringify(rawItems ?? []);
       const hash   = simpleHash(rawStr);
       await pool.query(`
         INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
@@ -296,7 +283,9 @@ exports.syncNow = async (req, res) => {
 
       const upserted = await upsertArticles({ client, businessId, items });
 
-      await client.query(`
+      // Ajuste de categorización desde el cache más reciente
+      await client.query(
+        `
 WITH raw AS (
   SELECT payload
   FROM public.maxi_menu_cache
@@ -331,13 +320,16 @@ UPDATE public.maxi_articles m
   FROM map
  WHERE m.business_id = $1
    AND m.articulo_id = map.articulo_id
-      `, [businessId]);
+`,
+        [businessId]
+      );
 
       await client.query('COMMIT');
 
       return res.json({ ok: true, scope: 'articles', upserted });
     }
 
+    // Otros alcances a futuro (ventas, etc.) se responden neutros por ahora
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
@@ -350,7 +342,7 @@ UPDATE public.maxi_articles m
 
 exports.salesSummaryFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = req.businessId;              
+  const businessId = req.businessId;
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
   const today = new Date();
@@ -360,7 +352,8 @@ exports.salesSummaryFromDB = async (req, res) => {
   const to = ymd(parseDate(req.query.to, yesterday));
 
   try {
-    const { rows: items } = await pool.query(`
+    const { rows: items } = await pool.query(
+      `
       SELECT articulo_id,
              SUM(qty)::numeric    AS qty,
              SUM(amount)::numeric AS amount
@@ -369,8 +362,9 @@ exports.salesSummaryFromDB = async (req, res) => {
          AND day BETWEEN $2 AND $3
        GROUP BY articulo_id
        ORDER BY articulo_id
-    `, [businessId, from, to]);
-
+      `,
+      [businessId, from, to]
+    );
     return res.json({ from, to, items });
   } catch (err) {
     console.error('salesSummaryFromDB error', err);
@@ -378,10 +372,9 @@ exports.salesSummaryFromDB = async (req, res) => {
   }
 };
 
-// GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day|week|month
 exports.salesSeriesFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = req.businessId;              // ✅
+  const businessId = req.businessId;
   const articuloId = Number(req.params.articuloId);
   let { groupBy = 'day' } = req.query || {};
   if (!uid || !businessId || !Number.isFinite(articuloId)) {
@@ -393,11 +386,11 @@ exports.salesSeriesFromDB = async (req, res) => {
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
   const to = ymd(parseDate(req.query.to, yesterday));
-
   groupBy = ['day', 'week', 'month'].includes(String(groupBy)) ? groupBy : 'day';
 
   if (groupBy === 'day') {
-    const { rows } = await pool.query(`
+    const { rows } = await pool.query(
+      `
       SELECT day AS bucket,
              SUM(qty)::numeric    AS qty,
              SUM(amount)::numeric AS amount
@@ -408,11 +401,14 @@ exports.salesSeriesFromDB = async (req, res) => {
          AND day  < $4::date
        GROUP BY day
        ORDER BY bucket
-    `, [businessId, articuloId, from, to]);
+      `,
+      [businessId, articuloId, from, to]
+    );
     return res.json({ from, to, groupBy, articuloId, items: rows });
   }
 
-  const { rows } = await pool.query(`
+  const { rows } = await pool.query(
+    `
     SELECT date_trunc($5, day)::date AS bucket,
            SUM(qty)::numeric         AS qty,
            SUM(amount)::numeric      AS amount
@@ -423,18 +419,19 @@ exports.salesSeriesFromDB = async (req, res) => {
        AND day  < $4::date
      GROUP BY bucket
      ORDER BY bucket
-  `, [businessId, articuloId, from, to, groupBy]);
-
+    `,
+    [businessId, articuloId, from, to, groupBy]
+  );
   res.json({ from, to, groupBy, articuloId, items: rows });
 };
 
-// GET /api/businesses/:id/articles  (desde tu BD)
 exports.listArticlesFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = req.businessId;              // ✅
+  const businessId = req.businessId;
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
-  const { rows } = await pool.query(`
+  const { rows } = await pool.query(
+    `
     SELECT
       articulo_id AS id,
       nombre,
@@ -446,26 +443,28 @@ exports.listArticlesFromDB = async (req, res) => {
     FROM public.maxi_articles
     WHERE business_id = $1
     ORDER BY categoria, subrubro, nombre
-  `, [businessId]);
-
+    `,
+    [businessId]
+  );
   res.json({ items: rows });
 };
 
-// GET /api/businesses/:id/articles/tree  (estructura para Sidebar)
 exports.listArticlesTreeFromDB = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = req.businessId; // ✅ del middleware
+  const businessId = req.businessId;
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
   try {
-    const { rows } = await pool.query(`
+    const { rows } = await pool.query(
+      `
       SELECT articulo_id, nombre, categoria, subrubro, precio
       FROM public.maxi_articles
       WHERE business_id = $1
       ORDER BY subrubro, categoria, nombre
-    `, [businessId]);
+      `,
+      [businessId]
+    );
 
-    // Agrupar subrubro -> categorias -> articulos
     const bySub = new Map();
     for (const r of rows) {
       const sub = r.subrubro || 'Sin subrubro';
@@ -478,17 +477,15 @@ exports.listArticlesTreeFromDB = async (req, res) => {
 
     const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
       subrubro,
-      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({
-        categoria, articulos
-      }))
+      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos }))
     }));
 
     res.json({
       ok: true,
       resumen: {
         subrubros: tree.length,
-        categorias: tree.reduce((a,s)=>a+(s.categorias?.length||0),0),
-        articulos: tree.reduce((a,s)=>a+s.categorias.reduce((x,c)=>x+(c.articulos?.length||0),0),0),
+        categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
+        articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
       },
       tree
     });
@@ -498,10 +495,9 @@ exports.listArticlesTreeFromDB = async (req, res) => {
   }
 };
 
-// (Opcional) proxy directo a MAXI
 exports.maxiArticlesProxy = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = req.businessId;              // ✅
+  const businessId = req.businessId;
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
   const today = new Date();
@@ -514,9 +510,7 @@ exports.maxiArticlesProxy = async (req, res) => {
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
     const mx = (rows[0]?.props || {}).maxi || {};
     const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
-    if (!(mx.email && password && mx.codcli)) {
-      return res.status(400).json({ error: 'maxi_not_configured' });
-    }
+    if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
     const items = await fetchMaxiArticles({ token, from, to });
