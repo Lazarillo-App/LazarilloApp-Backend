@@ -19,7 +19,7 @@ const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 
 /* ================== Multer (logos) ================== */
-// usa la misma carpeta que sirve app.js: __dirname/../uploads/logos
+// crea carpeta si no existe
 const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 
@@ -30,7 +30,6 @@ const storage = multer.diskStorage({
     cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
   }
 });
-
 const upload = multer({
   storage,
   limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
@@ -44,21 +43,16 @@ const upload = multer({
 router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
 
-/* ============ Logo: subir archivo (UNA sola ruta) ============ */
-// campo de archivo esperado por el frontend: "file"
+/* ============ Logo: subir archivo (ÚNICA RUTA) ============ */
 router.post('/:id/logo', (req, res, next) => {
   upload.single('file')(req, res, (err) => {
     if (err) {
       const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
       return res.status(status).json({
-        error: 'upload_error',
-        code: err.code || 'UPLOAD_FAILED',
-        message:
-          err.code === 'LIMIT_FILE_SIZE'
-            ? 'El archivo supera el máximo permitido (2MB).'
-            : err.code === 'UNSUPPORTED_TYPE'
-              ? 'Tipo de archivo no soportado.'
-              : (err.message || 'No se pudo subir el archivo.')
+        error:
+          err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
+          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+          'upload_error'
       });
     }
     businesses.uploadLogo(req, res, next);
