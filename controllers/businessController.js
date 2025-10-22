@@ -15,6 +15,9 @@ function attachBranding(biz) {
   return { ...biz, branding: { ...(biz.branding || {}), ...br } };
 }
 
+const MAXI_BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 // ------------------- Negocios (CRUD + selección) -------------------
 exports.listMine = async (req, res) => {
   try {
@@ -425,5 +428,188 @@ exports.setBrandingUrl = async (req, res, next) => {
     );
 
     res.json({ ok: true, url: logo_url || null });
+  } catch (e) { next(e); }
+};
+
+// PRUEBAS DE VENTAS PARA MAXI
+
+async function maxiLogin({ email, pass, codcli }) {
+  const res = await fetch(`${MAXI_BASE}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ email, pass, cod_cli: String(codcli) }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!(j?.resultCode === 'SUCCESS' && j?.content?.tokenAccess)) {
+    const msg = j?.resultDescription || `login_failed_${res.status}`;
+    const err = new Error(msg); err.status = 502; throw err;
+  }
+  return j.content.tokenAccess;
+}
+
+async function maxiFullInvoiceByDate({ token, from, to }) {
+  const u = new URL(`${MAXI_BASE}/estadisticas/fullinvoicebydate`);
+  u.searchParams.set('from', from);
+  u.searchParams.set('to',   to);
+  const res = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
+  const j = await res.json().catch(() => ({}));
+  if (j?.resultCode !== 'SUCCESS') {
+    const msg = j?.resultDescription || `fetch_failed_${res.status}`;
+    const err = new Error(msg); err.status = 502; throw err;
+  }
+  const inner = j?.content?.content || j?.content || {};
+  const arr   = Array.isArray(inner?.facturas) ? inner.facturas : [];
+  return arr.map(x => x?.factura).filter(Boolean);
+}
+
+function chunkRange7d(from, to) {
+  const out = [];
+  const d0 = new Date(from + 'T00:00:00');
+  const d1 = new Date(to   + 'T00:00:00');
+  if (!(+d0) || !(+d1) || d0 > d1) return out;
+  let cur = new Date(d0);
+  while (cur <= d1) {
+    const end = new Date(cur);
+    end.setDate(end.getDate() + 6);
+    if (end > d1) end.setTime(d1.getTime());
+    const pad = (n) => String(n).padStart(2, '0');
+    const f = `${cur.getFullYear()}-${pad(cur.getMonth()+1)}-${pad(cur.getDate())}`;
+    const t = `${end.getFullYear()}-${pad(end.getMonth()+1)}-${pad(end.getDate())}`;
+    out.push({ from: f, to: t });
+    cur.setDate(cur.getDate() + 7);
+  }
+  return out;
+}
+
+exports.maxiItemsByDate = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    if (!biz) return res.status(404).json({ error: 'not_found' });
+
+    // fechas
+    let from = String(req.query?.from || '').slice(0, 10);
+    let to   = String(req.query?.to   || '').slice(0, 10);
+    if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD' });
+
+    // credenciales maxi
+    const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
+    const mx = (rows[0]?.props || {}).maxi || {};
+    const pass = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : mx.password;
+    if (!(mx.email && pass && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+
+    const token = await maxiLogin({ email: mx.email, pass, codcli: mx.codcli });
+
+    // El endpoint permite 7 días: iteramos por ventanas
+    const windows = chunkRange7d(from, to);
+    const agg = new Map(); // key: cod_art -> { cod_art, nombre_art, cantidad, total }
+
+    let docs = 0;
+    for (const w of windows) {
+      const facturas = await maxiFullInvoiceByDate({ token, from: w.from, to: w.to });
+      docs += facturas.length;
+
+      for (const f of facturas) {
+        const items = Array.isArray(f.items) ? f.items : [];
+        for (const it of items) {
+          const cod = Number(it.cod_art ?? it.codigo ?? it.id ?? 0);
+          if (!cod) continue;
+          const nombre = String(it.nombre_art ?? it.nombre ?? '').trim();
+          const q = Number(it.cantidad ?? it.cant ?? 0) || 0;
+          const p = Number(it.precio ?? 0) || 0;
+          const key = String(cod);
+          const cur = agg.get(key) || { cod_art: cod, nombre_art: nombre, cantidad: 0, total: 0 };
+          cur.cantidad += q;
+          cur.total += q * p;
+          if (!cur.nombre_art && nombre) cur.nombre_art = nombre;
+          agg.set(key, cur);
+        }
+      }
+    }
+
+    const items = Array.from(agg.values())
+      .sort((a, b) => (b.cantidad - a.cantidad) || String(a.nombre_art).localeCompare(String(b.nombre_art)))
+      .map(x => ({ ...x, total: r2(x.total) }));
+
+    res.json({
+      ok: true,
+      range: { from, to },
+      windows: windows.length,
+      documents: docs,
+      items,
+      // Para comparar rápido: top 20
+      top20: items.slice(0, 20)
+    });
+  } catch (e) { next(e); }
+};
+
+// Preview mínimo y agregados para comparar rápido con el informe
+function summarizeInvoices(invoices = []) {
+  const preview = invoices.slice(0, 25).map(f => ({
+    numero:  f.numero ?? null,
+    fecha:   (f.fecha || f.cabecera?.fecha || '').slice(0, 10),
+    hora:    f.cabecera?.hora ?? null,
+    tipo:    f.cabecera?.nombre_cpb ?? null,     // ej "Tic"
+    cod_cpb: f.cabecera?.cod_cpb ?? null,        // ej "G" (tipo comprobante)
+    total:   Number(f.total ?? f.cabecera?.total ?? 0),
+    neto1:   Number(f.cabecera?.neto1 ?? 0),
+    iva1:    Number(f.cabecera?.iva1 ?? 0),
+    forma:   f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
+    suc:     f.cabecera?.prefijo ?? null,
+    anulado: false // este endpoint no trae flag de anulado; si apareciera, lo mapearíamos aquí
+  }));
+
+  const totalsByDay = {};
+  let totalPeriodo = 0;
+  let docs = 0;
+
+  for (const f of invoices) {
+    const total = Number(f.total ?? f.cabecera?.total ?? 0) || 0;
+    const fecha = String(f.fecha || f.cabecera?.fecha || '').slice(0, 10);
+    if (fecha) totalsByDay[fecha] = r2((totalsByDay[fecha] || 0) + total);
+    totalPeriodo += total;
+    docs += 1;
+  }
+
+  const byDay = Object.entries(totalsByDay)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([dia, total]) => ({ dia, total }));
+
+  return {
+    documents: docs,
+    total_periodo: r2(totalPeriodo),
+    totals_by_day: byDay,
+    sample: preview,
+  };
+}
+
+// ================== CONTROLADOR PÚBLICO ==================
+exports.maxiRawInvoices = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    if (!biz) return res.status(404).json({ error: 'not_found' });
+
+    const from = String(req.query?.from || '').slice(0, 10);
+    const to   = String(req.query?.to   || '').slice(0, 10);
+    if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD (rango máx. 7 días)' });
+
+    // credenciales almacenadas
+    const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
+    const mx = (rows[0]?.props || {}).maxi || {};
+    const pass = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : mx.password;
+    if (!(mx.email && pass && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+
+    // login + fetch
+    const token = await maxiLogin({ email: mx.email, pass, codcli: mx.codcli });
+    const invoices = await maxiFullInvoiceByDate({ token, from, to });
+
+    // respuesta de diagnóstico
+    res.json({
+      ok: true,
+      range: { from, to },
+      raw_count: invoices.length,
+      summary: summarizeInvoices(invoices),
+      // Si querés ver TODO crudo, habilitá temporalmente:
+      // raw: invoices
+    });
   } catch (e) { next(e); }
 };

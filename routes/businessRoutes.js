@@ -83,6 +83,10 @@ router.post('/:id/select', businesses.select);
 router.get('/:id/maxi-status', businesses.maxiStatus);
 router.post('/:id/maxi-credentials', businesses.maxiSave);
 
+// RAW Maxi (fullinvoicebydate) para diagnóstico
+router.get('/:id/maxi-raw-invoices', businesses.maxiRawInvoices);
+router.get('/:id/maxi-items', businesses.maxiItemsByDate);
+
 /* ================ Catálogo / Ventas (legacy) =============== */
 router.get('/:id/articles', listArticlesFromDB);
 router.get('/:id/articles/tree', listArticlesTreeFromDB);
