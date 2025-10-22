@@ -34,6 +34,8 @@ const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
 
+const path = require('path');
+
 /* ------------ logging de entrada ------------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -106,6 +108,7 @@ app.use('/api/branches', branchesRoutes);
 
 // (histórico) rutas bajo :businessId
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 /* --------------- Health --------------- */
 app.get('/health', (_req, res) => res.json({ ok: true }));

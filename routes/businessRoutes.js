@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-
+const path = require('path');
+const multer = require('multer');
 const businesses = require('../controllers/businessController');
 const {
   listArticlesFromDB,
@@ -14,6 +15,26 @@ const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncCont
 
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+
+// almacenamiento local simple (podés cambiar a S3/GCS más adelante)
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, path.join(__dirname, '..', 'uploads', 'logos')),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
+    cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
+  }
+});
+const upload = multer({ storage });
+
+// … tu código actual …
+router.use(authRequired);
+router.param('id', requireBusinessAccessParam);
+
+// ================== LOGO: subir archivo ==================
+router.post('/:id/logo', upload.single('file'), businesses.uploadLogo);
+
+// ============ LOGO: setear URL directa (sin archivo) =====
+router.patch('/:id/branding-url', businesses.setBrandingUrl);
 
 router.use(authRequired);
 

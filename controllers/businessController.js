@@ -361,3 +361,48 @@ exports.maxiArticles = async (req, res) => {
     res.status(500).json({ error: 'internal' });
   }
 };
+
+exports.uploadLogo = async (req, res, next) => {
+  try {
+    const biz = req.business;               // viene del router.param
+    if (!req.file) return res.status(400).json({ error: 'no_file' });
+
+    // URL pública del archivo
+    const url = `${req.protocol}://${req.get('host')}/uploads/logos/${req.file.filename}`;
+
+    // Guardar en props.branding.logo_url (merge JSONB)
+    await db.query(`
+      UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb)
+                  || jsonb_build_object(
+                       'branding',
+                       COALESCE(props->'branding','{}'::jsonb)
+                       || jsonb_build_object('logo_url', $2::text)
+                     )
+       WHERE id = $1
+    `, [biz.id, url]);
+
+    res.json({ ok: true, business_id: biz.id, url });
+  } catch (e) { next(e); }
+};
+
+exports.setBrandingUrl = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const url = String(req.body?.logo_url || '').trim();
+    if (!url) return res.status(400).json({ error: 'invalid_logo_url' });
+
+    await db.query(`
+      UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb)
+                  || jsonb_build_object(
+                       'branding',
+                       COALESCE(props->'branding','{}'::jsonb)
+                       || jsonb_build_object('logo_url', $2::text)
+                     )
+       WHERE id = $1
+    `, [biz.id, url]);
+
+    res.json({ ok: true, business_id: biz.id, url });
+  } catch (e) { next(e); }
+};
