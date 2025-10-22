@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const path = require('path');
+const fs = require('fs');
 const multer = require('multer');
+
 const businesses = require('../controllers/businessController');
 const {
   listArticlesFromDB,
@@ -12,34 +14,59 @@ const {
 } = require('../controllers/syncController');
 
 const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
-
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 
-// almacenamiento local simple (podés cambiar a S3/GCS más adelante)
+/* ================== Multer (logos) ================== */
+// crea carpeta si no existe
+const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
+fs.mkdirSync(logosDir, { recursive: true });
+
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, path.join(__dirname, '..', 'uploads', 'logos')),
+  destination: (_req, _file, cb) => cb(null, logosDir),
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
+    const ext = (path.extname(file.originalname || '') || '.png').toLowerCase();
     cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
   }
 });
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+  fileFilter: (_req, file, cb) => {
+    const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
+    cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
+  }
+});
 
-// … tu código actual …
+/* ============ Auth / params ============ */
 router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
 
-// ================== LOGO: subir archivo ==================
-router.post('/:id/logo', upload.single('file'), businesses.uploadLogo);
+/* ============ Logo: subir archivo ============ */
+// campo de archivo esperado por el frontend: "file"
+router.post('/:id/logo', (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      // Normaliza errores de Multer a 400
+      const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
+      return res.status(status).json({
+        error: 'upload_error',
+        code: err.code || 'UPLOAD_FAILED',
+        message:
+          err.code === 'LIMIT_FILE_SIZE'
+            ? 'El archivo supera el máximo permitido (2MB).'
+            : err.code === 'UNSUPPORTED_TYPE'
+              ? 'Tipo de archivo no soportado.'
+              : (err.message || 'No se pudo subir el archivo.')
+      });
+    }
+    // si no hubo error, delega al controller
+    businesses.uploadLogo(req, res, next);
+  });
+});
 
-// ============ LOGO: setear URL directa (sin archivo) =====
+/* ============ Logo: setear URL directa ============ */
 router.patch('/:id/branding-url', businesses.setBrandingUrl);
-
-router.use(authRequired);
-
-// Cargar y validar acceso a :id automáticamente
-router.param('id', requireBusinessAccessParam);
 
 /* =================== MAXI: ping =================== */
 router.get('/:id/maxi-ping', maxiPing);
@@ -72,19 +99,14 @@ router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 /* ================ Sync ventas (nuevo) ====================== */
 router.post('/:id/sync-sales', async (req, res, next) => {
   try {
-    const biz = req.business;                // ya viene del param
-    const mode =
-      (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d')
-        ? 'backfill_30d'
-        : 'auto';
-
+    const biz = req.business;
+    const mode = (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d') ? 'backfill_30d' : 'auto';
     const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
     const from = req.query.from ? new Date(req.query.from) : null;
     const to   = req.query.to   ? new Date(req.query.to)   : null;
     if ((from && isNaN(+from)) || (to && isNaN(+to))) {
       return res.status(400).json({ error: 'invalid_date' });
     }
-
     const out = await syncSalesForBusiness(biz, { mode, from, to, dryrun, req });
     res.json({ ok: true, business_id: biz.id, sales: out });
   } catch (e) { next(e); }
@@ -93,6 +115,7 @@ router.post('/:id/sync-sales', async (req, res, next) => {
 // Legacy de catálogo/otros (responde y dispara backfill si aplica)
 router.post('/:id/sync', syncNow);
 
+/* ============ Default group helpers ============ */
 router.get('/:id/default-group', (req, res) => {
   const biz = req.business;
   const defaultId = biz?.props?.default_group_id ?? null;
@@ -106,7 +129,6 @@ router.patch('/:id/default-group', async (req, res, next) => {
     if (groupId !== null && !Number.isFinite(groupId)) {
       return res.status(400).json({ error: 'invalid_group_id' });
     }
-    // guardamos en props para no romper historiales
     await require('../config/db').query(
       `UPDATE app_businesses
          SET props = COALESCE(props,'{}'::jsonb) || jsonb_build_object('default_group_id', $2::int)

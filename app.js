@@ -5,57 +5,62 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const { randomUUID } = require('crypto');
+const path = require('path');
+const fs = require('fs');
+
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 
-// 🔧 Mitigación dev del warning MaxListeners (opcional)
-if (process.env.NODE_ENV !== 'production') {
-  require('events').defaultMaxListeners = 30;
-}
-
-// ✅ Importa ambos desde authMiddleware (exporta { authRequired, loadActiveBusiness })
+// Middlewares de auth/negocio
 const { authRequired, loadActiveBusiness } = require('./middleware/authMiddleware');
-
-const forbidAppAdmin = require('./middleware/forbidAppAdmin');
-const requireAppAdmin = require('./middleware/requireAppAdmin'); // admin-only
+const requireAppAdmin = require('./middleware/requireAppAdmin');
 
 // Rutas
-const authRoutes = require('./routes/authRoutes');
-const devRoutes = require('./routes/devRoutes');
-const businessRoutes = require('./routes/businessRoutes');
-const adminRoutes = require('./routes/admin.routes');
-const adminCronRoutes = require('./routes/adminCronRoutes');
+const authRoutes         = require('./routes/authRoutes');
+const devRoutes          = require('./routes/devRoutes');
+const businessRoutes     = require('./routes/businessRoutes');
+const adminRoutes        = require('./routes/admin.routes');
+const adminCronRoutes    = require('./routes/adminCronRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
-
-const ventasRoutes = require('./routes/ventasRoutes');
-const insumosRoutes = require('./routes/insumosRoutes');
-const branchesRoutes = require('./routes/branchRoutes');
+const ventasRoutes       = require('./routes/ventasRoutes');
+const insumosRoutes      = require('./routes/insumosRoutes');
+const branchesRoutes     = require('./routes/branchRoutes');
 const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
 
-const path = require('path');
-
-/* ------------ logging de entrada ------------- */
+/* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
+if (process.env.NODE_ENV !== 'production') {
+  require('events').defaultMaxListeners = 30;
+}
 
+/* ----------- bootstrap uploads ----------- */
+// Creamos carpeta /uploads/logos en el contenedor/host
+const uploadsDir = path.join(__dirname, 'uploads');
+const logosDir   = path.join(uploadsDir, 'logos');
+fs.mkdirSync(logosDir, { recursive: true });
+
+// Servir archivos estáticos públicamente (sin auth)
+app.use('/uploads', express.static(uploadsDir));
+
+/* ----------- logging legible ----------- */
 app.use((req, res, next) => {
-  const reqId = randomUUID().slice(0, 8);
-  const start = Date.now();
+  const id = randomUUID().slice(0, 8);
+  const t0 = Date.now();
   const hdrs = { ...req.headers, authorization: req.headers.authorization ? '***' : undefined };
-
-  console.log(`➡️ [${reqId}] ${req.method} ${req.originalUrl}`);
+  console.log(`➡️ [${id}] ${req.method} ${req.originalUrl}`);
   if (process.env.LOG_REQUEST_HEADERS === '1') {
-    console.log(`   [${reqId}] headers:`, hdrs);
+    console.log(`   [${id}] headers:`, hdrs);
   }
   res.on('finish', () => {
-    console.log(`⬅️ [${reqId}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - start}ms)`);
+    console.log(`⬅️ [${id}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - t0}ms)`);
   });
   next();
 });
 
-/* CORS */
+/* ----------- CORS ----------- */
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -70,47 +75,49 @@ app.use(cors({
   credentials: false,
   optionsSuccessStatus: 204,
 }));
-app.options(/.*/, cors());
+app.options(/.*/, cors()); // preflight
 
-// Parsers + logs
+/* ----------- parsers + logger HTTP ----------- */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
-// Públicas
+/* ----------- públicas ----------- */
 app.use('/api/auth', authRoutes);
-app.use('/api/dev', devRoutes);
+app.use('/api/dev',  devRoutes);
 
-// Admin de plataforma (solo app_admin)
-app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
-app.use('/api/admin/cron', adminCronRoutes);
+/* ----------- admin plataforma ----------- */
+app.use('/api/admin',       authRequired, requireAppAdmin, adminRoutes);
+app.use('/api/admin/cron',  adminCronRoutes); // si tiene su propio guard interno, OK
 
-// Negocios: auth y NO ser app_admin
+/* ----------- businesses (con auth + carga de negocio activo) ----------- */
+/* Nota: dentro de businessRoutes se valida acceso a :id con requireBusinessAccessParam.
+   Cargar loadActiveBusiness acá también te habilita a rutas que usan X-Business-Id. */
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
 
-// Guard global de negocio activo o X-Business-Id para el resto de /api
+/* ----------- guard global para el resto de /api que necesitan negocio ----------- */
 app.use('/api', authRequired, loadActiveBusiness);
 
+/* ----------- utilidades ----------- */
 app.get('/api/_debug/whoami', authRequired, (req, res) => {
   res.json({
     uid: req.user?.id,
     role: req.user?.role,
-    active_business_id: req.user?.active_business_id, // si lo pones en el token
+    active_business_id: req.user?.active_business_id,
     headers_x_business_id: req.header('X-Business-Id')
   });
 });
 
-// Rutas que requieren negocio (heredan el guard anterior)
+/* ----------- módulos con negocio ----------- */
 app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
-app.use('/api/insumos', insumosRoutes);
-app.use('/api/ventas', ventasRoutes);
-app.use('/api/branches', branchesRoutes);
+app.use('/api/insumos',               insumosRoutes);
+app.use('/api/ventas',                ventasRoutes);
+app.use('/api/branches',              branchesRoutes);
 
-// (histórico) rutas bajo :businessId
+/* (histórico) rutas bajo :businessId */
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-/* --------------- Health --------------- */
+/* ----------- healthchecks ----------- */
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.get('/health/db', async (_req, res) => {
@@ -175,7 +182,7 @@ app.get('/health/dbinfo', async (_req, res) => {
   }
 });
 
-/* ---------------   / error handler --------------- */
+/* ----------- 404 + handler de errores ----------- */
 app.use((req, res, _next) => {
   res.status(404).json({ error: 'not_found', path: req.originalUrl });
 });
@@ -197,9 +204,7 @@ const PORT = process.env.PORT || 4000;
   try {
     await runMigrations();
     console.log('✅ Migraciones ejecutadas');
-    app.listen(PORT, () =>
-      console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`)
-    );
+    app.listen(PORT, () => console.log(`🚀 http://localhost:${PORT}`));
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);

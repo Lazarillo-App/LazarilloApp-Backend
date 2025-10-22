@@ -15,14 +15,16 @@ exports.listMine = async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
     const { rows } = await pool.query(`
-      SELECT DISTINCT b.id, b.name, b.color_hex, b.owner_id, b.created_at
+      SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, b.created_at
       FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id = b.id
       WHERE (ub.user_id = $1 OR b.owner_id = $1)
       ORDER BY b.created_at ASC;
     `, [uid]);
 
-    return res.json({ items: rows });
+    // devolvés items con { branding } listo para el front
+    const items = rows.map(attachBranding);
+    return res.json({ items });
   } catch (e) {
     console.error('GET /api/businesses error:', e);
     return res.status(500).json({ error: 'internal' });
@@ -131,34 +133,57 @@ exports.create = async (req, res) => {
   }
 };
 
-// controllers/businessController.js
-exports.getOne = async (req, res) => {
-  // si el loader ya lo puso, úsalo
-  if (req.business) return res.json(req.business);
-
-  // fallback (raro que ocurra)
-  return res.status(404).json({ error: 'not_found' });
-};
-
 exports.update = async (req, res) => {
   const uid = req.user?.id;
-  const businessId = req.businessId;
+  const businessId = req.businessId || Number(req.params.id) || req.business?.id;
   if (!uid) return res.status(401).json({ error: 'unauthorized' });
   if (!businessId) return res.status(404).json({ error: 'not_found' });
 
-  const { name, color_hex, brand_logo_url, brand_font } = req.body || {};
+  const body = req.body || {};
+  const name = body.name;
+
+  // si viene payload estilo { props: { branding: {...} } } o { branding: {...} }
+  const incomingBranding =
+    (body.props && body.props.branding) ||
+    body.branding ||
+    {};
+
+  // armamos jsonb de branding con solo los campos presentes (nulls se quitan)
+  // primary, secondary, background, font, logo_url, fg
+  const b = {
+    primary: incomingBranding.primary ?? null,
+    secondary: incomingBranding.secondary ?? null,
+    background: incomingBranding.background ?? null,
+    font: incomingBranding.font ?? null,
+    logo_url: incomingBranding.logo_url ?? null,
+    fg: incomingBranding.fg ?? null,
+  };
+
+  // query: si no mandaste branding, solo actualiza name
   const { rows } = await pool.query(
-    `UPDATE app_businesses
-     SET name=COALESCE($2,name),
-         color_hex=COALESCE($3,color_hex),
-         brand_logo_url=COALESCE($4,brand_logo_url),
-         brand_font=COALESCE($5,brand_font),
-         updated_at=NOW()
-     WHERE id=$1
-     RETURNING id, owner_id, name, color_hex, brand_logo_url, brand_font, updated_at`,
-    [businessId, name, color_hex, brand_logo_url, brand_font]
+    `
+    UPDATE app_businesses
+       SET
+         name = COALESCE($2, name),
+         props = 
+           CASE
+             WHEN $3::jsonb IS NULL THEN props
+             ELSE COALESCE(props,'{}'::jsonb) ||
+                  jsonb_build_object(
+                    'branding',
+                    COALESCE(props->'branding','{}'::jsonb) ||
+                    jsonb_strip_nulls($3::jsonb)
+                  )
+           END,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, name, slug, props, owner_id, created_at, updated_at;
+    `,
+    [businessId, name ?? null, Object.values(b).every(v => v === null) ? null : b]
   );
-  return res.json({ business: rows[0] });
+
+  const saved = attachBranding(rows[0]);
+  return res.json({ business: saved });
 };
 
 exports.select = async (req, res) => {
@@ -362,47 +387,69 @@ exports.maxiArticles = async (req, res) => {
   }
 };
 
-exports.uploadLogo = async (req, res, next) => {
+function attachBranding(biz) {
+  const br = (biz?.props && biz.props.branding) || biz.branding || {};
+  return {
+    ...biz,
+    branding: { ...(biz.branding || {}), ...br }
+  };
+}
+
+exports.getOne = async (req, res, next) => {
   try {
-    const biz = req.business;               // viene del router.param
-    if (!req.file) return res.status(400).json({ error: 'no_file' });
-
-    // URL pública del archivo
-    const url = `${req.protocol}://${req.get('host')}/uploads/logos/${req.file.filename}`;
-
-    // Guardar en props.branding.logo_url (merge JSONB)
-    await db.query(`
-      UPDATE app_businesses
-         SET props = COALESCE(props,'{}'::jsonb)
-                  || jsonb_build_object(
-                       'branding',
-                       COALESCE(props->'branding','{}'::jsonb)
-                       || jsonb_build_object('logo_url', $2::text)
-                     )
-       WHERE id = $1
-    `, [biz.id, url]);
-
-    res.json({ ok: true, business_id: biz.id, url });
+    if (!req.business) return res.status(404).json({ error: 'not_found' });
+    res.json(attachBranding(req.business));
   } catch (e) { next(e); }
 };
 
+/* === subir archivo === */
+exports.uploadLogo = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    if (!biz) return res.status(404).json({ error: 'not_found' });
+    if (!req.file) return res.status(400).json({ error: 'missing_file' });
+
+    const url = `/uploads/logos/${req.file.filename}`;
+
+    await pool.query(
+      `UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb) ||
+                     jsonb_build_object(
+                       'branding',
+                       COALESCE(props->'branding','{}'::jsonb) || jsonb_build_object('logo_url', $2)
+                     ),
+             updated_at = NOW()
+       WHERE id = $1`,
+      [biz.id, url]
+    );
+
+    res.status(201).json({ ok: true, url });
+  } catch (e) { next(e); }
+};
+
+/* === setear URL directa === */
 exports.setBrandingUrl = async (req, res, next) => {
   try {
     const biz = req.business;
-    const url = String(req.body?.logo_url || '').trim();
-    if (!url) return res.status(400).json({ error: 'invalid_logo_url' });
+    if (!biz) return res.status(404).json({ error: 'not_found' });
 
-    await db.query(`
-      UPDATE app_businesses
-         SET props = COALESCE(props,'{}'::jsonb)
-                  || jsonb_build_object(
+    const { logo_url } = req.body || {};
+    if (logo_url != null && typeof logo_url !== 'string') {
+      return res.status(400).json({ error: 'invalid_logo_url' });
+    }
+
+    await pool.query(
+      `UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb) ||
+                     jsonb_build_object(
                        'branding',
-                       COALESCE(props->'branding','{}'::jsonb)
-                       || jsonb_build_object('logo_url', $2::text)
-                     )
-       WHERE id = $1
-    `, [biz.id, url]);
+                       COALESCE(props->'branding','{}'::jsonb) || jsonb_build_object('logo_url', $2)
+                     ),
+             updated_at = NOW()
+       WHERE id = $1`,
+      [biz.id, logo_url || null]
+    );
 
-    res.json({ ok: true, business_id: biz.id, url });
+    res.json({ ok: true, url: logo_url || null });
   } catch (e) { next(e); }
 };
