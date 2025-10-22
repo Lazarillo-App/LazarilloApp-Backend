@@ -1,5 +1,6 @@
 // app.js
 require('dotenv').config();
+require('events').defaultMaxListeners = 30;
 
 const express = require('express');
 const cors = require('cors');
@@ -7,6 +8,7 @@ const morgan = require('morgan');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
@@ -32,17 +34,14 @@ const app = express();
 /* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
-if (process.env.NODE_ENV !== 'production') {
-  require('events').defaultMaxListeners = 30;
-}
 
 /* ----------- bootstrap uploads ----------- */
-// Creamos carpeta /uploads/logos en el contenedor/host
+// Usaremos SIEMPRE __dirname/uploads (coincide con businessRoutes)
 const uploadsDir = path.join(__dirname, 'uploads');
 const logosDir   = path.join(uploadsDir, 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 
-// Servir archivos estáticos públicamente (sin auth)
+// Servir archivos estáticos de /uploads
 app.use('/uploads', express.static(uploadsDir));
 
 /* ----------- logging legible ----------- */
@@ -87,12 +86,10 @@ app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
 
 /* ----------- admin plataforma ----------- */
-app.use('/api/admin',       authRequired, requireAppAdmin, adminRoutes);
-app.use('/api/admin/cron',  adminCronRoutes); // si tiene su propio guard interno, OK
+app.use('/api/admin',      authRequired, requireAppAdmin, adminRoutes);
+app.use('/api/admin/cron', adminCronRoutes); // si internamente ya valida, ok
 
 /* ----------- businesses (con auth + carga de negocio activo) ----------- */
-/* Nota: dentro de businessRoutes se valida acceso a :id con requireBusinessAccessParam.
-   Cargar loadActiveBusiness acá también te habilita a rutas que usan X-Business-Id. */
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
 
 /* ----------- guard global para el resto de /api que necesitan negocio ----------- */
@@ -210,5 +207,4 @@ const PORT = process.env.PORT || 4000;
     process.exit(1);
   }
 })();
-
 

@@ -1,12 +1,18 @@
 // controllers/businessController.js
 const pool = require('../config/db');
 const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
-const fetch = global.fetch || require('node-fetch');
+
+const fetch = (...args) => globalThis.fetch(...args);
 
 // ------------------- Helpers -------------------
 const slugify = (s = '') =>
   String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+
+function attachBranding(biz) {
+  const br = (biz?.props && biz.props.branding) || biz.branding || {};
+  return { ...biz, branding: { ...(biz.branding || {}), ...br } };
+}
 
 // ------------------- Negocios (CRUD + selección) -------------------
 exports.listMine = async (req, res) => {
@@ -19,15 +25,13 @@ exports.listMine = async (req, res) => {
       FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id = b.id
       WHERE (ub.user_id = $1 OR b.owner_id = $1)
-      ORDER BY b.created_at ASC;
+      ORDER BY b.created_at ASC
     `, [uid]);
 
-    // devolvés items con { branding } listo para el front
-    const items = rows.map(attachBranding);
-    return res.json({ items });
+    res.json({ items: rows.map(attachBranding) });
   } catch (e) {
     console.error('GET /api/businesses error:', e);
-    return res.status(500).json({ error: 'internal' });
+    res.status(500).json({ error: 'internal' });
   }
 };
 
@@ -142,48 +146,35 @@ exports.update = async (req, res) => {
   const body = req.body || {};
   const name = body.name;
 
-  // si viene payload estilo { props: { branding: {...} } } o { branding: {...} }
-  const incomingBranding =
-    (body.props && body.props.branding) ||
-    body.branding ||
-    {};
-
-  // armamos jsonb de branding con solo los campos presentes (nulls se quitan)
-  // primary, secondary, background, font, logo_url, fg
+  const incomingBranding = (body.props && body.props.branding) || body.branding || {};
   const b = {
-    primary: incomingBranding.primary ?? null,
+    primary:   incomingBranding.primary   ?? null,
     secondary: incomingBranding.secondary ?? null,
-    background: incomingBranding.background ?? null,
-    font: incomingBranding.font ?? null,
-    logo_url: incomingBranding.logo_url ?? null,
-    fg: incomingBranding.fg ?? null,
+    background:incomingBranding.background?? null,
+    font:      incomingBranding.font      ?? null,
+    logo_url:  incomingBranding.logo_url  ?? null,
+    fg:        incomingBranding.fg        ?? null,
   };
 
-  // query: si no mandaste branding, solo actualiza name
-  const { rows } = await pool.query(
-    `
+  const { rows } = await pool.query(`
     UPDATE app_businesses
-       SET
-         name = COALESCE($2, name),
-         props = 
-           CASE
-             WHEN $3::jsonb IS NULL THEN props
-             ELSE COALESCE(props,'{}'::jsonb) ||
-                  jsonb_build_object(
-                    'branding',
-                    COALESCE(props->'branding','{}'::jsonb) ||
-                    jsonb_strip_nulls($3::jsonb)
-                  )
-           END,
-         updated_at = NOW()
+       SET name = COALESCE($2, name),
+           props =
+             CASE
+               WHEN $3::jsonb IS NULL THEN props
+               ELSE COALESCE(props,'{}'::jsonb) ||
+                    jsonb_build_object(
+                      'branding',
+                      COALESCE(props->'branding','{}'::jsonb) ||
+                      jsonb_strip_nulls($3::jsonb)
+                    )
+             END,
+           updated_at = NOW()
      WHERE id = $1
-     RETURNING id, name, slug, props, owner_id, created_at, updated_at;
-    `,
-    [businessId, name ?? null, Object.values(b).every(v => v === null) ? null : b]
-  );
+     RETURNING id, name, slug, props, owner_id, created_at, updated_at
+  `, [businessId, name ?? null, Object.values(b).every(v => v === null) ? null : b]);
 
-  const saved = attachBranding(rows[0]);
-  return res.json({ business: saved });
+  res.json({ business: attachBranding(rows[0]) });
 };
 
 exports.select = async (req, res) => {
@@ -387,14 +378,6 @@ exports.maxiArticles = async (req, res) => {
   }
 };
 
-function attachBranding(biz) {
-  const br = (biz?.props && biz.props.branding) || biz.branding || {};
-  return {
-    ...biz,
-    branding: { ...(biz.branding || {}), ...br }
-  };
-}
-
 exports.getOne = async (req, res, next) => {
   try {
     if (!req.business) return res.status(404).json({ error: 'not_found' });
@@ -409,19 +392,20 @@ exports.uploadLogo = async (req, res, next) => {
     if (!biz) return res.status(404).json({ error: 'not_found' });
     if (!req.file) return res.status(400).json({ error: 'missing_file' });
 
+    // misma carpeta que sirve app.js
     const url = `/uploads/logos/${req.file.filename}`;
 
-    await pool.query(
-      `UPDATE app_businesses
+    await pool.query(`
+      UPDATE app_businesses
          SET props = COALESCE(props,'{}'::jsonb) ||
                      jsonb_build_object(
                        'branding',
-                       COALESCE(props->'branding','{}'::jsonb) || jsonb_build_object('logo_url', $2)
+                       COALESCE(props->'branding','{}'::jsonb) ||
+                       jsonb_build_object('logo_url', $2)
                      ),
              updated_at = NOW()
-       WHERE id = $1`,
-      [biz.id, url]
-    );
+       WHERE id = $1
+    `, [biz.id, url]);
 
     res.status(201).json({ ok: true, url });
   } catch (e) { next(e); }
@@ -438,17 +422,17 @@ exports.setBrandingUrl = async (req, res, next) => {
       return res.status(400).json({ error: 'invalid_logo_url' });
     }
 
-    await pool.query(
-      `UPDATE app_businesses
+    await pool.query(`
+      UPDATE app_businesses
          SET props = COALESCE(props,'{}'::jsonb) ||
                      jsonb_build_object(
                        'branding',
-                       COALESCE(props->'branding','{}'::jsonb) || jsonb_build_object('logo_url', $2)
+                       COALESCE(props->'branding','{}'::jsonb) ||
+                       jsonb_build_object('logo_url', $2)
                      ),
              updated_at = NOW()
-       WHERE id = $1`,
-      [biz.id, logo_url || null]
-    );
+       WHERE id = $1
+    `, [biz.id, logo_url || null]);
 
     res.json({ ok: true, url: logo_url || null });
   } catch (e) { next(e); }
