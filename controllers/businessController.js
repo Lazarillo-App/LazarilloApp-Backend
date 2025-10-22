@@ -150,46 +150,46 @@ exports.update = async (req, res) => {
   if (!businessId) return res.status(404).json({ error: 'not_found' });
 
   const body = req.body || {};
-  const name = body.name;
+  const name = (body.name ?? null);
 
-  const incomingBranding =
-    (body.props && body.props.branding) ||
-    body.branding ||
-    {};
+  const incoming =
+    body.props ? body.props : body;
 
-  const b = {
-    primary:    incomingBranding.primary ?? null,
-    secondary:  incomingBranding.secondary ?? null,
-    background: incomingBranding.background ?? null,
-    font:       incomingBranding.font ?? null,
-    logo_url:   incomingBranding.logo_url ?? null,
-    fg:         incomingBranding.fg ?? null,
+  const branding = incoming.branding || null;
+  const contact = incoming.contact || null;
+  const address = incoming.address || null;
+  const social  = incoming.social  || null;
+  const description = (incoming.description ?? null);
+
+  // armamos un jsonb parcial (sólo claves presentes)
+  const patch = {
+    ...(branding ? { branding } : {}),
+    ...(contact ? { contact } : {}),
+    ...(address ? { address } : {}),
+    ...(social  ? { social }  : {}),
+    ...(description !== null ? { description } : {})
   };
+
+  const patchIsEmpty = Object.keys(patch).length === 0;
 
   const { rows } = await pool.query(
     `
     UPDATE app_businesses
        SET
          name = COALESCE($2, name),
-         props =
-           CASE
-             WHEN $3::jsonb IS NULL THEN props
-             ELSE COALESCE(props,'{}'::jsonb) ||
-                  jsonb_build_object(
-                    'branding',
-                    COALESCE(props->'branding','{}'::jsonb) ||
-                    jsonb_strip_nulls($3::jsonb)
-                  )
-           END,
+         props = CASE
+                   WHEN $3::jsonb IS NULL THEN props
+                   ELSE COALESCE(props,'{}'::jsonb) || jsonb_strip_nulls($3::jsonb)
+                 END,
          updated_at = NOW()
      WHERE id = $1
      RETURNING id, name, slug, props, owner_id, created_at, updated_at;
     `,
-    [businessId, name ?? null, Object.values(b).every(v => v === null) ? null : b]
+    [businessId, name, patchIsEmpty ? null : patch]
   );
 
   const saved = attachBranding(rows[0]);
-  res.json({ business: saved });
+  return res.json({ business: saved });
 };
 
 exports.select = async (req, res) => {
