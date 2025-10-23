@@ -2,8 +2,13 @@
 const express = require('express');
 const { sendEmail } = require('../utils/mailer');
 const router = express.Router();
+const { reconcile } = require('../controllers/devReconcileController');
+const { authRequired } = require('../middleware/authMiddleware');
+const requireAppAdmin = require('../middleware/requireAppAdmin');
 
-router.get('/test-mail', async (req, res) => {
+router.get('/reconcile', authRequired, requireAppAdmin, reconcile);
+
+router.get('/test-mail', authRequired, requireAppAdmin, async (req, res) => {
   try {
     const to = req.query.to || process.env.MAIL_REPLY_TO || process.env.SMTP_USER;
     const html = `<h3>Test Lazarillo</h3><p>${new Date().toISOString()}</p>`;

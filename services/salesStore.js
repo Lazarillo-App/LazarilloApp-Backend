@@ -1,9 +1,8 @@
-// services/salesStore.js
 const pool = require('../config/db');
 
 // ---------- helpers fecha ----------
-const pad2 = n => String(n).padStart(2,'0');
-const ymd  = d => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+const pad2 = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 
 function parseMaxiDate(value) {
   if (!value) return null;
@@ -60,11 +59,20 @@ function normalizeInvoices(businessId, rawFacturas) {
     // Maxi suele usar "detalle" para renglones; mantenemos compat con "items"
     const lines = f?.detalle || f?.items || [];
 
-    // external id estable (preferimos numero; sino alguno de estos)
-    const extId =
+    const baseExt =
       cab?.id || cab?.numero || cab?.nro || cab?.nroComprobante || cab?.nroFactura || cab?.idFactura;
 
-    // fecha puede venir en varios campos; parseamos robusto (DD/MM/YYYY)
+    // preferir numero "0016-00001527" si viene, sino prefijo+numero
+    let composed = null;
+    if (typeof cab?.numero === 'string' && cab.numero.includes('-')) {
+      composed = cab.numero;
+    } else if (cab?.prefijo != null && cab?.numero != null) {
+      composed = `P${cab.prefijo}-N${cab.numero}`;
+    }
+
+    const extId = composed || baseExt;
+
+    // fecha robusta
     const occurredRaw =
       cab?.fecha || cab?.fechaEmision || cab?.fechaDocumento || cab?.fechaFactura || cab?.createdAt;
     const occurredDate = parseMaxiDate(occurredRaw);
@@ -102,8 +110,11 @@ function normalizeInvoices(businessId, rawFacturas) {
       const unitPrice =
         it?.precio ?? it?.precioUnitario ?? it?.unitPrice ?? 0;
 
-      const lineTotal =
-        it?.total ?? it?.importe ?? it?.monto ?? 0;
+      const lineTotalRaw =
+        it?.total ?? it?.importe ?? it?.monto ?? null;
+      const lineTotal = lineTotalRaw != null
+        ? lineTotalRaw
+        : Number(qty || 0) * Number(unitPrice || 0);
 
       items.push({
         sale_external_id: String(extId),     // luego se mapea al id real con RETURNING
@@ -133,10 +144,90 @@ async function upsertSalesBatch(businessId, rawFacturas) {
     await client.query('BEGIN');
 
     const { sales, items, touchedDays } = normalizeInvoices(businessId, rawFacturas);
+    if (!sales.length && !items.length) {
+      await client.query('COMMIT');
+      return { upserted: 0, updated: 0, minDay: null, maxDay: null };
+    }
 
-    // ... (INSERT app_sales / app_sales_items) igual que lo tenías ...
+    // ---------- UPSERT app_sales (batch con UNNEST) ----------
+    let externalToId = new Map();
 
-    // ⚠️ Agregado diario usando UTC para calzar con índice ix_app_sales_biz_day
+    if (sales.length) {
+      const bizArr   = sales.map(s => s.business_id);
+      const extArr   = sales.map(s => s.external_id);
+      const atArr    = sales.map(s => new Date(s.occurred_at));
+      const totArr   = sales.map(s => Number(s.total || 0));
+      const propsArr = sales.map(s => s.props || {});
+
+      const qSales = `
+      WITH up AS (
+        INSERT INTO app_sales (business_id, external_id, occurred_at, total, props)
+        SELECT * FROM UNNEST(
+          $1::int[], $2::text[], $3::timestamptz[], $4::numeric[], $5::jsonb[]
+        )
+        ON CONFLICT (business_id, external_id)
+        DO UPDATE SET occurred_at = EXCLUDED.occurred_at,
+                      total       = EXCLUDED.total,
+                      props       = EXCLUDED.props
+        RETURNING id, external_id
+      )
+      SELECT id, external_id FROM up
+      `;
+      const r = await client.query(qSales, [bizArr, extArr, atArr, totArr, propsArr]);
+      externalToId = new Map(r.rows.map(r => [String(r.external_id), Number(r.id)]));
+    }
+
+    // ---------- UPSERT app_sales_items (batch) ----------
+    if (items.length) {
+      // mapear sale_id desde sale_external_id
+      const saleIdArr = [];
+      const posArr    = [];
+      const artArr    = [];
+      const skuArr    = [];
+      const nameArr   = [];
+      const qtyArr    = [];
+      const unitArr   = [];
+      const lineTot   = [];
+      const propsArr  = [];
+
+      for (const it of items) {
+        const saleId = externalToId.get(String(it.sale_external_id));
+        if (!saleId) continue; // si no existe, saltamos
+        saleIdArr.push(saleId);
+        posArr.push(it.line_pos);
+        artArr.push(it.article_id);
+        skuArr.push(it.sku || null);
+        nameArr.push(it.name || null);
+        qtyArr.push(Number(it.quantity || 0));
+        unitArr.push(Number(it.unit_price || 0));
+        lineTot.push(Number(it.total || 0));
+        propsArr.push(it.props || {});
+      }
+
+      if (saleIdArr.length) {
+        const qItems = `
+        INSERT INTO app_sales_items
+          (sale_id, line_pos, article_id, sku, name, quantity, unit_price, total, props)
+        SELECT * FROM UNNEST(
+          $1::int[], $2::int[], $3::int[], $4::text[], $5::text[],
+          $6::numeric[], $7::numeric[], $8::numeric[], $9::jsonb[]
+        )
+        ON CONFLICT (sale_id, line_pos)
+        DO UPDATE SET article_id = EXCLUDED.article_id,
+                      sku        = EXCLUDED.sku,
+                      name       = EXCLUDED.name,
+                      quantity   = EXCLUDED.quantity,
+                      unit_price = EXCLUDED.unit_price,
+                      total      = EXCLUDED.total,
+                      props      = EXCLUDED.props
+        `;
+        await client.query(qItems, [
+          saleIdArr, posArr, artArr, skuArr, nameArr, qtyArr, unitArr, lineTot, propsArr
+        ]);
+      }
+    }
+
+    // ---------- Recalcular sales_daily para días tocados ----------
     if (touchedDays.length) {
       const { rows } = await client.query(
         `
@@ -152,31 +243,30 @@ async function upsertSalesBatch(businessId, rawFacturas) {
       );
 
       if (rows.length) {
-        const values = [];
-        const params = [];
-        let p = 1;
-        for (const r of rows) {
-          params.push(businessId, r.day, r.total, r.tx_count);
-          values.push(`($${p++}, $${p++}, $${p++}, $${p++})`);
-        }
+        const bizArr  = rows.map(r => businessId);
+        const dayArr  = rows.map(r => r.day);
+        const totArr  = rows.map(r => r.total);
+        const txcArr  = rows.map(r => r.tx_count);
+
         await client.query(
           `
           INSERT INTO sales_daily (business_id, day, total, tx_count)
-          VALUES ${values.join(',')}
+          SELECT * FROM UNNEST($1::int[], $2::date[], $3::numeric[], $4::int[])
           ON CONFLICT (business_id, day)
           DO UPDATE SET total = EXCLUDED.total, tx_count = EXCLUDED.tx_count
           `,
-          params
+          [bizArr, dayArr, totArr, txcArr]
         );
       }
     }
 
     await client.query('COMMIT');
+    const sorted = Array.from(new Set(touchedDays)).sort();
     return {
       upserted: sales.length,
       updated: 0,
-      minDay: touchedDays.length ? [...touchedDays].sort()[0] : null,
-      maxDay: touchedDays.length ? [...touchedDays].sort().slice(-1)[0] : null,
+      minDay: sorted[0] || null,
+      maxDay: sorted[sorted.length - 1] || null,
     };
   } catch (e) {
     await client.query('ROLLBACK');
@@ -186,9 +276,6 @@ async function upsertSalesBatch(businessId, rawFacturas) {
     client.release();
   }
 }
-
-async function getLastSalesSyncAt(businessId) { /* igual que ya tenías */ }
-async function setLastSalesSyncAt(businessId, isoTs) { /* igual que ya tenías */ }
 
 module.exports = {
   normalizeInvoices,
