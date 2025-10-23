@@ -17,6 +17,7 @@ const {
 const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+const { refreshMenu } = require('../controllers/maxiMenuController');
 
 /* ================== Multer (logos) ================== */
 // crea carpeta si no existe
@@ -86,6 +87,7 @@ router.post('/:id/maxi-credentials', businesses.maxiSave);
 // RAW Maxi (fullinvoicebydate) para diagnóstico
 router.get('/:id/maxi-raw-invoices', businesses.maxiRawInvoices);
 router.get('/:id/maxi-items', businesses.maxiItemsByDate);
+router.post('/:id/maxi-refresh-menu', refreshMenu);
 
 /* ================ Catálogo / Ventas (legacy) =============== */
 router.get('/:id/articles', listArticlesFromDB);
