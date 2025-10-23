@@ -3,18 +3,16 @@ require('dotenv').config();
 const { Client } = require('pg');
 
 async function ensureTable(client) {
+  // Solo asegura la existencia con el MISMO esquema de la migración
   await client.query(`
     CREATE TABLE IF NOT EXISTS public.maxi_menu_cache (
-      id           bigserial PRIMARY KEY,
-      business_id  integer      NOT NULL,
-      source       text         NOT NULL DEFAULT 'menuweb/menuextendido',
+      business_id  integer      NOT NULL REFERENCES public.app_businesses(id) ON DELETE CASCADE,
       payload      jsonb        NOT NULL,
       hash         text         NOT NULL,
-      updated_at   timestamptz  NOT NULL DEFAULT now()
+      updated_at   timestamptz  NOT NULL DEFAULT now(),
+      PRIMARY KEY (business_id, hash)
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_maxi_menu_cache_biz_hash
-      ON public.maxi_menu_cache (business_id, hash);
-    CREATE INDEX IF NOT EXISTS ix_maxi_menu_cache_biz_updated
+    CREATE INDEX IF NOT EXISTS maxi_menu_cache_biz_updated_idx
       ON public.maxi_menu_cache (business_id, updated_at DESC);
   `);
 }
@@ -28,21 +26,19 @@ async function ensureTable(client) {
 
   const client = new Client({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: process.env.DATABASE_SSL === '0' ? false : { rejectUnauthorized: false },
   });
 
   try {
     await client.connect();
     await ensureTable(client);
 
-    // Soporta tablas antiguas con fetched_at o nuevas con updated_at
+    // Trae el último snapshot por updated_at
     const { rows } = await client.query(`
-      SELECT
-        COALESCE(updated_at, NOW()) AS fetched_at,
-        payload
+      SELECT updated_at AS fetched_at, payload
       FROM public.maxi_menu_cache
       WHERE business_id = $1
-      ORDER BY COALESCE(updated_at, NOW()) DESC
+      ORDER BY updated_at DESC
       LIMIT 1
     `, [bizId]);
 
@@ -52,6 +48,7 @@ async function ensureTable(client) {
     }
 
     const { fetched_at, payload } = rows[0];
+    // El payload puede venir como array directo o envuelto en .content
     const content = Array.isArray(payload) ? payload : (payload?.content || []);
 
     console.log(`Última cache: ${new Date(fetched_at).toISOString()} — rubros: ${content.length}`);
