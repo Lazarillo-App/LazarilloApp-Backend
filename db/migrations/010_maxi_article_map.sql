@@ -1,5 +1,4 @@
--- migrations/010_maxi_article_map.sql
-
+-- 010_maxi_article_map.sql (DDL canónico)
 CREATE TABLE IF NOT EXISTS public.maxi_article_map (
   business_id  integer NOT NULL REFERENCES public.app_businesses(id) ON DELETE CASCADE,
   articulo_id  integer NOT NULL,
