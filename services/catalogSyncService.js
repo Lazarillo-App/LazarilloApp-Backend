@@ -176,7 +176,7 @@ async function syncCatalogFromMenu({ businessId, req, listmode, list, id_tienda 
     await client.query('ROLLBACK');
     e.status = e.status || 500;
     throw e;
-  } finally {
+  } finally { 
     client.release();
   }
 }
