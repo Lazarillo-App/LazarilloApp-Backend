@@ -78,7 +78,7 @@ function flattenMaxiMenu(tree = []) {
   const seen = new Set();
 
   for (const rubro of (tree || [])) {
-    const cat = String(rubro?.nombre || '').trim() || 'Sin categoría';
+    const rubroNombre = String(rubro?.nombre || '').trim() || 'Sin categoría';
 
     // artículos directamente bajo rubro (por si existiera)
     for (const a of (rubro?.articulos || [])) {
@@ -90,14 +90,14 @@ function flattenMaxiMenu(tree = []) {
         nombre: String(a?.nombre || '').trim(),
         precio: Number(a?.precio || 0) || 0,
         costo: 0,
-        categoria: cat,
-        subrubro: 'Sin subrubro',
+        categoria: 'Sin subrubro',
+        subrubro: rubroNombre,
         raw: a,
       });
     }
 
     for (const sr of (rubro?.subrubros || [])) {
-      const sub = String(sr?.nombre || '').trim() || 'Sin subrubro';
+      const subNombre = String(sr?.nombre || '').trim() || 'Sin subrubro';
       for (const a of (sr?.articulos || [])) {
         const id = Number(a?.id);
         if (!Number.isFinite(id) || seen.has(id)) continue;
@@ -107,8 +107,8 @@ function flattenMaxiMenu(tree = []) {
           nombre: String(a?.nombre || '').trim(),
           precio: Number(a?.precio || 0) || 0,
           costo: 0,
-          categoria: cat,
-          subrubro: sub,
+          categoria: subNombre,
+          subrubro: rubroNombre,
           raw: a,
         });
       }
@@ -128,8 +128,8 @@ function normalizeArticles(items = []) {
       nombre: String(it.nombre ?? it.descripcion ?? '').trim(),
       precio: Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0,
       costo: Number(it.costo ?? it.costoPromedio ?? 0) || 0,
-      categoria: String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría',
-      subrubro: String(it.subrubro ?? it.subRubro ?? '').trim() || 'Sin subrubro',
+      categoria: String(it.subrubro ?? it.subRubro ?? '').trim() || 'Sin subrubro',
+      subrubro: String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría',
       raw: it,
     }))
     .filter(a => Number.isFinite(a.id));
@@ -161,11 +161,15 @@ async function fetchMaxiArticles({ token, from, to }) {
     const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
     const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
     const costo = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
+    const categoriaApp = (ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null) || 'Sin subrubro';
+    const subrubroApp = (ctx.categoria ?? o.categoria ?? o.rubro ?? null) || 'Sin categoría';
     out.push({
       id,
       nombre,
       categoria: ctx.categoria ?? (o.categoria ?? o.rubro ?? null) ?? 'Sin categoría',
       subrubro: ctx.subrubro ?? (o.subrubro ?? o.subRubro ?? null) ?? 'Sin subrubro',
+      categoria: categoriaApp,
+      subrubro: subrubroApp,
       precio,
       costo,
       raw: o,
@@ -243,20 +247,21 @@ async function upsertArticles({ client, businessId, items }) {
 }
 
 // -------------------- Handlers --------------------
+// -------------------- Handlers --------------------
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
   const businessId = req.businessId;
   const { scope = 'articles', from, to } = req.body || {};
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
-  // Fechas por defecto (half-open [from, to) para series en BD)
+  // Fechas por defecto (half-open [from, to))
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   const f = ymd(parseDate(from, startOfMonth));
   const t = ymd(parseDate(to, yesterday));
 
-  // Credenciales Maxi (solo en este endpoint)
+  // Credenciales Maxi
   const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
   const mx = (bizRows[0]?.props || {}).maxi || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
@@ -270,66 +275,117 @@ exports.syncNow = async (req, res) => {
       const rawItems = await fetchMaxiArticles({ token, from: f, to: t });
       const items = normalizeArticles(rawItems);
 
-      // Cachear payload por hash para evitar duplicaciones innecesarias
+      // Cachear payload por hash
       const rawStr = JSON.stringify(rawItems ?? []);
-      const hash   = simpleHash(rawStr);
-      await pool.query(`
+      const hash = simpleHash(rawStr);
+
+      await client.query('BEGIN');
+
+      // (Opcional) cachear dentro de la misma tx
+      await client.query(`
         INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
         VALUES ($1, $2::jsonb, $3, NOW())
         ON CONFLICT (business_id, hash) DO UPDATE SET updated_at = NOW()
       `, [businessId, rawStr, hash]);
 
-      await client.query('BEGIN');
-
+      // Upsert de artículos
       const upserted = await upsertArticles({ client, businessId, items });
 
-      // Ajuste de categorización desde el cache más reciente
-      await client.query(
-        `
-WITH raw AS (
-  SELECT payload
-  FROM public.maxi_menu_cache
-  WHERE business_id = $1
-  ORDER BY updated_at DESC
-  LIMIT 1
-),
-rubros AS (
-  SELECT jsonb_array_elements(payload) AS r FROM raw
-),
-subs AS (
-  SELECT (r->'raw'->>'nombre')::text AS categoria,
-         jsonb_array_elements(r->'raw'->'subrubros') AS s
-  FROM rubros
-),
-arts AS (
-  SELECT categoria,
-         (s->>'nombre')::text AS subrubro,
-         jsonb_array_elements(s->'articulos') AS a
-  FROM subs
-),
-map AS (
-  SELECT (a->>'id')::int AS articulo_id,
-         NULLIF(btrim(categoria), '') AS categoria,
-         NULLIF(btrim(subrubro),  '') AS subrubro
-  FROM arts
-)
-UPDATE public.maxi_articles m
-   SET categoria  = COALESCE(map.categoria, m.categoria),
-       subrubro   = COALESCE(map.subrubro,  m.subrubro),
-       updated_at = NOW()
-  FROM map
- WHERE m.business_id = $1
-   AND m.articulo_id = map.articulo_id
-`,
-        [businessId]
-      );
+      // Ajuste categorización desde cache (SWAP subrubro→categoria, rubro→subrubro)
+      const { rows: mapUpd } = await client.query(`
+        WITH raw AS (
+          SELECT payload
+          FROM public.maxi_menu_cache
+          WHERE business_id = $1
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ),
+        content AS (
+          SELECT CASE
+            WHEN jsonb_typeof(payload) = 'array' THEN payload
+            ELSE COALESCE(
+              payload->'content',
+              payload->'menu'->'content',
+              payload->'data'->'content',
+              '[]'::jsonb
+            )
+          END AS arr
+          FROM raw
+        ),
+        rubros AS (
+          SELECT jsonb_array_elements(arr) AS r
+          FROM content
+        ),
+        subs AS (
+          SELECT
+            (r->'raw'->>'nombre')::text AS rubro_nombre,
+            jsonb_array_elements(COALESCE(r->'raw'->'subrubros','[]'::jsonb)) AS s
+          FROM rubros
+        ),
+        arts AS (
+          SELECT
+            (s->>'nombre')::text AS categoria,   -- subrubro Maxi → categoría app
+            rubro_nombre         AS subrubro,    -- rubro Maxi → subrubro app
+            jsonb_array_elements(COALESCE(s->'articulos','[]'::jsonb)) AS a
+          FROM subs
+        ),
+        map AS (
+          SELECT
+            (a->>'id')::int AS articulo_id,
+            NULLIF(btrim(categoria), '') AS categoria,
+            NULLIF(btrim(subrubro),  '') AS subrubro
+          FROM arts
+        ),
+        updated AS (
+          UPDATE public.maxi_articles m
+             SET categoria  = COALESCE(map.categoria, m.categoria),
+                 subrubro   = COALESCE(map.subrubro,  m.subrubro),
+                 updated_at = NOW()
+            FROM map
+           WHERE m.business_id = $1
+             AND m.articulo_id = map.articulo_id
+           RETURNING 1
+        )
+        SELECT COUNT(*)::int AS updated_count FROM updated;
+      `, [businessId]);
+
+      const mappedFromCache = Number(mapUpd?.[0]?.updated_count || 0);
+
+      // Refrescar public.maxi_article_map desde maxi_articles ya normalizado
+      const { rowCount: mapUpserts } = await client.query(`
+        WITH src AS (
+          SELECT business_id, articulo_id,
+                 NULLIF(btrim(categoria),'') AS categoria,  -- subrubro Maxi → categoría app
+                 NULLIF(btrim(subrubro),'')  AS subrubro    -- rubro Maxi     → subrubro app
+          FROM public.maxi_articles
+          WHERE business_id = $1
+        )
+        INSERT INTO public.maxi_article_map (business_id, article_id, categoria, subrubro, updated_at)
+        SELECT
+          s.business_id, s.articulo_id,
+          COALESCE(s.categoria,  '[PENDIENTE]'),
+          COALESCE(s.subrubro,   '[PENDIENTE]'),
+          NOW()
+        FROM src s
+        ON CONFLICT (business_id, article_id) DO UPDATE
+        SET categoria  = EXCLUDED.categoria,
+            subrubro   = EXCLUDED.subrubro,
+            updated_at = NOW()
+      `, [businessId]);
 
       await client.query('COMMIT');
 
-      return res.json({ ok: true, scope: 'articles', upserted });
+      return res.json({
+        ok: true,
+        scope: 'articles',
+        upserted,
+        mapped_from_cache: mappedFromCache,
+        mapped: mapUpserts,
+        cacheHash: hash
+      });
     }
 
-    // Otros alcances a futuro (ventas, etc.) se responden neutros por ahora
+    // Otros alcances a futuro
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
