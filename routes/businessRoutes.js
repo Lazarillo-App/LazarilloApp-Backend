@@ -18,6 +18,7 @@ const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncCont
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
+const { getArticlesTree } = require('../controllers/businessController');
 
 /* ================== Multer (logos) ================== */
 // crea carpeta si no existe
@@ -138,5 +139,7 @@ router.patch('/:id/default-group', async (req, res, next) => {
     res.json({ ok: true, business_id: biz.id, default_group_id: groupId });
   } catch (e) { next(e); }
 });
+
+router.get('/:businessId/articles-tree', getArticlesTree);
 
 module.exports = router;

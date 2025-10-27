@@ -15,6 +15,8 @@ const {
   createOrMoveAgrupacion
 } = require('../controllers/agrupacionesController');
 
+const { materializeGroupsFromTaxonomy } = require('../services/autoGroupingService');
+
 // Todas bajo /businesses/:businessId/...
 router.post('/agrupaciones', crearAgrupacion);
 router.get('/agrupaciones', obtenerAgrupaciones);
@@ -31,5 +33,14 @@ router.post('/agrupaciones/:id/exclusiones', upsertExclusiones);
 router.post('/agrupaciones/:fromId/move-items', moveItemsBetweenGroups);
 router.post('/agrupaciones/create-or-move', createOrMoveAgrupacion);
 
-module.exports = router;
+// ⬇️ NUEVO: materializar agrupaciones desde taxonomía (idempotente)
+router.post('/agrupaciones/auto-from-taxonomy', async (req, res, next) => {
+  try {
+    const businessId = Number(req.params.businessId);
+    const strategy = req.query.strategy === 'by-subrubro' ? 'by-subrubro' : 'by-categoria';
+    const out = await materializeGroupsFromTaxonomy(businessId, { strategy });
+    res.json({ ok: true, strategy, ...out });
+  } catch (e) { next(e); }
+});
 
+module.exports = router;

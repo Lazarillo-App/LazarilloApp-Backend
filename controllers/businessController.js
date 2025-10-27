@@ -613,3 +613,13 @@ exports.maxiRawInvoices = async (req, res, next) => {
     });
   } catch (e) { next(e); }
 };
+
+const { fetchArticlesTree } = require('../services/articlesRepo');
+
+exports.getArticlesTree = async (req, res, next) => {
+  try {
+    const businessId = Number(req.params.businessId);
+    const tree = await fetchArticlesTree(businessId);
+    res.json({ ok: true, tree });
+  } catch (e) { next(e); }
+}

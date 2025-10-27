@@ -1,0 +1,59 @@
+-- Normalización desde maxi_article_map (usa rubro_nombre / subrubro_nombre)
+
+WITH map AS (
+  SELECT
+    mam.article_id::bigint             AS article_id,
+    NULLIF(TRIM(mam.rubro_nombre), '')    AS categoria_raw,
+    NULLIF(TRIM(mam.subrubro_nombre), '') AS subrubro_raw
+  FROM maxi_article_map mam
+),
+norm AS (
+  SELECT
+    article_id,
+    CASE WHEN categoria_raw ~* '^(sin categoria|sin categoría|-+)$' THEN NULL ELSE categoria_raw END AS categoria,
+    CASE WHEN subrubro_raw  ~* '^(sin subrubro|sin categoria|sin categoría|-+)$' THEN NULL ELSE subrubro_raw END AS subrubro
+  FROM map
+),
+up_cats AS (
+  SELECT
+    n.article_id,
+    COALESCE(n.categoria, '[PENDIENTE]') AS categoria_name,
+    COALESCE(n.subrubro,  '[PENDIENTE]') AS subrubro_name
+  FROM norm n
+),
+ins_cat AS (
+  INSERT INTO categorias(nombre)
+  SELECT DISTINCT categoria_name FROM up_cats
+  ON CONFLICT (nombre) DO NOTHING
+  RETURNING id, nombre
+),
+all_cat AS (
+  SELECT id, nombre FROM categorias
+),
+cat_id AS (
+  SELECT u.article_id, c.id AS categoria_id, u.subrubro_name
+  FROM up_cats u
+  JOIN all_cat c ON c.nombre = u.categoria_name
+),
+ins_sub AS (
+  INSERT INTO subrubros(categoria_id, nombre)
+  SELECT DISTINCT categoria_id, subrubro_name FROM cat_id
+  ON CONFLICT (categoria_id, nombre) DO NOTHING
+  RETURNING id, categoria_id, nombre
+),
+all_sub AS (
+  SELECT id, categoria_id, nombre FROM subrubros
+),
+cat_sub AS (
+  SELECT
+    c.article_id,
+    c.categoria_id,
+    s.id AS subrubro_id
+  FROM cat_id c
+  JOIN all_sub s ON s.categoria_id = c.categoria_id AND s.nombre = c.subrubro_name
+)
+UPDATE app_articles a
+SET categoria_id = COALESCE(cs.categoria_id, 1),
+    subrubro_id  = COALESCE(cs.subrubro_id, 1)
+FROM cat_sub cs
+WHERE a.id = cs.article_id;
