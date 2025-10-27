@@ -1,3 +1,4 @@
+-- 2025_10_ingest_runs.sql
 CREATE TABLE IF NOT EXISTS ingest_runs (
   id bigserial PRIMARY KEY,
   business_id int NOT NULL,

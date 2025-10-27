@@ -1,3 +1,4 @@
+--- 2025_11_03_articles_with_taxonomy_view.sql
 CREATE OR REPLACE VIEW vw_articles_with_taxonomy AS
 SELECT
   a.id,

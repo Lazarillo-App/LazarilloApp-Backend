@@ -1,3 +1,4 @@
+-- 015_sales_indexes.sql
 BEGIN;
 
 -- Series diarias baratas (filtro por día en UTC)

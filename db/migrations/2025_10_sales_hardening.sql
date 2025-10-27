@@ -1,3 +1,4 @@
+--- 2025_10_sales_hardening.sql
 -- app_sales: idempotencia por comprobante
 ALTER TABLE app_sales
   ADD CONSTRAINT uq_app_sales_biz_ext UNIQUE (business_id, external_id);

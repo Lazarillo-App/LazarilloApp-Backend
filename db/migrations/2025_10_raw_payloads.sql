@@ -1,3 +1,4 @@
+-- 2025_10_raw_payloads.sql
 CREATE TABLE IF NOT EXISTS raw_maxi_payloads (
   id bigserial PRIMARY KEY,
   business_id int NOT NULL,

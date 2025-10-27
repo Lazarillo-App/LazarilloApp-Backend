@@ -1,3 +1,4 @@
+-- 2025_11_02_taxonomy_backfill.sql
 -- Normalización desde maxi_article_map (usa rubro_nombre / subrubro_nombre)
 
 WITH map AS (

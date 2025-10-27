@@ -1,3 +1,4 @@
+-- 2025_11_01_taxonomy.sql
 -- 1) Dimensiones (idempotentes)
 CREATE TABLE IF NOT EXISTS categorias (
   id SERIAL PRIMARY KEY,

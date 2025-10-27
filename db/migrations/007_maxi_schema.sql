@@ -1,3 +1,4 @@
+-- 007_maxi_schema.sql
 -- Recomendado si usas gen_random_uuid en sync_jobs
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
