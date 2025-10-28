@@ -73,126 +73,211 @@ async function maxiLogin({ email, password, codcli }) {
   return j.content.tokenAccess;
 }
 
-function flattenMaxiMenu(tree = []) {
+// Reemplaza flattenMaxiMenu/normalizeArticles por esto:
+function extractArticlesFromMaxiPayload(payloadAny) {
+  const arrRoot =
+    Array.isArray(payloadAny) ? payloadAny :
+    Array.isArray(payloadAny?.content) ? payloadAny.content :
+    Array.isArray(payloadAny?.menu?.content) ? payloadAny.menu.content :
+    Array.isArray(payloadAny?.data?.content) ? payloadAny.data.content :
+    [];
+
   const out = [];
   const seen = new Set();
 
-  for (const rubro of (tree || [])) {
-    const rubroNombre = String(rubro?.nombre || '').trim() || 'Sin categoría';
+  // helpers
+  const str = (v) => (v == null ? '' : String(v)).trim();
+  const num = (v, d=0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  };
+  const getId = (o={}) => num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
+  const isArticle = (o={}) => {
+    if (!o || typeof o !== 'object') return false;
+    const hasId = ['id','idArticulo','codart','codigo','codigoArticulo'].some(k => k in o);
+    if (!hasId) return false;
+    const hasNameOrPrice = ['nombre','descripcion','descripcionl','precio','precioVenta','importe'].some(k => k in o);
+    const nodeTypeArticulo = str(o.node_type).toUpperCase() === 'ARTICULO';
+    return hasId && (hasNameOrPrice || nodeTypeArticulo);
+  };
 
-    // artículos directamente bajo rubro (por si existiera)
-    for (const a of (rubro?.articulos || [])) {
-      const id = Number(a?.id);
-      if (!Number.isFinite(id) || seen.has(id)) continue;
-      seen.add(id);
-      out.push({
-        id,
-        nombre: String(a?.nombre || '').trim(),
-        precio: Number(a?.precio || 0) || 0,
-        costo: 0,
-        categoria: 'Sin subrubro',
-        subrubro: rubroNombre,
-        raw: a,
-      });
+  // toma nombre de rubro/subrubro desde node o desde node.raw
+  const getRubroName = (node) =>
+    str(node?.nombre) || str(node?.raw?.nombre) ||
+    str(node?.nombreRubro) || str(node?.rubroNombre) || str(node?.rubro?.descripcion) ||
+    'Sin subrubro'; // (rubro Maxi → subrubro app)
+
+  const getSubrubroName = (node) =>
+    str(node?.nombre) || str(node?.raw?.nombre) ||
+    str(node?.nombreSubRubro) || str(node?.subRubro?.descripcion) || str(node?.subrubro) ||
+    'Sin categoría'; // (subrubro Maxi → categoría app)
+
+  // push con SWAP (subrubro Maxi → categoria app ; rubro Maxi → subrubro app)
+  const pushArt = (a, ctx) => {
+    const id = getId(a);
+    if (!Number.isFinite(id) || seen.has(id)) return;
+    seen.add(id);
+    out.push({
+      id,
+      nombre: str(a.nombre ?? a.descripcion ?? a.descripcionl),
+      precio: num(a.precio ?? a.precioVenta ?? a.importe, 0),
+      costo:  num(a.costo ?? a.costoPromedio, 0),
+      categoria: str(a?.raw?.subrubro) || str(ctx.subrubro) || 'Sin categoría', // SUB_RUBRO Maxi
+      subrubro:  str(a?.raw?.categoria) || str(ctx.rubro)    || 'Sin subrubro',  // RUBRO Maxi
+      raw: a,
+    });
+  };
+
+  // walk recursivo: rubro → (subrubros → ...) → articulos
+  const walkSub = (node, ctx) => {
+    if (!node || typeof node !== 'object') return;
+
+    // artículos en el subrubro
+    const arts = node.articulos ?? node?.raw?.articulos ?? [];
+    if (Array.isArray(arts)) {
+      for (const a of arts) if (isArticle(a)) pushArt(a, ctx);
     }
 
-    for (const sr of (rubro?.subrubros || [])) {
-      const subNombre = String(sr?.nombre || '').trim() || 'Sin subrubro';
-      for (const a of (sr?.articulos || [])) {
-        const id = Number(a?.id);
-        if (!Number.isFinite(id) || seen.has(id)) continue;
-        seen.add(id);
-        out.push({
-          id,
-          nombre: String(a?.nombre || '').trim(),
-          precio: Number(a?.precio || 0) || 0,
-          costo: 0,
-          categoria: subNombre,
-          subrubro: rubroNombre,
-          raw: a,
-        });
+    // sub-subrubros (si existieran)
+    const subs = node.subrubros ?? node?.raw?.subrubros ?? [];
+    if (Array.isArray(subs)) {
+      for (const s of subs) {
+        const nextCtx = {
+          rubro:    ctx.rubro,
+          subrubro: getSubrubroName(s) || ctx.subrubro,
+        };
+        walkSub(s, nextCtx);
       }
     }
-  }
+  };
+
+  const walkRubro = (r) => {
+    const rubroNombre = getRubroName(r) || 'Sin subrubro'; // rubro Maxi → subrubro app
+    // artículos colgados del rubro
+    const artsR = r.articulos ?? r?.raw?.articulos ?? [];
+    if (Array.isArray(artsR)) {
+      for (const a of artsR) if (isArticle(a)) {
+        pushArt(a, { rubro: rubroNombre, subrubro: 'Sin categoría' });
+      }
+    }
+    // subrubros
+    const subs = r.subrubros ?? r?.raw?.subrubros ?? [];
+    if (Array.isArray(subs)) {
+      for (const s of subs) {
+        const ctx = { rubro: rubroNombre, subrubro: getSubrubroName(s) };
+        walkSub(s, ctx);
+      }
+    }
+  };
+
+  for (const r of arrRoot) walkRubro(r);
   return out;
 }
-
-function normalizeArticles(items = []) {
-  if (!Array.isArray(items)) return [];
-  const looksTree = items.some(it => it?.node_type === 'RUBRO' || it?.subrubros);
-  if (looksTree) return flattenMaxiMenu(items);
-
-  return items
-    .map(it => ({
-      id: Number(it.id ?? it.codigo ?? it.codigoArticulo ?? it.codart),
-      nombre: String(it.nombre ?? it.descripcion ?? '').trim(),
-      precio: Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0,
-      costo: Number(it.costo ?? it.costoPromedio ?? 0) || 0,
-      categoria: String(it.subrubro ?? it.subRubro ?? '').trim() || 'Sin subrubro',
-      subrubro: String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría',
-      raw: it,
-    }))
-    .filter(a => Number.isFinite(a.id));
-}
-
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
   if (to) u.searchParams.set('fechaFin', to);
 
-  const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` } });
+  const res = await fetchWithRetry(u.toString(), {
+    headers: { Authorization: `Bearer ${token}` }
+  });
   const j = await res.json().catch(() => ({}));
   if (j?.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
-  const content = j?.content ?? [];
 
-  // Caminata flexible (por si cambia el formato)
+  // Normalizamos la raíz del payload
+  const content =
+    Array.isArray(j?.content) ? j.content :
+    Array.isArray(j?.menu?.content) ? j.menu.content :
+    Array.isArray(j?.data?.content) ? j.data.content :
+    Array.isArray(j) ? j :
+    [];
+
   const out = [];
   const seen = new Set();
+
+  // Heurística: ¿esto parece un artículo?
   const isArticle = (o = {}) => {
-    const keys = Object.keys(o || {});
-    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
-    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
+    if (!o || typeof o !== 'object') return false;
+    const hasId = ['id','idArticulo','codart','codigo','codigoArticulo']
+      .some(k => k in o);
+    const hasInfo = ['descripcion','descripcionl','nombre','precio','precioVenta','importe']
+      .some(k => k in o);
     return hasId && hasInfo;
   };
+
+  // Empuja un artículo con SWAP (subrubro Maxi → categoria app ; rubro Maxi → subrubro app)
   const pushArt = (o, ctx) => {
     const id = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
     if (!Number.isFinite(id) || seen.has(id)) return;
     seen.add(id);
+
     const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
     const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
-    const costo = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
-    const categoriaApp = (ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null) || 'Sin subrubro';
-    const subrubroApp = (ctx.categoria ?? o.categoria ?? o.rubro ?? null) || 'Sin categoría';
+    const costo  = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
+
+    // SWAP: en el contexto guardamos rubro en ctx.categoria y subrubro en ctx.subrubro
+    //       para la app: categoria = subrubro Maxi ; subrubro = rubro Maxi
+    const rubroMaxi     = ctx.categoria ?? o.categoria ?? o.rubro ?? null;
+    const subrubroMaxi  = ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null;
+
     out.push({
       id,
       nombre,
-      categoria: ctx.categoria ?? (o.categoria ?? o.rubro ?? null) ?? 'Sin categoría',
-      subrubro: ctx.subrubro ?? (o.subrubro ?? o.subRubro ?? null) ?? 'Sin subrubro',
-      categoria: categoriaApp,
-      subrubro: subrubroApp,
+      categoria: subrubroMaxi ? String(subrubroMaxi).trim() : 'Sin subrubro',
+      subrubro:  rubroMaxi    ? String(rubroMaxi).trim()    : 'Sin categoría',
       precio,
       costo,
       raw: o,
     });
   };
+
+  // De un nodo cualquiera, intentamos extraer nombres de rubro/subrubro para el contexto
+  const deriveCtx = (node, ctx) => {
+    // Lo más común en Maxi:
+    const rubroNombre =
+      node?.nombreRubro ??
+      node?.rubroNombre ??
+      node?.rubro?.descripcion ??
+      node?.rubro ??
+      node?.raw?.categoria ??
+      ctx.categoria;
+
+    const subrubroNombre =
+      node?.nombreSubRubro ??
+      node?.subRubro?.descripcion ??
+      node?.subrubro ??
+      node?.raw?.subrubro ??
+      ctx.subrubro;
+
+    return {
+      categoria: rubroNombre ?? ctx.categoria ?? null,    // rubro Maxi
+      subrubro:  subrubroNombre ?? ctx.subrubro ?? null,  // subrubro Maxi
+    };
+  };
+
+  // Caminata recursiva: pasa el contexto y encuentra artículos en cualquier nivel
   const walk = (node, ctx = { categoria: null, subrubro: null }) => {
-    if (!node) return;
-    if (Array.isArray(node)) return node.forEach(n => walk(n, ctx));
+    if (node == null) return;
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n, ctx);
+      return;
+    }
     if (typeof node !== 'object') return;
 
-    const next = {
-      categoria: (node.nombreRubro ?? node.rubroNombre ?? node.rubro?.descripcion ?? ctx.categoria) || ctx.categoria,
-      subrubro: (node.nombreSubRubro ?? node.subRubro?.descripcion ?? node.subrubro ?? ctx.subrubro) || ctx.subrubro,
-    };
+    const next = deriveCtx(node, ctx);
 
+    // Si el nodo ya es un artículo, lo tomamos con el contexto actual
     if (isArticle(node)) pushArt(node, next);
 
+    // Recorremos valores hijos (soporta r.subrubros, r.articulos y cualquier estructura anidada)
     for (const v of Object.values(node)) {
-      if (v && (Array.isArray(v) || typeof v === 'object')) walk(v, next);
+      if (v && (Array.isArray(v) || typeof v === 'object')) {
+        walk(v, next);
+      }
     }
   };
-  walk(content);
 
+  walk(content);
   return out;
 }
 
@@ -245,8 +330,6 @@ async function upsertArticles({ client, businessId, items }) {
 
   return total;
 }
-
-// -------------------- Handlers --------------------
 // -------------------- Handlers --------------------
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
