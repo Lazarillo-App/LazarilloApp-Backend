@@ -7,7 +7,7 @@ const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.a
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
 const FETCH_RETRIES = Number(process.env.MAXI_FETCH_RETRIES || 2);
 
-// -------------------- Utils básicos --------------------
+/* ======================= Utils básicos ======================= */
 function simpleHash(str = '') {
   let h = 0;
   for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
@@ -26,7 +26,7 @@ function ymd(d) {
 }
 function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
 
-// -------------------- Fetch con timeout + reintentos --------------------
+/* ========== Fetch con timeout + reintentos (429/5xx) ========== */
 async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -36,7 +36,8 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
       const res = await fetchNative(url, { ...options, signal: ctrl.signal });
       clearTimeout(t);
       if (res.ok) return res;
-      // Reintentar en 429/5xx
+
+      // Reintenta en 429/5xx
       if ([429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
         await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2));
         continue;
@@ -58,7 +59,7 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
   throw lastErr || new Error('fetchWithRetry unknown error');
 }
 
-// -------------------- MAXI: login y artículos --------------------
+/* =================== MAXI: login y artículos =================== */
 async function maxiLogin({ email, password, codcli }) {
   const res = await fetchWithRetry(`${BASE}/login`, {
     method: 'POST',
@@ -73,97 +74,10 @@ async function maxiLogin({ email, password, codcli }) {
   return j.content.tokenAccess;
 }
 
-// Reemplaza flattenMaxiMenu/normalizeArticles por esto:
-function extractArticlesFromMaxiPayload(payloadAny) {
-  const arrRoot =
-    Array.isArray(payloadAny) ? payloadAny :
-      Array.isArray(payloadAny?.content) ? payloadAny.content :
-        Array.isArray(payloadAny?.menu?.content) ? payloadAny.menu.content :
-          Array.isArray(payloadAny?.data?.content) ? payloadAny.data.content :
-            [];
-
-  const out = [];
-  const seen = new Set();
-
-  // helpers
-  const str = (v) => (v == null ? '' : String(v)).trim();
-  const num = (v, d = 0) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : d;
-  };
-  const getId = (o = {}) => num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
-  function isArticle(o = {}) {
-    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
-    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
-    return hasId && hasInfo;
-  }
-
-  const pushArt = (o, ctx) => {
-    const id = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
-    if (!Number.isFinite(id) || seen.has(id)) return;
-    seen.add(id);
-
-    const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
-    const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
-    const costo = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
-
-    // SWAP ➜ categoría app = subrubro Maxi ; subrubro app = rubro Maxi
-    const categoriaApp = (ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null) || 'Sin subrubro';
-    const subrubroApp = (ctx.categoria ?? o.categoria ?? o.rubro ?? null) || 'Sin categoría';
-
-    out.push({
-      id, nombre, precio, costo,
-      categoria: categoriaApp,
-      subrubro: subrubroApp,
-      raw: o,
-    });
-  };
-
-  // walk recursivo: rubro → (subrubros → ...) → articulos
-  const walkSub = (node, ctx) => {
-    if (!node || typeof node !== 'object') return;
-
-    // artículos en el subrubro
-    const arts = node.articulos ?? node?.raw?.articulos ?? [];
-    if (Array.isArray(arts)) {
-      for (const a of arts) if (isArticle(a)) pushArt(a, ctx);
-    }
-
-    // sub-subrubros (si existieran)
-    const subs = node.subrubros ?? node?.raw?.subrubros ?? [];
-    if (Array.isArray(subs)) {
-      for (const s of subs) {
-        const nextCtx = {
-          rubro: ctx.rubro,
-          subrubro: getSubrubroName(s) || ctx.subrubro,
-        };
-        walkSub(s, nextCtx);
-      }
-    }
-  };
-
-  const walkRubro = (r) => {
-    const rubroNombre = getRubroName(r) || 'Sin subrubro'; // rubro Maxi → subrubro app
-    // artículos colgados del rubro
-    const artsR = r.articulos ?? r?.raw?.articulos ?? [];
-    if (Array.isArray(artsR)) {
-      for (const a of artsR) if (isArticle(a)) {
-        pushArt(a, { rubro: rubroNombre, subrubro: 'Sin categoría' });
-      }
-    }
-    // subrubros
-    const subs = r.subrubros ?? r?.raw?.subrubros ?? [];
-    if (Array.isArray(subs)) {
-      for (const s of subs) {
-        const ctx = { rubro: rubroNombre, subrubro: getSubrubroName(s) };
-        walkSub(s, ctx);
-      }
-    }
-  };
-
-  for (const r of arrRoot) walkRubro(r);
-  return out;
-}
+/**
+ * Trae el menú extendido y lo convierte a un array plano de artículos
+ * con SWAP: categoría app = subrubro Maxi, subrubro app = rubro Maxi.
+ */
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
@@ -175,28 +89,19 @@ async function fetchMaxiArticles({ token, from, to }) {
   const j = await res.json().catch(() => ({}));
   if (j?.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
 
-  // Normalizamos la raíz del payload
-  const content =
-    Array.isArray(j?.content) ? j.content :
-      Array.isArray(j?.menu?.content) ? j.menu.content :
-        Array.isArray(j?.data?.content) ? j.data.content :
-          Array.isArray(j) ? j :
-            [];
+  // Árbol crudo tal como viene de Maxi (lo cacheamos)
+  const raw = j?.content ?? [];
 
-  const out = [];
+  // Aplanado para upsert
+  const items = [];
   const seen = new Set();
 
-  // Heurística: ¿esto parece un artículo?
   const isArticle = (o = {}) => {
-    if (!o || typeof o !== 'object') return false;
-    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo']
-      .some(k => k in o);
-    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe']
-      .some(k => k in o);
+    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
+    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
     return hasId && hasInfo;
   };
 
-  // Empuja un artículo con SWAP (subrubro Maxi → categoria app ; rubro Maxi → subrubro app)
   const pushArt = (o, ctx) => {
     const id = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
     if (!Number.isFinite(id) || seen.has(id)) return;
@@ -204,27 +109,22 @@ async function fetchMaxiArticles({ token, from, to }) {
 
     const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
     const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
-    const costo = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
+    const costo  = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
 
-    // SWAP: en el contexto guardamos rubro en ctx.categoria y subrubro en ctx.subrubro
-    //       para la app: categoria = subrubro Maxi ; subrubro = rubro Maxi
-    const rubroMaxi = ctx.categoria ?? o.categoria ?? o.rubro ?? null;
-    const subrubroMaxi = ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null;
+    // SWAP: categoría app = subrubro Maxi ; subrubro app = rubro Maxi
+    const categoriaApp = (ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null) || 'Sin subrubro';
+    const subrubroApp  = (ctx.categoria ?? o.categoria ?? o.rubro ?? null)  || 'Sin categoría';
 
-    out.push({
-      id,
-      nombre,
-      categoria: subrubroMaxi ? String(subrubroMaxi).trim() : 'Sin subrubro',
-      subrubro: rubroMaxi ? String(rubroMaxi).trim() : 'Sin categoría',
-      precio,
-      costo,
+    items.push({
+      id, nombre, precio, costo,
+      categoria: categoriaApp,
+      subrubro:  subrubroApp,
       raw: o,
     });
   };
 
-  // De un nodo cualquiera, intentamos extraer nombres de rubro/subrubro para el contexto
+  // Deriva contexto rubro/subrubro desde cualquier nodo
   const deriveCtx = (node, ctx) => {
-    // Lo más común en Maxi:
     const rubroNombre =
       node?.nombreRubro ??
       node?.rubroNombre ??
@@ -241,38 +141,32 @@ async function fetchMaxiArticles({ token, from, to }) {
       ctx.subrubro;
 
     return {
-      categoria: rubroNombre ?? ctx.categoria ?? null,    // rubro Maxi
-      subrubro: subrubroNombre ?? ctx.subrubro ?? null,  // subrubro Maxi
+      categoria: rubroNombre ?? ctx.categoria ?? null,   // rubro Maxi  → subrubro app
+      subrubro:  subrubroNombre ?? ctx.subrubro ?? null, // subrubro Maxi → categoría app
     };
   };
 
-  // Caminata recursiva: pasa el contexto y encuentra artículos en cualquier nivel
   const walk = (node, ctx = { categoria: null, subrubro: null }) => {
     if (node == null) return;
-    if (Array.isArray(node)) {
-      for (const n of node) walk(n, ctx);
-      return;
-    }
+    if (Array.isArray(node)) { for (const n of node) walk(n, ctx); return; }
     if (typeof node !== 'object') return;
 
     const next = deriveCtx(node, ctx);
 
-    // Si el nodo ya es un artículo, lo tomamos con el contexto actual
     if (isArticle(node)) pushArt(node, next);
 
-    // Recorremos valores hijos (soporta r.subrubros, r.articulos y cualquier estructura anidada)
     for (const v of Object.values(node)) {
-      if (v && (Array.isArray(v) || typeof v === 'object')) {
-        walk(v, next);
-      }
+      if (v && (Array.isArray(v) || typeof v === 'object')) walk(v, next);
     }
   };
 
-  walk(content);
-  return out;
+  // Caminata sobre el árbol crudo
+  walk(raw);
+
+  return { items, raw };
 }
 
-// -------------------- Upsert en public.maxi_articles --------------------
+/* ========== Upsert en public.maxi_articles (chunked) ========== */
 async function upsertArticles({ client, businessId, items }) {
   if (!items.length) return 0;
   const CHUNK = 500;
@@ -291,9 +185,9 @@ async function upsertArticles({ client, businessId, items }) {
 
       const nombre = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
       const categoria = String(it.categoria ?? '').trim() || 'Sin categoría';
-      const subrubro = String(it.subrubro ?? '').trim() || 'Sin subrubro';
-      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
+      const subrubro  = String(it.subrubro  ?? '').trim() || 'Sin subrubro';
+      const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo     = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
       params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it.raw ?? it._raw ?? it));
@@ -322,7 +216,7 @@ async function upsertArticles({ client, businessId, items }) {
   return total;
 }
 
-// -------------------- Handlers --------------------
+/* ============================ Handlers ============================ */
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
   const businessId = req.businessId;
@@ -345,10 +239,11 @@ exports.syncNow = async (req, res) => {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     if (scope === 'articles' || scope === 'all') {
-      const items = await fetchMaxiArticles({ token, from: f, to: t });
+      // 1) Trae artículos (plano) + árbol crudo
+      const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
 
-      // cache payload
-      const rawStr = JSON.stringify(rawItems ?? []);
+      // 2) Cachea el árbol crudo con hash
+      const rawStr = JSON.stringify(raw ?? []);
       const hash = simpleHash(rawStr);
       await pool.query(`
         INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
@@ -358,9 +253,10 @@ exports.syncNow = async (req, res) => {
 
       await client.query('BEGIN');
 
+      // 3) Upsert de artículos (ya SWAPeados)
       const upserted = await upsertArticles({ client, businessId, items });
 
-      // Ajuste desde cache (SWAP subrubro→categoria, rubro→subrubro)
+      // 4) Ajuste desde cache (lee último payload y aplica SWAP contra maxi_articles)
       const { rows: mapUpd } = await client.query(`
         WITH raw AS (
           SELECT payload
@@ -390,8 +286,8 @@ exports.syncNow = async (req, res) => {
           FROM rubros
         ),
         arts AS (
-          SELECT (s->>'nombre')::text AS categoria,     -- subrubro Maxi
-                 rubro_nombre         AS subrubro,      -- rubro Maxi
+          SELECT (s->>'nombre')::text AS categoria,     -- subrubro Maxi  → categoría app
+                 rubro_nombre         AS subrubro,      -- rubro Maxi     → subrubro app
                  jsonb_array_elements(COALESCE(s->'articulos','[]'::jsonb)) AS a
           FROM subs
         ),
@@ -413,30 +309,29 @@ exports.syncNow = async (req, res) => {
         )
         SELECT COUNT(*)::int AS updated_count FROM updated;
       `, [businessId]);
-
       const mappedFromCache = Number(mapUpd?.[0]?.updated_count || 0);
 
-      // REFRESH del map (usa articulo_id y ON CONFLICT con (business_id, articulo_id))
+      // 5) Refresca tabla de mapeo (ON CONFLICT (business_id, articulo_id))
       const { rowCount: mapUpserts } = await client.query(`
-  WITH src AS (
-    SELECT business_id, articulo_id,
-           NULLIF(btrim(categoria),'') AS categoria,  -- subrubro Maxi → categoría app
-           NULLIF(btrim(subrubro),'')  AS subrubro    -- rubro Maxi     → subrubro app
-    FROM public.maxi_articles
-    WHERE business_id = $1
-  )
-  INSERT INTO public.maxi_article_map (business_id, articulo_id, categoria, subrubro, updated_at)
-  SELECT business_id,
-         articulo_id,
-         COALESCE(categoria, '[PENDIENTE]'),
-         COALESCE(subrubro,  '[PENDIENTE]'),
-         NOW()
-  FROM src
-  ON CONFLICT (business_id, articulo_id) DO UPDATE
-  SET categoria  = EXCLUDED.categoria,
-      subrubro   = EXCLUDED.subrubro,
-      updated_at = NOW()
-`, [businessId]);
+        WITH src AS (
+          SELECT business_id, articulo_id,
+                 NULLIF(btrim(categoria),'') AS categoria,
+                 NULLIF(btrim(subrubro),'')  AS subrubro
+          FROM public.maxi_articles
+          WHERE business_id = $1
+        )
+        INSERT INTO public.maxi_article_map (business_id, articulo_id, categoria, subrubro, updated_at)
+        SELECT business_id,
+               articulo_id,
+               COALESCE(categoria, '[PENDIENTE]'),
+               COALESCE(subrubro,  '[PENDIENTE]'),
+               NOW()
+        FROM src
+        ON CONFLICT (business_id, articulo_id) DO UPDATE
+        SET categoria  = EXCLUDED.categoria,
+            subrubro   = EXCLUDED.subrubro,
+            updated_at = NOW()
+      `, [businessId]);
 
       await client.query('COMMIT');
 
@@ -450,9 +345,10 @@ exports.syncNow = async (req, res) => {
       });
     }
 
+    // otros alcances (ventas, etc.)
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { }
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('syncNow error:', e?.stack || e);
     return res.status(500).json({ error: 'internal', detail: e?.message || String(e) });
   } finally {
@@ -469,7 +365,7 @@ exports.salesSummaryFromDB = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to = ymd(parseDate(req.query.to, yesterday));
+  const to   = ymd(parseDate(req.query.to, yesterday));
 
   try {
     const { rows: items } = await pool.query(
@@ -505,7 +401,7 @@ exports.salesSeriesFromDB = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to = ymd(parseDate(req.query.to, yesterday));
+  const to   = ymd(parseDate(req.query.to, yesterday));
   groupBy = ['day', 'week', 'month'].includes(String(groupBy)) ? groupBy : 'day';
 
   if (groupBy === 'day') {
@@ -624,7 +520,7 @@ exports.maxiArticlesProxy = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to = ymd(parseDate(req.query.to, yesterday));
+  const to   = ymd(parseDate(req.query.to, yesterday));
 
   try {
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
@@ -633,7 +529,7 @@ exports.maxiArticlesProxy = async (req, res) => {
     if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
-    const items = await fetchMaxiArticles({ token, from, to });
+    const { items } = await fetchMaxiArticles({ token, from, to });
     res.json({ from, to, items });
   } catch (e) {
     console.error('maxiArticlesProxy error:', e);
