@@ -78,10 +78,11 @@ async function maxiLogin({ email, password, codcli }) {
  * Trae el menú extendido y lo convierte a un array plano de artículos
  * con SWAP: categoría app = subrubro Maxi, subrubro app = rubro Maxi.
  */
+// === MAXI: artículos con SWAP (subrubro Maxi -> categoria app ; rubro Maxi -> subrubro app)
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
-  if (to) u.searchParams.set('fechaFin', to);
+  if (to)   u.searchParams.set('fechaFin',   to);
 
   const res = await fetchWithRetry(u.toString(), {
     headers: { Authorization: `Bearer ${token}` }
@@ -89,81 +90,106 @@ async function fetchMaxiArticles({ token, from, to }) {
   const j = await res.json().catch(() => ({}));
   if (j?.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
 
-  // Árbol crudo tal como viene de Maxi (lo cacheamos)
-  const raw = j?.content ?? [];
+  // El árbol real suele venir en content = [ { nombre, subrubros: [ { nombre, articulos: [...] } ] } ... ]
+  const root = Array.isArray(j?.content)
+    ? j.content
+    : Array.isArray(j?.menu?.content)
+      ? j.menu.content
+      : Array.isArray(j?.data?.content)
+        ? j.data.content
+        : [];
 
-  // Aplanado para upsert
   const items = [];
   const seen = new Set();
 
   const isArticle = (o = {}) => {
-    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
-    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
+    const hasId   = ['id','idArticulo','codart','codigo','codigoArticulo'].some(k => k in o);
+    const hasInfo = ['descripcion','descripcionl','nombre','precio','precioVenta','importe'].some(k => k in o);
     return hasId && hasInfo;
   };
 
-  const pushArt = (o, ctx) => {
-    const id = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
+  const num = (v, d = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  };
+
+  const getName = (o) =>
+    String(o?.descripcion ?? o?.descripcionl ?? o?.nombre ?? '').trim();
+
+  // PUSH con SWAP: categoría app = subrubro Maxi ; subrubro app = rubro Maxi
+  const pushArt = (o, { rubroNombre, subrubroNombre }) => {
+    const id = num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
     if (!Number.isFinite(id) || seen.has(id)) return;
     seen.add(id);
 
-    const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
-    const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
-    const costo  = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
-
-    // SWAP: categoría app = subrubro Maxi ; subrubro app = rubro Maxi
-    const categoriaApp = (ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null) || 'Sin subrubro';
-    const subrubroApp  = (ctx.categoria ?? o.categoria ?? o.rubro ?? null)  || 'Sin categoría';
+    const nombre = getName(o);
+    const precio = num(o.precio ?? o.precioVenta ?? o.importe, 0);
+    const costo  = num(o.costo ?? o.costoPromedio, 0);
 
     items.push({
-      id, nombre, precio, costo,
-      categoria: categoriaApp,
-      subrubro:  subrubroApp,
+      id,
+      nombre,
+      // SWAP explícito:
+      categoria: subrubroNombre || 'Sin subrubro',
+      subrubro:  rubroNombre    || 'Sin categoría',
+      precio,
+      costo,
       raw: o,
     });
   };
 
-  // Deriva contexto rubro/subrubro desde cualquier nodo
-  const deriveCtx = (node, ctx) => {
+  // Walker — rubro -> subrubros -> articulos
+  for (const rubro of root) {
     const rubroNombre =
-      node?.nombreRubro ??
-      node?.rubroNombre ??
-      node?.rubro?.descripcion ??
-      node?.rubro ??
-      node?.raw?.categoria ??
-      ctx.categoria;
+      String(
+        rubro?.nombre ??
+        rubro?.rubroNombre ??
+        rubro?.rubro?.descripcion ??
+        rubro?.rubro ??
+        ''
+      ).trim() || 'Sin subrubro'; // (recuerda: rubro Maxi luego lo usamos como "subrubro app")
 
-    const subrubroNombre =
-      node?.nombreSubRubro ??
-      node?.subRubro?.descripcion ??
-      node?.subrubro ??
-      node?.raw?.subrubro ??
-      ctx.subrubro;
-
-    return {
-      categoria: rubroNombre ?? ctx.categoria ?? null,   // rubro Maxi  → subrubro app
-      subrubro:  subrubroNombre ?? ctx.subrubro ?? null, // subrubro Maxi → categoría app
-    };
-  };
-
-  const walk = (node, ctx = { categoria: null, subrubro: null }) => {
-    if (node == null) return;
-    if (Array.isArray(node)) { for (const n of node) walk(n, ctx); return; }
-    if (typeof node !== 'object') return;
-
-    const next = deriveCtx(node, ctx);
-
-    if (isArticle(node)) pushArt(node, next);
-
-    for (const v of Object.values(node)) {
-      if (v && (Array.isArray(v) || typeof v === 'object')) walk(v, next);
+    // Artículos colgados directo del rubro (poco común, pero lo soportamos)
+    const artsRubro = Array.isArray(rubro?.articulos) ? rubro.articulos : [];
+    for (const a of artsRubro) if (isArticle(a)) {
+      // Si no hay subrubro, queda “Sin categoría” (porque en la app, categoría es subrubro Maxi)
+      pushArt(a, { rubroNombre, subrubroNombre: 'Sin categoría' });
     }
-  };
 
-  // Caminata sobre el árbol crudo
-  walk(raw);
+    // Subrubros
+    const subrubros = Array.isArray(rubro?.subrubros) ? rubro.subrubros : [];
+    for (const s of subrubros) {
+      const subrubroNombre =
+        String(
+          s?.nombre ??
+          s?.nombreSubRubro ??
+          s?.subRubro?.descripcion ??
+          s?.subrubro ??
+          ''
+        ).trim() || 'Sin subrubro';
 
-  return { items, raw };
+      // Artículos del subrubro
+      const arts = Array.isArray(s?.articulos) ? s.articulos : [];
+      for (const a of arts) if (isArticle(a)) {
+        pushArt(a, { rubroNombre, subrubroNombre });
+      }
+
+      // (Opcional) Sub-subrubros si existieran
+      const subs2 = Array.isArray(s?.subrubros) ? s.subrubros : [];
+      for (const s2 of subs2) {
+        const subSubNombre =
+          String(s2?.nombre ?? s2?.nombreSubRubro ?? s2?.subRubro?.descripcion ?? s2?.subrubro ?? '').trim()
+          || subrubroNombre;
+
+        const arts2 = Array.isArray(s2?.articulos) ? s2.articulos : [];
+        for (const a of arts2) if (isArticle(a)) {
+          pushArt(a, { rubroNombre, subrubroNombre: subSubNombre });
+        }
+      }
+    }
+  }
+
+  return { items, raw: root };
 }
 
 /* ========== Upsert en public.maxi_articles (chunked) ========== */
@@ -229,20 +255,26 @@ exports.syncNow = async (req, res) => {
   const f = ymd(parseDate(from, startOfMonth));
   const t = ymd(parseDate(to, yesterday));
 
-  const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
+  // Credenciales Maxi del negocio
+  const { rows: bizRows } = await pool.query(
+    `SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`,
+    [businessId]
+  );
   const mx = (bizRows[0]?.props || {}).maxi || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
-  if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+  if (!(mx.email && password && mx.codcli)) {
+    return res.status(400).json({ error: 'maxi_not_configured' });
+  }
 
   const client = await pool.connect();
   try {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     if (scope === 'articles' || scope === 'all') {
-      // 1) Trae artículos (plano) + árbol crudo
+      // 1) Traer artículos (plano SWAPeado) + árbol crudo
       const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
 
-      // 2) Cachea el árbol crudo con hash
+      // 2) Cachear árbol crudo con hash (para auditoría/depuración)
       const rawStr = JSON.stringify(raw ?? []);
       const hash = simpleHash(rawStr);
       await pool.query(`
@@ -253,66 +285,11 @@ exports.syncNow = async (req, res) => {
 
       await client.query('BEGIN');
 
-      // 3) Upsert de artículos (ya SWAPeados)
+      // 3) Upsert de artículos (ya con categoría=subrubro Maxi y subrubro=rubro Maxi)
       const upserted = await upsertArticles({ client, businessId, items });
 
-      // 4) Ajuste desde cache (lee último payload y aplica SWAP contra maxi_articles)
-      const { rows: mapUpd } = await client.query(`
-        WITH raw AS (
-          SELECT payload
-          FROM public.maxi_menu_cache
-          WHERE business_id = $1
-          ORDER BY updated_at DESC
-          LIMIT 1
-        ),
-        content AS (
-          SELECT CASE
-            WHEN jsonb_typeof(payload) = 'array' THEN payload
-            ELSE COALESCE(
-              payload->'content',
-              payload->'menu'->'content',
-              payload->'data'->'content',
-              '[]'::jsonb
-            )
-          END AS arr
-          FROM raw
-        ),
-        rubros AS (
-          SELECT jsonb_array_elements(arr) AS r FROM content
-        ),
-        subs AS (
-          SELECT (r->'raw'->>'nombre')::text AS rubro_nombre,
-                 jsonb_array_elements(COALESCE(r->'raw'->'subrubros','[]'::jsonb)) AS s
-          FROM rubros
-        ),
-        arts AS (
-          SELECT (s->>'nombre')::text AS categoria,     -- subrubro Maxi  → categoría app
-                 rubro_nombre         AS subrubro,      -- rubro Maxi     → subrubro app
-                 jsonb_array_elements(COALESCE(s->'articulos','[]'::jsonb)) AS a
-          FROM subs
-        ),
-        map AS (
-          SELECT (a->>'id')::int AS articulo_id,
-                 NULLIF(btrim(categoria), '') AS categoria,
-                 NULLIF(btrim(subrubro),  '') AS subrubro
-          FROM arts
-        ),
-        updated AS (
-          UPDATE public.maxi_articles m
-             SET categoria  = COALESCE(map.categoria, m.categoria),
-                 subrubro   = COALESCE(map.subrubro,  m.subrubro),
-                 updated_at = NOW()
-            FROM map
-           WHERE m.business_id = $1
-             AND m.articulo_id = map.articulo_id
-           RETURNING 1
-        )
-        SELECT COUNT(*)::int AS updated_count FROM updated;
-      `, [businessId]);
-      const mappedFromCache = Number(mapUpd?.[0]?.updated_count || 0);
-
-      // 5) Refresca tabla de mapeo (ON CONFLICT (business_id, articulo_id))
-      const { rowCount: mapUpserts } = await client.query(`
+      // 4) Refrescar tabla de mapeo directo desde maxi_articles
+      const { rowCount: mapped } = await client.query(`
         WITH src AS (
           SELECT business_id, articulo_id,
                  NULLIF(btrim(categoria),'') AS categoria,
@@ -339,13 +316,12 @@ exports.syncNow = async (req, res) => {
         ok: true,
         scope: 'articles',
         upserted,
-        mapped_from_cache: mappedFromCache,
-        mapped: mapUpserts,
+        mapped,
         cacheHash: hash
       });
     }
 
-    // otros alcances (ventas, etc.)
+    // Otros alcances (ventas, etc.)
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
