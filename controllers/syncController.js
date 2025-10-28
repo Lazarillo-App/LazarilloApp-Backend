@@ -92,39 +92,30 @@ function extractArticlesFromMaxiPayload(payloadAny) {
     return Number.isFinite(n) ? n : d;
   };
   const getId = (o = {}) => num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
-  const isArticle = (o = {}) => {
-    if (!o || typeof o !== 'object') return false;
+  function isArticle(o = {}) {
     const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
-    if (!hasId) return false;
-    const hasNameOrPrice = ['nombre', 'descripcion', 'descripcionl', 'precio', 'precioVenta', 'importe'].some(k => k in o);
-    const nodeTypeArticulo = str(o.node_type).toUpperCase() === 'ARTICULO';
-    return hasId && (hasNameOrPrice || nodeTypeArticulo);
-  };
+    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
+    return hasId && hasInfo;
+  }
 
-  // toma nombre de rubro/subrubro desde node o desde node.raw
-  const getRubroName = (node) =>
-    str(node?.nombre) || str(node?.raw?.nombre) ||
-    str(node?.nombreRubro) || str(node?.rubroNombre) || str(node?.rubro?.descripcion) ||
-    'Sin subrubro'; // (rubro Maxi → subrubro app)
-
-  const getSubrubroName = (node) =>
-    str(node?.nombre) || str(node?.raw?.nombre) ||
-    str(node?.nombreSubRubro) || str(node?.subRubro?.descripcion) || str(node?.subrubro) ||
-    'Sin categoría'; // (subrubro Maxi → categoría app)
-
-  // push con SWAP (subrubro Maxi → categoria app ; rubro Maxi → subrubro app)
-  const pushArt = (a, ctx) => {
-    const id = getId(a);
+  const pushArt = (o, ctx) => {
+    const id = Number(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo);
     if (!Number.isFinite(id) || seen.has(id)) return;
     seen.add(id);
+
+    const nombre = String(o.descripcion ?? o.descripcionl ?? o.nombre ?? '').trim();
+    const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
+    const costo = Number(o.costo ?? o.costoPromedio ?? 0) || 0;
+
+    // SWAP ➜ categoría app = subrubro Maxi ; subrubro app = rubro Maxi
+    const categoriaApp = (ctx.subrubro ?? o.subrubro ?? o.subRubro ?? null) || 'Sin subrubro';
+    const subrubroApp = (ctx.categoria ?? o.categoria ?? o.rubro ?? null) || 'Sin categoría';
+
     out.push({
-      id,
-      nombre: str(a.nombre ?? a.descripcion ?? a.descripcionl),
-      precio: num(a.precio ?? a.precioVenta ?? a.importe, 0),
-      costo: num(a.costo ?? a.costoPromedio, 0),
-      categoria: str(a?.raw?.subrubro) || str(ctx.subrubro) || 'Sin categoría', // SUB_RUBRO Maxi
-      subrubro: str(a?.raw?.categoria) || str(ctx.rubro) || 'Sin subrubro',  // RUBRO Maxi
-      raw: a,
+      id, nombre, precio, costo,
+      categoria: categoriaApp,
+      subrubro: subrubroApp,
+      raw: o,
     });
   };
 
@@ -354,8 +345,7 @@ exports.syncNow = async (req, res) => {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     if (scope === 'articles' || scope === 'all') {
-      const rawItems = await fetchMaxiArticles({ token, from: f, to: t });
-      const items = normalizeArticles(rawItems);
+      const items = await fetchMaxiArticles({ token, from: f, to: t });
 
       // cache payload
       const rawStr = JSON.stringify(rawItems ?? []);
