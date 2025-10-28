@@ -330,6 +330,7 @@ async function upsertArticles({ client, businessId, items }) {
 
   return total;
 }
+
 // -------------------- Handlers --------------------
 exports.syncNow = async (req, res) => {
   const uid = req.user?.id;
@@ -337,14 +338,12 @@ exports.syncNow = async (req, res) => {
   const { scope = 'articles', from, to } = req.body || {};
   if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
 
-  // Fechas por defecto (half-open [from, to))
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   const f = ymd(parseDate(from, startOfMonth));
   const t = ymd(parseDate(to, yesterday));
 
-  // Credenciales Maxi
   const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
   const mx = (bizRows[0]?.props || {}).maxi || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || '');
@@ -356,116 +355,98 @@ exports.syncNow = async (req, res) => {
 
     if (scope === 'articles' || scope === 'all') {
       const rawItems = await fetchMaxiArticles({ token, from: f, to: t });
-      const items = normalizeArticles(rawItems);
+      const items    = normalizeArticles(rawItems);
 
-      // Cachear payload por hash
+      // cache payload
       const rawStr = JSON.stringify(rawItems ?? []);
-      const hash = simpleHash(rawStr);
-
-      await client.query('BEGIN');
-
-      // (Opcional) cachear dentro de la misma tx
-      await client.query(`
+      const hash   = simpleHash(rawStr);
+      await pool.query(`
         INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
         VALUES ($1, $2::jsonb, $3, NOW())
         ON CONFLICT (business_id, hash) DO UPDATE SET updated_at = NOW()
       `, [businessId, rawStr, hash]);
 
-      // Upsert de artículos
+      await client.query('BEGIN');
+
       const upserted = await upsertArticles({ client, businessId, items });
 
-      // Ajuste de categorización desde el cache más reciente (robusto + SWAP)
-      // - categoría app   = SUB_RUBRO Maxi
-      // - subrubro app    = RUBRO Maxi
+      // Ajuste desde cache (SWAP subrubro→categoria, rubro→subrubro)
       const { rows: mapUpd } = await client.query(`
-  WITH raw AS (
-    SELECT payload
-    FROM public.maxi_menu_cache
-    WHERE business_id = $1
-    ORDER BY updated_at DESC
-    LIMIT 1
-  ),
-  content AS (
-    SELECT CASE
-      WHEN jsonb_typeof(payload) = 'array' THEN payload
-      ELSE COALESCE(
-        payload->'content',
-        payload->'menu'->'content',
-        payload->'data'->'content',
-        '[]'::jsonb
-      )
-    END AS arr
-    FROM raw
-  ),
-  rubros AS (
-    SELECT jsonb_array_elements(arr) AS r
-    FROM content
-  ),
-  subs AS (
-    SELECT
-      (r->'raw'->>'nombre')::text AS rubro_nombre,
-      jsonb_array_elements(COALESCE(r->'raw'->'subrubros','[]'::jsonb)) AS s
-    FROM rubros
-  ),
-  arts AS (
-    -- Caso 1: artículos dentro de subrubros
-    SELECT
-      (s->>'nombre')::text AS categoria,   -- SUB_RUBRO Maxi → categoría app
-      rubro_nombre         AS subrubro,    -- RUBRO Maxi     → subrubro app
-      jsonb_array_elements(COALESCE(s->'articulos','[]'::jsonb)) AS a
-    FROM subs
-
-    UNION ALL
-
-    -- Caso 2: artículos colgados directo del rubro (sin subrubros)
-    SELECT
-      '[SIN SUBRUBRO]'::text AS categoria,
-      (r->'raw'->>'nombre')::text AS subrubro,
-      jsonb_array_elements(COALESCE(r->'raw'->'articulos','[]'::jsonb)) AS a
-    FROM rubros r
-  ),
-  map AS (
-    SELECT
-      (a->>'id')::int                AS articulo_id,
-      NULLIF(btrim(categoria), '')   AS categoria,
-      NULLIF(btrim(subrubro),  '')   AS subrubro
-    FROM arts
-  ),
-  updated AS (
-    UPDATE public.maxi_articles m
-       SET categoria  = COALESCE(map.categoria, m.categoria),
-           subrubro   = COALESCE(map.subrubro,  m.subrubro),
-           updated_at = NOW()
-      FROM map
-     WHERE m.business_id = $1
-       AND m.articulo_id = map.articulo_id
-     RETURNING 1
-  )
-  SELECT COUNT(*)::int AS updated_count FROM updated;
-`, [businessId]);
+        WITH raw AS (
+          SELECT payload
+          FROM public.maxi_menu_cache
+          WHERE business_id = $1
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ),
+        content AS (
+          SELECT CASE
+            WHEN jsonb_typeof(payload) = 'array' THEN payload
+            ELSE COALESCE(
+              payload->'content',
+              payload->'menu'->'content',
+              payload->'data'->'content',
+              '[]'::jsonb
+            )
+          END AS arr
+          FROM raw
+        ),
+        rubros AS (
+          SELECT jsonb_array_elements(arr) AS r FROM content
+        ),
+        subs AS (
+          SELECT (r->'raw'->>'nombre')::text AS rubro_nombre,
+                 jsonb_array_elements(COALESCE(r->'raw'->'subrubros','[]'::jsonb)) AS s
+          FROM rubros
+        ),
+        arts AS (
+          SELECT (s->>'nombre')::text AS categoria,     -- subrubro Maxi
+                 rubro_nombre         AS subrubro,      -- rubro Maxi
+                 jsonb_array_elements(COALESCE(s->'articulos','[]'::jsonb)) AS a
+          FROM subs
+        ),
+        map AS (
+          SELECT (a->>'id')::int AS articulo_id,
+                 NULLIF(btrim(categoria), '') AS categoria,
+                 NULLIF(btrim(subrubro),  '') AS subrubro
+          FROM arts
+        ),
+        updated AS (
+          UPDATE public.maxi_articles m
+             SET categoria  = COALESCE(map.categoria, m.categoria),
+                 subrubro   = COALESCE(map.subrubro,  m.subrubro),
+                 updated_at = NOW()
+            FROM map
+           WHERE m.business_id = $1
+             AND m.articulo_id = map.articulo_id
+           RETURNING 1
+        )
+        SELECT COUNT(*)::int AS updated_count FROM updated;
+      `, [businessId]);
 
       const mappedFromCache = Number(mapUpd?.[0]?.updated_count || 0);
-      // Refrescar public.maxi_article_map desde maxi_articles (ya con SWAP aplicado)
+
+      // 🔧 REFRESH del map para el front (OJO: columna correcta es `articulo_id`)
       const { rowCount: mapUpserts } = await client.query(`
-  WITH src AS (
-    SELECT business_id, articulo_id,
-           NULLIF(btrim(categoria),'') AS categoria,  -- subrubro Maxi → categoría app
-           NULLIF(btrim(subrubro),'')  AS subrubro    -- rubro Maxi     → subrubro app
-    FROM public.maxi_articles
-    WHERE business_id = $1
-  )
-  INSERT INTO public.maxi_article_map (business_id, articulo_id, categoria, subrubro, updated_at)
-  SELECT
-    s.business_id, s.articulo_id,
-    COALESCE(s.categoria,  '[PENDIENTE]'),
-    COALESCE(s.subrubro,   '[PENDIENTE]'),
-    NOW()
-  FROM src s
-  ON CONFLICT (business_id, articulo_id) DO UPDATE
-  SET categoria  = EXCLUDED.categoria,
-      subrubro   = EXCLUDED.subrubro,
-      updated_at = NOW()
-`, [businessId]);
+        WITH src AS (
+          SELECT business_id, articulo_id,
+                 NULLIF(btrim(categoria),'') AS categoria,
+                 NULLIF(btrim(subrubro),'')  AS subrubro
+          FROM public.maxi_articles
+          WHERE business_id = $1
+        )
+        INSERT INTO public.maxi_article_map (business_id, articulo_id, categoria, subrubro, updated_at)
+        SELECT business_id,
+               articulo_id,
+               COALESCE(categoria, '[PENDIENTE]'),
+               COALESCE(subrubro,  '[PENDIENTE]'),
+               NOW()
+        FROM src
+        ON CONFLICT (business_id, articulo_id) DO UPDATE
+        SET categoria  = EXCLUDED.categoria,
+            subrubro   = EXCLUDED.subrubro,
+            updated_at = NOW()
+      `, [businessId]);
 
       await client.query('COMMIT');
 
@@ -477,18 +458,16 @@ exports.syncNow = async (req, res) => {
         mapped: mapUpserts,
         cacheHash: hash
       });
-
     }
 
-    // Otros alcances a futuro
     return res.json({ ok: true, scope, upserted: 0 });
- } catch (e) {
-  try { await client.query('ROLLBACK'); } catch {}
-  console.error('syncNow error:', {
-    msg: e.message, code: e.code, detail: e.detail, stack: e.stack
-  });
-  return res.status(500).json({ error: 'internal', detail: e.message });
-}
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error('syncNow error:', e?.stack || e);
+    return res.status(500).json({ error: 'internal', detail: e?.message || String(e) });
+  } finally {
+    client.release();
+  }
 };
 
 exports.salesSummaryFromDB = async (req, res) => {
