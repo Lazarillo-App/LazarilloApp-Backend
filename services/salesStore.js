@@ -153,10 +153,10 @@ async function upsertSalesBatch(businessId, rawFacturas) {
     let externalToId = new Map();
 
     if (sales.length) {
-      const bizArr   = sales.map(s => s.business_id);
-      const extArr   = sales.map(s => s.external_id);
-      const atArr    = sales.map(s => new Date(s.occurred_at));
-      const totArr   = sales.map(s => Number(s.total || 0));
+      const bizArr = sales.map(s => s.business_id);
+      const extArr = sales.map(s => s.external_id);
+      const atArr = sales.map(s => new Date(s.occurred_at));
+      const totArr = sales.map(s => Number(s.total || 0));
       const propsArr = sales.map(s => s.props || {});
 
       const qSales = `
@@ -181,14 +181,14 @@ async function upsertSalesBatch(businessId, rawFacturas) {
     if (items.length) {
       // mapear sale_id desde sale_external_id
       const saleIdArr = [];
-      const posArr    = [];
-      const artArr    = [];
-      const skuArr    = [];
-      const nameArr   = [];
-      const qtyArr    = [];
-      const unitArr   = [];
-      const lineTot   = [];
-      const propsArr  = [];
+      const posArr = [];
+      const artArr = [];
+      const skuArr = [];
+      const nameArr = [];
+      const qtyArr = [];
+      const unitArr = [];
+      const lineTot = [];
+      const propsArr = [];
 
       for (const it of items) {
         const saleId = externalToId.get(String(it.sale_external_id));
@@ -243,10 +243,10 @@ async function upsertSalesBatch(businessId, rawFacturas) {
       );
 
       if (rows.length) {
-        const bizArr  = rows.map(r => businessId);
-        const dayArr  = rows.map(r => r.day);
-        const totArr  = rows.map(r => r.total);
-        const txcArr  = rows.map(r => r.tx_count);
+        const bizArr = rows.map(r => businessId);
+        const dayArr = rows.map(r => r.day);
+        const totArr = rows.map(r => r.total);
+        const txcArr = rows.map(r => r.tx_count);
 
         await client.query(
           `
@@ -256,6 +256,48 @@ async function upsertSalesBatch(businessId, rawFacturas) {
           DO UPDATE SET total = EXCLUDED.total, tx_count = EXCLUDED.tx_count
           `,
           [bizArr, dayArr, totArr, txcArr]
+        );
+      }
+    }
+    // ---------- Recalcular sales_daily_items para días tocados ----------
+    if (touchedDays.length) {
+      const { rows: itemAgg } = await client.query(
+        `
+    SELECT
+      (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+      i.article_id                              AS articulo_id,
+      SUM(i.quantity)::numeric(14,3)            AS qty,
+      SUM(i.total)::numeric(14,2)               AS amount
+    FROM app_sales_items i
+    JOIN app_sales       s ON s.id = i.sale_id
+    WHERE s.business_id = $1
+      AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+      AND i.article_id IS NOT NULL
+    GROUP BY 1, 2
+    ORDER BY 1, 2
+    `,
+        [businessId, touchedDays]
+      );
+
+      if (itemAgg.length) {
+        const bizArr = itemAgg.map(() => businessId);
+        const artArr = itemAgg.map(r => Number(r.articulo_id));
+        const dayArr = itemAgg.map(r => r.day);
+        const qtyArr = itemAgg.map(r => Number(r.qty || 0));
+        const amtArr = itemAgg.map(r => Number(r.amount || 0));
+
+        await client.query(
+          `
+      INSERT INTO sales_daily_items (business_id, articulo_id, "date", qty, amount)
+      SELECT * FROM UNNEST(
+        $1::int[], $2::int[], $3::date[], $4::numeric[], $5::numeric[]
+      )
+      ON CONFLICT (business_id, articulo_id, "date")
+      DO UPDATE SET
+        qty    = EXCLUDED.qty,
+        amount = EXCLUDED.amount
+      `,
+          [bizArr, artArr, dayArr, qtyArr, amtArr]
         );
       }
     }
