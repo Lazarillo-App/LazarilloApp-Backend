@@ -6,10 +6,9 @@ const {
 } = require('../services/maxiSalesService');
 const { upsertSalesBatch } = require('../services/salesStore');
 const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
-
 // ───────── helpers fecha (UTC @ 00:00) ─────────
 function pad2(n) { return String(n).padStart(2, '0'); }
-function ymd(d) { return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth(),1)}-${pad2(d.getUTCDate())}`; }
+function ymd(d) { return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`; }
 function at00UTC(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
 function clampToYesterday(dateUTC00) {
   const today = at00UTC(new Date());
@@ -20,19 +19,37 @@ function parseYMD(s) {
   if (!s) return null;
   // Permite YYYY-MM-DD o fechas parseables por Date
   const d = s.length === 10 ? new Date(`${s}T00:00:00Z`) : new Date(s);
-  return isNaN(d) ? null : at00UTC(d);
+  return isNaN(+d) ? null : at00UTC(d);
 }
 
 // Ventanea [from..to] en bloques inclusivos de N días (p.ej. 7)
 function buildWindows(from, to, size = 7) {
+  const coerceUTC00 = (v) => {
+    if (v == null) return null;
+    if (v instanceof Date) return at00UTC(v);
+    if (typeof v === 'string') {
+      return v.length === 10 ? new Date(`${v}T00:00:00Z`) : at00UTC(new Date(v));
+    }
+    if (typeof v === 'number') return at00UTC(new Date(v));
+    if (v && typeof v === 'object' && v.day) return coerceUTC00(v.day);
+    const d = new Date(v);
+    return isNaN(+d) ? null : at00UTC(d);
+  };
+
+  const A = coerceUTC00(from);
+  const T = coerceUTC00(to);
+  if (!(A instanceof Date) || isNaN(+A) || !(T instanceof Date) || isNaN(+T)) {
+    throw new TypeError(`buildWindows: invalid from/to (from=${String(from)} to=${String(to)})`);
+  }
+  if (A > T) return [];
+
   const out = [];
-  let a = at00UTC(from);
-  const T = at00UTC(to);
+  let a = new Date(A.getTime()); // clonar
   while (a <= T) {
-    let b = new Date(a.getTime()(size - 1) * 86400000);
-    if (b > T) b = T;
-    out.push([a, b]);
-    a = new Date(b.getTime(),  86400000); // siguiente día del final
+    const endMs = a.getTime() + (size - 1) * 86400000; // inclusive
+    const b = new Date(Math.min(endMs, T.getTime()));
+    out.push([new Date(a.getTime()), b]); // clonar 'a' por seguridad
+    a = new Date(b.getTime() + 86400000); // siguiente día del final
   }
   return out;
 }
@@ -133,7 +150,7 @@ async function syncSalesForBusiness(
     return await ensureInitialBackfillOnce({ businessId: business.id, req });
   }
 
-  // 2) auto incremental (desde último día  1 hasta AYER)
+  // 2) auto incremental (desde último día + 1 hasta AYER)
   if (!from && !to) {
     return await runDailyAuto({ businessId: business.id, req });
   }
