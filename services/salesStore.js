@@ -143,61 +143,66 @@ async function upsertSalesBatch(businessId, rawFacturas) {
   try {
     await client.query('BEGIN');
 
+    // 1) Normalizar payload a { sales, items, touchedDays }
     const { sales, items, touchedDays } = normalizeInvoices(businessId, rawFacturas);
+
     if (!sales.length && !items.length) {
       await client.query('COMMIT');
       return { upserted: 0, updated: 0, minDay: null, maxDay: null };
     }
 
-    // ---------- UPSERT app_sales (batch con UNNEST) ----------
+    // 2) UPSERT app_sales — idempotente por (business_id, external_id)
     let externalToId = new Map();
 
     if (sales.length) {
-      const bizArr = sales.map(s => s.business_id);
-      const extArr = sales.map(s => s.external_id);
-      const atArr = sales.map(s => new Date(s.occurred_at));
-      const totArr = sales.map(s => Number(s.total || 0));
-      const propsArr = sales.map(s => s.props || {});
+      const bizArr   = sales.map(s => Number(s.business_id));
+      const extArr   = sales.map(s => String(s.external_id));
+      const atArr    = sales.map(s => new Date(s.occurred_at));       // timestamptz[]
+      const totArr   = sales.map(s => Number(s.total || 0));          // numeric[]
+      const propsArr = sales.map(s => s.props || {});                 // jsonb[]
 
       const qSales = `
-      WITH up AS (
-        INSERT INTO app_sales (business_id, external_id, occurred_at, total, props)
-        SELECT * FROM UNNEST(
-          $1::int[], $2::text[], $3::timestamptz[], $4::numeric[], $5::jsonb[]
+        WITH up AS (
+          INSERT INTO app_sales (business_id, external_id, occurred_at, total, props)
+          SELECT * FROM UNNEST(
+            $1::bigint[],  -- business_id
+            $2::text[],    -- external_id
+            $3::timestamptz[], -- occurred_at
+            $4::numeric[], -- total
+            $5::jsonb[]    -- props
+          )
+          ON CONFLICT (business_id, external_id)
+          DO UPDATE SET occurred_at = EXCLUDED.occurred_at,
+                        total       = EXCLUDED.total,
+                        props       = EXCLUDED.props
+          RETURNING id, external_id
         )
-        ON CONFLICT (business_id, external_id)
-        DO UPDATE SET occurred_at = EXCLUDED.occurred_at,
-                      total       = EXCLUDED.total,
-                      props       = EXCLUDED.props
-        RETURNING id, external_id
-      )
-      SELECT id, external_id FROM up
+        SELECT id, external_id FROM up
       `;
       const r = await client.query(qSales, [bizArr, extArr, atArr, totArr, propsArr]);
-      externalToId = new Map(r.rows.map(r => [String(r.external_id), Number(r.id)]));
+      externalToId = new Map(r.rows.map(x => [String(x.external_id), Number(x.id)]));
     }
 
-    // ---------- UPSERT app_sales_items (batch) ----------
+    // 3) UPSERT app_sales_items — idempotente por (sale_id, line_pos)
     if (items.length) {
-      // mapear sale_id desde sale_external_id
       const saleIdArr = [];
-      const posArr = [];
-      const artArr = [];
-      const skuArr = [];
-      const nameArr = [];
-      const qtyArr = [];
-      const unitArr = [];
-      const lineTot = [];
-      const propsArr = [];
+      const posArr    = [];
+      const artArr    = [];
+      const skuArr    = [];
+      const nameArr   = [];
+      const qtyArr    = [];
+      const unitArr   = [];
+      const lineTot   = [];
+      const propsArr  = [];
 
       for (const it of items) {
         const saleId = externalToId.get(String(it.sale_external_id));
-        if (!saleId) continue; // si no existe, saltamos
-        saleIdArr.push(saleId);
-        posArr.push(it.line_pos);
-        artArr.push(it.article_id);
-        skuArr.push(it.sku || null);
-        nameArr.push(it.name || null);
+        if (!saleId) continue; // si no insertó/actualizó el comprobante, saltamos la línea
+        saleIdArr.push(Number(saleId));
+        posArr.push(Number(it.line_pos));
+        artArr.push(it.article_id != null ? Number(it.article_id) : null); // puede ser NULL
+        skuArr.push(it.sku != null ? String(it.sku) : null);
+        nameArr.push(it.name != null ? String(it.name) : null);
         qtyArr.push(Number(it.quantity || 0));
         unitArr.push(Number(it.unit_price || 0));
         lineTot.push(Number(it.total || 0));
@@ -206,20 +211,27 @@ async function upsertSalesBatch(businessId, rawFacturas) {
 
       if (saleIdArr.length) {
         const qItems = `
-        INSERT INTO app_sales_items
-          (sale_id, line_pos, article_id, sku, name, quantity, unit_price, total, props)
-        SELECT * FROM UNNEST(
-          $1::int[], $2::int[], $3::int[], $4::text[], $5::text[],
-          $6::numeric[], $7::numeric[], $8::numeric[], $9::jsonb[]
-        )
-        ON CONFLICT (sale_id, line_pos)
-        DO UPDATE SET article_id = EXCLUDED.article_id,
-                      sku        = EXCLUDED.sku,
-                      name       = EXCLUDED.name,
-                      quantity   = EXCLUDED.quantity,
-                      unit_price = EXCLUDED.unit_price,
-                      total      = EXCLUDED.total,
-                      props      = EXCLUDED.props
+          INSERT INTO app_sales_items
+            (sale_id, line_pos, article_id, sku, name, quantity, unit_price, total, props)
+          SELECT * FROM UNNEST(
+            $1::bigint[],   -- sale_id
+            $2::int[],      -- line_pos
+            $3::int[],      -- article_id (NULL permitido)
+            $4::text[],     -- sku
+            $5::text[],     -- name
+            $6::numeric[],  -- quantity
+            $7::numeric[],  -- unit_price
+            $8::numeric[],  -- total
+            $9::jsonb[]     -- props
+          )
+          ON CONFLICT (sale_id, line_pos)
+          DO UPDATE SET article_id = EXCLUDED.article_id,
+                        sku        = EXCLUDED.sku,
+                        name       = EXCLUDED.name,
+                        quantity   = EXCLUDED.quantity,
+                        unit_price = EXCLUDED.unit_price,
+                        total      = EXCLUDED.total,
+                        props      = EXCLUDED.props
         `;
         await client.query(qItems, [
           saleIdArr, posArr, artArr, skuArr, nameArr, qtyArr, unitArr, lineTot, propsArr
@@ -227,7 +239,7 @@ async function upsertSalesBatch(businessId, rawFacturas) {
       }
     }
 
-    // ---------- Recalcular sales_daily para días tocados ----------
+    // 4) Recalcular sales_daily (por día) para los días tocados
     if (touchedDays.length) {
       const { rows } = await client.query(
         `
@@ -243,66 +255,78 @@ async function upsertSalesBatch(businessId, rawFacturas) {
       );
 
       if (rows.length) {
-        const bizArr = rows.map(r => businessId);
+        const bizArr = rows.map(() => Number(businessId));
         const dayArr = rows.map(r => r.day);
-        const totArr = rows.map(r => r.total);
-        const txcArr = rows.map(r => r.tx_count);
+        const totArr = rows.map(r => Number(r.total || 0));
+        const txcArr = rows.map(r => Number(r.tx_count || 0));
 
         await client.query(
           `
           INSERT INTO sales_daily (business_id, day, total, tx_count)
-          SELECT * FROM UNNEST($1::int[], $2::date[], $3::numeric[], $4::int[])
+          SELECT * FROM UNNEST(
+            $1::bigint[],  -- business_id
+            $2::date[],    -- day
+            $3::numeric[], -- total
+            $4::int[]      -- tx_count
+          )
           ON CONFLICT (business_id, day)
-          DO UPDATE SET total = EXCLUDED.total, tx_count = EXCLUDED.tx_count
+          DO UPDATE SET total    = EXCLUDED.total,
+                        tx_count = EXCLUDED.tx_count
           `,
           [bizArr, dayArr, totArr, txcArr]
         );
       }
     }
-    // ---------- Recalcular sales_daily_items para días tocados ----------
+
+    // 5) Recalcular sales_daily_items (por artículo y día) para los días tocados
     if (touchedDays.length) {
-      const { rows: itemAgg } = await client.query(
+      const { rows } = await client.query(
         `
-    SELECT
-      (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-      i.article_id                              AS articulo_id,
-      SUM(i.quantity)::numeric(14,3)            AS qty,
-      SUM(i.total)::numeric(14,2)               AS amount
-    FROM app_sales_items i
-    JOIN app_sales       s ON s.id = i.sale_id
-    WHERE s.business_id = $1
-      AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-      AND i.article_id IS NOT NULL
-    GROUP BY 1, 2
-    ORDER BY 1, 2
-    `,
+        SELECT
+          (s.occurred_at AT TIME ZONE 'UTC')::date AS date,
+          i.article_id                             AS articulo_id,
+          SUM(i.quantity)::numeric(14,3)          AS qty,
+          SUM(i.total)::numeric(14,2)             AS amount
+        FROM app_sales_items i
+        JOIN app_sales s ON s.id = i.sale_id
+        WHERE s.business_id = $1
+          AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+          AND i.article_id IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY 1, 2
+        `,
         [businessId, touchedDays]
       );
 
-      if (itemAgg.length) {
-        const bizArr = itemAgg.map(() => businessId);
-        const artArr = itemAgg.map(r => Number(r.articulo_id));
-        const dayArr = itemAgg.map(r => r.day);
-        const qtyArr = itemAgg.map(r => Number(r.qty || 0));
-        const amtArr = itemAgg.map(r => Number(r.amount || 0));
+      if (rows.length) {
+        const bizArr  = rows.map(() => Number(businessId));
+        const artArr  = rows.map(r => Number(r.articulo_id));
+        const dateArr = rows.map(r => r.date);
+        const qtyArr  = rows.map(r => Number(r.qty || 0));
+        const amtArr  = rows.map(r => Number(r.amount || 0));
 
         await client.query(
           `
-      INSERT INTO sales_daily_items (business_id, articulo_id, "date", qty, amount)
-      SELECT * FROM UNNEST(
-        $1::int[], $2::int[], $3::date[], $4::numeric[], $5::numeric[]
-      )
-      ON CONFLICT (business_id, articulo_id, "date")
-      DO UPDATE SET
-        qty    = EXCLUDED.qty,
-        amount = EXCLUDED.amount
-      `,
-          [bizArr, artArr, dayArr, qtyArr, amtArr]
+          INSERT INTO sales_daily_items (business_id, articulo_id, "date", qty, amount)
+          SELECT * FROM UNNEST(
+            $1::bigint[],  -- business_id
+            $2::int[],     -- articulo_id
+            $3::date[],    -- date
+            $4::numeric[], -- qty
+            $5::numeric[]  -- amount
+          )
+          ON CONFLICT (business_id, articulo_id, "date")
+          DO UPDATE SET
+            qty    = EXCLUDED.qty,
+            amount = EXCLUDED.amount
+          `,
+          [bizArr, artArr, dateArr, qtyArr, amtArr]
         );
       }
     }
 
     await client.query('COMMIT');
+
     const sorted = Array.from(new Set(touchedDays)).sort();
     return {
       upserted: sales.length,
