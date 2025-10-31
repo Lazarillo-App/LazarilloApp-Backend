@@ -3,9 +3,12 @@ const {
   fetchSalesRanged,
   getBearer,
   fetchFullByDate,
+  buildWindows, // usamos el del service
 } = require('../services/maxiSalesService');
+
 const { upsertSalesBatch } = require('../services/salesStore');
 const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
+
 // ───────── helpers fecha (UTC @ 00:00) ─────────
 function pad2(n) { return String(n).padStart(2, '0'); }
 function ymd(d) { return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`; }
@@ -19,39 +22,7 @@ function parseYMD(s) {
   if (!s) return null;
   // Permite YYYY-MM-DD o fechas parseables por Date
   const d = s.length === 10 ? new Date(`${s}T00:00:00Z`) : new Date(s);
-  return isNaN(+d) ? null : at00UTC(d);
-}
-
-// Ventanea [from..to] en bloques inclusivos de N días (p.ej. 7)
-function buildWindows(from, to, size = 7) {
-  const coerceUTC00 = (v) => {
-    if (v == null) return null;
-    if (v instanceof Date) return at00UTC(v);
-    if (typeof v === 'string') {
-      return v.length === 10 ? new Date(`${v}T00:00:00Z`) : at00UTC(new Date(v));
-    }
-    if (typeof v === 'number') return at00UTC(new Date(v));
-    if (v && typeof v === 'object' && v.day) return coerceUTC00(v.day);
-    const d = new Date(v);
-    return isNaN(+d) ? null : at00UTC(d);
-  };
-
-  const A = coerceUTC00(from);
-  const T = coerceUTC00(to);
-  if (!(A instanceof Date) || isNaN(+A) || !(T instanceof Date) || isNaN(+T)) {
-    throw new TypeError(`buildWindows: invalid from/to (from=${String(from)} to=${String(to)})`);
-  }
-  if (A > T) return [];
-
-  const out = [];
-  let a = new Date(A.getTime()); // clonar
-  while (a <= T) {
-    const endMs = a.getTime() + (size - 1) * 86400000; // inclusive
-    const b = new Date(Math.min(endMs, T.getTime()));
-    out.push([new Date(a.getTime()), b]); // clonar 'a' por seguridad
-    a = new Date(b.getTime() + 86400000); // siguiente día del final
-  }
-  return out;
+  return Number.isNaN(+d) ? null : at00UTC(d);
 }
 
 // ========== Diagnóstico directo contra Maxi ==========
@@ -71,22 +42,22 @@ async function maxiPing(req, res, next) {
 
     // Fechas: si no vienen, usar AYER; siempre clamp a AYER
     let from = parseYMD(req.query.from);
-    let to = parseYMD(req.query.to);
+    let to   = parseYMD(req.query.to);
 
     const todayUTC = at00UTC(new Date());
-    const AYER = new Date(todayUTC.getTime() - 86400000);
+    const AYER     = new Date(todayUTC.getTime() - 86400000);
 
     if (!from) from = AYER;
-    if (!to) to = AYER;
+    if (!to)   to   = AYER;
 
     from = at00UTC(from);
-    to = clampToYesterday(at00UTC(to));
+    to   = clampToYesterday(at00UTC(to));
 
     if (from > to) {
       return res.status(400).json({ error: 'from > to (invalid range)', from: ymd(from), to: ymd(to) });
     }
 
-    // Ventanas de 7 días (igual que el service)
+    // Ventanas de 7 días (igual que el service) → devuelve pares 'YYYY-MM-DD'
     const windows7 = buildWindows(from, to, 7);
     const out = [];
 
@@ -94,12 +65,12 @@ async function maxiPing(req, res, next) {
       try {
         const p = await fetchFullByDate(fa, fb, bearer);
         const len =
-          Array.isArray(p?.facturas) ? p.facturas.length :
-            Array.isArray(p?.content?.facturas) ? p.content.facturas.length :
-              Array.isArray(p?.content?.content) ? p.content.content.length :
-                Array.isArray(p?.content) ? p.content.length :
-                  Array.isArray(p) ? p.length :
-                    0;
+          Array.isArray(p?.facturas)              ? p.facturas.length :
+          Array.isArray(p?.content?.facturas)     ? p.content.facturas.length :
+          Array.isArray(p?.content?.content)      ? p.content.content.length :
+          Array.isArray(p?.content)               ? p.content.length :
+          Array.isArray(p)                         ? p.length :
+          0;
         out.push({
           window: [fa, fb],
           ok: true,

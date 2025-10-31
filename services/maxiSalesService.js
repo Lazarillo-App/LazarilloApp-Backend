@@ -7,16 +7,15 @@ const MAXI_BASE  = process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas
 const STATS_BASE = process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar';
 const CONC = Math.max(1, Number(process.env.MAXI_FETCH_CONCURRENCY || 3));
 
-// ---- cache de token por negocio ----
-const tokenCache = new Map(); // key -> { token, expMs }
-
-// Utils fechas (UTC)
+// ─────────── util fechas (UTC) ───────────
 function pad2(n){ return String(n).padStart(2,'0'); }
 function ymd(d){ return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`; }
 function at00UTC(d){ return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
-function addDaysUTC(d, n){ return new Date(d.getTime() + n*86400000); }
+function addDaysUTC(d, n){ return new Date(d.getTime() + n * 86400000); }
 
-// ------------------ bearer ------------------
+// ─────────── cache de bearer por negocio ───────────
+const tokenCache = new Map(); // key -> { token, expMs }
+
 async function loginMaxi(email, pass, codcli) {
   const url = `${MAXI_BASE.replace(/\/+$/,'')}/login`;
   const r = await fetch(url, {
@@ -37,30 +36,25 @@ async function loginMaxi(email, pass, codcli) {
 }
 
 /**
- * Obtiene Bearer en este orden:
- * 1) Header X-Maxi-Token (prioritario)
- * 2) Cache por business
- * 3) Credenciales cifradas en props.maxi -> login
+ * getBearer(businessId, req)
+ * Prioriza:
+ * 1) X-Maxi-Token (sin "Bearer " adelante si ya viene)
+ * 2) Cache local por business (válido ~9min)
+ * 3) Credenciales de DB (props.maxi: email/codcli/pass|pass_enc)
  */
 async function getBearer(businessId, req) {
-  // 1) Token por header (override)
   const hdrTok = req?.headers?.['x-maxi-token'];
   if (hdrTok && String(hdrTok).trim()) {
     return String(hdrTok).replace(/^Bearer\s+/i, '').trim();
   }
 
-  // 2) Cache
   const now = Date.now();
   const cached = tokenCache.get(String(businessId));
   if (cached && cached.expMs > now) return cached.token;
 
-  // 3) Credenciales desde DB
   const creds = await getCreds(businessId);
-
   const email  = (creds?.email || '').trim();
   const codcli = (creds?.cod_cli || creds?.codcli || '').trim();
-
-  // aceptar pass, password o pass_enc (cifrada)
   const password =
     creds?.pass ??
     creds?.password ??
@@ -77,10 +71,11 @@ async function getBearer(businessId, req) {
   return token;
 }
 
-// ------------------ fetch low-level ------------------
+// ─────────── low-level fetch (fullinvoicebydate) ───────────
 async function fetchFullByDate(fromYMD, toYMD, bearer) {
-  const url = `${STATS_BASE.replace(/\/+$/,'')}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
-  // 3 intentos con backoff; si es 5xx, dejamos que el caller decida fallback
+  const base = STATS_BASE.replace(/\/+$/,'');
+  const url = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
+
   for (let i=0;i<3;i++){
     const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
     const txt = await r.text().catch(()=> '');
@@ -88,7 +83,7 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
     const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
 
     if (ok) {
-      // aplanar envolturas content/content
+      // aplanar envolturas
       return (j?.content?.content) ? j.content.content
            : (j?.content)          ? j.content
            : j ?? {};
@@ -115,20 +110,57 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
   throw e;
 }
 
-// Particiona [from,to] en ventanas de N días
-function buildWindows(fromDate, toDate, winDays) {
+/**
+ * buildWindows(fromDate, toDate, winDays)
+ * Recibe Date (UTC 00:00), string "YYYY-MM-DD" o timestamp; devuelve
+ * pares inclusivos [YYYY-MM-DD, YYYY-MM-DD] en ventanas de N días.
+ */
+function buildWindows(fromDate, toDate, winDays = 7) {
+  const coerceUTC00 = (v) => {
+    if (v == null) return null;
+    if (v instanceof Date) return at00UTC(v);
+    if (typeof v === 'string') {
+      return v.length === 10 ? new Date(`${v}T00:00:00Z`) : at00UTC(new Date(v));
+    }
+    if (typeof v === 'number') return at00UTC(new Date(v));
+    if (v && typeof v === 'object' && v.day) return coerceUTC00(v.day);
+    const d = new Date(v);
+    return isNaN(+d) ? null : at00UTC(d);
+  };
+
+  const A = coerceUTC00(fromDate);
+  const T = coerceUTC00(toDate);
+  if (!(A instanceof Date) || isNaN(+A) || !(T instanceof Date) || isNaN(+T)) {
+    throw new TypeError(`buildWindows: invalid from/to (from=${String(fromDate)} to=${String(toDate)})`);
+  }
+  if (A > T) return [];
+
   const out = [];
-  for (let cur = new Date(fromDate); cur <= toDate; ) {
+  for (let cur = new Date(A); cur <= T; ) {
     const a = new Date(cur);
-    const b = addDaysUTC(cur, winDays - 1);
-    const stop = b < toDate ? b : toDate;
+    const b = addDaysUTC(a, winDays - 1);
+    const stop = b < T ? b : T;
     out.push([ymd(a), ymd(stop)]);
     cur = addDaysUTC(stop, 1);
   }
   return out;
 }
 
-// ---- Fallback: 7d -> (si falla) 1d ----
+// ─────────── extractor robusto ───────────
+function extractFacturas(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.facturas)) return payload.facturas;
+  if (Array.isArray(payload.content?.facturas)) return payload.content.facturas;
+  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas;
+  if (Array.isArray(payload.content)) return payload.content;
+  for (const [, v] of Object.entries(payload)) {
+    if (Array.isArray(v) && v.length && typeof v[0] === 'object') return v;
+  }
+  return [];
+}
+
+// ─────────── fetch principal con fallback 7d→1d ───────────
 async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   const windows7 = buildWindows(fromDate, toDate, 7);
 
@@ -139,7 +171,7 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   async function worker(){
     while (idx < windows7.length) {
       const my = idx++;
-      const [a,b] = windows7[my];
+      const [a,b] = windows7[my]; // strings YYYY-MM-DD
       try {
         results[my] = await fetchFullByDate(a, b, bearer);
       } catch (e) {
@@ -158,9 +190,10 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
     const err = errors[i];
     if ((err?.status || 0) >= 500) {
       const [wa, wb] = windows7[i];
-      const a = new Date(wa+'T00:00:00Z'), b = new Date(wb+'T00:00:00Z');
-      const days = buildWindows(a,b,1);
-      for (const [da,db] of days) {
+      const a = new Date(`${wa}T00:00:00Z`);
+      const b = new Date(`${wb}T00:00:00Z`);
+      const days = buildWindows(a, b, 1);
+      for (const [da, db] of days) {
         try {
           const dayPayload = await fetchFullByDate(da, db, bearer);
           outPayloads.push(dayPayload);
@@ -175,29 +208,14 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   return outPayloads;
 }
 
-// ===== Extractor robusto + aplanado =====
-function extractFacturas(payload) {
-  if (!payload) return [];
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload.facturas)) return payload.facturas;
-  if (Array.isArray(payload.content?.facturas)) return payload.content.facturas;
-  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas;
-  if (Array.isArray(payload.content)) return payload.content;
-  for (const [, v] of Object.entries(payload)) {
-    if (Array.isArray(v) && v.length && typeof v[0] === 'object') return v;
-  }
-  return [];
-}
-
-// --------- API principal usada por el controlador ---------
 /**
  * fetchSalesRanged({ businessId, from, to, req })
- * Devuelve un array "facturas" crudas (sin normalizar) listas para pasar a salesStore.
+ * Devuelve array de "facturas" crudas (ya aplanadas) listas para normalizar.
  */
 async function fetchSalesRanged({ businessId, from, to, req }) {
-  if (!businessId) { const e=new Error('businessId requerido'); e.status=400; throw e; }
+  if (!businessId) { const e = new Error('businessId requerido'); e.status = 400; throw e; }
 
-  // Normalizamos fechas a UTC 00:00 y clamp a AYER (por política)
+  // Normalizar a UTC 00:00 y clamp a AYER
   const todayUTC = at00UTC(new Date());
   const AYER = addDaysUTC(todayUTC, -1);
   const Fd = at00UTC(new Date(from));
@@ -207,11 +225,11 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   const bearer = await getBearer(businessId, req);
   const payloads = await fetchRangeWithFallback(Fd, toClamp, bearer, CONC);
 
-  // Extraer facturas de cada payload y aplanar { factura: {...} }
   const facturas = [];
   for (const p of (payloads || [])) {
     let arr = extractFacturas(p);
     if (!Array.isArray(arr) || !arr.length) continue;
+    // aplanar { factura: {...} }
     if (arr[0] && typeof arr[0] === 'object' && Object.prototype.hasOwnProperty.call(arr[0], 'factura')) {
       arr = arr.map(x => x?.factura || x).filter(Boolean);
     }
@@ -224,6 +242,8 @@ module.exports = {
   MAXI_BASE,
   STATS_BASE,
   getBearer,
+  fetchFullByDate,
+  buildWindows,
+  extractFacturas,
   fetchSalesRanged,
-  // opcional para tests: fetchFullByDate, buildWindows, extractFacturas
 };

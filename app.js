@@ -8,7 +8,7 @@ const morgan = require('morgan');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
-
+const { startCron } = require('./services/cron');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 
@@ -29,6 +29,8 @@ const branchesRoutes     = require('./routes/branchRoutes');
 const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
+
+startCron();
 
 /* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
