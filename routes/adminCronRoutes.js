@@ -11,6 +11,10 @@ function isCronAllowed(req) {
   return req.get('X-Cron-Secret') === secret;
 }
 
+router.get('/ping', (req, res) => {
+  res.json({ ok: true, now: new Date().toISOString() });
+});
+
 router.post('/sync-sales-daily', async (req, res) => {
   if (!isCronAllowed(req)) return res.status(401).json({ error: 'unauthorized' });
 
