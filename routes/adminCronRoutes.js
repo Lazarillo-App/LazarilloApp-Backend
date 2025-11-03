@@ -65,4 +65,26 @@ router.post('/backfill-30d', async (req, res) => {
   return res.json({ ok: true, details });
 });
 
+router.post('/sync-sales-daily', async (req, res) => {
+  const runId = (await pool.query(
+    `INSERT INTO cron_runs (job_name, details) VALUES ($1, $2) RETURNING id`,
+    ['sync-sales-daily', JSON.stringify({ trigger: 'manual|render' })]
+  )).rows[0].id;
+
+  try {
+    // ... tu código actual que arma rows/details ...
+    await pool.query(
+      `UPDATE cron_runs SET finished_at=now(), status='ok', details=$2 WHERE id=$1`,
+      [runId, JSON.stringify({ ran: rows.length, ok, fail })]
+    );
+    return res.json({ ok: true, ran: rows.length, ok_count: ok, fail_count: fail, details });
+  } catch (e) {
+    await pool.query(
+      `UPDATE cron_runs SET finished_at=now(), status='error', details=$2 WHERE id=$1`,
+      [runId, JSON.stringify({ message: e.message })]
+    );
+    throw e;
+  }
+});
+
 module.exports = router;
