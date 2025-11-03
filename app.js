@@ -30,8 +30,6 @@ const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
 
-startCron();
-
 /* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
