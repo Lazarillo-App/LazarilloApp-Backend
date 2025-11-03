@@ -85,9 +85,11 @@ app.use(morgan('➡️ :method :url :status :response-time ms'));
 app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
 
-/* ----------- admin plataforma ----------- */
-app.use('/api/admin',       authRequired, requireAppAdmin, adminRoutes);
+// Cron SIN auth (protegido por X-Cron-Secret dentro del router)
 app.use('/api/admin/cron',  adminCronRoutes);
+
+// Resto de /api/admin con auth
+app.use('/api/admin',       authRequired, requireAppAdmin, adminRoutes);
 
 /* ----------- businesses (auth + negocio activo) ----------- */
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
