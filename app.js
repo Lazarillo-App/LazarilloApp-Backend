@@ -30,6 +30,8 @@ const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
 
+startCron();
+
 /* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -83,11 +85,9 @@ app.use(morgan('➡️ :method :url :status :response-time ms'));
 app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
 
-// Cron SIN auth (protegido por X-Cron-Secret dentro del router)
-app.use('/api/admin/cron',  adminCronRoutes);
-
-// Resto de /api/admin con auth
+/* ----------- admin plataforma ----------- */
 app.use('/api/admin',       authRequired, requireAppAdmin, adminRoutes);
+app.use('/api/admin/cron',  adminCronRoutes);
 
 /* ----------- businesses (auth + negocio activo) ----------- */
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);

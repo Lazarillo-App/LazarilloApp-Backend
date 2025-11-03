@@ -7,8 +7,7 @@ const { upsertSalesBatch } = require('./salesStore');
 function lockKeyFor(businessId) { return 0x53A1E5 ^ Number(businessId); }
 async function tryLock(client, businessId) {
   const { rows: [{ locked }] } = await client.query(
-    'SELECT pg_try_advisory_lock($1) AS locked',
-    [lockKeyFor(businessId)]
+    'SELECT pg_try_advisory_lock($1) AS locked', [lockKeyFor(businessId)]
   );
   return !!locked;
 }
@@ -29,8 +28,7 @@ function last30UntilYesterday() {
 // ---- estado persistente (sales_sync_state) ----
 async function readState(client, businessId) {
   const { rows } = await client.query(
-    'SELECT * FROM sales_sync_state WHERE business_id=$1',
-    [businessId]
+    'SELECT * FROM sales_sync_state WHERE business_id=$1', [businessId]
   );
   return rows[0] || null;
 }
@@ -59,56 +57,22 @@ async function getMaxDayFromDB(client, businessId) {
   return r2.rows[0]?.max_day || null;
 }
 
-/* =========================================================================
-   Utilidad central: maneja BEGIN/COMMIT/ROLLBACK + lock/unlock + release safe
-   ========================================================================= */
-async function withTxnAndLock(businessId, fn) {
-  const client = await pool.connect();
-  let locked = false;
-  let released = false;
-
-  const safeRelease = () => { if (!released) { released = true; client.release(); } };
-  const safeUnlock  = async () => {
-    if (locked) {
-      try { await unlock(client, businessId); } catch {}
-      locked = false;
-    }
-  };
-
-  try {
-    await client.query('BEGIN');
-
-    // lock por negocio
-    locked = await tryLock(client, businessId);
-    if (!locked) {
-      await client.query('ROLLBACK');
-      safeRelease();
-      return { ok: false, skipped: true, reason: 'locked' };
-    }
-
-    // ejecuta el cuerpo
-    const result = await fn(client);
-
-    await safeUnlock();
-    await client.query('COMMIT');
-    safeRelease();
-    return result;
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    try { await safeUnlock(); } catch {}
-    safeRelease();
-    e.status = e.status || 500;
-    throw e;
-  }
-}
-
 // ====== API pública ======
 
 /** Backfill inicial UNA SOLA VEZ (30 días hasta ayer) */
 async function ensureInitialBackfillOnce({ businessId, req }) {
-  return withTxnAndLock(businessId, async (client) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (!(await tryLock(client, businessId))) {
+      await client.query('ROLLBACK'); client.release();
+      return { ok: false, skipped: true, reason: 'locked' };
+    }
+
     const state = await readState(client, businessId);
     if (state?.initial_backfill_done) {
+      await unlock(client, businessId);
+      await client.query('COMMIT'); client.release();
       return { ok: true, already_done: true };
     }
 
@@ -122,35 +86,48 @@ async function ensureInitialBackfillOnce({ businessId, req }) {
       last_daily_sync_at: to
     });
 
+    await unlock(client, businessId);
+    await client.query('COMMIT'); client.release();
     return { ok: true, from, to, ...res };
-  });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    try { await unlock(client, businessId); } catch {}
+    client.release();
+    e.status = e.status || 500;
+    throw e;
+  }
 }
 
 /** Incremental diario (desde último día + 1 hasta ayer) */
 async function runDailyAuto({ businessId, req }) {
-  return withTxnAndLock(businessId, async (client) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (!(await tryLock(client, businessId))) {
+      await client.query('ROLLBACK'); client.release();
+      return { ok: false, skipped: true, reason: 'locked' };
+    }
+
     const state = await readState(client, businessId);
     if (!state?.initial_backfill_done) {
-      // liberamos lock/txn en withTxnAndLock automáticamente y delegamos al backfill:
-      // Para mantener el lock/txn consistente, salimos devolviendo la intención de backfill,
-      // y dejamos que el caller lo invoque fuera. Pero para simplicidad y mantener
-      // compat actual, hacemos el backfill “inline” *sin* otra transacción/lock.
-      // Nota: El backfill llama a withTxnAndLock nuevamente (otro ciclo), está bien.
+      await unlock(client, businessId);
+      await client.query('COMMIT'); client.release();
       return await ensureInitialBackfillOnce({ businessId, req });
     }
 
     const maxDay = await getMaxDayFromDB(client, businessId);
     const y = last30UntilYesterday().to;
-
     if (!maxDay) {
       // no hay data por algún motivo → re-hacer 30 días
+      await unlock(client, businessId);
+      await client.query('COMMIT'); client.release();
       return await ensureInitialBackfillOnce({ businessId, req });
     }
-
     const start = new Date(maxDay); start.setDate(start.getDate() + 1);
     const from = toISODate(start), to = y;
-
     if (from > to) {
+      await unlock(client, businessId);
+      await client.query('COMMIT'); client.release();
       return { ok: true, up_to_date: true, last_day: maxDay };
     }
 
@@ -158,8 +135,16 @@ async function runDailyAuto({ businessId, req }) {
     const res = await upsertSalesBatch(businessId, raw);
     await upsertState(client, businessId, { last_daily_sync_at: to });
 
+    await unlock(client, businessId);
+    await client.query('COMMIT'); client.release();
     return { ok: true, from, to, ...res };
-  });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    try { await unlock(client, businessId); } catch {}
+    client.release();
+    e.status = e.status || 500;
+    throw e;
+  }
 }
 
 module.exports = { ensureInitialBackfillOnce, runDailyAuto };

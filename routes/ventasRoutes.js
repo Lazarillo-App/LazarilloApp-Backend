@@ -12,7 +12,7 @@ const {
   getArticleSeriesQuery,
 } = require('../controllers/ventasController');
 
-// Valida/inyecta negocio (toma de header/query/param o active_business_id)
+// Valida/inyecta negocio (tzoma de header/query/param o active_business_id)
 const requireBiz = (req, res, next) => requireBusinessAccess(req, res, next);
 
 // Raíz (peek + series)

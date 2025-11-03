@@ -14,7 +14,7 @@ function simpleHash(str = '') {
   return String(h >>> 0);
 }
 
-function parseDate(d, fallback) {
+function parseDate(zd, fallback) {
   const x = new Date(d);
   return Number.isNaN(x.getTime()) ? new Date(fallback) : x;
 }
