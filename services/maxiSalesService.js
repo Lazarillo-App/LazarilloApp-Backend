@@ -245,5 +245,5 @@ module.exports = {
   fetchFullByDate,
   buildWindows,
   extractFacturas,
-  fetchSalesRanged,z
+  fetchSalesRanged,
 };
