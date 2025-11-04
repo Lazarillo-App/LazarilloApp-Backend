@@ -33,7 +33,6 @@ const storage = multer.diskStorage({
   }
 });
 
-// ===== Multer instancia =====
 const upload = multer({
   storage,
   limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
@@ -50,32 +49,36 @@ router.param('id', requireBusinessAccessParam);
 // ===== Upload logo =====
 // Acepta 'file', 'logo' o 'image' como nombre de campo
 const uploadFields = upload.fields([
-  { name: 'file',  maxCount: 1 },
-  { name: 'logo',  maxCount: 1 },
+  { name: 'file', maxCount: 1 },
+  { name: 'logo', maxCount: 1 },
   { name: 'image', maxCount: 1 },
 ]);
 
 router.post('/:id/logo', (req, res, next) => {
-  uploadFields(req, res, (err) => {
+  const uploadAny = upload.any(); // <— acepta cualquier nombre de campo
+  uploadAny(req, res, (err) => {
     if (err) {
       const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error'
+            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+              'upload_error'
       });
     }
+    const arr = Array.isArray(req.files) ? req.files : [];
+    const firstImg = arr.find(f => /^image\//i.test(f.mimetype)) || null;
+    req.file = firstImg;
 
-    // Normaliza a req.file para el controller
-    req.file = (req.files?.file?.[0]) || (req.files?.logo?.[0]) || (req.files?.image?.[0]) || null;
+    // DEBUG temporal (debe verse esto en logs cuando pegás la ruta)
+    console.log('[upload-logo] content-type:', req.headers['content-type']);
+    console.log('[upload-logo] files:', arr.map(f => ({ field: f.fieldname, type: f.mimetype, size: f.size })));
+    console.log('[upload-logo] chosen:', !!req.file, req.file?.fieldname);
 
     if (!req.file) {
-      // alineado con el error que veías: missing_file (400)
       return res.status(400).json({ error: 'missing_file' });
     }
 
-    // delega al controller
     businesses.uploadLogo(req, res, next);
   });
 });
@@ -123,7 +126,7 @@ router.post('/:id/sync-sales', async (req, res, next) => {
     const mode = (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d') ? 'backfill_30d' : 'auto';
     const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
     const from = req.query.from ? new Date(req.query.from) : null;
-    const to   = req.query.to   ? new Date(req.query.to)   : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
     if ((from && isNaN(+from)) || (to && isNaN(+to))) {
       return res.status(400).json({ error: 'invalid_date' });
     }
