@@ -379,12 +379,10 @@ exports.maxiArticles = async (req, res) => {
 // ------------------- Logo / Branding -------------------
 exports.uploadLogo = async (req, res, next) => {
   try {
-    const biz = req.business; // viene de requireBusinessAccessParam
+    const biz = req.business; // cargado por requireBusinessAccessParam
     let logoUrl = null;
 
     if (req.file) {
-      // sirve /uploads de forma estática en server.js/app.js:
-      // app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
       logoUrl = `/uploads/logos/${req.file.filename}`;
     } else if (req.body?.url) {
       logoUrl = String(req.body.url).trim();
@@ -392,7 +390,7 @@ exports.uploadLogo = async (req, res, next) => {
       return res.status(400).json({ error: 'missing_file' });
     }
 
-    await pool.query(`
+    await require('../config/db').query(`
       UPDATE app_businesses
          SET props = COALESCE(props,'{}'::jsonb)
                     || jsonb_build_object(

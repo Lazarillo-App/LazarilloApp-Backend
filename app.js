@@ -42,7 +42,7 @@ const logosDir   = path.join(uploadsDir, 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 
 // Servir archivos estáticos públicamente (sin auth)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', require('express').static(path.join(__dirname, 'uploads')));
 
 /* ----------- logging legible ----------- */
 app.use((req, res, next) => {

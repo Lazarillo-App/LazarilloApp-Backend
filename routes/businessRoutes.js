@@ -48,6 +48,7 @@ const upload = multer({
 });
 
 // Acepta 'file', 'logo' o 'image'
+
 const uploadFields = upload.fields([
   { name: 'file',  maxCount: 1 },
   { name: 'logo',  maxCount: 1 },
@@ -65,16 +66,19 @@ router.post('/:id/logo', (req, res, next) => {
           'upload_error'
       });
     }
-    // normaliza a req.file para el controller
-    const files = req.files || {};
-    req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
-     console.log('[upload-logo] content-type:', req.headers['content-type']);
-    console.log('[upload-logo] files keys:', Object.keys(req.files || {}));
-    console.log('[upload-logo] file?', !!req.file, req.file?.fieldname, req.file?.mimetype, req.file?.size);
+    // Normalizamos para el controller
+    const f = (req.files?.file?.[0]) || (req.files?.logo?.[0]) || (req.files?.image?.[0]) || null;
+    req.file = f;
 
-    return businesses.uploadLogo(req, res, next);
+    // DEBUG (podés quitar luego)
+    console.log('[upload-logo] content-type:', req.headers['content-type']);
+    console.log('[upload-logo] keys:', Object.keys(req.files || {}));
+    console.log('[upload-logo] has file?', !!req.file, req.file?.fieldname, req.file?.mimetype, req.file?.size);
+
+    businesses.uploadLogo(req, res, next);
   });
 });
+
 
 /* ============ Logo: setear URL directa ============ */
 router.patch('/:id/branding-url', businesses.setBrandingUrl);
