@@ -20,11 +20,11 @@ const { requireBusinessAccessParam } = require('../middleware/requireBusinessAcc
 const { refreshMenu } = require('../controllers/maxiMenuController');
 const { getArticlesTree } = require('../controllers/businessController');
 
-/* ================== Multer (logos) ================== */
-// crea carpeta si no existe
+// ===== Carpeta de logos =====
 const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 
+// ===== Multer storage =====
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, logosDir),
   filename: (req, file, cb) => {
@@ -33,22 +33,22 @@ const storage = multer.diskStorage({
   }
 });
 
-/* ============ Auth / params ============ */
-router.use(authRequired);
-router.param('id', requireBusinessAccessParam);
-
-/* ============ Logo: subir archivo (ÚNICA RUTA) ============ */
+// ===== Multer instancia =====
 const upload = multer({
   storage,
-  limits: { fileSize: 2 * 1024 * 1024 },
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
   fileFilter: (_req, file, cb) => {
     const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
     cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
   }
 });
 
-// Acepta 'file', 'logo' o 'image'
+// ===== Auth/param =====
+router.use(authRequired);
+router.param('id', requireBusinessAccessParam);
 
+// ===== Upload logo =====
+// Acepta 'file', 'logo' o 'image' como nombre de campo
 const uploadFields = upload.fields([
   { name: 'file',  maxCount: 1 },
   { name: 'logo',  maxCount: 1 },
@@ -66,19 +66,19 @@ router.post('/:id/logo', (req, res, next) => {
           'upload_error'
       });
     }
-    // Normalizamos para el controller
-    const f = (req.files?.file?.[0]) || (req.files?.logo?.[0]) || (req.files?.image?.[0]) || null;
-    req.file = f;
 
-    // DEBUG (podés quitar luego)
-    console.log('[upload-logo] content-type:', req.headers['content-type']);
-    console.log('[upload-logo] keys:', Object.keys(req.files || {}));
-    console.log('[upload-logo] has file?', !!req.file, req.file?.fieldname, req.file?.mimetype, req.file?.size);
+    // Normaliza a req.file para el controller
+    req.file = (req.files?.file?.[0]) || (req.files?.logo?.[0]) || (req.files?.image?.[0]) || null;
 
+    if (!req.file) {
+      // alineado con el error que veías: missing_file (400)
+      return res.status(400).json({ error: 'missing_file' });
+    }
+
+    // delega al controller
     businesses.uploadLogo(req, res, next);
   });
 });
-
 
 /* ============ Logo: setear URL directa ============ */
 router.patch('/:id/branding-url', businesses.setBrandingUrl);

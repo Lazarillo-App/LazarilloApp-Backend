@@ -376,59 +376,48 @@ exports.maxiArticles = async (req, res) => {
   }
 };
 
-// ------------------- Logo / Branding -------------------
 exports.uploadLogo = async (req, res, next) => {
   try {
-    const biz = req.business; // cargado por requireBusinessAccessParam
-    let logoUrl = null;
+    const biz = req.business; // viene de requireBusinessAccessParam
+    if (!req.file) return res.status(400).json({ error: 'missing_file' });
 
-    if (req.file) {
-      logoUrl = `/uploads/logos/${req.file.filename}`;
-    } else if (req.body?.url) {
-      logoUrl = String(req.body.url).trim();
-    } else {
-      return res.status(400).json({ error: 'missing_file' });
-    }
+    // ruta pública (coincide con app.use('/uploads', ...))
+    const relPath = path.relative(path.join(__dirname, '..'), req.file.path)
+      .replace(/\\/g, '/'); // win compat
+    const publicUrl = `/${relPath}`; // p.ej: /uploads/logos/biz_52_....png
 
-    await require('../config/db').query(`
+    // guardar en props.branding.logo_url
+    await pool.query(`
       UPDATE app_businesses
          SET props = COALESCE(props,'{}'::jsonb)
-                    || jsonb_build_object(
-                         'branding',
-                         COALESCE(props->'branding','{}'::jsonb)
-                         || jsonb_build_object('logo_url', $2)
-                       )
+                   || jsonb_build_object('branding',
+                        COALESCE((props->'branding')::jsonb, '{}'::jsonb)
+                        || jsonb_build_object('logo_url', $2)
+                      )
        WHERE id = $1
-    `, [biz.id, logoUrl]);
+    `, [biz.id, publicUrl]);
 
-    res.json({ ok: true, logo_url: logoUrl, url: logoUrl });
+    res.json({ ok: true, url: publicUrl, business_id: biz.id });
   } catch (e) { next(e); }
 };
 
-/* === setear URL directa en branding === */
 exports.setBrandingUrl = async (req, res, next) => {
   try {
     const biz = req.business;
-    if (!biz) return res.status(404).json({ error: 'not_found' });
-
     const { logo_url } = req.body || {};
-    if (logo_url != null && typeof logo_url !== 'string') {
-      return res.status(400).json({ error: 'invalid_logo_url' });
-    }
+    const val = (typeof logo_url === 'string' && logo_url.trim()) ? logo_url.trim() : null;
 
-    await pool.query(
-      `UPDATE app_businesses
-         SET props = COALESCE(props,'{}'::jsonb) ||
-                     jsonb_build_object(
-                       'branding',
-                       COALESCE(props->'branding','{}'::jsonb) || jsonb_build_object('logo_url', $2)
-                     ),
-             updated_at = NOW()
-       WHERE id = $1`,
-      [biz.id, logo_url || null]
-    );
+    await pool.query(`
+      UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb)
+                   || jsonb_build_object('branding',
+                        COALESCE((props->'branding')::jsonb, '{}'::jsonb)
+                        || jsonb_build_object('logo_url', $2)
+                      )
+       WHERE id = $1
+    `, [biz.id, val]);
 
-    res.json({ ok: true, url: logo_url || null });
+    res.json({ ok: true, url: val, business_id: biz.id });
   } catch (e) { next(e); }
 };
 
