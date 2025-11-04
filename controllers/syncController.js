@@ -15,9 +15,10 @@ function simpleHash(str = '') {
 }
 
 function parseDate(zd, fallback) {
-  const x = new Date(d);
+
   return Number.isNaN(x.getTime()) ? new Date(fallback) : x;
 }
+
 function ymd(d) {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
@@ -82,7 +83,7 @@ async function maxiLogin({ email, password, codcli }) {
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
-  if (to)   u.searchParams.set('fechaFin',   to);
+  if (to) u.searchParams.set('fechaFin', to);
 
   const res = await fetchWithRetry(u.toString(), {
     headers: { Authorization: `Bearer ${token}` }
@@ -103,8 +104,8 @@ async function fetchMaxiArticles({ token, from, to }) {
   const seen = new Set();
 
   const isArticle = (o = {}) => {
-    const hasId   = ['id','idArticulo','codart','codigo','codigoArticulo'].some(k => k in o);
-    const hasInfo = ['descripcion','descripcionl','nombre','precio','precioVenta','importe'].some(k => k in o);
+    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
+    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
     return hasId && hasInfo;
   };
 
@@ -124,14 +125,14 @@ async function fetchMaxiArticles({ token, from, to }) {
 
     const nombre = getName(o);
     const precio = num(o.precio ?? o.precioVenta ?? o.importe, 0);
-    const costo  = num(o.costo ?? o.costoPromedio, 0);
+    const costo = num(o.costo ?? o.costoPromedio, 0);
 
     items.push({
       id,
       nombre,
       // SWAP explícito:
       categoria: subrubroNombre || 'Sin subrubro',
-      subrubro:  rubroNombre    || 'Sin categoría',
+      subrubro: rubroNombre || 'Sin categoría',
       precio,
       costo,
       raw: o,
@@ -211,9 +212,9 @@ async function upsertArticles({ client, businessId, items }) {
 
       const nombre = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
       const categoria = String(it.categoria ?? '').trim() || 'Sin categoría';
-      const subrubro  = String(it.subrubro  ?? '').trim() || 'Sin subrubro';
-      const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo     = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
+      const subrubro = String(it.subrubro ?? '').trim() || 'Sin subrubro';
+      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
       params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it.raw ?? it._raw ?? it));
@@ -324,10 +325,18 @@ exports.syncNow = async (req, res) => {
     // Otros alcances (ventas, etc.)
     return res.json({ ok: true, scope, upserted: 0 });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
+    const msg = String(e?.message || '');
+    if (msg.includes('maxi_login_failed') || e.status === 401 || msg.includes('401')) {
+      return res.status(401).json({ error: 'unauthorized', detail: 'Maxi login failed/401' });
+    }
+    if (msg.includes('maxi_not_configured')) {
+      return res.status(400).json({ error: 'maxi_not_configured' });
+    }
     console.error('syncNow error:', e?.stack || e);
-    return res.status(500).json({ error: 'internal', detail: e?.message || String(e) });
-  } finally {
+    return res.status(500).json({ error: 'internal', detail: msg });
+  }
+  finally {
     client.release();
   }
 };
@@ -341,7 +350,7 @@ exports.salesSummaryFromDB = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to   = ymd(parseDate(req.query.to, yesterday));
+  const to = ymd(parseDate(req.query.to, yesterday));
 
   try {
     const { rows: items } = await pool.query(
@@ -377,7 +386,7 @@ exports.salesSeriesFromDB = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to   = ymd(parseDate(req.query.to, yesterday));
+  const to = ymd(parseDate(req.query.to, yesterday));
   groupBy = ['day', 'week', 'month'].includes(String(groupBy)) ? groupBy : 'day';
 
   if (groupBy === 'day') {
@@ -496,7 +505,7 @@ exports.maxiArticlesProxy = async (req, res) => {
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to   = ymd(parseDate(req.query.to, yesterday));
+  const to = ymd(parseDate(req.query.to, yesterday));
 
   try {
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`, [businessId]);
