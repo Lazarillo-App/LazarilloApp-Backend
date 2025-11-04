@@ -376,31 +376,34 @@ exports.maxiArticles = async (req, res) => {
   }
 };
 
-/* === subir archivo de LOGO === */
+// ------------------- Logo / Branding -------------------
 exports.uploadLogo = async (req, res, next) => {
   try {
-    const biz = req.business;
-    if (!biz) return res.status(404).json({ error: 'not_found' });
-    if (!req.file) {
-      console.warn('uploadLogo: missing req.file. content-type=', req.headers['content-type']);
+    const biz = req.business; // viene de requireBusinessAccessParam
+    let logoUrl = null;
+
+    if (req.file) {
+      // sirve /uploads de forma estática en server.js/app.js:
+      // app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+      logoUrl = `/uploads/logos/${req.file.filename}`;
+    } else if (req.body?.url) {
+      logoUrl = String(req.body.url).trim();
+    } else {
       return res.status(400).json({ error: 'missing_file' });
     }
 
-    const url = `/uploads/logos/${req.file.filename}`;
+    await pool.query(`
+      UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb)
+                    || jsonb_build_object(
+                         'branding',
+                         COALESCE(props->'branding','{}'::jsonb)
+                         || jsonb_build_object('logo_url', $2)
+                       )
+       WHERE id = $1
+    `, [biz.id, logoUrl]);
 
-    await pool.query(
-      `UPDATE app_businesses
-         SET props = COALESCE(props,'{}'::jsonb) ||
-                     jsonb_build_object(
-                       'branding',
-                       COALESCE(props->'branding','{}'::jsonb) || jsonb_build_object('logo_url', $2)
-                     ),
-             updated_at = NOW()
-       WHERE id = $1`,
-      [biz.id, url]
-    );
-
-    res.status(201).json({ ok: true, url });
+    res.json({ ok: true, logo_url: logoUrl, url: logoUrl });
   } catch (e) { next(e); }
 };
 

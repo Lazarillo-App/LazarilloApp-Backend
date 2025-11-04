@@ -32,22 +32,30 @@ const storage = multer.diskStorage({
     cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
   }
 });
-const upload = multer({
-  storage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
-  fileFilter: (_req, file, cb) => {
-    const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
-    cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
-  }
-});
 
 /* ============ Auth / params ============ */
 router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
 
 /* ============ Logo: subir archivo (ÚNICA RUTA) ============ */
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
+    cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
+  }
+});
+
+// Acepta 'file', 'logo' o 'image'
+const uploadFields = upload.fields([
+  { name: 'file',  maxCount: 1 },
+  { name: 'logo',  maxCount: 1 },
+  { name: 'image', maxCount: 1 },
+]);
+
 router.post('/:id/logo', (req, res, next) => {
-  upload.single('file')(req, res, (err) => {
+  uploadFields(req, res, (err) => {
     if (err) {
       const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
       return res.status(status).json({
@@ -57,7 +65,14 @@ router.post('/:id/logo', (req, res, next) => {
           'upload_error'
       });
     }
-    businesses.uploadLogo(req, res, next);
+    // normaliza a req.file para el controller
+    const files = req.files || {};
+    req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
+     console.log('[upload-logo] content-type:', req.headers['content-type']);
+    console.log('[upload-logo] files keys:', Object.keys(req.files || {}));
+    console.log('[upload-logo] file?', !!req.file, req.file?.fieldname, req.file?.mimetype, req.file?.size);
+
+    return businesses.uploadLogo(req, res, next);
   });
 });
 
