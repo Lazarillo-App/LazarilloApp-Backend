@@ -3,32 +3,55 @@ const { decryptSecretCompat } = require('../utils/cryptoField');
 const pool = require('../config/db');
 const fetchNative = global.fetch || require('node-fetch');
 
-const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
+const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/$/, '');
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
 const FETCH_RETRIES = Number(process.env.MAXI_FETCH_RETRIES || 2);
 
 /* ======================= Utils básicos ======================= */
 function simpleHash(str = '') {
   let h = 0;
-  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  for (let i = 0; i < str.length; i++) {
+    h = (h * 31 + str.charCodeAt(i)) | 0;
+  }
   return String(h >>> 0);
 }
 
+// Normaliza fechas para los controladores (acepta Date | string | number)
 function parseDate(zd, fallback) {
-
-  return Number.isNaN(x.getTime()) ? new Date(fallback) : x;
+  // si no viene nada, usar el fallback
+  if (zd == null || zd === '') return new Date(fallback);
+  // ya es Date
+  if (zd instanceof Date) return Number.isNaN(+zd) ? new Date(fallback) : zd;
+  // timestamp numérico
+  if (typeof zd === 'number') {
+    const d = new Date(zd);
+    return Number.isNaN(+d) ? new Date(fallback) : d;
+  }
+  // string ISO/fecha
+  const d = new Date(String(zd));
+  return Number.isNaN(+d) ? new Date(fallback) : d;
 }
 
 function ymd(d) {
+  if (!(d instanceof Date) || Number.isNaN(+d)) d = new Date();
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
-function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
+
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setUTCDate(x.getUTCDate() + n);
+  return x;
+}
 
 /* ========== Fetch con timeout + reintentos (429/5xx) ========== */
-async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
+async function fetchWithRetry(
+  url,
+  options = {},
+  { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}
+) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const ctrl = new AbortController();
@@ -40,7 +63,7 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
 
       // Reintenta en 429/5xx
       if ([429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
-        await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2));
+        await new Promise((r) => setTimeout(r, 200 * (attempt + 1) ** 2));
         continue;
       }
       const txt = await res.text().catch(() => '');
@@ -51,7 +74,7 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
       clearTimeout(t);
       lastErr = e;
       if (attempt < retries) {
-        await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2));
+        await new Promise((r) => setTimeout(r, 200 * (attempt + 1) ** 2));
         continue;
       }
       throw lastErr;
@@ -210,14 +233,23 @@ async function upsertArticles({ client, businessId, items }) {
       const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
       if (!Number.isFinite(id)) continue;
 
-      const nombre = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
+      const nombre   = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
       const categoria = String(it.categoria ?? '').trim() || 'Sin categoría';
-      const subrubro = String(it.subrubro ?? '').trim() || 'Sin subrubro';
-      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
+      const subrubro  = String(it.subrubro  ?? '').trim() || 'Sin subrubro';
+      const precio   = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo    = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
-      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it.raw ?? it._raw ?? it));
+      params.push(
+        businessId,
+        id,
+        nombre,
+        categoria,
+        subrubro,
+        precio,
+        costo,
+        JSON.stringify(it.raw ?? it._raw ?? it)
+      );
     }
 
     if (!values.length) continue;
@@ -272,7 +304,7 @@ exports.syncNow = async (req, res) => {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     if (scope === 'articles' || scope === 'all') {
-      // 1) Traer artículos (plano SWAPeado) + árbol crudo
+      // 1) Traer artículos (plano SWAPeado)  árbol crudo
       const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
 
       // 2) Cachear árbol crudo con hash (para auditoría/depuración)
@@ -466,30 +498,39 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       [businessId]
     );
 
+    // Construye: subrubro -> categoria -> [articulos]
     const bySub = new Map();
     for (const r of rows) {
-      const sub = r.subrubro || 'Sin subrubro';
-      const cat = r.categoria || 'Sin categoría';
+      const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
+      const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
       if (!bySub.has(sub)) bySub.set(sub, new Map());
       const byCat = bySub.get(sub);
       if (!byCat.has(cat)) byCat.set(cat, []);
-      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
+      byCat.get(cat).push({
+        id: r.articulo_id,
+        nombre: r.nombre,
+        precio: r.precio ?? null,
+      });
     }
 
     const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
       subrubro,
-      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos }))
+      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({
+        categoria,
+        articulos,
+      })),
     }));
 
-    res.json({
-      ok: true,
-      resumen: {
-        subrubros: tree.length,
-        categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
-        articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
-      },
-      tree
-    });
+    const resumen = {
+      subrubros: tree.length,
+      categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
+      articulos: tree.reduce(
+        (a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0),
+        0
+      ),
+    };
+
+    res.json({ ok: true, resumen, tree });
   } catch (e) {
     console.error('listArticlesTreeFromDB error:', e);
     res.status(500).json({ error: 'internal', detail: e.message });
