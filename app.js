@@ -32,6 +32,8 @@ const app = express();
 
 startCron();
 
+app.use('/admin', require('./routes/adminRebuildAggRoutes'));
+
 /* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
