@@ -136,7 +136,7 @@ async function syncSalesForBusiness(
     F = at00UTC(F);
     T = clampToYesterday(at00UTC(T));
     if (F > T) {
-      return { ok: false, error: 'from > to (invalid range)', range: { from: ymd(F), to: ymd(T) } };
+      return { ok: false, error: 'invalid_range_or_mode', hint: 'use mode=auto | backfill_30d | from+to' };
     }
 
     // Trae desde Maxi con fallback 7d→1d y normaliza

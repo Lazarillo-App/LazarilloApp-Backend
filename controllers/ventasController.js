@@ -108,14 +108,13 @@ async function getSummary(req, res, next) {
     const lim = Math.min(Math.max(parseInt(req.query.limit || '200', 10), 1), 1000);
 
     const { rows } = await pool.query(
-      `SELECT i.article_id,
-              SUM(i.quantity)::numeric(14,3) AS qty
-         FROM app_sales_items i
-         JOIN app_sales s ON s.id = i.sale_id
-        WHERE s.business_id = $1
-          AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-          AND i.article_id IS NOT NULL
-        GROUP BY 1
+      `SELECT articulo_id AS article_id,
+              SUM(qty)::numeric(14,3) AS qty,
+              SUM(amount)::numeric(14,2) AS amount
+         FROM sales_daily_items
+        WHERE business_id = $1
+          AND "date" BETWEEN $2::date AND $3::date
+        GROUP BY articulo_id
         ORDER BY qty DESC
         LIMIT ${lim}`,
       [businessId, ymd(F), ymd(T)]
@@ -154,15 +153,14 @@ async function getArticleSeries(req, res, next) {
 
     // Agregado desde items
     const { rows } = await pool.query(
-      `SELECT (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-              SUM(i.quantity)::numeric(14,3)         AS qty
-         FROM app_sales_items i
-         JOIN app_sales s ON s.id = i.sale_id
-        WHERE s.business_id = $1
-          AND i.article_id = $2
-          AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
-        GROUP BY 1
-        ORDER BY 1`,
+      `SELECT "date" AS day,
+              SUM(qty)::numeric(14,3) AS qty
+         FROM sales_daily_items
+        WHERE business_id = $1
+          AND articulo_id = $2
+          AND "date" BETWEEN $3::date AND $4::date
+        GROUP BY "date"
+        ORDER BY "date"`,
       [businessId, articuloId, ymd(F), ymd(T)]
     );
 
@@ -207,42 +205,38 @@ async function getArticleSeriesQuery(req, res, next) {
 
     if (gb === 'day') {
       const { rows } = await pool.query(
-        `SELECT (s.occurred_at AT TIME ZONE 'UTC')::date AS label,
-                SUM(i.quantity)::numeric(14,3)         AS qty
-           FROM app_sales_items i
-           JOIN app_sales s ON s.id = i.sale_id
-          WHERE s.business_id = $1
-            AND i.article_id = $2
-            AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
-          GROUP BY 1
-          ORDER BY 1`,
+        `SELECT "date" AS label,
+                SUM(qty)::numeric(14,3) AS qty
+           FROM sales_daily_items
+          WHERE business_id = $1
+            AND articulo_id = $2
+            AND "date" BETWEEN $3::date AND $4::date
+          GROUP BY "date"
+          ORDER BY "date"`,
         [businessId, articuloId, yf, yt]
       );
-      const items = rows.map(r => ({ label: String(r.label), qty: Number(r.qty) || 0 }));
-      const total = items.reduce((a, x) => a + x.qty, 0);
+      const items = rows.map(r => ({ label: String(r.label).slice(0,10), qty: Number(r.qty) || 0 }));
+      const total = items.reduce((a, x) => a,  x.qty, 0);
       return res.json({ total, items });
     }
 
-    const bucket = gb === 'week' ? 'week' : 'month';
+   const bucket = gb === 'week' ? 'week' : 'month';
     const { rows } = await pool.query(
-      `SELECT date_trunc('${bucket}', (s.occurred_at AT TIME ZONE 'UTC')::date)::date AS label,
-              SUM(i.quantity)::numeric(14,3)                                          AS qty
-         FROM app_sales_items i
-         JOIN app_sales s ON s.id = i.sale_id
-        WHERE s.business_id = $1
-          AND i.article_id = $2
-          AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date
+      `SELECT date_trunc($5, "date")::date AS label,
+              SUM(qty)::numeric(14,3)      AS qty
+         FROM sales_daily_items
+        WHERE business_id = $1
+          AND articulo_id = $2
+          AND "date" BETWEEN $3::date AND $4::date
         GROUP BY 1
         ORDER BY 1`,
-      [businessId, articuloId, yf, yt]
+      [businessId, articuloId, yf, yt, bucket]
     );
     const items = rows.map(r => ({
-      label: (r.label instanceof Date)
-        ? r.label.toISOString().slice(0, 10)
-        : String(r.label).slice(0, 10),
+       label: (r.label instanceof Date) ? r.label.toISOString().slice(0,10) : String(r.label).slice(0,10),
       qty: Number(r.qty) || 0
     }));
-    const total = items.reduce((a, x) => a + x.qty, 0);
+    const total = items.reduce((a, x) => a,  x.qty, 0);
     return res.json({ total, items });
   } catch (err) {
     next(err);
