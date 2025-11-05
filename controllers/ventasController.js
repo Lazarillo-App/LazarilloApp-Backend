@@ -22,11 +22,18 @@ function clampRange(fromStr, toStr) {
   const todayUTC = at00(now);
   const AYER = addDays(todayUTC, -1);
 
-  const F = toDate(fromStr) || addDays(todayUTC, -29);
-  const T = toDate(toStr) || AYER;
+  const F0 = toDate(fromStr) || addDays(todayUTC, -29);
+  const T0 = toDate(toStr) || AYER;
 
-  const Tclamped = T > AYER ? AYER : T;
-  return { F: at00(F), T: at00(Tclamped), AYER };
+  const F = at00(F0);
+  const T = at00(T0 > AYER ? AYER : T0);
+
+  if (Number.isNaN(F.getTime()) || Number.isNaN(T.getTime())) {
+    // fallback robusto: últimos 30 días hasta ayer
+    const Fd = addDays(todayUTC, -29);
+    return { F: at00(Fd), T: AYER, AYER };
+  }
+  return { F, T, AYER };
 }
 
 function getBusinessId(req) {
@@ -81,15 +88,15 @@ async function getVentas(req, res, next) {
     } else {
       const bucket = gb === 'week' ? 'week' : 'month';
       const { rows } = await pool.query(
-        `SELECT date_trunc('${bucket}', day)::date AS bucket,
+        `SELECT date_trunc($3, day)::date AS bucket,
                 SUM(total)::numeric(14,2) AS total,
                 SUM(tx_count)::int         AS tx_count
            FROM sales_daily
           WHERE business_id = $1
-            AND day BETWEEN $2::date AND $3::date
+            AND day BETWEEN $2::date AND $4::date
           GROUP BY 1
           ORDER BY 1 ASC`,
-        [businessId, ymd(F), ymd(T)]
+        [businessId, ymd(F), bucket, ymd(T)]
       );
       return res.json({ ok: true, business_id: businessId, groupBy: gb, series: rows });
     }
@@ -109,7 +116,7 @@ async function getSummary(req, res, next) {
 
     const { rows } = await pool.query(
       `SELECT articulo_id AS article_id,
-              SUM(qty)::numeric(14,3) AS qty,
+              SUM(qty)::numeric(14,3)   AS qty,
               SUM(amount)::numeric(14,2) AS amount
          FROM sales_daily_items
         WHERE business_id = $1
@@ -145,26 +152,36 @@ async function getArticleSeries(req, res, next) {
 
     const { F, T } = clampRange(req.query.from, req.query.to);
 
-    // Calendario de días
+    // Calendario de días (bucket completo)
     const days = [];
     for (let d = new Date(`${ymd(F)}T00:00:00Z`); d <= new Date(`${ymd(T)}T00:00:00Z`); d = addDays(d, 1)) {
       days.push(ymd(d));
     }
 
-    // Agregado desde items
+    // controllers/ventasController.js  (en getArticleSeries)
+
     const { rows } = await pool.query(
-      `SELECT "date" AS day,
-              SUM(qty)::numeric(14,3) AS qty
-         FROM sales_daily_items
-        WHERE business_id = $1
-          AND articulo_id = $2
-          AND "date" BETWEEN $3::date AND $4::date
-        GROUP BY "date"
-        ORDER BY "date"`,
+      `
+  SELECT "date" AS day,
+         SUM(qty)::numeric(14,3) AS qty
+    FROM sales_daily_items
+   WHERE business_id = $1
+     AND articulo_id = $2
+     AND "date" BETWEEN $3::date AND $4::date
+   GROUP BY "date"
+   ORDER BY "date"
+  `,
       [businessId, articuloId, ymd(F), ymd(T)]
     );
 
-    const map = new Map(rows.map(r => [String(r.day), Number(r.qty)]));
+    // 🔧 normalizamos la clave a 'YYYY-MM-DD'
+    const keyOf = (v) =>
+      (v instanceof Date)
+        ? v.toISOString().slice(0, 10)
+        : String(v).slice(0, 10);
+
+    const map = new Map(rows.map(r => [keyOf(r.day), Number(r.qty)]));
+
     const series = days.map(d => ({ date: d, qty: map.get(d) || 0 }));
 
     return res.json({
@@ -175,6 +192,7 @@ async function getArticleSeries(req, res, next) {
       groupBy: 'day',
       data: series
     });
+
   } catch (err) {
     next(err);
   }
@@ -215,12 +233,12 @@ async function getArticleSeriesQuery(req, res, next) {
           ORDER BY "date"`,
         [businessId, articuloId, yf, yt]
       );
-      const items = rows.map(r => ({ label: String(r.label).slice(0,10), qty: Number(r.qty) || 0 }));
-      const total = items.reduce((a, x) => a,  x.qty, 0);
-      return res.json({ total, items });
+      const items = rows.map(r => ({ label: String(r.label).slice(0, 10), qty: Number(r.qty) || 0 }));
+      const total = items.reduce((a, x) => a + x.qty, 0);
+      return res.json({ ok: true, business_id: businessId, articuloId, groupBy: 'day', total, items });
     }
 
-   const bucket = gb === 'week' ? 'week' : 'month';
+    const bucket = gb === 'week' ? 'week' : 'month';
     const { rows } = await pool.query(
       `SELECT date_trunc($5, "date")::date AS label,
               SUM(qty)::numeric(14,3)      AS qty
@@ -233,11 +251,11 @@ async function getArticleSeriesQuery(req, res, next) {
       [businessId, articuloId, yf, yt, bucket]
     );
     const items = rows.map(r => ({
-       label: (r.label instanceof Date) ? r.label.toISOString().slice(0,10) : String(r.label).slice(0,10),
+      label: (r.label instanceof Date) ? r.label.toISOString().slice(0, 10) : String(r.label).slice(0, 10),
       qty: Number(r.qty) || 0
     }));
-    const total = items.reduce((a, x) => a,  x.qty, 0);
-    return res.json({ total, items });
+    const total = items.reduce((a, x) => a + x.qty, 0);
+    return res.json({ ok: true, business_id: businessId, articuloId, groupBy: gb, total, items });
   } catch (err) {
     next(err);
   }
