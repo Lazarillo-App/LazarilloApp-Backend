@@ -6,9 +6,18 @@ const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
 const fetch = (...args) => globalThis.fetch(...args);
 
 // ------------------- Helpers -------------------
-const slugify = (s = '') =>
-  String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+const slugify = (s = '') => {
+  const out = String(s)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') 
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')                      
+    .replace(/(^-|-$)+/g, '')                         
+    .slice(0, 40);                                    
+  return out || 'local';
+};
+
+  // 🔔 dispara el backfill inicial de 7 días “en background”
+const { triggerInitialWeekOnBusinessCreate } = require('../services/initialIngestion');
 
 function attachBranding(biz) {
   const br = (biz?.props && biz.props.branding) || biz.branding || {};
@@ -97,14 +106,20 @@ exports.create = async (req, res) => {
       maxi
     } = req.body || {};
 
-    if (!name || !name.trim()) return res.status(400).json({ error: 'name_required' });
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'name_required' });
+    }
 
     // slug único
     let base = slugify(name);
-    if (!base) base = 'local';
     let slug = base, i = 1;
-    while (true) {
-      const { rows } = await pool.query('SELECT 1 FROM app_businesses WHERE slug=$1 LIMIT 1', [slug]);
+    // buscar slug libre
+    // (nota: si tenés índice unique(slug), esto evita reintentos por error)
+    for (;;) {
+      const { rows } = await pool.query(
+        'SELECT 1 FROM app_businesses WHERE slug=$1 LIMIT 1',
+        [slug]
+      );
       if (!rows[0]) break;
       slug = `${base}-${++i}`;
     }
@@ -114,17 +129,23 @@ exports.create = async (req, res) => {
 
     // credenciales MAXI cifradas si vienen
     if (maxi?.email && maxi?.password && maxi?.codcli) {
-      props.maxi = { email: maxi.email, codcli: maxi.codcli, pass_enc: encryptSecret(maxi.password) };
+      props.maxi = {
+        email:  String(maxi.email || '').trim(),
+        codcli: String(maxi.codcli || maxi.cod_cli || '').trim(),
+        pass_enc: encryptSecret(String(maxi.password || ''))
+      };
     }
 
+    // INSERT negocio
     const { rows } = await pool.query(
-      `INSERT INTO app_businesses (owner_id,name,slug,props)
+      `INSERT INTO app_businesses (owner_id, name, slug, props)
        VALUES ($1,$2,$3,$4)
        RETURNING id, owner_id, name, slug, props, created_at`,
       [uid, name.trim(), slug, props]
     );
     const biz = rows[0];
 
+    // relación usuario-negocio (owner)
     await pool.query(
       `INSERT INTO user_businesses (user_id, business_id, role)
        VALUES ($1,$2,'owner')
@@ -132,12 +153,25 @@ exports.create = async (req, res) => {
       [uid, biz.id]
     );
 
-    await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
+    // set activo
+    await pool.query(
+      `UPDATE app_users SET active_business_id=$1 WHERE id=$2`,
+      [biz.id, uid]
+    );
 
-    res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
+    // 🔔 Disparar copia inicial última SEMANA (7 días hasta AYER) en background
+    //     No bloquea la respuesta. Pasa req por si hay X-Maxi-Token en headers.
+    try {
+      triggerInitialWeekOnBusinessCreate(biz.id, req);
+    } catch (e) {
+      // no romper la respuesta por un error de lanzamiento async
+      console.warn('[business.create] triggerInitialWeekOnBusinessCreate warn:', e?.message);
+    }
+
+    return res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
   } catch (e) {
     console.error('POST /api/businesses error:', e);
-    res.status(500).json({ error: 'internal' });
+    return res.status(500).json({ error: 'internal' });
   }
 };
 
