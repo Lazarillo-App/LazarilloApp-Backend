@@ -67,7 +67,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type','Authorization','X-Business-Id','X-Maxi-Token','X-Cron-Secret'],
   credentials: false,
   optionsSuccessStatus: 204,
-}));
+}
+));
 app.options(/.*/, cors());
 
 /* ----------- parsers + logger HTTP (ANTES de montar /admin) ----------- */
