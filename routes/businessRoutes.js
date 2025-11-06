@@ -20,6 +20,9 @@ const { requireBusinessAccessParam } = require('../middleware/requireBusinessAcc
 const { refreshMenu } = require('../controllers/maxiMenuController');
 const { getArticlesTree } = require('../controllers/businessController');
 
+// 🔹 Nuevo: sync ventana simple (últimos N días)
+const { runWindow } = require('../services/salesSyncPolicy');
+
 // ===== Carpeta de logos =====
 const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
@@ -47,38 +50,29 @@ router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
 
 // ===== Upload logo =====
-// Acepta 'file', 'logo' o 'image' como nombre de campo
-const uploadFields = upload.fields([
-  { name: 'file', maxCount: 1 },
-  { name: 'logo', maxCount: 1 },
-  { name: 'image', maxCount: 1 },
-]);
-
+// Acepta 'file', 'logo' o 'image' como nombre de campo (y fallback a any)
 router.post('/:id/logo', (req, res, next) => {
-  const uploadAny = upload.any(); // <— acepta cualquier nombre de campo
+  const uploadAny = upload.any();
   uploadAny(req, res, (err) => {
     if (err) {
       const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-              'upload_error'
+          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+          'upload_error'
       });
     }
     const arr = Array.isArray(req.files) ? req.files : [];
     const firstImg = arr.find(f => /^image\//i.test(f.mimetype)) || null;
     req.file = firstImg;
 
-    // DEBUG temporal (debe verse esto en logs cuando pegás la ruta)
+    // DEBUG temporal
     console.log('[upload-logo] content-type:', req.headers['content-type']);
     console.log('[upload-logo] files:', arr.map(f => ({ field: f.fieldname, type: f.mimetype, size: f.size })));
     console.log('[upload-logo] chosen:', !!req.file, req.file?.fieldname);
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'missing_file' });
-    }
-
+    if (!req.file) return res.status(400).json({ error: 'missing_file' });
     businesses.uploadLogo(req, res, next);
   });
 });
@@ -119,7 +113,7 @@ router.get('/:id/articles/tree', listArticlesTreeFromDB);
 router.get('/:id/sales/summary', salesSummaryFromDB);
 router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 
-/* ================ Sync ventas (nuevo) ====================== */
+/* ================ Sync ventas: modo actual ================= */
 router.post('/:id/sync-sales', async (req, res, next) => {
   try {
     const biz = req.business;
@@ -132,6 +126,16 @@ router.post('/:id/sync-sales', async (req, res, next) => {
     }
     const out = await syncSalesForBusiness(biz, { mode, from, to, dryrun, req });
     res.json({ ok: true, business_id: biz.id, sales: out });
+  } catch (e) { next(e); }
+});
+
+/* ========== 🔹 Nuevo: Sync manual “últimos N días” (default 7) ========== */
+router.post('/:id/sync-sales-window', async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const windowDays = Math.min(Math.max(parseInt(req.body?.windowDays ?? '7', 10), 1), 30);
+    const detail = await runWindow({ businessId: biz.id, days: windowDays });
+    res.json({ ok: true, business_id: biz.id, window_days: windowDays, detail });
   } catch (e) { next(e); }
 });
 
@@ -162,6 +166,7 @@ router.patch('/:id/default-group', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* ====== (duplicado compatible) árbol artículos por businessId ====== */
 router.get('/:businessId/articles-tree', getArticlesTree);
 
 module.exports = router;

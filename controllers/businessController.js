@@ -1,10 +1,14 @@
 // controllers/businessController.js
+const path = require('path');                    // 👈 faltaba
 const pool = require('../config/db');
 const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
 
 // fetch compatible en Node 18+ (usa global)
 const fetch = (...args) => globalThis.fetch(...args);
 const { ensureInitialBackfillOnce } = require('../services/salesSyncPolicy');
+
+const MAXI_BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 const slugify = (s = '') => {
   const out = String(s)
@@ -20,9 +24,6 @@ function attachBranding(biz) {
   const br = (biz?.props && biz.props.branding) || biz.branding || {};
   return { ...biz, branding: { ...(biz.branding || {}), ...br } };
 }
-
-const MAXI_BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // ------------------- Negocios (CRUD + selección) -------------------
 exports.listMine = async (req, res) => {
@@ -105,7 +106,7 @@ exports.create = async (req, res) => {
 
     if (!name || !name.trim()) return res.status(400).json({ error: 'name_required' });
 
-    // slug único (usá tu helper slugify definitivo)
+    // slug único
     let base = slugify(name);
     if (!base) base = 'local';
     let slug = base, i = 1;
@@ -118,7 +119,7 @@ exports.create = async (req, res) => {
     // props base
     const props = { branding, contact, address, social, lang, currency, timezone, tax_id };
 
-    // MAXI credenciales (cifrar)
+    // MAXI credenciales (cifrar si vienen)
     if (maxi?.email && maxi?.password && maxi?.codcli) {
       props.maxi = { email: maxi.email, codcli: maxi.codcli, pass_enc: encryptSecret(maxi.password) };
     }
@@ -139,10 +140,10 @@ exports.create = async (req, res) => {
     );
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
 
-    // 🔔 TRIGGER: backfill inicial de N días, no bloqueante
+    // Backfill inicial 7 días (no bloqueante)
     setImmediate(async () => {
       try {
-        await ensureInitialBackfillOnce({ businessId: biz.id, req });
+        await ensureInitialBackfillOnce({ businessId: biz.id });
         console.log(`[backfill:init] biz=${biz.id} OK`);
       } catch (e) {
         console.error(`[backfill:init] biz=${biz.id} ERROR:`, e?.message);
@@ -170,8 +171,7 @@ exports.update = async (req, res) => {
   const body = req.body || {};
   const name = (body.name ?? null);
 
-  const incoming =
-    body.props ? body.props : body;
+  const incoming = body.props ? body.props : body;
 
   const branding = incoming.branding || null;
   const contact = incoming.contact || null;
@@ -179,7 +179,6 @@ exports.update = async (req, res) => {
   const social  = incoming.social  || null;
   const description = (incoming.description ?? null);
 
-  // armamos un jsonb parcial (sólo claves presentes)
   const patch = {
     ...(branding ? { branding } : {}),
     ...(contact ? { contact } : {}),
@@ -187,7 +186,6 @@ exports.update = async (req, res) => {
     ...(social  ? { social }  : {}),
     ...(description !== null ? { description } : {})
   };
-
   const patchIsEmpty = Object.keys(patch).length === 0;
 
   const { rows } = await pool.query(
@@ -346,98 +344,6 @@ exports.maxiSave = async (req, res) => {
 };
 
 // ------------------- MAXI (llamadas externas: ejemplo) -------------------
-async function callMaxiArticles({ email, password, codcli, from, to }) {
-  const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
-
-  const rLogin = await fetch(`${BASE}/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ email, pass: password, cod_cli: String(codcli) })
-  });
-  const jLogin = await rLogin.json();
-  if (!(jLogin?.resultCode === 'SUCCESS' && jLogin?.content?.tokenAccess)) {
-    throw new Error(`maxi_login_failed_${rLogin.status}`);
-  }
-  const token = jLogin.content.tokenAccess;
-
-  const u = new URL(`${BASE}/menuweb/menuextendido`);
-  if (from) u.searchParams.set('fechaInicio', from);
-  if (to) u.searchParams.set('fechaFin', to);
-
-  const rArt = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
-  const jArt = await rArt.json();
-  if (jArt?.resultCode === 'SUCCESS') return jArt.content || [];
-  throw new Error(`maxi_fetch_failed_${rArt.status}:${jArt?.resultDescription || ''}`);
-}
-
-exports.maxiArticles = async (req, res) => {
-  const uid = req.user?.id;
-  const businessId = req.businessId;
-  const { from = '2025-01-01', to = '2025-04-01' } = req.query || {};
-  if (!uid || !businessId) return res.status(400).json({ error: 'no_active_business' });
-
-  const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [businessId]);
-  const mx = (rows[0]?.props || {}).maxi || {};
-  const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : mx.password;
-
-  if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
-
-  try {
-    const items = await callMaxiArticles({ email: mx.email, password, codcli: mx.codcli, from, to });
-    res.json({ items });
-  } catch (e) {
-    console.error('GET /:id/maxi-articles error:', e);
-    res.status(500).json({ error: 'internal' });
-  }
-};
-
-exports.uploadLogo = async (req, res, next) => {
-  try {
-    const biz = req.business; // viene de requireBusinessAccessParam
-    if (!req.file) return res.status(400).json({ error: 'missing_file' });
-
-    // ruta pública (coincide con app.use('/uploads', ...))
-    const relPath = path.relative(path.join(__dirname, '..'), req.file.path)
-      .replace(/\\/g, '/'); // win compat
-    const publicUrl = `/${relPath}`; // p.ej: /uploads/logos/biz_52_....png
-
-    // guardar en props.branding.logo_url
-    await pool.query(`
-      UPDATE app_businesses
-         SET props = COALESCE(props,'{}'::jsonb)
-                   || jsonb_build_object('branding',
-                        COALESCE((props->'branding')::jsonb, '{}'::jsonb)
-                        || jsonb_build_object('logo_url', $2)
-                      )
-       WHERE id = $1
-    `, [biz.id, publicUrl]);
-
-    res.json({ ok: true, url: publicUrl, business_id: biz.id });
-  } catch (e) { next(e); }
-};
-
-exports.setBrandingUrl = async (req, res, next) => {
-  try {
-    const biz = req.business;
-    const { logo_url } = req.body || {};
-    const val = (typeof logo_url === 'string' && logo_url.trim()) ? logo_url.trim() : null;
-
-    await pool.query(`
-      UPDATE app_businesses
-         SET props = COALESCE(props,'{}'::jsonb)
-                   || jsonb_build_object('branding',
-                        COALESCE((props->'branding')::jsonb, '{}'::jsonb)
-                        || jsonb_build_object('logo_url', $2)
-                      )
-       WHERE id = $1
-    `, [biz.id, val]);
-
-    res.json({ ok: true, url: val, business_id: biz.id });
-  } catch (e) { next(e); }
-};
-
-// PRUEBAS DE VENTAS PARA MAXI
-
 async function maxiLogin({ email, pass, codcli }) {
   const res = await fetch(`${MAXI_BASE}/login`, {
     method: 'POST',
@@ -467,21 +373,22 @@ async function maxiFullInvoiceByDate({ token, from, to }) {
   return arr.map(x => x?.factura).filter(Boolean);
 }
 
+// Divide un rango en ventanas de 7 días [from..to] (fechas en UTC)
 function chunkRange7d(from, to) {
   const out = [];
-  const d0 = new Date(from + 'T00:00:00');
-  const d1 = new Date(to   + 'T00:00:00');
+  const d0 = new Date(from + 'T00:00:00Z'); // 👈 UTC
+  const d1 = new Date(to   + 'T00:00:00Z');
   if (!(+d0) || !(+d1) || d0 > d1) return out;
   let cur = new Date(d0);
   while (cur <= d1) {
     const end = new Date(cur);
-    end.setDate(end.getDate() + 6);
+    end.setUTCDate(end.getUTCDate() + 6);
     if (end > d1) end.setTime(d1.getTime());
     const pad = (n) => String(n).padStart(2, '0');
-    const f = `${cur.getFullYear()}-${pad(cur.getMonth()+1)}-${pad(cur.getDate())}`;
-    const t = `${end.getFullYear()}-${pad(end.getMonth()+1)}-${pad(end.getDate())}`;
+    const f = `${end.getUTCFullYear ? cur.getUTCFullYear() : cur.getFullYear()}-${pad((cur.getUTCMonth?.() ?? cur.getMonth())+1)}-${pad(cur.getUTCDate?.() ?? cur.getDate())}`;
+    const t = `${end.getUTCFullYear ? end.getUTCFullYear() : end.getFullYear()}-${pad((end.getUTCMonth?.() ?? end.getMonth())+1)}-${pad(end.getUTCDate?.() ?? end.getDate())}`;
     out.push({ from: f, to: t });
-    cur.setDate(cur.getDate() + 7);
+    cur.setUTCDate(cur.getUTCDate() + 7);
   }
   return out;
 }
@@ -541,7 +448,6 @@ exports.maxiItemsByDate = async (req, res, next) => {
       windows: windows.length,
       documents: docs,
       items,
-      // Para comparar rápido: top 20
       top20: items.slice(0, 20)
     });
   } catch (e) { next(e); }
@@ -553,14 +459,14 @@ function summarizeInvoices(invoices = []) {
     numero:  f.numero ?? null,
     fecha:   (f.fecha || f.cabecera?.fecha || '').slice(0, 10),
     hora:    f.cabecera?.hora ?? null,
-    tipo:    f.cabecera?.nombre_cpb ?? null,     // ej "Tic"
-    cod_cpb: f.cabecera?.cod_cpb ?? null,        // ej "G" (tipo comprobante)
+    tipo:    f.cabecera?.nombre_cpb ?? null,
+    cod_cpb: f.cabecera?.cod_cpb ?? null,
     total:   Number(f.total ?? f.cabecera?.total ?? 0),
     neto1:   Number(f.cabecera?.neto1 ?? 0),
     iva1:    Number(f.cabecera?.iva1 ?? 0),
     forma:   f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
     suc:     f.cabecera?.prefijo ?? null,
-    anulado: false // este endpoint no trae flag de anulado; si apareciera, lo mapearíamos aquí
+    anulado: false
   }));
 
   const totalsByDay = {};
@@ -597,24 +503,20 @@ exports.maxiRawInvoices = async (req, res, next) => {
     const to   = String(req.query?.to   || '').slice(0, 10);
     if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD (rango máx. 7 días)' });
 
-    // credenciales almacenadas
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
     const mx = (rows[0]?.props || {}).maxi || {};
     const pass = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : mx.password;
     if (!(mx.email && pass && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
-    // login + fetch
     const token = await maxiLogin({ email: mx.email, pass, codcli: mx.codcli });
     const invoices = await maxiFullInvoiceByDate({ token, from, to });
 
-    // respuesta de diagnóstico
     res.json({
       ok: true,
       range: { from, to },
       raw_count: invoices.length,
       summary: summarizeInvoices(invoices),
-      // Si querés ver TODO crudo, habilitá temporalmente:
-      // raw: invoices
+      // raw: invoices // habilitar sólo para debug puntual
     });
   } catch (e) { next(e); }
 };
@@ -627,4 +529,24 @@ exports.getArticlesTree = async (req, res, next) => {
     const tree = await fetchArticlesTree(businessId);
     res.json({ ok: true, tree });
   } catch (e) { next(e); }
-}
+};
+
+exports.setBrandingUrl = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const { logo_url } = req.body || {};
+    const val = (typeof logo_url === 'string' && logo_url.trim()) ? logo_url.trim() : null;
+
+    await require('../config/db').query(`
+      UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb)
+                   || jsonb_build_object('branding',
+                        COALESCE((props->'branding')::jsonb, '{}'::jsonb)
+                        || jsonb_build_object('logo_url', $2)
+                      )
+       WHERE id = $1
+    `, [biz.id, val]);
+
+    res.json({ ok: true, url: val, business_id: biz.id });
+  } catch (e) { next(e); }
+};
