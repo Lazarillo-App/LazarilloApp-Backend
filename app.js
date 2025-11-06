@@ -63,8 +63,8 @@ app.use(cors({
     'https://www.lazarillo.com.ar',
     'https://lazarillo-app.github.io',
   ],
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id', 'X-Maxi-Token', 'X-Cron-Secret'],
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','X-Business-Id','X-Maxi-Token','X-Cron-Secret'],
   credentials: false,
   optionsSuccessStatus: 204,
 }));
