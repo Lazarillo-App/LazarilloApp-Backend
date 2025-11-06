@@ -4,7 +4,6 @@ const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
 
 // fetch compatible en Node 18+ (usa global)
 const fetch = (...args) => globalThis.fetch(...args);
-
 const { ensureInitialBackfillOnce } = require('../services/salesSyncPolicy');
 
 const slugify = (s = '') => {
@@ -106,7 +105,7 @@ exports.create = async (req, res) => {
 
     if (!name || !name.trim()) return res.status(400).json({ error: 'name_required' });
 
-    // slug único
+    // slug único (usá tu helper slugify definitivo)
     let base = slugify(name);
     if (!base) base = 'local';
     let slug = base, i = 1;
@@ -119,7 +118,7 @@ exports.create = async (req, res) => {
     // props base
     const props = { branding, contact, address, social, lang, currency, timezone, tax_id };
 
-    // credenciales MAXI cifradas si vienen
+    // MAXI credenciales (cifrar)
     if (maxi?.email && maxi?.password && maxi?.codcli) {
       props.maxi = { email: maxi.email, codcli: maxi.codcli, pass_enc: encryptSecret(maxi.password) };
     }
@@ -138,26 +137,19 @@ exports.create = async (req, res) => {
        ON CONFLICT (user_id, business_id) DO NOTHING`,
       [uid, biz.id]
     );
-
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
 
-    // Respondemos rápido
-    res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
+    // 🔔 TRIGGER: backfill inicial de N días, no bloqueante
+    setImmediate(async () => {
+      try {
+        await ensureInitialBackfillOnce({ businessId: biz.id, req });
+        console.log(`[backfill:init] biz=${biz.id} OK`);
+      } catch (e) {
+        console.error(`[backfill:init] biz=${biz.id} ERROR:`, e?.message);
+      }
+    });
 
-    // Disparamos backfill inicial (1 semana por defecto) sin bloquear la respuesta
-    if (props.maxi?.email && (props.maxi?.pass_enc || maxi?.password) && props.maxi?.codcli) {
-      setImmediate(async () => {
-        try {
-          await ensureInitialBackfillOnce({
-            businessId: biz.id,
-            req,                  // para permitir X-Maxi-Token si lo usás en pruebas
-            windowDays: process.env.INITIAL_BACKFILL_DAYS || 7
-          });
-        } catch (e) {
-          console.error('[create] initial backfill failed:', e?.message);
-        }
-      });
-    }
+    res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
   } catch (e) {
     console.error('POST /api/businesses error:', e);
     res.status(500).json({ error: 'internal' });

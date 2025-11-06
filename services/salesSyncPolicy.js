@@ -20,12 +20,13 @@ async function unlock(client, businessId) {
 function pad2(n){ return String(n).padStart(2,'0'); }
 function toISODate(d){ return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
 
-function lastNUntilYesterday(N = 7) {
+function lastNDaysUntilYesterday(N = 7) {
   const now = new Date();
-  const end = new Date(now); end.setDate(end.getDate() - 1);
+  const end = new Date(now); end.setDate(end.getDate() - 1); // AYER
   const start = new Date(end); start.setDate(start.getDate() - (N - 1));
   return { from: toISODate(start), to: toISODate(end) };
 }
+const INIT_BACKFILL_DAYS = Math.max(1, Number(process.env.INIT_BACKFILL_DAYS || 7));
 
 // ---- estado persistente (sales_sync_state) ----
 async function readState(client, businessId) {
@@ -64,29 +65,24 @@ async function getMaxDayFromDB(client, businessId) {
  * Backfill inicial UNA SOLA VEZ.
  * windowDays: tamaño de ventana (default: env INITIAL_BACKFILL_DAYS || 7)
  */
-async function ensureInitialBackfillOnce({ businessId, req, windowDays }) {
+/** Backfill inicial UNA SOLA VEZ (N días hasta ayer) */
+async function ensureInitialBackfillOnce({ businessId, req }) {
   const client = await pool.connect();
-  let locked = false;
   try {
     await client.query('BEGIN');
-
-    // lock
-    locked = await tryLock(client, businessId);
-    if (!locked) {
-      await client.query('ROLLBACK');
+    if (!(await tryLock(client, businessId))) {
+      await client.query('ROLLBACK'); client.release();
       return { ok: false, skipped: true, reason: 'locked' };
     }
 
-    // estado
     const state = await readState(client, businessId);
     if (state?.initial_backfill_done) {
-      await client.query('COMMIT');
+      await unlock(client, businessId);
+      await client.query('COMMIT'); client.release();
       return { ok: true, already_done: true };
     }
 
-    const W = Number(windowDays || process.env.INITIAL_BACKFILL_DAYS || 7);
-    const { from, to } = lastNUntilYesterday(Math.max(1, W));
-
+    const { from, to } = lastNDaysUntilYesterday(INIT_BACKFILL_DAYS);
     const raw = await fetchSalesRanged({ businessId, from, to, req });
     const res = await upsertSalesBatch(businessId, raw);
 
@@ -96,15 +92,15 @@ async function ensureInitialBackfillOnce({ businessId, req, windowDays }) {
       last_daily_sync_at: to
     });
 
-    await client.query('COMMIT');
-    return { ok: true, from, to, window_days: W, ...res };
+    await unlock(client, businessId);
+    await client.query('COMMIT'); client.release();
+    return { ok: true, from, to, window_days: INIT_BACKFILL_DAYS, ...res };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
+    try { await unlock(client, businessId); } catch {}
+    client.release();
     e.status = e.status || 500;
     throw e;
-  } finally {
-    try { if (locked) await unlock(client, businessId); } catch {}
-    client.release(); // ← se libera SIEMPRE una sola vez
   }
 }
 

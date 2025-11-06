@@ -10,10 +10,10 @@ const path = require('path');
 const fs = require('fs');
 
 const { startCron } = require('./services/cron');
-const pool = require('./config/db');            // (ok tenerlo importado)
+const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 
-// Middlewares de auth/negocio
+// Auth middlewares
 const { authRequired, loadActiveBusiness } = require('./middleware/authMiddleware');
 const requireAppAdmin = require('./middleware/requireAppAdmin');
 
@@ -22,21 +22,25 @@ const authRoutes         = require('./routes/authRoutes');
 const devRoutes          = require('./routes/devRoutes');
 const businessRoutes     = require('./routes/businessRoutes');
 const adminRoutes        = require('./routes/admin.routes');
-const adminCronRoutes    = require('./routes/adminCronRoutes');       // ⬅ cron sin auth (solo X-Cron-Secret)
-const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes'); // ⬅ rebuild agregados (con X-Cron-Secret)
+const adminCronRoutes    = require('./routes/adminCronRoutes');        // ⬅ cron sin JWT (X-Cron-Secret)
+const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes');  // ⬅ rebuild agregados (X-Cron-Secret)
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes       = require('./routes/ventasRoutes');
 const insumosRoutes      = require('./routes/insumosRoutes');
 const branchesRoutes     = require('./routes/branchRoutes');
 const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
+// (Opcional) probe directo a Maxi en dev
+const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
+const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
+
 const app = express();
 
-// ───────────────── base ─────────────────
+/* ----------- básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-// Logging inicial legible
+/* logging simple por request */
 app.use((req, res, next) => {
   const id = randomUUID().slice(0, 8);
   const t0 = Date.now();
@@ -47,7 +51,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS
+/* ----------- CORS ----------- */
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -64,47 +68,47 @@ app.use(cors({
 }));
 app.options(/.*/, cors());
 
-// Parsers + logger HTTP
+/* ----------- parsers + logger HTTP ----------- */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
-// Uploads públicos
+/* ----------- uploads públicos ----------- */
 const uploadsDir = path.join(__dirname, 'uploads');
 const logosDir   = path.join(uploadsDir, 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// ───────────────── rutas sin auth ─────────────────
+/* ----------- rutas públicas ----------- */
 app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
+if (exposeProbe) {
+  app.use('/api/dev', devMaxiProbeRoutes); // GET /api/dev/maxi-probe?biz=&from=&to=
+}
 
-// CRON sin JWT (solo valida X-Cron-Secret internamente)
+/* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
 app.use('/api/cron', adminCronRoutes);
 
-// Rebuild agregados (útil para Postman) — sin JWT, con X-Cron-Secret opcional
+/* ----------- rebuild agregados (X-Cron-Secret opcional) ----------- */
 app.use('/admin', adminRebuildAgg);
 
-// ───────────────── rutas con auth ─────────────────
-// Admin plataforma (requiere app_admin)
+/* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
-
-// Businesses (auth + negocio activo)
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
 
-// Guard global de /api (después de montar /api/cron y /api/admin)
+/* guard global de /api (después de /api/cron y /api/admin) */
 app.use('/api', authRequired, loadActiveBusiness);
 
-// Utilidades con negocio
+/* módulos con negocio */
 app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
 app.use('/api/insumos',               insumosRoutes);
 app.use('/api/ventas',                ventasRoutes);
 app.use('/api/branches',              branchesRoutes);
 
-// (histórico) rutas bajo :businessId
+/* histórico: rutas bajo :businessId */
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
-// Debug
+/* util debug */
 app.get('/api/_debug/whoami', authRequired, (req, res) => {
   res.json({
     uid: req.user?.id,
@@ -114,16 +118,17 @@ app.get('/api/_debug/whoami', authRequired, (req, res) => {
   });
 });
 
-// Health
+/* health */
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// 404 + errores
+/* 404 + errores */
 app.use((req, res) => res.status(404).json({ error: 'not_found', path: req.originalUrl }));
 app.use((err, req, res, _next) => {
   console.error('❌ Error:', err);
   res.status(err.status || 500).json({ error: 'internal', message: err?.message, code: err?.code });
 });
 
+/* ----------- cron en prod ----------- */
 if (process.env.CRON_ENABLED === '1') {
   startCron();
 }
