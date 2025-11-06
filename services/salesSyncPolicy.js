@@ -10,6 +10,7 @@ async function tryLock(client, businessId) {
     'SELECT pg_try_advisory_lock($1) AS locked', [lockKeyFor(businessId)]
   );
   return !!locked;
+  
 }
 async function unlock(client, businessId) {
   await client.query('SELECT pg_advisory_unlock($1)', [lockKeyFor(businessId)]);
@@ -159,6 +160,12 @@ async function runDailyAuto({ businessId, req }) {
     try { if (locked) await unlock(client, businessId); } catch {}
     client.release(); // ← liberar UNA vez
   }
+
+  console.log(`[sync] biz=${businessId} intento lock...`);
+locked = await tryLock(client, businessId);
+console.log(`[sync] biz=${businessId} locked=${locked}`);
+
 }
+
 
 module.exports = { ensureInitialBackfillOnce, runDailyAuto };

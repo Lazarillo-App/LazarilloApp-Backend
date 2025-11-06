@@ -33,7 +33,6 @@ const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 const app = express();
 
 // ───────────────── base ─────────────────
-startCron();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
@@ -124,6 +123,10 @@ app.use((err, req, res, _next) => {
   console.error('❌ Error:', err);
   res.status(err.status || 500).json({ error: 'internal', message: err?.message, code: err?.code });
 });
+
+if (process.env.CRON_ENABLED === '1') {
+  startCron();
+}
 
 console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
 
