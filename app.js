@@ -10,7 +10,7 @@ const path = require('path');
 const fs = require('fs');
 
 const { startCron } = require('./services/cron');
-const pool = require('./config/db');
+const pool = require('./config/db');            // (ok tenerlo importado)
 const { runMigrations } = require('./db/migrations');
 
 // Middlewares de auth/negocio
@@ -22,8 +22,8 @@ const authRoutes         = require('./routes/authRoutes');
 const devRoutes          = require('./routes/devRoutes');
 const businessRoutes     = require('./routes/businessRoutes');
 const adminRoutes        = require('./routes/admin.routes');
-const adminCronRoutes    = require('./routes/adminCronRoutes');
-const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes'); // 👈 NUEVA
+const adminCronRoutes    = require('./routes/adminCronRoutes');       // ⬅ cron sin auth (solo X-Cron-Secret)
+const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes'); // ⬅ rebuild agregados (con X-Cron-Secret)
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes       = require('./routes/ventasRoutes');
 const insumosRoutes      = require('./routes/insumosRoutes');
@@ -32,28 +32,23 @@ const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 const app = express();
 
+// ───────────────── base ─────────────────
 startCron();
-
-/* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-/* ----------- logging legible ----------- */
+// Logging inicial legible
 app.use((req, res, next) => {
   const id = randomUUID().slice(0, 8);
   const t0 = Date.now();
   const hdrs = { ...req.headers, authorization: req.headers.authorization ? '***' : undefined };
   console.log(`➡️ [${id}] ${req.method} ${req.originalUrl}`);
-  if (process.env.LOG_REQUEST_HEADERS === '1') {
-    console.log(`   [${id}] headers:`, hdrs);
-  }
-  res.on('finish', () => {
-    console.log(`⬅️ [${id}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - t0}ms)`);
-  });
+  if (process.env.LOG_REQUEST_HEADERS === '1') console.log(`   [${id}] headers:`, hdrs);
+  res.on('finish', () => console.log(`⬅️ [${id}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - t0}ms)`));
   next();
 });
 
-/* ----------- CORS ----------- */
+// CORS
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -67,82 +62,72 @@ app.use(cors({
   allowedHeaders: ['Content-Type','Authorization','X-Business-Id','X-Maxi-Token','X-Cron-Secret'],
   credentials: false,
   optionsSuccessStatus: 204,
-}
-));
+}));
 app.options(/.*/, cors());
 
-/* ----------- parsers + logger HTTP (ANTES de montar /admin) ----------- */
+// Parsers + logger HTTP
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
-/* ----------- bootstrap uploads ----------- */
+// Uploads públicos
 const uploadsDir = path.join(__dirname, 'uploads');
 const logosDir   = path.join(uploadsDir, 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// estáticos públicos
-app.use('/uploads', require('express').static(path.join(__dirname, 'uploads')));
-
-/* ----------- públicas ----------- */
+// ───────────────── rutas sin auth ─────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
 
-/* ----------- admin plataforma ----------- */
-// opción alternativa
-app.use('/api/cron', require('./routes/adminCronRoutes')); 
-app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
+// CRON sin JWT (solo valida X-Cron-Secret internamente)
+app.use('/api/cron', adminCronRoutes);
 
-
-// admin util (rebuild agregados) — sin auth, pero con secreto opcional
+// Rebuild agregados (útil para Postman) — sin JWT, con X-Cron-Secret opcional
 app.use('/admin', adminRebuildAgg);
 
-/* ----------- businesses (auth + negocio activo) ----------- */
+// ───────────────── rutas con auth ─────────────────
+// Admin plataforma (requiere app_admin)
+app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
+
+// Businesses (auth + negocio activo)
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
 
-/* ----------- guard global /api ----------- */
+// Guard global de /api (después de montar /api/cron y /api/admin)
 app.use('/api', authRequired, loadActiveBusiness);
 
-/* ----------- utilidades ----------- */
-app.get('/api/_debug/whoami', authRequired, (req, res) => {
-  res.json({
-    uid: req.user?.id,
-    role: req.user?.role,
-    active_business_id: req.user?.active_business_id,
-    headers_x_business_id: req.header('X-Business-Id')
-  });
-});
-
-/* ----------- módulos con negocio ----------- */
+// Utilidades con negocio
 app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
 app.use('/api/insumos',               insumosRoutes);
 app.use('/api/ventas',                ventasRoutes);
 app.use('/api/branches',              branchesRoutes);
 
-/* (histórico) rutas bajo :businessId */
+// (histórico) rutas bajo :businessId
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
-/* ----------- health ----------- */
-app.get('/health', (_req, res) => res.json({ ok: true }));
-
-/* ----------- 404 + handler de errores ----------- */
-app.use((req, res, _next) => {
-  res.status(404).json({ error: 'not_found', path: req.originalUrl });
+// Debug
+app.get('/api/_debug/whoami', authRequired, (req, res) => {
+  res.json({
+    uid: req.user?.id,
+    role: req.user?.role,
+    active_business_id: req.user?.active_business_id,
+    headers_x_business_id: req.header('X-Business-Id'),
+  });
 });
 
+// Health
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// 404 + errores
+app.use((req, res) => res.status(404).json({ error: 'not_found', path: req.originalUrl }));
 app.use((err, req, res, _next) => {
   console.error('❌ Error:', err);
-  res.status(err.status || 500).json({
-    error: 'internal',
-    message: err?.message,
-    code: err?.code,
-  });
+  res.status(err.status || 500).json({ error: 'internal', message: err?.message, code: err?.code });
 });
 
 console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
 
 const PORT = process.env.PORT || 4000;
-
 (async () => {
   try {
     await runMigrations();
