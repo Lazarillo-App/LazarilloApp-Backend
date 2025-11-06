@@ -89,8 +89,10 @@ app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
 
 /* ----------- admin plataforma ----------- */
-app.use('/api/admin',       authRequired, requireAppAdmin, adminRoutes);
-app.use('/api/admin/cron',  adminCronRoutes);
+// opción alternativa
+app.use('/api/cron', require('./routes/adminCronRoutes')); 
+app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
+
 
 // admin util (rebuild agregados) — sin auth, pero con secreto opcional
 app.use('/admin', adminRebuildAgg);
