@@ -4,13 +4,13 @@ const router = express.Router();
 const pool = require('../config/db');
 const { runDailyAuto, ensureInitialBackfillOnce } = require('../services/salesSyncPolicy');
 
-// Guard opcional por secreto
 function isCronAllowed(req) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return true;
   return req.get('X-Cron-Secret') === secret;
 }
 
+// POST /api/admin/cron/sync-sales-daily
 router.post('/sync-sales-daily', async (req, res) => {
   if (!isCronAllowed(req)) return res.status(401).json({ error: 'unauthorized' });
 
@@ -37,7 +37,7 @@ router.post('/sync-sales-daily', async (req, res) => {
   return res.json({ ok: true, ran: rows.length, ok_count: ok, fail_count: fail, details });
 });
 
-// (Opcional) endpoint para backfill inicial masivo
+// POST /api/admin/cron/backfill-30d
 router.post('/backfill-30d', async (req, res) => {
   if (!isCronAllowed(req)) return res.status(401).json({ error: 'unauthorized' });
 

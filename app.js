@@ -8,6 +8,7 @@ const morgan = require('morgan');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
+
 const { startCron } = require('./services/cron');
 const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
@@ -22,6 +23,7 @@ const devRoutes          = require('./routes/devRoutes');
 const businessRoutes     = require('./routes/businessRoutes');
 const adminRoutes        = require('./routes/admin.routes');
 const adminCronRoutes    = require('./routes/adminCronRoutes');
+const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes'); // 👈 NUEVA
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes       = require('./routes/ventasRoutes');
 const insumosRoutes      = require('./routes/insumosRoutes');
@@ -32,19 +34,9 @@ const app = express();
 
 startCron();
 
-app.use('/admin', require('./routes/adminRebuildAggRoutes'));
-
 /* ----------- ajustes básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
-
-/* ----------- bootstrap uploads (una sola carpeta pública) ----------- */
-const uploadsDir = path.join(__dirname, 'uploads');
-const logosDir   = path.join(uploadsDir, 'logos');
-fs.mkdirSync(logosDir, { recursive: true });
-
-// Servir archivos estáticos públicamente (sin auth)
-app.use('/uploads', require('express').static(path.join(__dirname, 'uploads')));
 
 /* ----------- logging legible ----------- */
 app.use((req, res, next) => {
@@ -72,16 +64,24 @@ app.use(cors({
     'https://lazarillo-app.github.io',
   ],
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id', 'X-Maxi-Token'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Business-Id', 'X-Maxi-Token', 'X-Cron-Secret'],
   credentials: false,
   optionsSuccessStatus: 204,
 }));
 app.options(/.*/, cors());
 
-/* ----------- parsers + logger HTTP ----------- */
+/* ----------- parsers + logger HTTP (ANTES de montar /admin) ----------- */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('➡️ :method :url :status :response-time ms'));
+
+/* ----------- bootstrap uploads ----------- */
+const uploadsDir = path.join(__dirname, 'uploads');
+const logosDir   = path.join(uploadsDir, 'logos');
+fs.mkdirSync(logosDir, { recursive: true });
+
+// estáticos públicos
+app.use('/uploads', require('express').static(path.join(__dirname, 'uploads')));
 
 /* ----------- públicas ----------- */
 app.use('/api/auth', authRoutes);
@@ -91,10 +91,13 @@ app.use('/api/dev',  devRoutes);
 app.use('/api/admin',       authRequired, requireAppAdmin, adminRoutes);
 app.use('/api/admin/cron',  adminCronRoutes);
 
+// admin util (rebuild agregados) — sin auth, pero con secreto opcional
+app.use('/admin', adminRebuildAgg);
+
 /* ----------- businesses (auth + negocio activo) ----------- */
 app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
 
-/* ----------- guard global para el resto de /api que necesitan negocio ----------- */
+/* ----------- guard global /api ----------- */
 app.use('/api', authRequired, loadActiveBusiness);
 
 /* ----------- utilidades ----------- */
@@ -116,7 +119,7 @@ app.use('/api/branches',              branchesRoutes);
 /* (histórico) rutas bajo :businessId */
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
-/* ----------- healthchecks ----------- */
+/* ----------- health ----------- */
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 /* ----------- 404 + handler de errores ----------- */
@@ -147,4 +150,3 @@ const PORT = process.env.PORT || 4000;
     process.exit(1);
   }
 })();
-
