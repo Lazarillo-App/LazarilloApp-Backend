@@ -16,6 +16,11 @@ function simpleHash(str = '') {
   return String(h >>> 0);
 }
 
+const norm = s => String(s ?? '').trim();
+const orSinCategoria = s => (norm(s) || 'Sin categoría');
+const orSinSubrubro = s => (norm(s) || 'Sin subrubro');
+
+
 // Normaliza fechas para los controladores (acepta Date | string | number)
 function parseDate(zd, fallback) {
   // si no viene nada, usar el fallback
@@ -153,14 +158,15 @@ async function fetchMaxiArticles({ token, from, to }) {
     items.push({
       id,
       nombre,
-      // SWAP explícito:
-      categoria: subrubroNombre || 'Sin subrubro',
-      subrubro: rubroNombre || 'Sin categoría',
+      // SWAP correcto: app.categoria = subrubro Maxi ; app.subrubro = rubro Maxi
+      categoria: orSinCategoria(subrubroNombre),
+      subrubro: orSinSubrubro(rubroNombre),
       precio,
       costo,
       raw: o,
     });
   };
+
 
   // Walker — rubro -> subrubros -> articulos
   for (const rubro of root) {
@@ -174,10 +180,11 @@ async function fetchMaxiArticles({ token, from, to }) {
       ).trim() || 'Sin subrubro'; // (recuerda: rubro Maxi luego lo usamos como "subrubro app")
 
     // Artículos colgados directo del rubro (poco común, pero lo soportamos)
+    // Artículos colgados directo del rubro
     const artsRubro = Array.isArray(rubro?.articulos) ? rubro.articulos : [];
     for (const a of artsRubro) if (isArticle(a)) {
-      // Si no hay subrubro, queda “Sin categoría” (porque en la app, categoría es subrubro Maxi)
-      pushArt(a, { rubroNombre, subrubroNombre: 'Sin categoría' });
+      // sin subrubro → categoría “Sin categoría”
+      pushArt(a, { rubroNombre, subrubroNombre: '' });
     }
 
     // Subrubros
@@ -233,11 +240,11 @@ async function upsertArticles({ client, businessId, items }) {
       const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
       if (!Number.isFinite(id)) continue;
 
-      const nombre   = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
-      const categoria = String(it.categoria ?? '').trim() || 'Sin categoría';
-      const subrubro  = String(it.subrubro  ?? '').trim() || 'Sin subrubro';
-      const precio   = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo    = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
+      const nombre = String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null;
+      const categoria = orSinCategoria(it.categoria);
+      const subrubro = orSinSubrubro(it.subrubro);
+      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
 
       values.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++}::jsonb,NOW())`);
       params.push(
