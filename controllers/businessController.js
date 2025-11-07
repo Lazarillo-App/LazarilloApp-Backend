@@ -1,15 +1,23 @@
 // controllers/businessController.js
-const path = require('path');                    // 👈 faltaba
+const path = require('path');
 const pool = require('../config/db');
 const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
 
 // fetch compatible en Node 18+ (usa global)
 const fetch = (...args) => globalThis.fetch(...args);
-const { ensureInitialBackfillOnce } = require('../services/salesSyncPolicy');
+
+// Sync ventas (servicios)
+const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
+const { fetchSalesRanged } = require('../services/maxiSalesService');
+const { upsertSalesBatch } = require('../services/salesStore');
+
+// Artículos
+const { fetchArticlesTree } = require('../services/articlesRepo');
 
 const MAXI_BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+/* ───────────────── helpers ───────────────── */
 const slugify = (s = '') => {
   const out = String(s)
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -25,7 +33,24 @@ function attachBranding(biz) {
   return { ...biz, branding: { ...(biz.branding || {}), ...br } };
 }
 
-// ------------------- Negocios (CRUD + selección) -------------------
+// Fechas (UTC día)
+const pad2 = (n) => String(n).padStart(2, '0');
+const ymd  = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+const addDaysUTC = (d, n) => new Date(d.getTime() + n*86400000);
+
+function clampToYesterday(fromStr, toStr) {
+  const today = at00(new Date());
+  const AYER  = addDaysUTC(today, -1);
+  const F = fromStr ? at00(new Date(fromStr)) : AYER;
+  const T = toStr   ? at00(new Date(toStr))   : AYER;
+  const Tc = T > AYER ? AYER : T;
+  if (isNaN(+F) || isNaN(+Tc)) throw Object.assign(new Error('invalid_date'), { status: 400 });
+  if (F > Tc) throw Object.assign(new Error('from_after_to'), { status: 400 });
+  return { from: ymd(F), to: ymd(Tc) };
+}
+
+/* ───────────────── Negocios (CRUD + selección) ───────────────── */
 exports.listMine = async (req, res) => {
   try {
     const uid = req.user?.id;
@@ -176,14 +201,14 @@ exports.update = async (req, res) => {
   const branding = incoming.branding || null;
   const contact = incoming.contact || null;
   const address = incoming.address || null;
-  const social = incoming.social || null;
+  const social  = incoming.social  || null;
   const description = (incoming.description ?? null);
 
   const patch = {
     ...(branding ? { branding } : {}),
     ...(contact ? { contact } : {}),
     ...(address ? { address } : {}),
-    ...(social ? { social } : {}),
+    ...(social  ? { social }  : {}),
     ...(description !== null ? { description } : {})
   };
   const patchIsEmpty = Object.keys(patch).length === 0;
@@ -282,7 +307,7 @@ exports.remove = async (req, res) => {
   }
 };
 
-// ------------------- MAXI (estado y credenciales) -------------------
+/* ───────────────── Maxi: estado y credenciales ───────────────── */
 exports.maxiStatus = async (req, res) => {
   try {
     const uid = req.user?.id;
@@ -343,7 +368,40 @@ exports.maxiSave = async (req, res) => {
   res.json({ ok: true, maxi: { email: maxi.email, codcli: maxi.codcli, configured: true } });
 };
 
-// ------------------- MAXI (llamadas externas: ejemplo) -------------------
+/* ───────────────── Subida de logo (POST /:id/logo) ───────────────── */
+exports.uploadLogo = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    if (!biz?.id) return res.status(404).json({ error: 'not_found' });
+
+    const urlFromBody = (req.body?.url || '').trim();
+    let publicUrl = urlFromBody || null;
+
+    if (req.file && req.file.filename) {
+      publicUrl = `/uploads/logos/${req.file.filename}`;
+    }
+
+    if (!publicUrl) {
+      return res.status(400).json({ error: 'missing_file_or_url' });
+    }
+
+    await pool.query(`
+      UPDATE app_businesses
+         SET props = COALESCE(props,'{}'::jsonb)
+                    || jsonb_build_object(
+                         'branding',
+                         COALESCE((props->'branding')::jsonb,'{}'::jsonb)
+                         || jsonb_build_object('logo_url',$2::text)
+                       ),
+             updated_at = now()
+       WHERE id=$1
+    `, [biz.id, publicUrl]);
+
+    res.json({ ok: true, business_id: biz.id, logo_url: publicUrl });
+  } catch (e) { next(e); }
+};
+
+/* ───────────────── Maxi: helpers para endpoints públicos de prueba ───────────────── */
 async function maxiLogin({ email, pass, codcli }) {
   const res = await fetch(`${MAXI_BASE}/login`, {
     method: 'POST',
@@ -358,10 +416,10 @@ async function maxiLogin({ email, pass, codcli }) {
   return j.content.tokenAccess;
 }
 
-async function maxiFullInvoiceByDate({ token, from, to }) {
+async function maxiInvoiceByDate({ token, from, to }) {
   const u = new URL(`${MAXI_BASE}/estadisticas/invoicebydate`);
   u.searchParams.set('from', from);
-  u.searchParams.set('to', to);
+  u.searchParams.set('to',   to);
   const res = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
   const j = await res.json().catch(() => ({}));
   if (j?.resultCode !== 'SUCCESS') {
@@ -369,41 +427,39 @@ async function maxiFullInvoiceByDate({ token, from, to }) {
     const err = new Error(msg); err.status = 502; throw err;
   }
   const inner = j?.content?.content || j?.content || {};
-  const arr = Array.isArray(inner?.facturas) ? inner.facturas : [];
+  const arr   = Array.isArray(inner?.facturas) ? inner.facturas : [];
   return arr.map(x => x?.factura).filter(Boolean);
 }
 
 // Divide un rango en ventanas de 7 días [from..to] (fechas en UTC)
 function chunkRange7d(from, to) {
   const out = [];
-  const d0 = new Date(from + 'T00:00:00Z'); // 👈 UTC
-  const d1 = new Date(to + 'T00:00:00Z');
+  const d0 = new Date(from + 'T00:00:00Z'); // UTC
+  const d1 = new Date(to   + 'T00:00:00Z');
   if (!(+d0) || !(+d1) || d0 > d1) return out;
   let cur = new Date(d0);
   while (cur <= d1) {
     const end = new Date(cur);
     end.setUTCDate(end.getUTCDate() + 6);
     if (end > d1) end.setTime(d1.getTime());
-    const pad = (n) => String(n).padStart(2, '0');
-    const f = `${end.getUTCFullYear ? cur.getUTCFullYear() : cur.getFullYear()}-${pad((cur.getUTCMonth?.() ?? cur.getMonth()) + 1)}-${pad(cur.getUTCDate?.() ?? cur.getDate())}`;
-    const t = `${end.getUTCFullYear ? end.getUTCFullYear() : end.getFullYear()}-${pad((end.getUTCMonth?.() ?? end.getMonth()) + 1)}-${pad(end.getUTCDate?.() ?? end.getDate())}`;
+    const f = ymd(cur);
+    const t = ymd(end);
     out.push({ from: f, to: t });
     cur.setUTCDate(cur.getUTCDate() + 7);
   }
   return out;
 }
 
+/* ───────────────── Maxi: endpoints públicos de prueba/diagnóstico ───────────────── */
 exports.maxiItemsByDate = async (req, res, next) => {
   try {
     const biz = req.business;
     if (!biz) return res.status(404).json({ error: 'not_found' });
 
-    // fechas
-    let from = String(req.query?.from || '').slice(0, 10);
-    let to = String(req.query?.to || '').slice(0, 10);
+    const from = String(req.query?.from || '').slice(0, 10);
+    const to   = String(req.query?.to   || '').slice(0, 10);
     if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD' });
 
-    // credenciales maxi
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
     const mx = (rows[0]?.props || {}).maxi || {};
     const pass = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : mx.password;
@@ -411,13 +467,12 @@ exports.maxiItemsByDate = async (req, res, next) => {
 
     const token = await maxiLogin({ email: mx.email, pass, codcli: mx.codcli });
 
-    // El endpoint permite 7 días: iteramos por ventanas
     const windows = chunkRange7d(from, to);
-    const agg = new Map(); // key: cod_art -> { cod_art, nombre_art, cantidad, total }
-
+    const agg = new Map(); // cod_art -> { cod_art, nombre_art, cantidad, total }
     let docs = 0;
+
     for (const w of windows) {
-      const facturas = await maxiFullInvoiceByDate({ token, from: w.from, to: w.to });
+      const facturas = await maxiInvoiceByDate({ token, from: w.from, to: w.to });
       docs += facturas.length;
 
       for (const f of facturas) {
@@ -453,19 +508,18 @@ exports.maxiItemsByDate = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// Preview mínimo y agregados para comparar rápido con el informe
 function summarizeInvoices(invoices = []) {
   const preview = invoices.slice(0, 25).map(f => ({
-    numero: f.numero ?? null,
-    fecha: (f.fecha || f.cabecera?.fecha || '').slice(0, 10),
-    hora: f.cabecera?.hora ?? null,
-    tipo: f.cabecera?.nombre_cpb ?? null,
+    numero:  f.numero ?? null,
+    fecha:   (f.fecha || f.cabecera?.fecha || '').slice(0, 10),
+    hora:    f.cabecera?.hora ?? null,
+    tipo:    f.cabecera?.nombre_cpb ?? null,
     cod_cpb: f.cabecera?.cod_cpb ?? null,
-    total: Number(f.total ?? f.cabecera?.total ?? 0),
-    neto1: Number(f.cabecera?.neto1 ?? 0),
-    iva1: Number(f.cabecera?.iva1 ?? 0),
-    forma: f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
-    suc: f.cabecera?.prefijo ?? null,
+    total:   Number(f.total ?? f.cabecera?.total ?? 0),
+    neto1:   Number(f.cabecera?.neto1 ?? 0),
+    iva1:    Number(f.cabecera?.iva1 ?? 0),
+    forma:   f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
+    suc:     f.cabecera?.prefijo ?? null,
     anulado: false
   }));
 
@@ -493,14 +547,13 @@ function summarizeInvoices(invoices = []) {
   };
 }
 
-// ================== CONTROLADOR PÚBLICO ==================
 exports.maxiRawInvoices = async (req, res, next) => {
   try {
     const biz = req.business;
     if (!biz) return res.status(404).json({ error: 'not_found' });
 
     const from = String(req.query?.from || '').slice(0, 10);
-    const to = String(req.query?.to || '').slice(0, 10);
+    const to   = String(req.query?.to   || '').slice(0, 10);
     if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD (rango máx. 7 días)' });
 
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
@@ -509,20 +562,19 @@ exports.maxiRawInvoices = async (req, res, next) => {
     if (!(mx.email && pass && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
     const token = await maxiLogin({ email: mx.email, pass, codcli: mx.codcli });
-    const invoices = await maxiFullInvoiceByDate({ token, from, to });
+    const invoices = await maxiInvoiceByDate({ token, from, to });
 
     res.json({
       ok: true,
       range: { from, to },
       raw_count: invoices.length,
       summary: summarizeInvoices(invoices),
-      // raw: invoices // habilitar sólo para debug puntual
+      // raw: invoices // habilitar solo para debug puntual
     });
   } catch (e) { next(e); }
 };
 
-const { fetchArticlesTree } = require('../services/articlesRepo');
-
+/* ───────────────── Árbol de artículos (desde DB propia) ───────────────── */
 exports.getArticlesTree = async (req, res, next) => {
   try {
     const businessId = Number(req.params.businessId);
@@ -531,6 +583,7 @@ exports.getArticlesTree = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/* ───────────────── Branding: setear URL directa ───────────────── */
 exports.setBrandingUrl = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -548,5 +601,73 @@ exports.setBrandingUrl = async (req, res, next) => {
     `, [biz.id, val]);
 
     res.json({ ok: true, url: val, business_id: biz.id });
+  } catch (e) { next(e); }
+};
+
+// ⬇️ ya los tenés arriba importados, los reutilizamos:
+// const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
+// const { fetchSalesRanged } = require('../services/maxiSalesService');
+// const { upsertSalesBatch } = require('../services/salesStore');
+
+/**
+ * POST /api/businesses/:id/sync-sales-7d
+ * Backfill inicial (7 días hasta AYER). Útil para forzar primer llenado.
+ */
+exports.syncSalesLast7d = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    if (!biz) return res.status(404).json({ error: 'not_found' });
+    const out = await ensureInitialBackfillOnce({ businessId: biz.id, req });
+    return res.json({ ok: true, business_id: biz.id, mode: 'initial_backfill_7d', ...out });
+  } catch (e) { next(e); }
+};
+
+/**
+ * POST /api/businesses/:id/sync-sales?mode=auto|range|backfill_30d&from=YYYY-MM-DD&to=YYYY-MM-DD
+ * - auto: incremental desde el último día hasta AYER
+ * - range: fuerza un rango arbitrario (clamp a AYER), guarda en DB y recalcula agregados
+ * - backfill_30d: igual a auto, pero si no hay datos hace backfill de 30 días
+ */
+exports.syncSales = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    if (!biz) return res.status(404).json({ error: 'not_found' });
+
+    const mode = String(req.query.mode || 'auto').toLowerCase();
+
+    if (mode === 'auto') {
+      const out = await runDailyAuto({ businessId: biz.id, req });
+      return res.json({ ok: true, business_id: biz.id, mode, ...out });
+    }
+
+    if (mode === 'backfill_30d') {
+      // Reutilizamos runDailyAuto: si no hay datos hace backfill inicial (ver salesSyncPolicy)
+      const out = await runDailyAuto({ businessId: biz.id, req });
+      return res.json({ ok: true, business_id: biz.id, mode, ...out });
+    }
+
+    if (mode === 'range') {
+      const from = String(req.query.from || '').slice(0, 10);
+      const to   = String(req.query.to   || '').slice(0, 10);
+      if (!from || !to) {
+        return res.status(400).json({ error: 'invalid_range', hint: 'use from=YYYY-MM-DD&to=YYYY-MM-DD' });
+      }
+
+      // Trae crudo desde Maxi (aplica clamp a AYER adentro) y guarda
+      const raw = await fetchSalesRanged({ businessId: biz.id, from, to, req });
+      const resUp = await upsertSalesBatch(biz.id, raw);
+
+      return res.json({
+        ok: true,
+        business_id: biz.id,
+        mode,
+        from,
+        to,
+        fetched: raw.length,
+        ...resUp
+      });
+    }
+
+    return res.status(400).json({ error: 'invalid_mode', allowed: ['auto','range','backfill_30d'] });
   } catch (e) { next(e); }
 };

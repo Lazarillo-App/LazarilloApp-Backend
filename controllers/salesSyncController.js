@@ -3,19 +3,19 @@
 const pool = require('../config/db');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
-const fetchNative = global.fetch || require('node-fetch');
+// Usa fetch nativo (Node 18+) y cae a node-fetch si hace falta
+const fetchNative =
+  (typeof globalThis.fetch === 'function')
+    ? ((...args) => globalThis.fetch(...args))
+    : require('node-fetch');
 
-const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/$/, '');
+const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
 const FETCH_RETRIES = Number(process.env.MAXI_FETCH_RETRIES || 2);
+// Permite cambiar la ruta de ítems/menú vía env sin tocar código
+const ITEMS_PATH = (process.env.MAXI_ITEMS_PATH || '/estadisticas/menu').replace(/\/+$/, '');
 
 /* ======================= Utils ======================= */
-function simpleHash(str = '') {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
-  return String(h >>> 0);
-}
-
 function parseDate(zd, fallback) {
   if (zd == null || zd === '') return new Date(fallback);
   if (zd instanceof Date) return Number.isNaN(+zd) ? new Date(fallback) : zd;
@@ -41,7 +41,7 @@ function addDays(d, n) {
   return x;
 }
 
-/* ===== Fetch con timeout + reintentos (429/5xx) ===== */
+/* ===== Fetch con timeout + reintentos (429/5xx/abort) ===== */
 async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -77,34 +77,59 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
 }
 
 /* ======================= MAXI API ======================= */
-// NOTA: si tus rutas reales difieren, ajustá estas dos funciones solamente.
-async function maxiLogin({ email, password }) {
+/**
+ * Login Maxi coherente con el resto del proyecto:
+ * POST /login  { email, pass, cod_cli }
+ * Respuesta esperada: { resultCode: 'SUCCESS', content: { tokenAccess } }
+ */
+async function maxiLogin({ email, pass, codcli }) {
   const url = `${BASE}/login`;
+  const body = { email, pass, cod_cli: String(codcli) };
+
   const res = await fetchWithRetry(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password })
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body),
   });
+
   const data = await res.json().catch(() => ({}));
-  const token = data?.token || data?.access_token || data?.jwt || null;
-  if (!token) {
-    const msg = data?.error || 'login_failed';
+  const ok = data?.resultCode === 'SUCCESS' && data?.content?.tokenAccess;
+  if (!ok) {
+    const msg = data?.resultDescription || `login_failed_${res.status}`;
     const err = new Error(msg);
-    err.status = 401;
+    err.status = 502;
     throw err;
   }
-  return token;
+  return data.content.tokenAccess;
 }
 
-// Descarga catálogo de artículos. Cambiá path/qs si tu API usa otros nombres.
+/**
+ * Descarga catálogo (menú/ítems).
+ * Por defecto pega a /estadisticas/menu; se puede cambiar con MAXI_ITEMS_PATH.
+ * Incluimos cod_cli y codcli en query por compatibilidad.
+ * Normaliza varias "formas" comunes de payload.
+ */
 async function maxiFetchItems({ token, codcli }) {
-  const url = `${BASE}/items?codcli=${encodeURIComponent(codcli)}`;
-  const res = await fetchWithRetry(url, {
+  const u = new URL(`${BASE}${ITEMS_PATH}`);
+  u.searchParams.set('cod_cli', String(codcli));
+  u.searchParams.set('codcli', String(codcli));
+
+  const res = await fetchWithRetry(u.toString(), {
     headers: { Authorization: `Bearer ${token}` },
   });
-  const data = await res.json().catch(() => ({}));
-  // Normalizamos a array
-  const items = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : []);
+  const d = await res.json().catch(() => ({}));
+
+  // Intentamos extraer un array de artículos desde varias estructuras posibles
+  // Ejemplos vistos: d.content.articulos, d.content.items, d.items, d.articulos, d
+  const tryArrays = [
+    d?.content?.articulos,
+    d?.content?.items,
+    d?.items,
+    d?.articulos,
+    d?.content?.content?.articulos,
+    d,
+  ];
+  const items = tryArrays.find(Array.isArray) || [];
   return items;
 }
 
@@ -122,22 +147,21 @@ async function upsertArticles({ client, businessId, items }) {
     let p = 1;
 
     for (const it of slice) {
-      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
+      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo ?? it.cod_art ?? it.articulo_id);
       if (!Number.isFinite(id)) continue;
 
-      const nombre = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null);
-      const categoria = (String(it.categoria ?? '').trim() || 'Sin categoría');
-      const subrubro = (String(it.subrubro ?? '').trim() || 'Sin subrubro');
-      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo  = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
+      const nombre = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? it.nombre_art ?? '').slice(0, 200) || null);
+      const categoria = (String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría');
+      const subrubro = (String(it.subrubro ?? it.sub_rubro ?? '').trim() || 'Sin subrubro');
+      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? it.precio_sugerido ?? 0) || 0;
+      const costo  = Number(it.costo  ?? it.costoPromedio ?? it.costo_ultima_compra ?? 0) || 0;
 
-      // 8 columnas -> $p ... $p+7
-      values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6},$${p+7}::jsonb,NOW())`);
+      values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6}::jsonb,NOW())`);
       params.push(
         businessId, id, nombre, categoria, subrubro, precio, costo,
         JSON.stringify(it.raw ?? it._raw ?? it)
       );
-      p += 8;
+      p += 7;
     }
 
     if (!values.length) continue;
@@ -165,22 +189,28 @@ async function upsertArticles({ client, businessId, items }) {
 
 /* =================== Helpers credenciales MAXI =================== */
 function loadMaxiCredsFromBiz(biz) {
-  // Convenciones: guardamos en biz.props.maxi ó biz.props.maxi_credentials
+  // Guardamos en biz.props.maxi (según controllers/businessController.js)
   const props = biz?.props || {};
   const mx = props.maxi || props.maxi_credentials || {};
   const email = mx.email || mx.user || null;
   const codcli = mx.codcli || mx.codigo || null;
 
-  // Puede venir guardado cifrado como { password_enc } ó { password }
-  const passwordRaw = mx.password_enc || mx.password || null;
-  const password = decryptSecretCompat(passwordRaw);
+  // Soportar { pass_enc } (principal) y compat { password_enc, password, pass }
+  const secret =
+    mx.pass_enc ??
+    mx.password_enc ??
+    mx.password ??
+    mx.pass ??
+    null;
 
-  if (!email || !password || !codcli) {
+  const pass = decryptSecretCompat(secret);
+
+  if (!email || !pass || !codcli) {
     const err = new Error('missing_maxi_credentials');
     err.status = 400;
     throw err;
   }
-  return { email, password, codcli };
+  return { email, pass, codcli };
 }
 
 /* ======================= Endpoints ======================= */
@@ -258,7 +288,7 @@ exports.listArticlesTreeFromDB = async (req, res) => {
 // POST /:id/sync
 // Body:
 //   - scope: 'articles' | 'all' (default 'articles')
-//   - from / to (opcional) SI tu fetch de items acepta fechas; si no, se ignoran
+//   - from / to (opcional) — hoy ignorado por fetch de items; queda por si se amplía
 exports.syncNow = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
@@ -266,21 +296,21 @@ exports.syncNow = async (req, res) => {
   const scope = (req.body?.scope || 'articles').toLowerCase();
 
   const now = new Date();
-  const defFrom = addDays(now, -30); // por si quisieras fechas
+  const defFrom = addDays(now, -30);
   const from = parseDate(req.body?.from, defFrom);
   const to   = parseDate(req.body?.to, now);
 
   const client = await pool.connect();
   try {
-    // Tomar credenciales MAXI
-    const { email, password, codcli } = loadMaxiCredsFromBiz(biz);
+    // 1) Credenciales Maxi
+    const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
 
-    // Login + token
-    const token = await maxiLogin({ email, password });
+    // 2) Login → tokenAccess
+    const token = await maxiLogin({ email, pass, codcli });
 
-    // Por ahora solo sincronizamos artículos (catálogo)
+    // 3) Por ahora solo sincronizamos artículos (catálogo)
     let upserted = 0;
-    let mapped = 0; // si tenés lógica de mapeo extra, setear acá
+    let mapped = 0; // reservado si luego mapearas a tablas propias
 
     if (scope === 'articles' || scope === 'all') {
       const items = await maxiFetchItems({ token, codcli });

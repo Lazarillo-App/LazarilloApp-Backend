@@ -6,39 +6,43 @@ const fs = require('fs');
 const multer = require('multer');
 
 const businesses = require('../controllers/businessController');
+const syncCtrl = require('../controllers/syncController');
+const salesSyncCtrl = require('../controllers/salesSyncController');
+const { authRequired } = require('../middleware/authMiddleware');
+const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+const { refreshMenu } = require('../controllers/maxiMenuController');
+
+// 🔹 Nuevo: sync ventana simple (últimos N días)
+const { runWindow } = require('../services/salesSyncPolicy');
+
+// ===== Fallbacks defensivos para evitar TypeError si algo está indefinido =====
+const maxiPing = (salesSyncCtrl && typeof salesSyncCtrl.maxiPing === 'function')
+  ? salesSyncCtrl.maxiPing
+  : (_req, res) => res.status(501).json({ error: 'not_implemented' });
+
+const syncSalesForBusiness = (salesSyncCtrl && typeof salesSyncCtrl.syncSalesForBusiness === 'function')
+  ? salesSyncCtrl.syncSalesForBusiness
+  : async (_biz, _opts) => ({ note: 'not_implemented' });
+
 const {
   listArticlesFromDB,
   listArticlesTreeFromDB,
   salesSummaryFromDB,
   salesSeriesFromDB,
   syncNow,
-} = require('../controllers/syncController');
+} = syncCtrl;
 
-const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
-const { authRequired } = require('../middleware/authMiddleware');
-const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
-const { refreshMenu } = require('../controllers/maxiMenuController');
-
-// ================== Helper anti-crash ==================
-function ensureFn(name, fn) {
-  if (typeof fn !== 'function') {
-    console.warn(`[routes/businesses] Handler faltante: ${name} -> responderá 501`);
-    return (_req, res) => res.status(501).json({ error: 'not_implemented', handler: name });
-  }
-  return fn;
-}
-
-// ================== Carpeta /uploads/logos ==================
+// ===== Carpeta de logos =====
 const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 
-// ================== Multer ==================
+// ===== Multer storage =====
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, logosDir),
   filename: (req, file, cb) => {
     const ext = (path.extname(file.originalname || '') || '.png').toLowerCase();
     cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
-  },
+  }
 });
 
 const upload = multer({
@@ -47,114 +51,107 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
     cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
-  },
+  }
 });
 
-// ================== Auth/params ==================
+// ===== Auth/param =====
 router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
 
-// ================== Logo: subir archivo ==================
-// Acepta 'file', 'logo' o 'image'
-const uploadFields = upload.fields([
-  { name: 'file',  maxCount: 1 },
-  { name: 'logo',  maxCount: 1 },
-  { name: 'image', maxCount: 1 },
-]);
-
+// ===== Upload logo =====
+// Acepta 'file', 'logo' o 'image' como nombre de campo (y fallback a any)
 router.post('/:id/logo', (req, res, next) => {
-  uploadFields(req, res, (err) => {
+  const uploadAny = upload.any();
+  uploadAny(req, res, (err) => {
     if (err) {
       const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
           err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error',
+          'upload_error'
       });
     }
+    const arr = Array.isArray(req.files) ? req.files : [];
+    const firstImg = arr.find(f => /^image\//i.test(f.mimetype)) || null;
+    req.file = firstImg;
 
-    // Normaliza a req.file para el controller
-    const files = req.files || {};
-    req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
-
-    // Debug acotado (podés quitarlo luego)
+    // DEBUG temporal
     console.log('[upload-logo] content-type:', req.headers['content-type']);
-    console.log('[upload-logo] keys:', Object.keys(files));
-    console.log('[upload-logo] has file?', !!req.file, req.file?.fieldname, req.file?.mimetype, req.file?.size);
+    console.log('[upload-logo] files:', arr.map(f => ({ field: f.fieldname, type: f.mimetype, size: f.size })));
+    console.log('[upload-logo] chosen:', !!req.file, req.file?.fieldname);
 
-    if (!req.file && !req.body?.url) {
-      return res.status(400).json({ error: 'missing_file' });
-    }
-
-    return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
+    if (!req.file) return res.status(400).json({ error: 'missing_file' });
+    businesses.uploadLogo(req, res, next);
   });
 });
 
-// ================== Logo: setear URL directa ==================
-router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
+/* ============ Logo: setear URL directa ============ */
+router.patch('/:id/branding-url', businesses.setBrandingUrl);
 
-// ================== MAXI: ping ==================
-router.get('/:id/maxi-ping', ensureFn('maxiPing', maxiPing));
+/* =================== MAXI: ping =================== */
+router.get('/:id/maxi-ping', maxiPing);
 
-// ================== CRUD base ==================
-router.get('/', ensureFn('businesses.listMine', businesses.listMine));
-router.post('/', ensureFn('businesses.create', businesses.create));
+/* ========================= CRUD base ======================= */
+router.get('/', businesses.listMine);
+router.post('/', businesses.create);
 
 // Negocio activo
-router.get('/active', ensureFn('businesses.getActive', businesses.getActive));
-router.patch('/active', ensureFn('businesses.setActive', businesses.setActive));
+router.get('/active', businesses.getActive);
+router.patch('/active', businesses.setActive);
 
 // Por :id (req.business ya cargado por router.param)
-router.get('/:id', ensureFn('businesses.getOne', businesses.getOne));
-router.patch('/:id', ensureFn('businesses.update', businesses.update));
-router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
-router.post('/:id/select', ensureFn('businesses.select', businesses.select));
+router.get('/:id', businesses.getOne);
+router.patch('/:id', businesses.update);
+router.delete('/:id', businesses.remove);
+router.post('/:id/select', businesses.select);
 
-// ================== Maxi credenciales / estado ==================
-router.get('/:id/maxi-status', ensureFn('businesses.maxiStatus', businesses.maxiStatus));
-router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.maxiSave));
+/* ============== Maxi credenciales / estado ================= */
+router.get('/:id/maxi-status', businesses.maxiStatus);
+router.post('/:id/maxi-credentials', businesses.maxiSave);
 
-// (Diagnóstico Maxi – dejar comentado si no existen los handlers)
-// router.get('/:id/maxi-raw-invoices', ensureFn('businesses.maxiRawInvoices', businesses.maxiRawInvoices));
-// router.get('/:id/maxi-items', ensureFn('businesses.maxiItemsByDate', businesses.maxiItemsByDate));
+// RAW Maxi (fullinvoicebydate) para diagnóstico
+router.get('/:id/maxi-raw-invoices', businesses.maxiRawInvoices);
+router.get('/:id/maxi-items', businesses.maxiItemsByDate);
+router.post('/:id/maxi-refresh-menu', refreshMenu);
 
-router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
+/* ================ Catálogo / Ventas (legacy) =============== */
+router.get('/:id/articles', listArticlesFromDB);
+router.get('/:id/articles/tree', listArticlesTreeFromDB);
 
-// ================== Catálogo / Ventas (legacy) ==================
-router.get('/:id/articles', ensureFn('listArticlesFromDB', listArticlesFromDB));
-router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
+router.get('/:id/sales/summary', salesSummaryFromDB);
+router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 
-router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
-router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
-
-// ================== Sync ventas (nuevo) ==================
+/* ================ Sync ventas: modo actual ================= */
 router.post('/:id/sync-sales', async (req, res, next) => {
   try {
     const biz = req.business;
-    const mode =
-      (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d')
-        ? 'backfill_30d'
-        : 'auto';
+    const mode = (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d') ? 'backfill_30d' : 'auto';
     const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
     const from = req.query.from ? new Date(req.query.from) : null;
-    const to   = req.query.to   ? new Date(req.query.to)   : null;
-
+    const to = req.query.to ? new Date(req.query.to) : null;
     if ((from && isNaN(+from)) || (to && isNaN(+to))) {
       return res.status(400).json({ error: 'invalid_date' });
     }
-
-    const out = await ensureFn('syncSalesForBusiness', syncSalesForBusiness)(
-      biz, { mode, from, to, dryrun, req }
-    );
+    const out = await syncSalesForBusiness(biz, { mode, from, to, dryrun, req });
     res.json({ ok: true, business_id: biz.id, sales: out });
   } catch (e) { next(e); }
 });
 
-// Legacy de catálogo/otros (responde y dispara backfill si aplica)
-router.post('/:id/sync', ensureFn('syncNow', syncNow));
+/* ========== 🔹 Nuevo: Sync manual “últimos N días” (default 7) ========== */
+router.post('/:id/sync-sales-window', async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const windowDays = Math.min(Math.max(parseInt(req.body?.windowDays ?? '7', 10), 1), 30);
+    const detail = await runWindow({ businessId: biz.id, days: windowDays });
+    res.json({ ok: true, business_id: biz.id, window_days: windowDays, detail });
+  } catch (e) { next(e); }
+});
 
-// ================== Default group helpers ==================
+// Legacy de catálogo/otros (responde y dispara backfill si aplica)
+router.post('/:id/sync', syncNow);
+
+/* ============ Default group helpers ============ */
 router.get('/:id/default-group', (req, res) => {
   const biz = req.business;
   const defaultId = biz?.props?.default_group_id ?? null;
@@ -178,5 +175,7 @@ router.patch('/:id/default-group', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* ====== (duplicado compatible) árbol artículos por businessId ====== */
+router.get('/:businessId/articles-tree', businesses.getArticlesTree);
 
 module.exports = router;
