@@ -176,14 +176,14 @@ exports.update = async (req, res) => {
   const branding = incoming.branding || null;
   const contact = incoming.contact || null;
   const address = incoming.address || null;
-  const social  = incoming.social  || null;
+  const social = incoming.social || null;
   const description = (incoming.description ?? null);
 
   const patch = {
     ...(branding ? { branding } : {}),
     ...(contact ? { contact } : {}),
     ...(address ? { address } : {}),
-    ...(social  ? { social }  : {}),
+    ...(social ? { social } : {}),
     ...(description !== null ? { description } : {})
   };
   const patchIsEmpty = Object.keys(patch).length === 0;
@@ -285,7 +285,7 @@ exports.remove = async (req, res) => {
 // ------------------- MAXI (estado y credenciales) -------------------
 exports.maxiStatus = async (req, res) => {
   try {
-    const uid   = req.user?.id;
+    const uid = req.user?.id;
     const bizId =
       Number(req.business?.id) ||
       Number(req.params?.id) ||
@@ -359,9 +359,9 @@ async function maxiLogin({ email, pass, codcli }) {
 }
 
 async function maxiFullInvoiceByDate({ token, from, to }) {
-  const u = new URL(`${MAXI_BASE}/estadisticas/fullinvoicebydate`);
+  const u = new URL(`${MAXI_BASE}/estadisticas/invoicebydate`);
   u.searchParams.set('from', from);
-  u.searchParams.set('to',   to);
+  u.searchParams.set('to', to);
   const res = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
   const j = await res.json().catch(() => ({}));
   if (j?.resultCode !== 'SUCCESS') {
@@ -369,7 +369,7 @@ async function maxiFullInvoiceByDate({ token, from, to }) {
     const err = new Error(msg); err.status = 502; throw err;
   }
   const inner = j?.content?.content || j?.content || {};
-  const arr   = Array.isArray(inner?.facturas) ? inner.facturas : [];
+  const arr = Array.isArray(inner?.facturas) ? inner.facturas : [];
   return arr.map(x => x?.factura).filter(Boolean);
 }
 
@@ -377,7 +377,7 @@ async function maxiFullInvoiceByDate({ token, from, to }) {
 function chunkRange7d(from, to) {
   const out = [];
   const d0 = new Date(from + 'T00:00:00Z'); // 👈 UTC
-  const d1 = new Date(to   + 'T00:00:00Z');
+  const d1 = new Date(to + 'T00:00:00Z');
   if (!(+d0) || !(+d1) || d0 > d1) return out;
   let cur = new Date(d0);
   while (cur <= d1) {
@@ -385,8 +385,8 @@ function chunkRange7d(from, to) {
     end.setUTCDate(end.getUTCDate() + 6);
     if (end > d1) end.setTime(d1.getTime());
     const pad = (n) => String(n).padStart(2, '0');
-    const f = `${end.getUTCFullYear ? cur.getUTCFullYear() : cur.getFullYear()}-${pad((cur.getUTCMonth?.() ?? cur.getMonth())+1)}-${pad(cur.getUTCDate?.() ?? cur.getDate())}`;
-    const t = `${end.getUTCFullYear ? end.getUTCFullYear() : end.getFullYear()}-${pad((end.getUTCMonth?.() ?? end.getMonth())+1)}-${pad(end.getUTCDate?.() ?? end.getDate())}`;
+    const f = `${end.getUTCFullYear ? cur.getUTCFullYear() : cur.getFullYear()}-${pad((cur.getUTCMonth?.() ?? cur.getMonth()) + 1)}-${pad(cur.getUTCDate?.() ?? cur.getDate())}`;
+    const t = `${end.getUTCFullYear ? end.getUTCFullYear() : end.getFullYear()}-${pad((end.getUTCMonth?.() ?? end.getMonth()) + 1)}-${pad(end.getUTCDate?.() ?? end.getDate())}`;
     out.push({ from: f, to: t });
     cur.setUTCDate(cur.getUTCDate() + 7);
   }
@@ -400,7 +400,7 @@ exports.maxiItemsByDate = async (req, res, next) => {
 
     // fechas
     let from = String(req.query?.from || '').slice(0, 10);
-    let to   = String(req.query?.to   || '').slice(0, 10);
+    let to = String(req.query?.to || '').slice(0, 10);
     if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD' });
 
     // credenciales maxi
@@ -456,16 +456,16 @@ exports.maxiItemsByDate = async (req, res, next) => {
 // Preview mínimo y agregados para comparar rápido con el informe
 function summarizeInvoices(invoices = []) {
   const preview = invoices.slice(0, 25).map(f => ({
-    numero:  f.numero ?? null,
-    fecha:   (f.fecha || f.cabecera?.fecha || '').slice(0, 10),
-    hora:    f.cabecera?.hora ?? null,
-    tipo:    f.cabecera?.nombre_cpb ?? null,
+    numero: f.numero ?? null,
+    fecha: (f.fecha || f.cabecera?.fecha || '').slice(0, 10),
+    hora: f.cabecera?.hora ?? null,
+    tipo: f.cabecera?.nombre_cpb ?? null,
     cod_cpb: f.cabecera?.cod_cpb ?? null,
-    total:   Number(f.total ?? f.cabecera?.total ?? 0),
-    neto1:   Number(f.cabecera?.neto1 ?? 0),
-    iva1:    Number(f.cabecera?.iva1 ?? 0),
-    forma:   f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
-    suc:     f.cabecera?.prefijo ?? null,
+    total: Number(f.total ?? f.cabecera?.total ?? 0),
+    neto1: Number(f.cabecera?.neto1 ?? 0),
+    iva1: Number(f.cabecera?.iva1 ?? 0),
+    forma: f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
+    suc: f.cabecera?.prefijo ?? null,
     anulado: false
   }));
 
@@ -500,7 +500,7 @@ exports.maxiRawInvoices = async (req, res, next) => {
     if (!biz) return res.status(404).json({ error: 'not_found' });
 
     const from = String(req.query?.from || '').slice(0, 10);
-    const to   = String(req.query?.to   || '').slice(0, 10);
+    const to = String(req.query?.to || '').slice(0, 10);
     if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD (rango máx. 7 días)' });
 
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
