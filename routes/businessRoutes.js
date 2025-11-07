@@ -18,22 +18,27 @@ const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncCont
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
-const { getArticlesTree } = require('../controllers/businessController');
 
-// 🔹 Nuevo: sync ventana simple (últimos N días)
-const { runWindow } = require('../services/salesSyncPolicy');
+// ================== Helper anti-crash ==================
+function ensureFn(name, fn) {
+  if (typeof fn !== 'function') {
+    console.warn(`[routes/businesses] Handler faltante: ${name} -> responderá 501`);
+    return (_req, res) => res.status(501).json({ error: 'not_implemented', handler: name });
+  }
+  return fn;
+}
 
-// ===== Carpeta de logos =====
+// ================== Carpeta /uploads/logos ==================
 const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 
-// ===== Multer storage =====
+// ================== Multer ==================
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, logosDir),
   filename: (req, file, cb) => {
     const ext = (path.extname(file.originalname || '') || '.png').toLowerCase();
     cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
-  }
+  },
 });
 
 const upload = multer({
@@ -42,107 +47,114 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
     cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
-  }
+  },
 });
 
-// ===== Auth/param =====
+// ================== Auth/params ==================
 router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
 
-// ===== Upload logo =====
-// Acepta 'file', 'logo' o 'image' como nombre de campo (y fallback a any)
+// ================== Logo: subir archivo ==================
+// Acepta 'file', 'logo' o 'image'
+const uploadFields = upload.fields([
+  { name: 'file',  maxCount: 1 },
+  { name: 'logo',  maxCount: 1 },
+  { name: 'image', maxCount: 1 },
+]);
+
 router.post('/:id/logo', (req, res, next) => {
-  const uploadAny = upload.any();
-  uploadAny(req, res, (err) => {
+  uploadFields(req, res, (err) => {
     if (err) {
       const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
           err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error'
+          'upload_error',
       });
     }
-    const arr = Array.isArray(req.files) ? req.files : [];
-    const firstImg = arr.find(f => /^image\//i.test(f.mimetype)) || null;
-    req.file = firstImg;
 
-    // DEBUG temporal
+    // Normaliza a req.file para el controller
+    const files = req.files || {};
+    req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
+
+    // Debug acotado (podés quitarlo luego)
     console.log('[upload-logo] content-type:', req.headers['content-type']);
-    console.log('[upload-logo] files:', arr.map(f => ({ field: f.fieldname, type: f.mimetype, size: f.size })));
-    console.log('[upload-logo] chosen:', !!req.file, req.file?.fieldname);
+    console.log('[upload-logo] keys:', Object.keys(files));
+    console.log('[upload-logo] has file?', !!req.file, req.file?.fieldname, req.file?.mimetype, req.file?.size);
 
-    if (!req.file) return res.status(400).json({ error: 'missing_file' });
-    businesses.uploadLogo(req, res, next);
+    if (!req.file && !req.body?.url) {
+      return res.status(400).json({ error: 'missing_file' });
+    }
+
+    return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
 });
 
-/* ============ Logo: setear URL directa ============ */
-router.patch('/:id/branding-url', businesses.setBrandingUrl);
+// ================== Logo: setear URL directa ==================
+router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
 
-/* =================== MAXI: ping =================== */
-router.get('/:id/maxi-ping', maxiPing);
+// ================== MAXI: ping ==================
+router.get('/:id/maxi-ping', ensureFn('maxiPing', maxiPing));
 
-/* ========================= CRUD base ======================= */
-router.get('/', businesses.listMine);
-router.post('/', businesses.create);
+// ================== CRUD base ==================
+router.get('/', ensureFn('businesses.listMine', businesses.listMine));
+router.post('/', ensureFn('businesses.create', businesses.create));
 
 // Negocio activo
-router.get('/active', businesses.getActive);
-router.patch('/active', businesses.setActive);
+router.get('/active', ensureFn('businesses.getActive', businesses.getActive));
+router.patch('/active', ensureFn('businesses.setActive', businesses.setActive));
 
 // Por :id (req.business ya cargado por router.param)
-router.get('/:id', businesses.getOne);
-router.patch('/:id', businesses.update);
-router.delete('/:id', businesses.remove);
-router.post('/:id/select', businesses.select);
+router.get('/:id', ensureFn('businesses.getOne', businesses.getOne));
+router.patch('/:id', ensureFn('businesses.update', businesses.update));
+router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
+router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 
-/* ============== Maxi credenciales / estado ================= */
-router.get('/:id/maxi-status', businesses.maxiStatus);
-router.post('/:id/maxi-credentials', businesses.maxiSave);
+// ================== Maxi credenciales / estado ==================
+router.get('/:id/maxi-status', ensureFn('businesses.maxiStatus', businesses.maxiStatus));
+router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.maxiSave));
 
-// RAW Maxi (fullinvoicebydate) para diagnóstico
-router.get('/:id/maxi-raw-invoices', businesses.maxiRawInvoices);
-router.get('/:id/maxi-items', businesses.maxiItemsByDate);
-router.post('/:id/maxi-refresh-menu', refreshMenu);
+// (Diagnóstico Maxi – dejar comentado si no existen los handlers)
+// router.get('/:id/maxi-raw-invoices', ensureFn('businesses.maxiRawInvoices', businesses.maxiRawInvoices));
+// router.get('/:id/maxi-items', ensureFn('businesses.maxiItemsByDate', businesses.maxiItemsByDate));
 
-/* ================ Catálogo / Ventas (legacy) =============== */
-router.get('/:id/articles', listArticlesFromDB);
-router.get('/:id/articles/tree', listArticlesTreeFromDB);
+router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 
-router.get('/:id/sales/summary', salesSummaryFromDB);
-router.get('/:id/sales/:articuloId', salesSeriesFromDB);
+// ================== Catálogo / Ventas (legacy) ==================
+router.get('/:id/articles', ensureFn('listArticlesFromDB', listArticlesFromDB));
+router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
 
-/* ================ Sync ventas: modo actual ================= */
+router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
+router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
+
+// ================== Sync ventas (nuevo) ==================
 router.post('/:id/sync-sales', async (req, res, next) => {
   try {
     const biz = req.business;
-    const mode = (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d') ? 'backfill_30d' : 'auto';
+    const mode =
+      (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d')
+        ? 'backfill_30d'
+        : 'auto';
     const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
     const from = req.query.from ? new Date(req.query.from) : null;
-    const to = req.query.to ? new Date(req.query.to) : null;
+    const to   = req.query.to   ? new Date(req.query.to)   : null;
+
     if ((from && isNaN(+from)) || (to && isNaN(+to))) {
       return res.status(400).json({ error: 'invalid_date' });
     }
-    const out = await syncSalesForBusiness(biz, { mode, from, to, dryrun, req });
+
+    const out = await ensureFn('syncSalesForBusiness', syncSalesForBusiness)(
+      biz, { mode, from, to, dryrun, req }
+    );
     res.json({ ok: true, business_id: biz.id, sales: out });
   } catch (e) { next(e); }
 });
 
-/* ========== 🔹 Nuevo: Sync manual “últimos N días” (default 7) ========== */
-router.post('/:id/sync-sales-window', async (req, res, next) => {
-  try {
-    const biz = req.business;
-    const windowDays = Math.min(Math.max(parseInt(req.body?.windowDays ?? '7', 10), 1), 30);
-    const detail = await runWindow({ businessId: biz.id, days: windowDays });
-    res.json({ ok: true, business_id: biz.id, window_days: windowDays, detail });
-  } catch (e) { next(e); }
-});
-
 // Legacy de catálogo/otros (responde y dispara backfill si aplica)
-router.post('/:id/sync', syncNow);
+router.post('/:id/sync', ensureFn('syncNow', syncNow));
 
-/* ============ Default group helpers ============ */
+// ================== Default group helpers ==================
 router.get('/:id/default-group', (req, res) => {
   const biz = req.business;
   const defaultId = biz?.props?.default_group_id ?? null;
@@ -166,7 +178,5 @@ router.patch('/:id/default-group', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/* ====== (duplicado compatible) árbol artículos por businessId ====== */
-router.get('/:businessId/articles-tree', getArticlesTree);
 
 module.exports = router;

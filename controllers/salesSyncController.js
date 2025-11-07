@@ -1,162 +1,325 @@
-// controllers/salesSyncController.js
-const {
-  fetchSalesRanged,
-  getBearer,
-  fetchFullByDate,
-  buildWindows, // usamos el del service
-} = require('../services/maxiSalesService');
+// controllers/syncController.js
+/* eslint-disable no-console */
+const pool = require('../config/db');
+const { decryptSecretCompat } = require('../utils/cryptoField');
 
-const { upsertSalesBatch } = require('../services/salesStore');
-const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
+const fetchNative = global.fetch || require('node-fetch');
 
-// ───────── helpers fecha (UTC @ 00:00) ─────────
-function pad2(n) { return String(n).padStart(2, '0'); }
-function ymd(d) { return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`; }
-function at00UTC(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
-function clampToYesterday(dateUTC00) {
-  const today = at00UTC(new Date());
-  const ayer = new Date(today.getTime() - 86400000);
-  return dateUTC00 > ayer ? ayer : dateUTC00;
-}
-function parseYMD(s) {
-  if (!s) return null;
-  // Permite YYYY-MM-DD o fechas parseables por Date
-  const d = s.length === 10 ? new Date(`${s}T00:00:00Z`) : new Date(s);
-  return Number.isNaN(+d) ? null : at00UTC(d);
+const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/$/, '');
+const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
+const FETCH_RETRIES = Number(process.env.MAXI_FETCH_RETRIES || 2);
+
+/* ======================= Utils ======================= */
+function simpleHash(str = '') {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return String(h >>> 0);
 }
 
-// ========== Diagnóstico directo contra Maxi ==========
-async function maxiPing(req, res, next) {
-  try {
-    const bizId =
-      Number(req.business?.id) ||
-      Number(req.params.id) ||
-      Number(req.headers['x-business-id']);
+function parseDate(zd, fallback) {
+  if (zd == null || zd === '') return new Date(fallback);
+  if (zd instanceof Date) return Number.isNaN(+zd) ? new Date(fallback) : zd;
+  if (typeof zd === 'number') {
+    const d = new Date(zd);
+    return Number.isNaN(+d) ? new Date(fallback) : d;
+  }
+  const d = new Date(String(zd));
+  return Number.isNaN(+d) ? new Date(fallback) : d;
+}
 
-    if (!Number.isFinite(bizId)) {
-      return res.status(400).json({ error: 'invalid_business_id' });
-    }
+function ymd(d) {
+  if (!(d instanceof Date) || Number.isNaN(+d)) d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
-    // Bearer (acepta X-Maxi-Token override)
-    const bearer = await getBearer(bizId, req);
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setUTCDate(x.getUTCDate() + n);
+  return x;
+}
 
-    // Fechas: si no vienen, usar AYER; siempre clamp a AYER
-    let from = parseYMD(req.query.from);
-    let to   = parseYMD(req.query.to);
+/* ===== Fetch con timeout + reintentos (429/5xx) ===== */
+async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort('timeout'), timeout);
+    try {
+      const res = await fetchNative(url, { ...options, signal: ctrl.signal });
+      clearTimeout(t);
+      if (res.ok) return res;
 
-    const todayUTC = at00UTC(new Date());
-    const AYER     = new Date(todayUTC.getTime() - 86400000);
-
-    if (!from) from = AYER;
-    if (!to)   to   = AYER;
-
-    from = at00UTC(from);
-    to   = clampToYesterday(at00UTC(to));
-
-    if (from > to) {
-      return res.status(400).json({ error: 'from > to (invalid range)', from: ymd(from), to: ymd(to) });
-    }
-
-    // Ventanas de 7 días (igual que el service) → devuelve pares 'YYYY-MM-DD'
-    const windows7 = buildWindows(from, to, 7);
-    const out = [];
-
-    for (const [fa, fb] of windows7) {
-      try {
-        const p = await fetchFullByDate(fa, fb, bearer);
-        const len =
-          Array.isArray(p?.facturas)              ? p.facturas.length :
-          Array.isArray(p?.content?.facturas)     ? p.content.facturas.length :
-          Array.isArray(p?.content?.content)      ? p.content.content.length :
-          Array.isArray(p?.content)               ? p.content.length :
-          Array.isArray(p)                         ? p.length :
-          0;
-        out.push({
-          window: [fa, fb],
-          ok: true,
-          keys: Object.keys(p || {}),
-          length_guess: len,
-        });
-      } catch (e) {
-        out.push({
-          window: [fa, fb],
-          ok: false,
-          status: e?.status || 500,
-          preview: e?._maxi?.bodyPreview || String(e?.message || '').slice(0, 200),
-        });
+      // Reintentar en 429/5xx
+      if ([429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
+        const delay = 200 * (attempt + 1) ** 2;
+        await new Promise(r => setTimeout(r, delay));
+        continue;
       }
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`HTTP ${res.status} - ${txt.slice(0, 200)}`);
+      err.status = res.status;
+      throw err;
+    } catch (e) {
+      clearTimeout(t);
+      lastErr = e;
+      if (attempt < retries) {
+        const delay = 200 * (attempt + 1) ** 2;
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw lastErr;
+    }
+  }
+  throw lastErr || new Error('fetchWithRetry unknown error');
+}
+
+/* ======================= MAXI API ======================= */
+// NOTA: si tus rutas reales difieren, ajustá estas dos funciones solamente.
+async function maxiLogin({ email, password }) {
+  const url = `${BASE}/login`;
+  const res = await fetchWithRetry(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+  const data = await res.json().catch(() => ({}));
+  const token = data?.token || data?.access_token || data?.jwt || null;
+  if (!token) {
+    const msg = data?.error || 'login_failed';
+    const err = new Error(msg);
+    err.status = 401;
+    throw err;
+  }
+  return token;
+}
+
+// Descarga catálogo de artículos. Cambiá path/qs si tu API usa otros nombres.
+async function maxiFetchItems({ token, codcli }) {
+  const url = `${BASE}/items?codcli=${encodeURIComponent(codcli)}`;
+  const res = await fetchWithRetry(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  // Normalizamos a array
+  const items = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : []);
+  return items;
+}
+
+/* ========== Upsert en public.maxi_articles (chunked) ========== */
+async function upsertArticles({ client, businessId, items }) {
+  if (!items || !items.length) return 0;
+  const CHUNK = 500;
+  let total = 0;
+
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const slice = items.slice(i, i + CHUNK);
+
+    const values = [];
+    const params = [];
+    let p = 1;
+
+    for (const it of slice) {
+      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
+      if (!Number.isFinite(id)) continue;
+
+      const nombre = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null);
+      const categoria = (String(it.categoria ?? '').trim() || 'Sin categoría');
+      const subrubro = (String(it.subrubro ?? '').trim() || 'Sin subrubro');
+      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo  = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
+
+      // 8 columnas -> $p ... $p+7
+      values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6},$${p+7}::jsonb,NOW())`);
+      params.push(
+        businessId, id, nombre, categoria, subrubro, precio, costo,
+        JSON.stringify(it.raw ?? it._raw ?? it)
+      );
+      p += 8;
     }
 
-    // Además: pasamos por el extractor real del service (incluye fallback diario)
-    const facturas = await fetchSalesRanged({ businessId: bizId, from, to, req });
+    if (!values.length) continue;
+
+    const sql = `
+      INSERT INTO public.maxi_articles
+        (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at)
+      VALUES ${values.join(',')}
+      ON CONFLICT (business_id, articulo_id)
+      DO UPDATE SET
+        nombre     = EXCLUDED.nombre,
+        categoria  = EXCLUDED.categoria,
+        subrubro   = EXCLUDED.subrubro,
+        precio     = EXCLUDED.precio,
+        costo      = EXCLUDED.costo,
+        raw        = EXCLUDED.raw,
+        updated_at = NOW()
+    `;
+    await client.query(sql, params);
+    total += slice.length;
+  }
+
+  return total;
+}
+
+/* =================== Helpers credenciales MAXI =================== */
+function loadMaxiCredsFromBiz(biz) {
+  // Convenciones: guardamos en biz.props.maxi ó biz.props.maxi_credentials
+  const props = biz?.props || {};
+  const mx = props.maxi || props.maxi_credentials || {};
+  const email = mx.email || mx.user || null;
+  const codcli = mx.codcli || mx.codigo || null;
+
+  // Puede venir guardado cifrado como { password_enc } ó { password }
+  const passwordRaw = mx.password_enc || mx.password || null;
+  const password = decryptSecretCompat(passwordRaw);
+
+  if (!email || !password || !codcli) {
+    const err = new Error('missing_maxi_credentials');
+    err.status = 400;
+    throw err;
+  }
+  return { email, password, codcli };
+}
+
+/* ======================= Endpoints ======================= */
+
+// GET /:id/articles  (lista plana)
+exports.listArticlesFromDB = async (req, res) => {
+  const biz = req.business;
+  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT articulo_id, nombre, categoria, subrubro, precio, costo
+         FROM public.maxi_articles
+        WHERE business_id = $1
+        ORDER BY nombre ASC`,
+      [biz.id]
+    );
+    res.json({ ok: true, items: rows, count: rows.length });
+  } catch (e) {
+    console.error('listArticlesFromDB error:', e);
+    res.status(500).json({ error: 'internal', detail: e.message });
+  }
+};
+
+// GET /:id/articles/tree  (subrubro > categoría > artículos)
+exports.listArticlesTreeFromDB = async (req, res) => {
+  const biz = req.business;
+  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT articulo_id, nombre, categoria, subrubro, precio
+         FROM public.maxi_articles
+        WHERE business_id = $1
+        ORDER BY subrubro, categoria, nombre`,
+      [biz.id]
+    );
+
+    const bySub = new Map();
+    for (const r of rows) {
+      const sub = r.subrubro || 'Sin subrubro';
+      const cat = r.categoria || 'Sin categoría';
+      if (!bySub.has(sub)) bySub.set(sub, new Map());
+      const byCat = bySub.get(sub);
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
+    }
+
+    const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
+      subrubro,
+      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos }))
+    }));
+
+    const categoriasCount = tree.reduce((a, s) => a + (s.categorias?.length || 0), 0);
+    const articulosCount = tree.reduce(
+      (a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0),
+      0
+    );
+
+    res.json({
+      ok: true,
+      resumen: {
+        subrubros: tree.length,
+        categorias: categoriasCount,
+        articulos: articulosCount,
+      },
+      tree
+    });
+  } catch (e) {
+    console.error('listArticlesTreeFromDB error:', e);
+    res.status(500).json({ error: 'internal', detail: e.message });
+  }
+};
+
+// POST /:id/sync
+// Body:
+//   - scope: 'articles' | 'all' (default 'articles')
+//   - from / to (opcional) SI tu fetch de items acepta fechas; si no, se ignoran
+exports.syncNow = async (req, res) => {
+  const biz = req.business;
+  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+
+  const scope = (req.body?.scope || 'articles').toLowerCase();
+
+  const now = new Date();
+  const defFrom = addDays(now, -30); // por si quisieras fechas
+  const from = parseDate(req.body?.from, defFrom);
+  const to   = parseDate(req.body?.to, now);
+
+  const client = await pool.connect();
+  try {
+    // Tomar credenciales MAXI
+    const { email, password, codcli } = loadMaxiCredsFromBiz(biz);
+
+    // Login + token
+    const token = await maxiLogin({ email, password });
+
+    // Por ahora solo sincronizamos artículos (catálogo)
+    let upserted = 0;
+    let mapped = 0; // si tenés lógica de mapeo extra, setear acá
+
+    if (scope === 'articles' || scope === 'all') {
+      const items = await maxiFetchItems({ token, codcli });
+      await client.query('BEGIN');
+      upserted = await upsertArticles({ client, businessId: biz.id, items });
+      await client.query('COMMIT');
+    }
 
     return res.json({
       ok: true,
-      business_id: bizId,
-      token_ok: Boolean(bearer),
-      range: { from: ymd(from), to: ymd(to) },
-      sample_count: Array.isArray(facturas) ? facturas.length : 0,
-      windows: out,
+      business_id: biz.id,
+      scope,
+      from: ymd(from),
+      to: ymd(to),
+      upserted,
+      mapped
     });
   } catch (e) {
-    return next(e);
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error('syncNow error:', e);
+    const status = e.status || (String(e.message || '').includes('401') ? 401 : 500);
+    const detail = e.message || 'sync_failed';
+    return res.status(status).json({ error: 'sync_failed', detail });
+  } finally {
+    client.release();
   }
-}
+};
 
-// ========== Fachada de sync con la policy ==========
-async function syncSalesForBusiness(
-  business,
-  { mode = 'auto', from = null, to = null, dryrun = false, req } = {}
-) {
-  if (!business || !business.id) {
-    throw new TypeError('business.id required');
-  }
+/* ===== Compat (legacy) — derivados a /api/ventas ===== */
+exports.salesSummaryFromDB = async (_req, res) => {
+  res.status(410).json({
+    error: 'gone',
+    detail: 'Este endpoint fue reemplazado por /api/ventas/summary (con X-Business-Id).'
+  });
+};
 
-  // 1) backfill canónico (30d hasta AYER, una vez)
-  if (mode === 'backfill' || mode === 'backfill_30d') {
-    if (dryrun) {
-      const r = await ensureInitialBackfillOnce({ businessId: business.id, req });
-      return { ...r, note: 'ensureInitialBackfillOnce executed (policy). Dryrun real no implementado aquí.' };
-    }
-    return await ensureInitialBackfillOnce({ businessId: business.id, req });
-  }
-
-  // 2) auto incremental (desde último día + 1 hasta AYER)
-  if (!from && !to) {
-    return await runDailyAuto({ businessId: business.id, req });
-  }
-
-  // 3) rango puntual (clamp y validación)
-  if (from && to) {
-    let F = parseYMD(from);
-    let T = parseYMD(to);
-    if (!F || !T) {
-      return { ok: false, error: 'invalid_from_or_to (use YYYY-MM-DD)' };
-    }
-    F = at00UTC(F);
-    T = clampToYesterday(at00UTC(T));
-    if (F > T) {
-      return { ok: false, error: 'invalid_range_or_mode', hint: 'use mode=auto | backfill_30d | from+to' };
-    }
-
-    // Trae desde Maxi con fallback 7d→1d y normaliza
-    const salesRaw = await fetchSalesRanged({ businessId: business.id, from: F, to: T, req });
-
-    if (dryrun) {
-      return {
-        ok: true,
-        dryrun: true,
-        rawCount: Array.isArray(salesRaw) ? salesRaw.length : 0,
-        range: { from: ymd(F), to: ymd(T) },
-      };
-    }
-
-    // Persiste en lote (idempotente por external_id / line_pos)
-    const counts = await upsertSalesBatch(business.id, salesRaw);
-    return { ok: true, mode: 'range', range: { from: ymd(F), to: ymd(T) }, ...counts };
-  }
-
-  return { ok: false, error: 'invalid_range_or_mode' };
-}
-
-module.exports = { maxiPing, syncSalesForBusiness };
+exports.salesSeriesFromDB = async (_req, res) => {
+  res.status(410).json({
+    error: 'gone',
+    detail: 'Este endpoint fue reemplazado por /api/ventas/by-article (con X-Business-Id).'
+  });
+};
