@@ -7,32 +7,43 @@ const MAXI_BASE  = process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas
 const STATS_BASE = process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar';
 const CONC = Math.max(1, Number(process.env.MAXI_FETCH_CONCURRENCY || 3));
 
-// ─────────── util fechas (UTC) ───────────
-function pad2(n){ return String(n).padStart(2,'0'); }
-function ymd(d){ return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`; }
-function at00UTC(d){ return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
-function addDaysUTC(d, n){ return new Date(d.getTime() + n * 86400000); }
+/* ─────────── util fechas (UTC) ─────────── */
+function pad2(n) { return String(n).padStart(2, '0'); }
+function ymd(d) { return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`; }
+function at00UTC(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
+function addDaysUTC(d, n) { return new Date(d.getTime() + n * 86400000); }
 
-// ─────────── cache de bearer por negocio ───────────
+/* ─────────── cache de bearer por negocio ─────────── */
 const tokenCache = new Map(); // key -> { token, expMs }
 
 async function loginMaxi(email, pass, codcli) {
-  const url = `${MAXI_BASE.replace(/\/+$/,'')}/login`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type':'application/json' },
-    body: JSON.stringify({ email, pass, cod_cli: codcli })
-  });
-  const txt = await r.text().catch(()=> '');
-  let j; try { j = JSON.parse(txt); } catch {}
-  if (!r.ok || j?.resultCode !== 'SUCCESS') {
-    const err = new Error(j?.resultDescription || r.statusText || 'login Maxi falló');
-    err.status = r.status || 502;
-    throw err;
+  // intentá /auth/login; si no existe, /login
+  const base = MAXI_BASE.replace(/\/+$/,'');
+  const candidates = [`${base}/auth/login`, `${base}/login`];
+
+  let lastErr;
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ email, pass, cod_cli: codcli })
+      });
+      const txt = await r.text().catch(()=> '');
+      let j; try { j = JSON.parse(txt); } catch {}
+      if (!r.ok || j?.resultCode !== 'SUCCESS') {
+        const err = new Error(j?.resultDescription || r.statusText || 'login Maxi falló');
+        err.status = r.status || 502;
+        throw err;
+      }
+      const token = j?.content?.tokenAccess || j?.content?.token || j?.token;
+      if (!token) { const e = new Error('token Maxi vacío'); e.status = 502; throw e; }
+      return token;
+    } catch (e) {
+      lastErr = e;
+    }
   }
-  const token = j?.content?.tokenAccess;
-  if (!token) { const e=new Error('token Maxi vacío'); e.status=502; throw e; }
-  return token;
+  throw lastErr || new Error('login Maxi falló');
 }
 
 /**
@@ -71,32 +82,31 @@ async function getBearer(businessId, req) {
   return token;
 }
 
-// ─────────── low-level fetch (fullinvoicebydate) ───────────
-async function fetchFullByDate(fromYMD, toYMD, bearer) {
+/* ─────────── low-level fetch principal: invoicebydate (GET) ─────────── */
+async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
   const base = STATS_BASE.replace(/\/+$/,'');
-  const url = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
+  const url = `${base}/estadisticas/invoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
 
-  for (let i=0;i<3;i++){
+  for (let i = 0; i < 3; i++) {
     const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
-    const txt = await r.text().catch(()=> '');
+    const txt = await r.text().catch(() => '');
     let j; try { j = JSON.parse(txt); } catch {}
-    const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
 
+    const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
     if (ok) {
-      // aplanar envolturas
       return (j?.content?.content) ? j.content.content
            : (j?.content)          ? j.content
            : j ?? {};
     }
 
-    if ([429,502,503].includes(r.status)) {
+    if ([429, 502, 503].includes(r.status)) {
       if (i === 2) {
         const e = new Error(j?.resultDescription || r.statusText || 'Maxi 5xx');
         e.status = r.status || 502;
         e._maxi = { status: r.status, fromYMD, toYMD, bodyPreview: String(txt).slice(0,200) };
         throw e;
       }
-      await new Promise(res => setTimeout(res, 400 * (i+1)**2));
+      await new Promise(res => setTimeout(res, 400 * (i + 1) ** 2));
       continue;
     }
 
@@ -105,9 +115,28 @@ async function fetchFullByDate(fromYMD, toYMD, bearer) {
     e._maxi = { status: r.status, fromYMD, toYMD, bodyPreview: String(txt).slice(0,200) };
     throw e;
   }
+
   const e = new Error('Maxi retries exhausted');
   e.status = 502;
   throw e;
+}
+
+/* ─────────── fallback: fullinvoicebydate (GET) ─────────── */
+async function tryFullInvoiceByDate(fromYMD, toYMD, bearer) {
+  const base = STATS_BASE.replace(/\/+$/,'');
+  const url = `${base}/estadisticas/fullinvoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
+  const txt = await r.text().catch(() => '');
+  let j; try { j = JSON.parse(txt); } catch {}
+  if (!r.ok) {
+    const e = new Error(`fallback_fullinvoicebydate_${r.status}`);
+    e.status = r.status || 502;
+    e._maxi = { status: r.status, fromYMD, toYMD, bodyPreview: String(txt).slice(0,200) };
+    throw e;
+  }
+  return (j?.content?.content) ? j.content.content
+       : (j?.content)          ? j.content
+       : j ?? {};
 }
 
 /**
@@ -146,7 +175,7 @@ function buildWindows(fromDate, toDate, winDays = 7) {
   return out;
 }
 
-// ─────────── extractor robusto ───────────
+/* ─────────── extractor robusto ─────────── */
 function extractFacturas(payload) {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload;
@@ -160,7 +189,7 @@ function extractFacturas(payload) {
   return [];
 }
 
-// ─────────── fetch principal con fallback 7d→1d ───────────
+/* ─────────── fetch principal con fallback 7d→1d ─────────── */
 async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   const windows7 = buildWindows(fromDate, toDate, 7);
 
@@ -168,40 +197,60 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   const errors  = new Array(windows7.length).fill(null);
 
   let idx = 0;
-  async function worker(){
+  async function worker() {
     while (idx < windows7.length) {
       const my = idx++;
-      const [a,b] = windows7[my]; // strings YYYY-MM-DD
+      const [a, b] = windows7[my]; // strings YYYY-MM-DD
       try {
-        results[my] = await fetchFullByDate(a, b, bearer);
+        results[my] = await fetchInvoiceByDate(a, b, bearer);
       } catch (e) {
+        // si no existe el endpoint nuevo, probá fallback para esa ventana
+        if (String(e?.message||'').includes('404') || String(e?.message||'').includes('501')) {
+          try {
+            results[my] = await tryFullInvoiceByDate(a, b, bearer);
+            errors[my] = null;
+            continue;
+          } catch (e2) {
+            errors[my] = e2;
+            continue;
+          }
+        }
         errors[my] = e;
       }
     }
   }
-  await Promise.all(Array.from({length: Math.min(conc, windows7.length)}, worker));
+  await Promise.all(Array.from({ length: Math.min(conc, windows7.length) }, worker));
 
   const outPayloads = [];
-  for (let i=0;i<windows7.length;i++){
+  for (let i = 0; i < windows7.length; i++) {
     if (!errors[i]) {
       outPayloads.push(results[i]);
       continue;
     }
+
     const err = errors[i];
     if ((err?.status || 0) >= 500) {
+      // fallback por día (1d) sobre esa ventana
       const [wa, wb] = windows7[i];
       const a = new Date(`${wa}T00:00:00Z`);
       const b = new Date(`${wb}T00:00:00Z`);
       const days = buildWindows(a, b, 1);
       for (const [da, db] of days) {
         try {
-          const dayPayload = await fetchFullByDate(da, db, bearer);
+          const dayPayload = await fetchInvoiceByDate(da, db, bearer);
           outPayloads.push(dayPayload);
         } catch (e2) {
-          console.warn('[maxi fallback] falló día', { da, db, status: e2?.status, info: e2?._maxi });
+          try {
+            const dayPayload2 = await tryFullInvoiceByDate(da, db, bearer);
+            outPayloads.push(dayPayload2);
+            continue;
+          } catch {
+            console.warn('[maxi fallback] falló día', { da, db, status: e2?.status, info: e2?._maxi });
+          }
         }
       }
     } else {
+      // error “duro” (4xx distinto de 404/401, etc.)
       throw err;
     }
   }
@@ -242,9 +291,9 @@ module.exports = {
   MAXI_BASE,
   STATS_BASE,
   getBearer,
-  fetchFullByDate,
+  fetchInvoiceByDate,
+  fetchFullByDate: fetchInvoiceByDate,
   buildWindows,
   extractFacturas,
   fetchSalesRanged,
 };
- 
