@@ -1,372 +1,259 @@
+// services/salesStore.js
 const pool = require('../config/db');
 
-// ---------- helpers fecha ----------
-const pad2 = n => String(n).padStart(2, '0');
-const ymd = d => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+/* ───────── helpers num/date ───────── */
+const toNum = (v) => {
+  if (v == null || v === '') return 0;
+  const n = Number(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? n : 0;
+};
 
-function parseMaxiDate(value) {
-  if (!value) return null;
-  if (value instanceof Date && !isNaN(+value)) return value;
-  if (typeof value === 'string') {
-    // Ej: "07/08/2025" o "07/08/2025 14:33:10"
-    const m = value.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
-    if (m) {
-      const dd = +m[1], mm = +m[2], yyyy = +m[3];
-      const HH = +(m[4] ?? 0), MI = +(m[5] ?? 0), SS = +(m[6] ?? 0);
-      return new Date(Date.UTC(yyyy, mm - 1, dd, HH, MI, SS));
-    }
+function parseYMDorDMYtoUTC(dateStr) {
+  if (!dateStr) return null;
+  // Casos típicos:
+  // - "2025-11-03"
+  // - "03/11/2025"
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return new Date(`${dateStr}T00:00:00Z`);
   }
-  const d = new Date(value);
-  return isNaN(+d) ? null : d;
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(dateStr);
+  if (m) {
+    const [_, dd, mm, yyyy] = m;
+    return new Date(`${yyyy}-${mm}-${dd}T00:00:00Z`);
+  }
+  // fallback
+  const d = new Date(dateStr);
+  return Number.isFinite(+d) ? new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())) : null;
 }
 
-// ---------- props.last_sales_sync_at ----------
-async function getLastSalesSyncAt(businessId) {
-  const { rows } = await pool.query(
-    `SELECT (props->>'last_sales_sync_at') AS ts
-       FROM app_businesses
-      WHERE id=$1`,
-    [businessId]
-  );
-  return rows[0]?.ts || null;
-}
-
-async function setLastSalesSyncAt(businessId, isoTs) {
-  await pool.query(
-    `UPDATE app_businesses
-        SET props = COALESCE(props,'{}'::jsonb) || jsonb_build_object('last_sales_sync_at', $2::text)
-      WHERE id = $1`,
-    [businessId, isoTs]
-  );
-}
-
-/**
- * Normaliza facturas crudas de Maxi a:
- *  - app_sales (comprobante)
- *  - app_sales_items (líneas)
- *  y devuelve días tocados para recalcular sales_daily.
- */
-function normalizeInvoices(businessId, rawFacturas = []) {
+/* 
+   Normaliza ambos formatos:
+   - fullinvoicebydate: { factura: { numero, total, cabecera{ fecha, ... }, items[] } }
+   - invoicebydate:     { order: { orderData{ orderId, orderDate, totalSales }, orderItems:[{ orderItem{ title, quantity, productPrice, totalPrice, ... } }] } }
+*/
+function normalizeInvoices(businessId, rawDocs) {
   const sales = [];
   const items = [];
   const touchedDays = new Set();
 
-  const toISODate = (dmy) => {
-    if (!dmy) return null;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dmy)) return dmy;
-    const m = String(dmy).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-    if (m) {
-      const [_, dd, mm, yyyy] = m;
-      return `${yyyy}-${mm}-${dd}`;
-    }
-    return null;
+  const pushSale = (external_id, occurred_at, total) => {
+    const s = { business_id: businessId, external_id, occurred_at, total: toNum(total) };
+    sales.push(s);
+    touchedDays.add(s.occurred_at.toISOString().slice(0,10)); // YYYY-MM-DD
+    return s;
   };
 
-  const pushSale = ({ external_id, occurred_at, total, raw }) => {
-    if (!external_id) return null;
-    const occurredISO = occurred_at ? new Date(`${occurred_at}T00:00:00.000Z`).toISOString() : null;
-    sales.push({
+  const pushItem = (sale_idx, line_pos, data) => {
+    // data: { article_id?, article_name, qty, unit_price, line_total }
+    items.push({
       business_id: businessId,
-      external_id,
-      occurred_at: occurredISO,
-      total: Number(total || 0),
-      raw
+      sale_idx,
+      line_pos,
+      article_id: data.article_id ?? null,         // si tu pipeline resuelve ID en otro paso, dejalo null
+      article_name: data.article_name || null,     // útil para joins posteriores
+      qty: toNum(data.qty),
+      unit_price: toNum(data.unit_price),
+      line_total: toNum(data.line_total),
     });
-    if (occurred_at) touchedDays.add(occurred_at);
-    return sales.length - 1;
   };
 
-  for (const row of rawFacturas) {
+  (rawDocs || []).forEach((doc) => {
     // ───────── fullinvoicebydate ─────────
-    if (row?.factura) {
-      const f = row.factura;
-      const fechaYMD = toISODate(f.fecha || f.cabecera?.fecha);
-      const total    = Number(f.total ?? f.cabecera?.total ?? 0) || 0;
-      const external = String(f.numero || `${f.cabecera?.prefijo || ''}-${f.cabecera?.numero || ''}`).trim() || null;
+    if (doc && doc.numero && (doc.cabecera || doc.items)) {
+      const external = String(doc.numero);
+      const occurred = parseYMDorDMYtoUTC(doc.cabecera?.fecha || doc.fecha);
+      const total    = toNum(doc.total);
 
-      const saleIdx = pushSale({
-        external_id: external,
-        occurred_at: fechaYMD,
-        total,
-        raw: f
+      const sale_idx = sales.length;
+      pushSale(external, occurred, total);
+
+      (doc.items || []).forEach((it, i) => {
+        const nombre   = it.nombre_art || it.title || it.descripcion || 'Item';
+        const cantidad = toNum(it.cantidad);
+        const precio   = toNum(it.precio);
+        // Para fullinvoice no viene total por línea → lo calculamos
+        const lineTotal = toNum(it.total) || (cantidad * precio);
+
+        pushItem(sale_idx, i + 1, {
+          article_id: it.cod_art ?? null,
+          article_name: nombre,
+          qty: cantidad,
+          unit_price: precio,
+          line_total: lineTotal,
+        });
       });
-
-      if (saleIdx != null && Array.isArray(f.items)) {
-        let pos = 0;
-        for (const it of f.items) {
-          items.push({
-            business_id: businessId,
-            sale_index: saleIdx,
-            line_pos: pos++,
-            cod_art: Number(it.cod_art ?? 0) || null,
-            nombre_art: String(it.nombre_art ?? '').trim() || null,
-            cantidad: Number(it.cantidad ?? 0) || 0,
-            precio_unit: Number(it.precio ?? 0) || 0,
-            total_line: Number(it.cantidad ?? 0) * Number(it.precio ?? 0) || 0,
-            raw: it
-          });
-        }
-      }
-      continue;
+      return;
     }
 
-    // ───────── invoicebydate ─────────
-    const od = row?.order?.orderData || row?.orderData || null;
-    if (od) {
-      const fechaYMD = toISODate(od.orderDate);
-      const total    = Number(od.totalSales ?? 0) || 0;
-      const external = String(od.orderId || '').trim() || null;
+    // ───────── invoicebydate (ordenes) ─────────
+    const ord = doc?.order;
+    if (ord?.orderData) {
+      const od  = ord.orderData;
+      const oid = od.orderId ? String(od.orderId) : null;
+      const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
+      const total    = toNum(od.totalSales);
 
-      const saleIdx = pushSale({
-        external_id: external,
-        occurred_at: fechaYMD,
-        total,
-        raw: row.order || row
+      const sale_idx = sales.length;
+      pushSale(oid, occurred, total);
+
+      const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
+      arr.forEach((wrap, i) => {
+        const oi = wrap?.orderItem || wrap || {};
+        const title   = oi.title || oi.nombre_art || 'Item';
+        const qty     = toNum(oi.quantity);
+        const price   = toNum(oi.productPrice);
+        // Clave del bug: si totalPrice viene 0 o ausente, calcular qty*price
+        const lineTot = toNum(oi.totalPrice) || (qty * price);
+
+        // Si tu pipeline resuelve artículo, dejá article_id en null y conservá el nombre
+        pushItem(sale_idx, i + 1, {
+          article_id: oi.cod_art ?? null,
+          article_name: title,
+          qty,
+          unit_price: price,
+          line_total: lineTot,
+        });
       });
-
-      const orderItems = row?.order?.orderItems || row?.orderItems || [];
-      if (saleIdx != null && Array.isArray(orderItems)) {
-        let pos = 0;
-        for (const wrapper of orderItems) {
-          const it = wrapper?.orderItem || wrapper || {};
-          const qty   = Number(it.quantity ?? 0) || 0;
-          const pu    = Number(it.productPrice ?? 0) || 0;
-          const tline = Number(it.totalPrice ?? (qty * pu)) || 0;
-          items.push({
-            business_id: businessId,
-            sale_index: saleIdx,
-            line_pos: pos++,
-            cod_art: null, // no viene código en este endpoint
-            nombre_art: String(it.title ?? '').trim() || null,
-            cantidad: qty,
-            precio_unit: pu,
-            total_line: tline,
-            raw: it
-          });
-        }
-      }
-      continue;
+      return;
     }
 
-    // Si llega algo desconocido, lo ignoramos (pero podríamos loguearlo)
-  }
+    // Si viene otro objeto raro, lo ignoramos para no romper
+  });
 
   return { sales, items, touchedDays: Array.from(touchedDays) };
 }
 
 /**
- * Inserta/actualiza lotes en app_sales/app_sales_items y recalcula sales_daily.
- * Idempotente por (business_id, external_id) y (sale_id, line_pos).
- * Devuelve conteos reales: { upserted, updated, minDay, maxDay }
+ * Inserta/actualiza ventas e ítems y recalcula agregados diarios SOLO para los días tocados.
+ * Devuelve { upserted, updated, minDay, maxDay }
  */
-async function upsertSalesBatch(businessId, rawFacturas) {
-  const client = await pool.connect();
+async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
+  const { sales, items, touchedDays } = normalizeInvoices(businessId, rawDocs);
+  if (!sales.length) return { upserted: 0, updated: 0, minDay: null, maxDay: null };
+
+  const client = clientExtern || await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1) Normalizar payload a { sales, items, touchedDays }
-    const { sales, items, touchedDays } = normalizeInvoices(businessId, rawFacturas);
+    // 1) UPSERT app_sales y quedarnos con los IDs (por external_id)
+    const saleIdMap = new Map(); // sale_idx -> sale_id
+    let upserted = 0, updated = 0;
 
-    if (!sales.length && !items.length) {
-      await client.query('COMMIT');
-      return { upserted: 0, updated: 0, minDay: null, maxDay: null };
+    for (let i = 0; i < sales.length; i++) {
+      const s = sales[i];
+      const { rows } = await client.query(
+        `INSERT INTO app_sales (business_id, external_id, occurred_at, total)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (business_id, external_id)
+         DO UPDATE SET total = EXCLUDED.total
+         RETURNING id, (xmax = 0) AS inserted`,
+        [s.business_id, s.external_id, s.occurred_at, s.total]
+      );
+      saleIdMap.set(i, rows[0].id);
+      if (rows[0].inserted) upserted++; else updated++;
     }
 
-    // 2) UPSERT app_sales — idempotente por (business_id, external_id)
-    let externalToId = new Map();
-
-    if (sales.length) {
-      const bizArr   = sales.map(s => Number(s.business_id));
-      const extArr   = sales.map(s => String(s.external_id));
-      const atArr    = sales.map(s => new Date(s.occurred_at));       // timestamptz[]
-      const totArr   = sales.map(s => Number(s.total || 0));          // numeric[]
-      const propsArr = sales.map(s => s.props || {});                 // jsonb[]
-
-      const qSales = `
-        WITH up AS (
-          INSERT INTO app_sales (business_id, external_id, occurred_at, total, props)
-          SELECT * FROM UNNEST(
-            $1::bigint[],  -- business_id
-            $2::text[],    -- external_id
-            $3::timestamptz[], -- occurred_at
-            $4::numeric[], -- total
-            $5::jsonb[]    -- props
-          )
-          ON CONFLICT (business_id, external_id)
-          DO UPDATE SET occurred_at = EXCLUDED.occurred_at,
-                        total       = EXCLUDED.total,
-                        props       = EXCLUDED.props
-          RETURNING id, external_id
-        )
-        SELECT id, external_id FROM up
-      `;
-      const r = await client.query(qSales, [bizArr, extArr, atArr, totArr, propsArr]);
-      externalToId = new Map(r.rows.map(x => [String(x.external_id), Number(x.id)]));
-    }
-
-    // 3) UPSERT app_sales_items — idempotente por (sale_id, line_pos)
+    // 2) Reemplazamos líneas por venta (simple y seguro para mantener consistencia)
+    //    (Si querés micro-diff, lo podemos hacer después)
+    //    Armamos bulk insert con VALUES
     if (items.length) {
-      const saleIdArr = [];
-      const posArr    = [];
-      const artArr    = [];
-      const skuArr    = [];
-      const nameArr   = [];
-      const qtyArr    = [];
-      const unitArr   = [];
-      const lineTot   = [];
-      const propsArr  = [];
-
-      for (const it of items) {
-        const saleId = externalToId.get(String(it.sale_external_id));
-        if (!saleId) continue; // si no insertó/actualizó el comprobante, saltamos la línea
-        saleIdArr.push(Number(saleId));
-        posArr.push(Number(it.line_pos));
-        artArr.push(it.article_id != null ? Number(it.article_id) : null); // puede ser NULL
-        skuArr.push(it.sku != null ? String(it.sku) : null);
-        nameArr.push(it.name != null ? String(it.name) : null);
-        qtyArr.push(Number(it.quantity || 0));
-        unitArr.push(Number(it.unit_price || 0));
-        lineTot.push(Number(it.total || 0));
-        propsArr.push(it.props || {});
-      }
-
-      if (saleIdArr.length) {
-        const qItems = `
-          INSERT INTO app_sales_items
-            (sale_id, line_pos, article_id, sku, name, quantity, unit_price, total, props)
-          SELECT * FROM UNNEST(
-            $1::bigint[],   -- sale_id
-            $2::int[],      -- line_pos
-            $3::int[],      -- article_id (NULL permitido)
-            $4::text[],     -- sku
-            $5::text[],     -- name
-            $6::numeric[],  -- quantity
-            $7::numeric[],  -- unit_price
-            $8::numeric[],  -- total
-            $9::jsonb[]     -- props
-          )
-          ON CONFLICT (sale_id, line_pos)
-          DO UPDATE SET article_id = EXCLUDED.article_id,
-                        sku        = EXCLUDED.sku,
-                        name       = EXCLUDED.name,
-                        quantity   = EXCLUDED.quantity,
-                        unit_price = EXCLUDED.unit_price,
-                        total      = EXCLUDED.total,
-                        props      = EXCLUDED.props
-        `;
-        await client.query(qItems, [
-          saleIdArr, posArr, artArr, skuArr, nameArr, qtyArr, unitArr, lineTot, propsArr
-        ]);
-      }
-    }
-
-    // 4) Recalcular sales_daily (por día) para los días tocados
-    if (touchedDays.length) {
-      const { rows } = await client.query(
-        `
-        SELECT (occurred_at AT TIME ZONE 'UTC')::date AS day,
-               SUM(total)::numeric(14,2)            AS total,
-               COUNT(*)::int                         AS tx_count
-          FROM app_sales
-         WHERE business_id = $1
-           AND (occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-         GROUP BY 1
-        `,
-        [businessId, touchedDays]
+      // Borramos líneas previas de estas ventas
+      const saleIds = Array.from(saleIdMap.values());
+      await client.query(
+        `DELETE FROM app_sales_items WHERE sale_id = ANY($1::int[])`,
+        [saleIds]
       );
 
-      if (rows.length) {
-        const bizArr = rows.map(() => Number(businessId));
-        const dayArr = rows.map(r => r.day);
-        const totArr = rows.map(r => Number(r.total || 0));
-        const txcArr = rows.map(r => Number(r.tx_count || 0));
+      const values = [];
+      const params = [];
+      let p = 1;
+      items.forEach((it) => {
+        const sale_id = saleIdMap.get(it.sale_idx);
+        if (!sale_id) return;
+        values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+        params.push(
+          sale_id,
+          it.line_pos,
+          it.article_id,
+          it.article_name,
+          it.qty,
+          it.line_total // 🔴 usamos line_total para el monto de la línea
+        );
+      });
 
+      if (values.length) {
         await client.query(
-          `
-          INSERT INTO sales_daily (business_id, day, total, tx_count)
-          SELECT * FROM UNNEST(
-            $1::bigint[],  -- business_id
-            $2::date[],    -- day
-            $3::numeric[], -- total
-            $4::int[]      -- tx_count
-          )
-          ON CONFLICT (business_id, day)
-          DO UPDATE SET total    = EXCLUDED.total,
-                        tx_count = EXCLUDED.tx_count
-          `,
-          [bizArr, dayArr, totArr, txcArr]
+          `INSERT INTO app_sales_items (sale_id, line_pos, article_id, article_name, qty, amount)
+           VALUES ${values.join(',')}`,
+          params
         );
       }
     }
 
-    // 5) Recalcular sales_daily_items (por artículo y día) para los días tocados
+    // 3) Recalcular agregados para los días tocados
     if (touchedDays.length) {
-      const { rows } = await client.query(
-        `
-        SELECT
-          (s.occurred_at AT TIME ZONE 'UTC')::date AS date,
-          i.article_id                             AS articulo_id,
-          SUM(i.quantity)::numeric(14,3)          AS qty,
-          SUM(i.total)::numeric(14,2)             AS amount
-        FROM app_sales_items i
-        JOIN app_sales s ON s.id = i.sale_id
-        WHERE s.business_id = $1
-          AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-          AND i.article_id IS NOT NULL
-        GROUP BY 1, 2
-        ORDER BY 1, 2
-        `,
-        [businessId, touchedDays]
+      // Normalizamos a array único de días YYYY-MM-DD
+      const days = touchedDays.sort();
+      const minDay = days[0];
+      const maxDay = days[days.length - 1];
+
+      // Borrado selectivo
+      await client.query(
+        `DELETE FROM sales_daily
+          WHERE business_id = $1 AND day = ANY($2::date[])`,
+        [businessId, days]
+      );
+      await client.query(
+        `DELETE FROM sales_daily_items
+          WHERE business_id = $1 AND day = ANY($2::date[])`,
+        [businessId, days]
       );
 
-      if (rows.length) {
-        const bizArr  = rows.map(() => Number(businessId));
-        const artArr  = rows.map(r => Number(r.articulo_id));
-        const dateArr = rows.map(r => r.date);
-        const qtyArr  = rows.map(r => Number(r.qty || 0));
-        const amtArr  = rows.map(r => Number(r.amount || 0));
+      // sales_daily: suma de totales y tx_count
+      await client.query(
+        `INSERT INTO sales_daily (business_id, day, total, tx_count)
+         SELECT s.business_id,
+                (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+                SUM(s.total) AS total,
+                COUNT(*)     AS tx_count
+         FROM app_sales s
+         WHERE s.business_id = $1
+           AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+         GROUP BY s.business_id, day`,
+        [businessId, days]
+      );
 
-        await client.query(
-          `
-          INSERT INTO sales_daily_items (business_id, articulo_id, "date", qty, amount)
-          SELECT * FROM UNNEST(
-            $1::bigint[],  -- business_id
-            $2::int[],     -- articulo_id
-            $3::date[],    -- date
-            $4::numeric[], -- qty
-            $5::numeric[]  -- amount
-          )
-          ON CONFLICT (business_id, articulo_id, "date")
-          DO UPDATE SET
-            qty    = EXCLUDED.qty,
-            amount = EXCLUDED.amount
-          `,
-          [bizArr, artArr, dateArr, qtyArr, amtArr]
-        );
-      }
+      // sales_daily_items: suma por artículo del amount de la línea (NO unit_price)
+      await client.query(
+        `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
+         SELECT s.business_id,
+                (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+                si.article_id,
+                SUM(si.qty)    AS qty,
+                SUM(si.amount) AS amount
+         FROM app_sales_items si
+         JOIN app_sales s ON s.id = si.sale_id
+         WHERE s.business_id = $1
+           AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+         GROUP BY s.business_id, day, si.article_id`,
+        [businessId, days]
+      );
+
+      await client.query('COMMIT');
+      return { upserted, updated, minDay, maxDay };
     }
 
     await client.query('COMMIT');
-
-    const sorted = Array.from(new Set(touchedDays)).sort();
-    return {
-      upserted: sales.length,
-      updated: 0,
-      minDay: sorted[0] || null,
-      maxDay: sorted[sorted.length - 1] || null,
-    };
+    return { upserted, updated, minDay: null, maxDay: null };
   } catch (e) {
     await client.query('ROLLBACK');
-    e.status = e.status || 500;
     throw e;
   } finally {
-    client.release();
+    if (!clientExtern) client.release();
   }
 }
 
 module.exports = {
   normalizeInvoices,
   upsertSalesBatch,
-  getLastSalesSyncAt,
-  setLastSalesSyncAt,
 };

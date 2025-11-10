@@ -39,7 +39,7 @@ async function loginMaxi(email, pass, codcli) {
  * getBearer(businessId, req)
  * Prioriza:
  * 1) X-Maxi-Token
- * 2) Cache local
+ * 2) Cache local (9 min)
  * 3) Creds DB (email/codcli/pass|pass_enc)
  */
 async function getBearer(businessId, req) {
@@ -146,34 +146,30 @@ function extractFacturas(payload) {
   const content = payload?.content ?? payload;
   const inner   = content?.content ?? content;
 
-  // Caso clásico: { content: { content: { facturas: [ { factura }, ... ] } } }
+  // Caso clásico fullinvoicebydate: { content: { content: { facturas: [ { factura }, ... ] } } }
   if (Array.isArray(inner?.facturas)) {
     return inner.facturas.filter(Boolean);
   }
-
-  // Algunas variantes: { facturas: [ { factura }, ... ] }
+  // Variante: { facturas: [ { factura }, ... ] }
   if (Array.isArray(payload?.facturas)) {
     return payload.facturas.filter(Boolean);
   }
 
-  // ───────────────── invoicebydate ─────────────────
+  // ───────── invoicebydate ─────────
   // Formato: array de { order: { orderData, orderItems: [ { orderItem } ] } }
   // Puede venir como { content: [ ... ] } o directamente [ ... ]
   const arr = Array.isArray(inner) ? inner : (Array.isArray(payload) ? payload : null);
   if (arr && arr.length) {
-    // Si lucen como órdenes, devolvemos [{ order }, ...]
     if (arr.some(x => x?.order?.orderData || x?.orderData)) {
       return arr.map(x => {
-        if (x?.order?.orderData) return x;                // { order: { orderData, orderItems } }
-        if (x?.orderData)         return { order: x };    // { orderData, orderItems }  => lo envolvemos
+        if (x?.order?.orderData) return x;             // { order: { orderData, orderItems } }
+        if (x?.orderData)         return { order: x }; // { orderData, orderItems }  => envolver
         return x;
       });
     }
-    // Si son objetos variados, devolvemos tal cual (mejor crudo que vacío)
     return arr;
   }
 
-  // Último intento: ¿array en content?
   if (Array.isArray(content)) return content;
 
   return [];
@@ -241,9 +237,12 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   for (const p of (payloads || [])) {
     let arr = extractFacturas(p);
     if (!Array.isArray(arr) || !arr.length) continue;
+
+    // Si es fullinvoicebydate: [{ factura }, ...] → extraemos la factura
     if (arr[0] && typeof arr[0] === 'object' && Object.prototype.hasOwnProperty.call(arr[0], 'factura')) {
       arr = arr.map(x => x?.factura || x).filter(Boolean);
     }
+    // invoicebydate retorna órdenes (mantener tal cual; el normalizador las entiende)
     if (arr.length) facturas.push(...arr);
   }
   return facturas;
@@ -252,16 +251,11 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
 module.exports = {
   MAXI_BASE,
   STATS_BASE,
-  // utils que usan otros módulos (dev probe, etc.)
   at00UTC,
   addDaysUTC,
-  // bearer
   getBearer,
-  // low-level nuevo
   fetchInvoiceByDate,
-  // helpers
   buildWindows,
   extractFacturas,
-  // high-level
   fetchSalesRanged,
 };
