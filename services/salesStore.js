@@ -192,7 +192,6 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
 
     // 3) Recalcular agregados para los días tocados
     if (touchedDays.length) {
-      // Normalizamos a array único de días YYYY-MM-DD
       const days = touchedDays.sort();
       const minDay = days[0];
       const maxDay = days[days.length - 1];
@@ -200,53 +199,50 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
       // Borrado selectivo
       await client.query(
         `DELETE FROM sales_daily
-          WHERE business_id = $1 AND day = ANY($2::date[])`,
+      WHERE business_id = $1 AND day = ANY($2::date[])`,
         [businessId, days]
       );
       await client.query(
         `DELETE FROM sales_daily_items
-          WHERE business_id = $1 AND day = ANY($2::date[])`,
+      WHERE business_id = $1 AND day = ANY($2::date[])`,
         [businessId, days]
       );
 
-      // sales_daily: suma de totales y tx_count
+      // ✅ sales_daily: suma de totales y tx_count
       await client.query(
-        `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-SELECT s.business_id,
-       (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-       si.article_id,
-       SUM(si.qty)    AS qty,
-       SUM(si.amount) AS amount
-FROM app_sales_items si
-JOIN app_sales s ON s.id = si.sale_id
-WHERE s.business_id = $1
-  AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-GROUP BY s.business_id, day, si.article_id
-`,
+        `INSERT INTO sales_daily (business_id, day, total, tx_count)
+     SELECT s.business_id,
+            (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+            SUM(s.total) AS total,
+            COUNT(*)     AS tx_count
+     FROM app_sales s
+     WHERE s.business_id = $1
+       AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+     GROUP BY s.business_id, day`,
         [businessId, days]
       );
 
-      // sales_daily_items: suma por artículo del amount de la línea (NO unit_price)
+      // ✅ sales_daily_items: suma por artículo (filtro NULL obligatorio)
       await client.query(
         `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-SELECT s.business_id,
-       (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-       si.article_id,
-       SUM(si.qty)    AS qty,
-       SUM(si.amount) AS amount
-FROM app_sales_items si
-JOIN app_sales s ON s.id = si.sale_id
-WHERE s.business_id = $1
-  AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-  AND si.article_id IS NOT NULL              -- 🔒 clave del fix
-GROUP BY s.business_id, day, si.article_id;
-`,
+     SELECT s.business_id,
+            (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+            si.article_id,
+            SUM(si.qty)    AS qty,
+            SUM(si.amount) AS amount
+     FROM app_sales_items si
+     JOIN app_sales s ON s.id = si.sale_id
+     WHERE s.business_id = $1
+       AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+       AND si.article_id IS NOT NULL
+     GROUP BY s.business_id, day, si.article_id`,
         [businessId, days]
       );
 
       await client.query('COMMIT');
       return { upserted, updated, minDay, maxDay };
     }
+
 
     await client.query('COMMIT');
     return { upserted, updated, minDay: null, maxDay: null };
