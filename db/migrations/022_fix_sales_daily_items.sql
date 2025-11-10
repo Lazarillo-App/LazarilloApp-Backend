@@ -1,12 +1,3 @@
-# variables de entorno con tus credenciales (Render)
-export PGHOST=<host>
-export PGPORT=<puerto>
-export PGUSER=<usuario>
-export PGPASSWORD=<password>
-export PGDATABASE=<db>
-
-psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -p "$PGPORT" -v ON_ERROR_STOP=1 <<'SQL'
--- Pegar aquí TODO el bloque:
 BEGIN;
 
 -- Asegurar columnas destino
@@ -103,4 +94,3 @@ BEGIN
 END $$;
 
 COMMIT;
-SQL
