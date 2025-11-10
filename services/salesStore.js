@@ -208,36 +208,36 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
         [businessId, days]
       );
 
-      // ✅ sales_daily: suma de totales y tx_count
+      // sales_daily: suma de totales y tx_count
       await client.query(
         `INSERT INTO sales_daily (business_id, day, total, tx_count)
-     SELECT s.business_id,
-            (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-            SUM(s.total) AS total,
-            COUNT(*)     AS tx_count
-     FROM app_sales s
-     WHERE s.business_id = $1
-       AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-     GROUP BY s.business_id, day`,
+   SELECT s.business_id,
+          (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+          SUM(s.total) AS total,
+          COUNT(*)     AS tx_count
+   FROM app_sales s
+   WHERE s.business_id = $1
+     AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+   GROUP BY s.business_id, day`,
         [businessId, days]
       );
 
-      // ✅ sales_daily_items: suma por artículo (filtro NULL obligatorio)
+      // sales_daily_items: sumariza por artículo (usa 0 cuando no hay mapeo)
       await client.query(
         `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-     SELECT s.business_id,
-            (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-            si.article_id,
-            SUM(si.qty)    AS qty,
-            SUM(si.amount) AS amount
-     FROM app_sales_items si
-     JOIN app_sales s ON s.id = si.sale_id
-     WHERE s.business_id = $1
-       AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-       AND si.article_id IS NOT NULL
-     GROUP BY s.business_id, day, si.article_id`,
+   SELECT s.business_id,
+          (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+          COALESCE(si.article_id, 0)              AS article_id,
+          SUM(si.qty)    AS qty,
+          SUM(si.amount) AS amount
+   FROM app_sales_items si
+   JOIN app_sales s ON s.id = si.sale_id
+   WHERE s.business_id = $1
+     AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+   GROUP BY s.business_id, day, COALESCE(si.article_id, 0)`,
         [businessId, days]
       );
+
 
       await client.query('COMMIT');
       return { upserted, updated, minDay, maxDay };
