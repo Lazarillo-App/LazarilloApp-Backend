@@ -690,11 +690,12 @@ exports.setBrandingUrl = async (req, res, next) => {
 exports.syncSalesLast7d = async (req, res, next) => {
   try {
     const biz = req.business;
-    if (!biz) return res.status(404).json({ error: 'not_found' });
-    const out = await ensureInitialBackfillOnce({ businessId: biz.id, req });
-    return res.json({ ok: true, business_id: biz.id, mode: 'initial_backfill_7d', ...out });
+    const out = await require('../services/salesSyncPolicy')
+      .ensureInitialBackfillOnce({ businessId: biz.id, req });
+    res.json({ ok: true, mode: 'initial_backfill_7d', ...out });
   } catch (e) { next(e); }
 };
+
 
 /**
  * POST /api/businesses/:id/sync-sales?mode=auto|range|backfill_30d&from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -705,21 +706,23 @@ exports.syncSalesLast7d = async (req, res, next) => {
 exports.syncSales = async (req, res, next) => {
   try {
     const biz = req.business;
-    if (!biz) return res.status(404).json({ error: 'not_found' });
+    if (!biz?.id) return res.status(404).json({ error: 'not_found' });
 
     const mode = String(req.query.mode || 'auto').toLowerCase();
 
+    // Modo incremental diario: desde el último día sincronizado +1 hasta AYER (idempotente)
     if (mode === 'auto') {
       const out = await runDailyAuto({ businessId: biz.id, req });
       return res.json({ ok: true, business_id: biz.id, mode, ...out });
     }
 
+    // Alias de “backfill_30d”: delega en la misma política que resuelve el primer backfill y luego incremental
     if (mode === 'backfill_30d') {
-      // Reutilizamos runDailyAuto: si no hay datos hace backfill inicial (ver salesSyncPolicy)
       const out = await runDailyAuto({ businessId: biz.id, req });
       return res.json({ ok: true, business_id: biz.id, mode, ...out });
     }
 
+    // Rango arbitrario: trae crudo desde Maxi (clamp interno a AYER), normaliza y hace UPSERT
     if (mode === 'range') {
       const from = String(req.query.from || '').slice(0, 10);
       const to   = String(req.query.to   || '').slice(0, 10);
@@ -727,9 +730,8 @@ exports.syncSales = async (req, res, next) => {
         return res.status(400).json({ error: 'invalid_range', hint: 'use from=YYYY-MM-DD&to=YYYY-MM-DD' });
       }
 
-      // Trae crudo desde Maxi (aplica clamp a AYER adentro) y guarda
-      const raw = await fetchSalesRanged({ businessId: biz.id, from, to, req });
-      const resUp = await upsertSalesBatch(biz.id, raw);
+      const rawFacturas = await fetchSalesRanged({ businessId: biz.id, from, to, req });
+      const upsertOut   = await upsertSalesBatch(biz.id, rawFacturas);
 
       return res.json({
         ok: true,
@@ -737,11 +739,13 @@ exports.syncSales = async (req, res, next) => {
         mode,
         from,
         to,
-        fetched: raw.length,
-        ...resUp
+        fetched: rawFacturas.length,
+        ...upsertOut, // { upserted, updated, minDay, maxDay, touchedDays? }
       });
     }
 
     return res.status(400).json({ error: 'invalid_mode', allowed: ['auto','range','backfill_30d'] });
-  } catch (e) { next(e); }
+  } catch (e) {
+    next(e);
+  }
 };

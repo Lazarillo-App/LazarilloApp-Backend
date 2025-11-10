@@ -11,6 +11,8 @@ const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
 
+const ctrl = require('../controllers/businessController');
+
 // 🔹 Nuevo: sync ventana simple (últimos N días)
 const { runWindow } = require('../services/salesSyncPolicy');
 
@@ -69,8 +71,8 @@ router.post('/:id/logo', (req, res, next) => {
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error'
+            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+              'upload_error'
       });
     }
     const arr = Array.isArray(req.files) ? req.files : [];
@@ -120,7 +122,10 @@ router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 /* ───────── Sync ventas (oficial) ─────────
    ⚠️ Importante: montamos el handler bueno de businessController (soporta mode=auto | range | backfill_30d)
 */
-router.post('/:id/sync-sales', ensureFn('businesses.syncSales', businesses.syncSales));
+
+router.post('/:id/sync-sales-7d', ensureFn('businesses.syncSalesLast7d', ctrl.syncSalesLast7d));
+
+router.post('/:id/sync-sales', ensureFn('businesses.syncSales', ctrl.syncSales));
 
 /* ───────── Sync manual: “últimos N días” (default 7) ───────── */
 router.post('/:id/sync-sales-window', async (req, res, next) => {
@@ -157,7 +162,7 @@ router.patch('/:id/default-group', async (req, res, next) => {
     );
     res.json({ ok: true, business_id: biz.id, default_group_id: groupId });
   } catch (e) { next(e); }
-  
+
 });
 
 /* ───────── Árbol artículos por businessId (duplicado compatible) ───────── */
