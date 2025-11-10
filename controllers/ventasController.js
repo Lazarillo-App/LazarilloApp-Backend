@@ -95,26 +95,28 @@ async function getVentas(req, res, next) {
   }
 }
 
+// controllers/ventasController.js  (solo PATCH de handlers legacy)
+
 // ====== LEGADO: ranking artículos (últimos 30 días) ======
 async function getSummary(req, res, next) {
   try {
     const businessId = getBusinessId(req);
     if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
 
-    const { F, T } = clampRange(null, null); // default 30d hasta AYER
+    const { F, T } = clampRange(null, null); // 30d hasta AYER por default
     const lim = Math.min(Math.max(parseInt(req.query.limit || '200', 10), 1), 1000);
 
     const { rows } = await pool.query(
-      `SELECT articulo_id AS article_id,
-              SUM(qty)::numeric(14,3)   AS qty,
-              SUM(amount)::numeric(14,2) AS amount
-         FROM sales_daily_items
-        WHERE business_id = $1
-          AND "date" BETWEEN $2::date AND $3::date
-        GROUP BY articulo_id
+      `SELECT sdi.article_id,
+              SUM(sdi.qty)::numeric(14,3)    AS qty,
+              SUM(sdi.amount)::numeric(14,2) AS amount
+         FROM sales_daily_items sdi
+        WHERE sdi.business_id = $1
+          AND sdi.day BETWEEN $2::date AND $3::date
+        GROUP BY sdi.article_id
         ORDER BY qty DESC
-        LIMIT ${lim}`,
-      [businessId, ymd(F), ymd(T)]
+        LIMIT $4`,
+      [businessId, ymd(F), ymd(T), lim]
     );
 
     return res.json({
@@ -124,9 +126,7 @@ async function getSummary(req, res, next) {
       count: rows.length,
       items: rows
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 }
 
 // ====== LEGADO/COMPAT: serie por artículo (ID Maxi == article_id) ======
@@ -148,16 +148,15 @@ async function getArticleSeries(req, res, next) {
       days.push(ymd(d));
     }
 
-    // Agregado desde items
     const { rows } = await pool.query(
-      `SELECT "date" AS day,
-              SUM(qty)::numeric(14,3) AS qty
-         FROM sales_daily_items
-        WHERE business_id = $1
-          AND articulo_id = $2
-          AND "date" BETWEEN $3::date AND $4::date
-        GROUP BY "date"
-        ORDER BY "date"`,
+      `SELECT sdi.day AS day,
+              SUM(sdi.qty)::numeric(14,3) AS qty
+         FROM sales_daily_items sdi
+        WHERE sdi.business_id = $1
+          AND sdi.article_id  = $2
+          AND sdi.day BETWEEN $3::date AND $4::date
+        GROUP BY sdi.day
+        ORDER BY sdi.day`,
       [businessId, articuloId, ymd(F), ymd(T)]
     );
 
@@ -172,9 +171,7 @@ async function getArticleSeries(req, res, next) {
       groupBy: 'day',
       data: series
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 }
 
 // ====== COMPAT: /api/ventas/by-article?articuloId=&from=&to=&groupBy= ======
@@ -202,14 +199,14 @@ async function getArticleSeriesQuery(req, res, next) {
 
     if (gb === 'day') {
       const { rows } = await pool.query(
-        `SELECT "date" AS label,
-                SUM(qty)::numeric(14,3) AS qty
-           FROM sales_daily_items
-          WHERE business_id = $1
-            AND articulo_id = $2
-            AND "date" BETWEEN $3::date AND $4::date
-          GROUP BY "date"
-          ORDER BY "date"`,
+        `SELECT sdi.day AS label,
+                SUM(sdi.qty)::numeric(14,3) AS qty
+           FROM sales_daily_items sdi
+          WHERE sdi.business_id = $1
+            AND sdi.article_id  = $2
+            AND sdi.day BETWEEN $3::date AND $4::date
+          GROUP BY sdi.day
+          ORDER BY sdi.day`,
         [businessId, articuloId, yf, yt]
       );
       const items = rows.map(r => ({ label: String(r.label).slice(0,10), qty: Number(r.qty) || 0 }));
@@ -219,12 +216,12 @@ async function getArticleSeriesQuery(req, res, next) {
 
     const bucket = gb === 'week' ? 'week' : 'month';
     const { rows } = await pool.query(
-      `SELECT date_trunc($5, "date")::date AS label,
-              SUM(qty)::numeric(14,3)      AS qty
-         FROM sales_daily_items
-        WHERE business_id = $1
-          AND articulo_id = $2
-          AND "date" BETWEEN $3::date AND $4::date
+      `SELECT date_trunc($5, sdi.day)::date AS label,
+              SUM(sdi.qty)::numeric(14,3)   AS qty
+         FROM sales_daily_items sdi
+        WHERE sdi.business_id = $1
+          AND sdi.article_id  = $2
+          AND sdi.day BETWEEN $3::date AND $4::date
         GROUP BY 1
         ORDER BY 1`,
       [businessId, articuloId, yf, yt, bucket]
@@ -235,9 +232,7 @@ async function getArticleSeriesQuery(req, res, next) {
     }));
     const total = items.reduce((a, x) => a + x.qty, 0);
     return res.json({ ok: true, business_id: businessId, articuloId, groupBy: gb, total, items });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 }
 
 module.exports = {

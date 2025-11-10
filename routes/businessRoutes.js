@@ -1,3 +1,4 @@
+// routes/businesses.js
 const express = require('express');
 const router = express.Router();
 const path = require('path');
@@ -6,14 +7,15 @@ const multer = require('multer');
 
 const businesses = require('../controllers/businessController');
 const syncCtrl = require('../controllers/syncController');
-const salesSyncCtrl = require('../controllers/salesSyncController');
+// const salesSyncCtrl = require('../controllers/salesSyncController'); // ← legacy/opcional
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
 
+// Para mantener consistencia en handlers que ya movimos a businessController
 const ctrl = require('../controllers/businessController');
 
-// 🔹 Nuevo: sync ventana simple (últimos N días)
+// Sync ventana simple (últimos N días)
 const { runWindow } = require('../services/salesSyncPolicy');
 
 /* ───────── ensureFn: evita TypeError si falta algún handler ───────── */
@@ -26,16 +28,9 @@ function ensureFn(name, fn) {
 }
 
 /* ───────── Fallbacks defensivos para controladores opcionales ───────── */
-const maxiPing = ensureFn('salesSyncCtrl.maxiPing', salesSyncCtrl?.maxiPing);
-const syncSalesForBusiness = ensureFn('salesSyncCtrl.syncSalesForBusiness', salesSyncCtrl?.syncSalesForBusiness);
-
-const {
-  listArticlesFromDB,
-  listArticlesTreeFromDB,
-  salesSummaryFromDB,
-  salesSeriesFromDB,
-  syncNow,
-} = syncCtrl;
+// Si tenés un ping real en otro controller, ponelo ahí; si no, queda 501 prolijo.
+const maxiPing = ensureFn('salesSyncCtrl.maxiPing', undefined);
+const syncSalesForBusiness = ensureFn('salesSyncCtrl.syncSalesForBusiness', undefined);
 
 /* ───────── Carpeta de logos + Multer ───────── */
 const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
@@ -71,8 +66,8 @@ router.post('/:id/logo', (req, res, next) => {
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-              'upload_error'
+          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+          'upload_error'
       });
     }
     const arr = Array.isArray(req.files) ? req.files : [];
@@ -80,17 +75,17 @@ router.post('/:id/logo', (req, res, next) => {
     req.file = firstImg;
 
     if (!req.file) return res.status(400).json({ error: 'missing_file' });
-    businesses.uploadLogo(req, res, next);
+    ctrl.uploadLogo(req, res, next);
   });
 });
 
 /* ───────── Branding: setear URL directa ───────── */
 router.patch('/:id/branding-url', businesses.setBrandingUrl);
 
-/* ───────── MAXI: ping ───────── */
+/* ───────── MAXI: ping (diagnóstico) ───────── */
 router.get('/:id/maxi-ping', maxiPing);
 
-/* ───────── CRUD base ───────── */
+/* ───────── CRUD base de negocios ───────── */
 router.get('/', businesses.listMine);
 router.post('/', businesses.create);
 
@@ -98,7 +93,7 @@ router.post('/', businesses.create);
 router.get('/active', businesses.getActive);
 router.patch('/active', businesses.setActive);
 
-// Por :id (req.business ya cargado por router.param)
+// Por :id (req.business viene de router.param)
 router.get('/:id', businesses.getOne);
 router.patch('/:id', businesses.update);
 router.delete('/:id', businesses.remove);
@@ -108,24 +103,30 @@ router.post('/:id/select', businesses.select);
 router.get('/:id/maxi-status', businesses.maxiStatus);
 router.post('/:id/maxi-credentials', businesses.maxiSave);
 
-// RAW Maxi para diagnóstico (ahora usa el mismo flujo que el probe)
+// RAW Maxi para diagnóstico (usa flujo del probe)
 router.get('/:id/maxi-raw-invoices', businesses.maxiRawInvoices);
 router.get('/:id/maxi-items', businesses.maxiItemsByDate);
 router.post('/:id/maxi-refresh-menu', refreshMenu);
 
-/* ───────── Catálogo / Ventas (legacy) ───────── */
+/* ───────── Catálogo / Ventas (legacy compat) ───────── */
+const {
+  listArticlesFromDB,
+  listArticlesTreeFromDB,
+  salesSummaryFromDB,
+  salesSeriesFromDB,
+  syncNow,
+} = syncCtrl;
+
 router.get('/:id/articles', listArticlesFromDB);
 router.get('/:id/articles/tree', listArticlesTreeFromDB);
 router.get('/:id/sales/summary', salesSummaryFromDB);
 router.get('/:id/sales/:articuloId', salesSeriesFromDB);
 
 /* ───────── Sync ventas (oficial) ─────────
-   ⚠️ Importante: montamos el handler bueno de businessController (soporta mode=auto | range | backfill_30d)
+   Soporta mode=auto | range | backfill_30d en ctrl.syncSales
 */
-
 router.post('/:id/sync-sales-7d', ensureFn('businesses.syncSalesLast7d', ctrl.syncSalesLast7d));
-
-router.post('/:id/sync-sales', ensureFn('businesses.syncSales', ctrl.syncSales));
+router.post('/:id/sync-sales',   ensureFn('businesses.syncSales',       ctrl.syncSales));
 
 /* ───────── Sync manual: “últimos N días” (default 7) ───────── */
 router.post('/:id/sync-sales-window', async (req, res, next) => {
@@ -134,10 +135,12 @@ router.post('/:id/sync-sales-window', async (req, res, next) => {
     const windowDays = Math.min(Math.max(parseInt(req.body?.windowDays ?? '7', 10), 1), 30);
     const detail = await runWindow({ businessId: biz.id, days: windowDays });
     res.json({ ok: true, business_id: String(biz.id), window_days: windowDays, detail });
-  } catch (e) { next(e); }
+  } catch (e) {
+    next(e);
+  }
 });
 
-// Legacy de catálogo/otros (responde y dispara backfill si aplica)
+// Legacy de catálogo/otros (responde y puede disparar backfill)
 router.post('/:id/sync', syncNow);
 
 /* ───────── Default group helpers ───────── */
@@ -162,7 +165,6 @@ router.patch('/:id/default-group', async (req, res, next) => {
     );
     res.json({ ok: true, business_id: biz.id, default_group_id: groupId });
   } catch (e) { next(e); }
-
 });
 
 /* ───────── Árbol artículos por businessId (duplicado compatible) ───────── */
