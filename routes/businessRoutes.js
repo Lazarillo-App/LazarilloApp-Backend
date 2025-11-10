@@ -157,6 +157,7 @@ router.patch('/:id/default-group', async (req, res, next) => {
     );
     res.json({ ok: true, business_id: biz.id, default_group_id: groupId });
   } catch (e) { next(e); }
+  
 });
 
 /* ───────── Árbol artículos por businessId (duplicado compatible) ───────── */
