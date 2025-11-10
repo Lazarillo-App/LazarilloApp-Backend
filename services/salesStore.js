@@ -253,6 +253,81 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
   }
 }
 
+// services/salesStore.js
+async function upsertDailyAggregates(pool, businessId, fromYmd, toYmd) {
+  // Asumimos app_sales y app_sales_items están OK (con article_id no-null en origen).
+  const sql = `
+  WITH range AS (
+    SELECT $1::int AS business_id,
+           $2::date AS dfrom,
+           $3::date AS dto
+  ),
+  base AS (
+    SELECT s.business_id,
+           s.occurred_at::date AS day,
+           i.article_id,
+           i.qty,
+           i.amount
+    FROM app_sales s
+    JOIN app_sales_items i ON i.sale_id = s.id
+    JOIN range r ON r.business_id = s.business_id
+    WHERE s.business_id = $1
+      AND s.occurred_at::date BETWEEN $2::date AND $3::date
+      AND i.article_id IS NOT NULL        -- 🔒 evita NULLs aquí
+  ),
+  agg_day AS (
+    SELECT business_id, day,
+           COALESCE(SUM(amount),0)::numeric(14,2) AS total,
+           COUNT(DISTINCT (business_id, day, /*venta*/ sale_id)) AS tx_count
+    FROM (
+      SELECT b.business_id, b.day, b.amount, s.id AS sale_id
+      FROM base b
+      JOIN app_sales s ON s.business_id=b.business_id AND s.occurred_at::date=b.day
+    ) x
+    GROUP BY business_id, day
+  ),
+  agg_items AS (
+    SELECT business_id, day, article_id,
+           COALESCE(SUM(qty),0)::numeric(14,3)    AS qty,
+           COALESCE(SUM(amount),0)::numeric(14,2) AS amount
+    FROM base
+    GROUP BY business_id, day, article_id
+  )
+  -- Upsert sales_daily
+  INSERT INTO sales_daily AS sd (business_id, day, total, tx_count)
+  SELECT a.business_id, a.day, a.total, a.tx_count
+  FROM agg_day a
+  ON CONFLICT (business_id, day) DO UPDATE
+    SET total   = EXCLUDED.total,
+        tx_count= EXCLUDED.tx_count;
+
+  -- Upsert sales_daily_items
+  INSERT INTO sales_daily_items AS sdi (business_id, day, article_id, qty, amount)
+  SELECT a.business_id, a.day, a.article_id, a.qty, a.amount
+  FROM agg_items a
+  ON CONFLICT (business_id, day, article_id) DO UPDATE
+    SET qty    = EXCLUDED.qty,
+        amount = EXCLUDED.amount;
+  `;
+
+  await pool.query('BEGIN');
+  try {
+    await pool.query(`
+      DELETE FROM sales_daily_items
+       WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;
+      DELETE FROM sales_daily
+       WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;`,
+      [businessId, fromYmd, toYmd]
+    );
+    await pool.query(sql, [businessId, fromYmd, toYmd]);
+    await pool.query('COMMIT');
+  } catch (e) {
+    await pool.query('ROLLBACK');
+    throw e;
+  }
+}
+
+
 module.exports = {
   normalizeInvoices,
   upsertSalesBatch,
