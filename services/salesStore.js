@@ -39,7 +39,7 @@ function normalizeInvoices(businessId, rawDocs) {
   const pushSale = (external_id, occurred_at, total) => {
     const s = { business_id: businessId, external_id, occurred_at, total: toNum(total) };
     sales.push(s);
-    touchedDays.add(s.occurred_at.toISOString().slice(0,10)); // YYYY-MM-DD
+    touchedDays.add(s.occurred_at.toISOString().slice(0, 10)); // YYYY-MM-DD
     return s;
   };
 
@@ -62,15 +62,15 @@ function normalizeInvoices(businessId, rawDocs) {
     if (doc && doc.numero && (doc.cabecera || doc.items)) {
       const external = String(doc.numero);
       const occurred = parseYMDorDMYtoUTC(doc.cabecera?.fecha || doc.fecha);
-      const total    = toNum(doc.total);
+      const total = toNum(doc.total);
 
       const sale_idx = sales.length;
       pushSale(external, occurred, total);
 
       (doc.items || []).forEach((it, i) => {
-        const nombre   = it.nombre_art || it.title || it.descripcion || 'Item';
+        const nombre = it.nombre_art || it.title || it.descripcion || 'Item';
         const cantidad = toNum(it.cantidad);
-        const precio   = toNum(it.precio);
+        const precio = toNum(it.precio);
         // Para fullinvoice no viene total por línea → lo calculamos
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
@@ -88,10 +88,10 @@ function normalizeInvoices(businessId, rawDocs) {
     // ───────── invoicebydate (ordenes) ─────────
     const ord = doc?.order;
     if (ord?.orderData) {
-      const od  = ord.orderData;
+      const od = ord.orderData;
       const oid = od.orderId ? String(od.orderId) : null;
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
-      const total    = toNum(od.totalSales);
+      const total = toNum(od.totalSales);
 
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
@@ -99,9 +99,9 @@ function normalizeInvoices(businessId, rawDocs) {
       const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
       arr.forEach((wrap, i) => {
         const oi = wrap?.orderItem || wrap || {};
-        const title   = oi.title || oi.nombre_art || 'Item';
-        const qty     = toNum(oi.quantity);
-        const price   = toNum(oi.productPrice);
+        const title = oi.title || oi.nombre_art || 'Item';
+        const qty = toNum(oi.quantity);
+        const price = toNum(oi.productPrice);
         // Clave del bug: si totalPrice viene 0 o ausente, calcular qty*price
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
@@ -211,31 +211,36 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
 
       // sales_daily: suma de totales y tx_count
       await client.query(
-        `INSERT INTO sales_daily (business_id, day, total, tx_count)
-         SELECT s.business_id,
-                (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-                SUM(s.total) AS total,
-                COUNT(*)     AS tx_count
-         FROM app_sales s
-         WHERE s.business_id = $1
-           AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-         GROUP BY s.business_id, day`,
+        `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
+SELECT s.business_id,
+       (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+       si.article_id,
+       SUM(si.qty)    AS qty,
+       SUM(si.amount) AS amount
+FROM app_sales_items si
+JOIN app_sales s ON s.id = si.sale_id
+WHERE s.business_id = $1
+  AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+GROUP BY s.business_id, day, si.article_id
+`,
         [businessId, days]
       );
 
       // sales_daily_items: suma por artículo del amount de la línea (NO unit_price)
       await client.query(
         `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-         SELECT s.business_id,
-                (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-                si.article_id,
-                SUM(si.qty)    AS qty,
-                SUM(si.amount) AS amount
-         FROM app_sales_items si
-         JOIN app_sales s ON s.id = si.sale_id
-         WHERE s.business_id = $1
-           AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-         GROUP BY s.business_id, day, si.article_id`,
+SELECT s.business_id,
+       (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+       si.article_id,
+       SUM(si.qty)    AS qty,
+       SUM(si.amount) AS amount
+FROM app_sales_items si
+JOIN app_sales s ON s.id = si.sale_id
+WHERE s.business_id = $1
+  AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+  AND si.article_id IS NOT NULL              -- 🔒 clave del fix
+GROUP BY s.business_id, day, si.article_id;
+`,
         [businessId, days]
       );
 
