@@ -8,7 +8,7 @@ ALTER TABLE app_sales_items
   ADD COLUMN IF NOT EXISTS article_id int;
 
 ALTER TABLE app_sales_items
-  ADD COLUMN IF NOT EXISTS article_name text;
+  ADD COLUMN IF NOT EXISTS article_name text; 
 
 ALTER TABLE app_sales_items
   ADD COLUMN IF NOT EXISTS qty numeric(14,3) DEFAULT 0 NOT NULL;
