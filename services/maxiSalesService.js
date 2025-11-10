@@ -141,14 +141,41 @@ function buildWindows(fromDate, toDate, winDays = 7) {
 /* ───────── extractor ───────── */
 function extractFacturas(payload) {
   if (!payload) return [];
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload.facturas)) return payload.facturas;
-  if (Array.isArray(payload.content?.facturas)) return payload.content.facturas;
-  if (Array.isArray(payload.content?.content?.facturas)) return payload.content.content.facturas;
-  if (Array.isArray(payload.content)) return payload.content;
-  for (const [, v] of Object.entries(payload)) {
-    if (Array.isArray(v) && v.length && typeof v[0] === 'object') return v;
+
+  // fullinvoicebydate variantes
+  const content = payload?.content ?? payload;
+  const inner   = content?.content ?? content;
+
+  // Caso clásico: { content: { content: { facturas: [ { factura }, ... ] } } }
+  if (Array.isArray(inner?.facturas)) {
+    return inner.facturas.filter(Boolean);
   }
+
+  // Algunas variantes: { facturas: [ { factura }, ... ] }
+  if (Array.isArray(payload?.facturas)) {
+    return payload.facturas.filter(Boolean);
+  }
+
+  // ───────────────── invoicebydate ─────────────────
+  // Formato: array de { order: { orderData, orderItems: [ { orderItem } ] } }
+  // Puede venir como { content: [ ... ] } o directamente [ ... ]
+  const arr = Array.isArray(inner) ? inner : (Array.isArray(payload) ? payload : null);
+  if (arr && arr.length) {
+    // Si lucen como órdenes, devolvemos [{ order }, ...]
+    if (arr.some(x => x?.order?.orderData || x?.orderData)) {
+      return arr.map(x => {
+        if (x?.order?.orderData) return x;                // { order: { orderData, orderItems } }
+        if (x?.orderData)         return { order: x };    // { orderData, orderItems }  => lo envolvemos
+        return x;
+      });
+    }
+    // Si son objetos variados, devolvemos tal cual (mejor crudo que vacío)
+    return arr;
+  }
+
+  // Último intento: ¿array en content?
+  if (Array.isArray(content)) return content;
+
   return [];
 }
 

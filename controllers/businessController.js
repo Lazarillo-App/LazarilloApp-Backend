@@ -509,29 +509,97 @@ exports.maxiItemsByDate = async (req, res, next) => {
 };
 
 function summarizeInvoices(invoices = []) {
-  const preview = invoices.slice(0, 25).map(f => ({
-    numero:  f.numero ?? null,
-    fecha:   (f.fecha || f.cabecera?.fecha || '').slice(0, 10),
-    hora:    f.cabecera?.hora ?? null,
-    tipo:    f.cabecera?.nombre_cpb ?? null,
-    cod_cpb: f.cabecera?.cod_cpb ?? null,
-    total:   Number(f.total ?? f.cabecera?.total ?? 0),
-    neto1:   Number(f.cabecera?.neto1 ?? 0),
-    iva1:    Number(f.cabecera?.iva1 ?? 0),
-    forma:   f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
-    suc:     f.cabecera?.prefijo ?? null,
-    anulado: false
-  }));
+  // Helpers
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const toISODate = (dmy) => {
+    // admite 'DD/MM/YYYY' o 'YYYY-MM-DD'
+    if (!dmy) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dmy)) return dmy;
+    const m = String(dmy).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (m) {
+      const [_, dd, mm, yyyy] = m;
+      return `${yyyy}-${mm}-${dd}`;
+    }
+    return '';
+  };
 
+  // Preview (primeros 25), detectando ambos shapes
+  const preview = invoices.slice(0, 25).map((row) => {
+    // fullinvoicebydate → { factura: {...} }
+    if (row?.factura) {
+      const f = row.factura;
+      return {
+        numero:  f.numero ?? null,
+        fecha:   toISODate(f.fecha || f.cabecera?.fecha),
+        hora:    f.cabecera?.hora ?? null,
+        tipo:    f.cabecera?.nombre_cpb ?? null,
+        cod_cpb: f.cabecera?.cod_cpb ?? null,
+        total:   Number(f.total ?? f.cabecera?.total ?? 0),
+        neto1:   Number(f.cabecera?.neto1 ?? 0),
+        iva1:    Number(f.cabecera?.iva1 ?? 0),
+        forma:   f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
+        suc:     f.cabecera?.prefijo ?? null,
+        anulado: false
+      };
+    }
+
+    // invoicebydate → { order: { orderData, orderItems } }
+    const od = row?.order?.orderData || row?.orderData || null;
+    if (od) {
+      return {
+        numero:  od.orderId ?? null,
+        fecha:   toISODate(od.orderDate),
+        hora:    od.timeClose || od.timeOpen || null,
+        tipo:    null,
+        cod_cpb: null,
+        total:   Number(od.totalSales ?? 0),
+        neto1:   0,
+        iva1:    0,
+        forma:   null,
+        suc:     null,
+        anulado: false
+      };
+    }
+
+    // Desconocido → generamos algo estable
+    return {
+      numero:  null,
+      fecha:   '',
+      hora:    null,
+      tipo:    null,
+      cod_cpb: null,
+      total:   0,
+      neto1:   0,
+      iva1:    0,
+      forma:   null,
+      suc:     null,
+      anulado: false
+    };
+  });
+
+  // Totales por día
   const totalsByDay = {};
   let totalPeriodo = 0;
   let docs = 0;
 
-  for (const f of invoices) {
-    const total = Number(f.total ?? f.cabecera?.total ?? 0) || 0;
-    const fecha = String(f.fecha || f.cabecera?.fecha || '').slice(0, 10);
-    if (fecha) totalsByDay[fecha] = r2((totalsByDay[fecha] || 0) + total);
-    totalPeriodo += total;
+  for (const row of invoices) {
+    let fechaISO = '';
+    let totalNum = 0;
+
+    if (row?.factura) {
+      const f = row.factura;
+      fechaISO = toISODate(f.fecha || f.cabecera?.fecha);
+      totalNum = Number(f.total ?? f.cabecera?.total ?? 0) || 0;
+    } else if (row?.order?.orderData || row?.orderData) {
+      const od = row.order?.orderData || row.orderData;
+      fechaISO = toISODate(od.orderDate);
+      totalNum = Number(od.totalSales ?? 0) || 0;
+    }
+
+    if (fechaISO) {
+      totalsByDay[fechaISO] = r2((totalsByDay[fechaISO] || 0) + totalNum);
+    }
+    totalPeriodo += totalNum;
     docs += 1;
   }
 

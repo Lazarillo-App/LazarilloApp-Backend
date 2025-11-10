@@ -46,88 +46,109 @@ async function setLastSalesSyncAt(businessId, isoTs) {
  *  - app_sales_items (líneas)
  *  y devuelve días tocados para recalcular sales_daily.
  */
-function normalizeInvoices(businessId, rawFacturas) {
+function normalizeInvoices(businessId, rawFacturas = []) {
   const sales = [];
   const items = [];
   const touchedDays = new Set();
 
-  // Aplana si vienen como { factura: {...} }
-  const facturas = (rawFacturas || []).map(f => (f && f.factura) ? f.factura : f).filter(Boolean);
-
-  for (const f of facturas) {
-    const cab = f?.cabecera || f?.header || f || {};
-    // Maxi suele usar "detalle" para renglones; mantenemos compat con "items"
-    const lines = f?.detalle || f?.items || [];
-
-    const baseExt =
-      cab?.id || cab?.numero || cab?.nro || cab?.nroComprobante || cab?.nroFactura || cab?.idFactura;
-
-    // preferir numero "0016-00001527" si viene, sino prefijo+numero
-    let composed = null;
-    if (typeof cab?.numero === 'string' && cab.numero.includes('-')) {
-      composed = cab.numero;
-    } else if (cab?.prefijo != null && cab?.numero != null) {
-      composed = `P${cab.prefijo}-N${cab.numero}`;
+  const toISODate = (dmy) => {
+    if (!dmy) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dmy)) return dmy;
+    const m = String(dmy).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (m) {
+      const [_, dd, mm, yyyy] = m;
+      return `${yyyy}-${mm}-${dd}`;
     }
+    return null;
+  };
 
-    const extId = composed || baseExt;
+  const pushSale = ({ external_id, occurred_at, total, raw }) => {
+    if (!external_id) return null;
+    const occurredISO = occurred_at ? new Date(`${occurred_at}T00:00:00.000Z`).toISOString() : null;
+    sales.push({
+      business_id: businessId,
+      external_id,
+      occurred_at: occurredISO,
+      total: Number(total || 0),
+      raw
+    });
+    if (occurred_at) touchedDays.add(occurred_at);
+    return sales.length - 1;
+  };
 
-    // fecha robusta
-    const occurredRaw =
-      cab?.fecha || cab?.fechaEmision || cab?.fechaDocumento || cab?.fechaFactura || cab?.createdAt;
-    const occurredDate = parseMaxiDate(occurredRaw);
+  for (const row of rawFacturas) {
+    // ───────── fullinvoicebydate ─────────
+    if (row?.factura) {
+      const f = row.factura;
+      const fechaYMD = toISODate(f.fecha || f.cabecera?.fecha);
+      const total    = Number(f.total ?? f.cabecera?.total ?? 0) || 0;
+      const external = String(f.numero || `${f.cabecera?.prefijo || ''}-${f.cabecera?.numero || ''}`).trim() || null;
 
-    const total =
-      cab?.total ?? cab?.importeTotal ?? cab?.monto ?? cab?.montoTotal ?? 0;
+      const saleIdx = pushSale({
+        external_id: external,
+        occurred_at: fechaYMD,
+        total,
+        raw: f
+      });
 
-    if (!extId || !occurredDate) {
-      // sin id o fecha válida, no insertamos este comprobante
+      if (saleIdx != null && Array.isArray(f.items)) {
+        let pos = 0;
+        for (const it of f.items) {
+          items.push({
+            business_id: businessId,
+            sale_index: saleIdx,
+            line_pos: pos++,
+            cod_art: Number(it.cod_art ?? 0) || null,
+            nombre_art: String(it.nombre_art ?? '').trim() || null,
+            cantidad: Number(it.cantidad ?? 0) || 0,
+            precio_unit: Number(it.precio ?? 0) || 0,
+            total_line: Number(it.cantidad ?? 0) * Number(it.precio ?? 0) || 0,
+            raw: it
+          });
+        }
+      }
       continue;
     }
 
-    const occurredIso = occurredDate.toISOString();
-    const day = occurredIso.slice(0, 10);
-    touchedDays.add(day);
+    // ───────── invoicebydate ─────────
+    const od = row?.order?.orderData || row?.orderData || null;
+    if (od) {
+      const fechaYMD = toISODate(od.orderDate);
+      const total    = Number(od.totalSales ?? 0) || 0;
+      const external = String(od.orderId || '').trim() || null;
 
-    sales.push({
-      business_id: businessId,
-      external_id: String(extId),
-      occurred_at: occurredIso,
-      total: Number(total || 0),
-      props: cab, // guardamos cabecera completa
-    });
-
-    // map de campos comunes para líneas
-    let pos = 0;
-    for (const it of (Array.isArray(lines) ? lines : [])) {
-      pos++;
-      const articleId =
-        it?.cod_art ?? it?.codigoArticulo ?? it?.articuloId ?? it?.idArticulo ?? null;
-
-      const qty =
-        it?.cantidad ?? it?.unidades ?? it?.qty ?? it?.cantidadVendida ?? 0;
-
-      const unitPrice =
-        it?.precio ?? it?.precioUnitario ?? it?.unitPrice ?? 0;
-
-      const lineTotalRaw =
-        it?.total ?? it?.importe ?? it?.monto ?? null;
-      const lineTotal = lineTotalRaw != null
-        ? lineTotalRaw
-        : Number(qty || 0) * Number(unitPrice || 0);
-
-      items.push({
-        sale_external_id: String(extId),     // luego se mapea al id real con RETURNING
-        line_pos: pos,
-        article_id: articleId ? Number(articleId) : null,
-        sku: it?.codigo || it?.sku || null,
-        name: it?.descripcion || it?.nombre || null,
-        quantity: Number(qty || 0),
-        unit_price: Number(unitPrice || 0),
-        total: Number(lineTotal || 0),
-        props: it || {},
+      const saleIdx = pushSale({
+        external_id: external,
+        occurred_at: fechaYMD,
+        total,
+        raw: row.order || row
       });
+
+      const orderItems = row?.order?.orderItems || row?.orderItems || [];
+      if (saleIdx != null && Array.isArray(orderItems)) {
+        let pos = 0;
+        for (const wrapper of orderItems) {
+          const it = wrapper?.orderItem || wrapper || {};
+          const qty   = Number(it.quantity ?? 0) || 0;
+          const pu    = Number(it.productPrice ?? 0) || 0;
+          const tline = Number(it.totalPrice ?? (qty * pu)) || 0;
+          items.push({
+            business_id: businessId,
+            sale_index: saleIdx,
+            line_pos: pos++,
+            cod_art: null, // no viene código en este endpoint
+            nombre_art: String(it.title ?? '').trim() || null,
+            cantidad: qty,
+            precio_unit: pu,
+            total_line: tline,
+            raw: it
+          });
+        }
+      }
+      continue;
     }
+
+    // Si llega algo desconocido, lo ignoramos (pero podríamos loguearlo)
   }
 
   return { sales, items, touchedDays: Array.from(touchedDays) };
