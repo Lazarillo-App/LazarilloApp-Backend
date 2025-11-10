@@ -8,7 +8,7 @@ const fetch = (...args) => globalThis.fetch(...args);
 
 // Sync ventas (servicios)
 const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
-const { fetchSalesRanged } = require('../services/maxiSalesService');
+const { fetchSalesRanged,  getBearer, fetchInvoiceByDate, extractFacturas } = require('../services/maxiSalesService');
 const { upsertSalesBatch } = require('../services/salesStore');
 
 // Artículos
@@ -554,24 +554,30 @@ exports.maxiRawInvoices = async (req, res, next) => {
 
     const from = String(req.query?.from || '').slice(0, 10);
     const to   = String(req.query?.to   || '').slice(0, 10);
-    if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD (rango máx. 7 días)' });
+    if (!from || !to) {
+      return res.status(400).json({
+        error: 'missing_dates',
+        hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD (rango máx. 7 días)'
+      });
+    }
 
-    const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
-    const mx = (rows[0]?.props || {}).maxi || {};
-    const pass = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : mx.password;
-    if (!(mx.email && pass && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+    // 🔐 Usa el mismo flujo que el probe: bearer cacheado + endpoint correcto
+    const bearer   = await getBearer(biz.id, req);
+    const payload  = await fetchInvoiceByDate(from, to, bearer);
 
-    const token = await maxiLogin({ email: mx.email, pass, codcli: mx.codcli });
-    const invoices = await maxiInvoiceByDate({ token, from, to });
+    // 🧩 Normaliza a un array de "factura" (sirve para el summarize)
+    const invoices = extractFacturas(payload) || [];
 
-    res.json({
+    return res.json({
       ok: true,
       range: { from, to },
       raw_count: invoices.length,
       summary: summarizeInvoices(invoices),
-      // raw: invoices // habilitar solo para debug puntual
+      // raw: invoices // <-- habilitar solo para debug puntual
     });
-  } catch (e) { next(e); }
+  } catch (e) {
+    next(e);
+  }
 };
 
 /* ───────────────── Árbol de artículos (desde DB propia) ───────────────── */
