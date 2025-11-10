@@ -21,6 +21,9 @@ async function unlock(client, businessId) {
 /* ───────────────────── Helpers de fechas (hasta AYER) ───────────────────── */
 const pad2 = (n) => String(n).padStart(2, '0');
 const toISODate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+const ymd  = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+const addDaysUTC = (d, n) => new Date(d.getTime() + n*86400000);
 
 /** Devuelve { from, to } de los últimos N días **hasta ayer** */
 function lastNDaysUntilYesterday(N = 7) {
@@ -41,6 +44,19 @@ function yesterdayISO() {
 }
 
 const INIT_BACKFILL_DAYS = Math.max(1, Number(process.env.INIT_BACKFILL_DAYS || 7));
+
+async function runWindow({ businessId, days = 7, req } = {}) {
+  const today = at00(new Date());
+  const AYER  = addDaysUTC(today, -1);
+  const d = Math.max(1, Math.min(parseInt(days || 7, 10), 30));
+  const to   = ymd(AYER);
+  const from = ymd(addDaysUTC(AYER, -(d-1)));
+
+  const raw    = await fetchSalesRanged({ businessId, from, to, req });
+  const result = await upsertSalesBatch(businessId, raw);
+
+  return { from, to, fetched: raw.length, ...result };
+}
 
 /* ───────────────────── Estado persistente (sales_sync_state) ───────────────────── */
 async function readState(client, businessId) {
@@ -194,4 +210,5 @@ async function runDailyAuto({ businessId, req }) {
 module.exports = {
   ensureInitialBackfillOnce,
   runDailyAuto,
+  runWindow,
 };
