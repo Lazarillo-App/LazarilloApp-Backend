@@ -1,5 +1,42 @@
--- 020_fix_sales_daily_schema.sql
--- Normaliza sales_daily y sales_daily_items para que tengan "day" (DATE) y claves esperadas
+-- 021_sales_unify.sql
+-- Unifica esquema de ventas: app_sales_items + sales_daily + sales_daily_items
+-- Idempotente y seguro para correr varias veces.
+
+BEGIN;
+
+-- ========== app_sales_items ==========
+-- Columnas mínimas que usa el normalizador actual (NO usamos article_name)
+ALTER TABLE app_sales_items
+  ADD COLUMN IF NOT EXISTS line_pos     int,
+  ADD COLUMN IF NOT EXISTS article_id   int,
+  ADD COLUMN IF NOT EXISTS title        text,
+  ADD COLUMN IF NOT EXISTS qty          numeric(14,3) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS amount       numeric(14,2) NOT NULL DEFAULT 0;
+
+-- Index de unicidad por línea dentro de la venta
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes WHERE indexname = 'ux_app_sales_items_sale_line'
+  ) THEN
+    CREATE UNIQUE INDEX ux_app_sales_items_sale_line
+      ON app_sales_items (sale_id, line_pos);
+  END IF;
+END $$;
+
+-- FK básica a app_sales
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE constraint_name = 'fk_app_sales_items_sale'
+      AND table_name = 'app_sales_items'
+  ) THEN
+    ALTER TABLE app_sales_items
+      ADD CONSTRAINT fk_app_sales_items_sale
+      FOREIGN KEY (sale_id) REFERENCES app_sales(id) ON DELETE CASCADE;
+  END IF;
+END $$;
 
 -- ========== sales_daily ==========
 DO $$
@@ -18,46 +55,23 @@ BEGIN
   END IF;
 END $$;
 
--- Asegurar columnas
+-- Asegurar columnas y NOT NULL
 ALTER TABLE sales_daily
   ADD COLUMN IF NOT EXISTS business_id int,
   ADD COLUMN IF NOT EXISTS day         date,
   ADD COLUMN IF NOT EXISTS total       numeric(14,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS tx_count    int DEFAULT 0;
 
--- Intento de migrar datos si existen columnas antiguas
-DO $$
-BEGIN
-  -- Si hay una columna 'fecha' o 'occurred_at', volcamos a 'day' cuando esté NULL
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='sales_daily' AND column_name='fecha'
-  ) THEN
-    UPDATE sales_daily
-       SET day = COALESCE(day, fecha::date)
-     WHERE day IS NULL;
-  END IF;
-
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='sales_daily' AND column_name='occurred_at'
-  ) THEN
-    UPDATE sales_daily
-       SET day = COALESCE(day, occurred_at::date)
-     WHERE day IS NULL;
-  END IF;
-END $$;
-
--- Marcar NOT NULL donde corresponda
 ALTER TABLE sales_daily
   ALTER COLUMN business_id SET NOT NULL;
 
--- Si aún hay NULLs en day, llénalos con una fecha dummy para poder poner NOT NULL (luego se recalcula)
+-- Si quedó day en NULL por esquemas viejos, rellenar con 1970-01-01 para poder not null (luego se recalcula)
 UPDATE sales_daily SET day = DATE '1970-01-01' WHERE day IS NULL;
+
 ALTER TABLE sales_daily
   ALTER COLUMN day SET NOT NULL;
 
--- Primary key consistente (business_id, day)
+-- PK consistente
 DO $$
 DECLARE
   pk_name text;
@@ -67,7 +81,6 @@ BEGIN
   WHERE tc.table_name='sales_daily' AND tc.constraint_type='PRIMARY KEY';
 
   IF pk_name IS NULL OR pk_name <> 'sales_daily_pkey' THEN
-    -- Si existe otra PK diferente, la eliminamos
     IF pk_name IS NOT NULL THEN
       EXECUTE format('ALTER TABLE sales_daily DROP CONSTRAINT %I', pk_name);
     END IF;
@@ -76,7 +89,7 @@ BEGIN
   END IF;
 END $$;
 
--- Índice auxiliar opcional
+-- Índice auxiliar
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -104,26 +117,12 @@ BEGIN
   END IF;
 END $$;
 
--- Asegurar columnas
 ALTER TABLE sales_daily_items
   ADD COLUMN IF NOT EXISTS business_id int,
   ADD COLUMN IF NOT EXISTS day         date,
   ADD COLUMN IF NOT EXISTS article_id  int,
   ADD COLUMN IF NOT EXISTS qty         numeric(14,3) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS amount      numeric(14,2) DEFAULT 0;
-
--- Migrar day si existiese una columna antigua
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='sales_daily_items' AND column_name='fecha'
-  ) THEN
-    UPDATE sales_daily_items
-       SET day = COALESCE(day, fecha::date)
-     WHERE day IS NULL;
-  END IF;
-END $$;
 
 ALTER TABLE sales_daily_items
   ALTER COLUMN business_id SET NOT NULL;
@@ -132,7 +131,7 @@ UPDATE sales_daily_items SET day = DATE '1970-01-01' WHERE day IS NULL;
 ALTER TABLE sales_daily_items
   ALTER COLUMN day SET NOT NULL;
 
--- Primary key correcta
+-- PK correcta
 DO $$
 DECLARE
   pk_name text;
@@ -158,9 +157,12 @@ BEGIN
   ) THEN
     CREATE INDEX ix_sales_daily_items_day ON sales_daily_items(day);
   END IF;
+
   IF NOT EXISTS (
     SELECT 1 FROM pg_indexes WHERE indexname='ix_sales_daily_items_article'
   ) THEN
     CREATE INDEX ix_sales_daily_items_article ON sales_daily_items(article_id);
   END IF;
 END $$;
+
+COMMIT;
