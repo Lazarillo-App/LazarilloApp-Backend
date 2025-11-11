@@ -1,4 +1,4 @@
-// routes/businesses.js
+// routes/businessRoutes.js
 const express = require('express');
 const router = express.Router();
 const path = require('path');
@@ -6,19 +6,20 @@ const fs = require('fs');
 const multer = require('multer');
 
 const businesses = require('../controllers/businessController');
-const syncCtrl = require('../controllers/syncController');
-// const salesSyncCtrl = require('../controllers/salesSyncController'); // ← legacy/opcional
+const {
+  listArticlesFromDB,
+  listArticlesTreeFromDB,
+  salesSummaryFromDB,
+  salesSeriesFromDB,
+  syncNow,
+} = require('../controllers/syncController');
+
+const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
 
-// Para mantener consistencia en handlers que ya movimos a businessController
-const ctrl = require('../controllers/businessController');
-
-// Sync ventana simple (últimos N días)
-const { runWindow } = require('../services/salesSyncPolicy');
-
-/* ───────── ensureFn: evita TypeError si falta algún handler ───────── */
+// ================== Helper anti-crash ==================
 function ensureFn(name, fn) {
   if (typeof fn !== 'function') {
     console.warn(`[routes/businesses] Handler faltante: ${name} -> responderá 501`);
@@ -27,21 +28,17 @@ function ensureFn(name, fn) {
   return fn;
 }
 
-/* ───────── Fallbacks defensivos para controladores opcionales ───────── */
-// Si tenés un ping real en otro controller, ponelo ahí; si no, queda 501 prolijo.
-const maxiPing = ensureFn('salesSyncCtrl.maxiPing', undefined);
-const syncSalesForBusiness = ensureFn('salesSyncCtrl.syncSalesForBusiness', undefined);
-
-/* ───────── Carpeta de logos + Multer ───────── */
+// ================== Carpeta /uploads/logos ==================
 const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 
+// ================== Multer ==================
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, logosDir),
   filename: (req, file, cb) => {
     const ext = (path.extname(file.originalname || '') || '.png').toLowerCase();
     cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
-  }
+  },
 });
 
 const upload = multer({
@@ -50,100 +47,114 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
     cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
-  }
+  },
 });
 
-/* ───────── Auth + param ───────── */
+// ================== Auth/params ==================
 router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
 
-/* ───────── Upload logo ───────── */
+// ================== Logo: subir archivo ==================
+// Acepta 'file', 'logo' o 'image'
+const uploadFields = upload.fields([
+  { name: 'file',  maxCount: 1 },
+  { name: 'logo',  maxCount: 1 },
+  { name: 'image', maxCount: 1 },
+]);
+
 router.post('/:id/logo', (req, res, next) => {
-  const uploadAny = upload.any();
-  uploadAny(req, res, (err) => {
+  uploadFields(req, res, (err) => {
     if (err) {
       const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
           err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error'
+          'upload_error',
       });
     }
-    const arr = Array.isArray(req.files) ? req.files : [];
-    const firstImg = arr.find(f => /^image\//i.test(f.mimetype)) || null;
-    req.file = firstImg;
 
-    if (!req.file) return res.status(400).json({ error: 'missing_file' });
-    ctrl.uploadLogo(req, res, next);
+    // Normaliza a req.file para el controller
+    const files = req.files || {};
+    req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
+
+    // Debug acotado (podés quitarlo luego)
+    console.log('[upload-logo] content-type:', req.headers['content-type']);
+    console.log('[upload-logo] keys:', Object.keys(files));
+    console.log('[upload-logo] has file?', !!req.file, req.file?.fieldname, req.file?.mimetype, req.file?.size);
+
+    if (!req.file && !req.body?.url) {
+      return res.status(400).json({ error: 'missing_file' });
+    }
+
+    return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
 });
 
-/* ───────── Branding: setear URL directa ───────── */
-router.patch('/:id/branding-url', businesses.setBrandingUrl);
+// ================== Logo: setear URL directa ==================
+router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
 
-/* ───────── MAXI: ping (diagnóstico) ───────── */
-router.get('/:id/maxi-ping', maxiPing);
+// ================== MAXI: ping ==================
+router.get('/:id/maxi-ping', ensureFn('maxiPing', maxiPing));
 
-/* ───────── CRUD base de negocios ───────── */
-router.get('/', businesses.listMine);
-router.post('/', businesses.create);
+// ================== CRUD base ==================
+router.get('/', ensureFn('businesses.listMine', businesses.listMine));
+router.post('/', ensureFn('businesses.create', businesses.create));
 
 // Negocio activo
-router.get('/active', businesses.getActive);
-router.patch('/active', businesses.setActive);
+router.get('/active', ensureFn('businesses.getActive', businesses.getActive));
+router.patch('/active', ensureFn('businesses.setActive', businesses.setActive));
 
-// Por :id (req.business viene de router.param)
-router.get('/:id', businesses.getOne);
-router.patch('/:id', businesses.update);
-router.delete('/:id', businesses.remove);
-router.post('/:id/select', businesses.select);
+// Por :id (req.business ya cargado por router.param)
+router.get('/:id', ensureFn('businesses.getOne', businesses.getOne));
+router.patch('/:id', ensureFn('businesses.update', businesses.update));
+router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
+router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 
-/* ───────── Maxi credenciales / estado ───────── */
-router.get('/:id/maxi-status', businesses.maxiStatus);
-router.post('/:id/maxi-credentials', businesses.maxiSave);
+// ================== Maxi credenciales / estado ==================
+router.get('/:id/maxi-status', ensureFn('businesses.maxiStatus', businesses.maxiStatus));
+router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.maxiSave));
 
-// RAW Maxi para diagnóstico (usa flujo del probe)
-router.get('/:id/maxi-raw-invoices', businesses.maxiRawInvoices);
-router.get('/:id/maxi-items', businesses.maxiItemsByDate);
-router.post('/:id/maxi-refresh-menu', refreshMenu);
+// (Diagnóstico Maxi – dejar comentado si no existen los handlers)
+// router.get('/:id/maxi-raw-invoices', ensureFn('businesses.maxiRawInvoices', businesses.maxiRawInvoices));
+// router.get('/:id/maxi-items', ensureFn('businesses.maxiItemsByDate', businesses.maxiItemsByDate));
 
-/* ───────── Catálogo / Ventas (legacy compat) ───────── */
-const {
-  listArticlesFromDB,
-  listArticlesTreeFromDB,
-  salesSummaryFromDB,
-  salesSeriesFromDB,
-  syncNow,
-} = syncCtrl;
+router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 
-router.get('/:id/articles', listArticlesFromDB);
-router.get('/:id/articles/tree', listArticlesTreeFromDB);
-router.get('/:id/sales/summary', salesSummaryFromDB);
-router.get('/:id/sales/:articuloId', salesSeriesFromDB);
+// ================== Catálogo / Ventas (legacy) ==================
+router.get('/:id/articles', ensureFn('listArticlesFromDB', listArticlesFromDB));
+router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
 
-/* ───────── Sync ventas (oficial) ─────────
-   Soporta mode=auto | range | backfill_30d en ctrl.syncSales
-*/
-router.post('/:id/sync-sales-7d', ensureFn('businesses.syncSalesLast7d', ctrl.syncSalesLast7d));
-router.post('/:id/sync-sales',   ensureFn('businesses.syncSales',       ctrl.syncSales));
+router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
+router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
 
-/* ───────── Sync manual: “últimos N días” (default 7) ───────── */
-router.post('/:id/sync-sales-window', async (req, res, next) => {
+// ================== Sync ventas (nuevo) ==================
+router.post('/:id/sync-sales', async (req, res, next) => {
   try {
     const biz = req.business;
-    const windowDays = Math.min(Math.max(parseInt(req.body?.windowDays ?? '7', 10), 1), 30);
-    const detail = await runWindow({ businessId: biz.id, days: windowDays });
-    res.json({ ok: true, business_id: String(biz.id), window_days: windowDays, detail });
-  } catch (e) {
-    next(e);
-  }
+    const mode =
+      (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d')
+        ? 'backfill_30d'
+        : 'auto';
+    const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to   = req.query.to   ? new Date(req.query.to)   : null;
+
+    if ((from && isNaN(+from)) || (to && isNaN(+to))) {
+      return res.status(400).json({ error: 'invalid_date' });
+    }
+
+    const out = await ensureFn('syncSalesForBusiness', syncSalesForBusiness)(
+      biz, { mode, from, to, dryrun, req }
+    );
+    res.json({ ok: true, business_id: biz.id, sales: out });
+  } catch (e) { next(e); }
 });
 
-// Legacy de catálogo/otros (responde y puede disparar backfill)
-router.post('/:id/sync', syncNow);
+// Legacy de catálogo/otros (responde y dispara backfill si aplica)
+router.post('/:id/sync', ensureFn('syncNow', syncNow));
 
-/* ───────── Default group helpers ───────── */
+// ================== Default group helpers ==================
 router.get('/:id/default-group', (req, res) => {
   const biz = req.business;
   const defaultId = biz?.props?.default_group_id ?? null;
@@ -167,7 +178,6 @@ router.patch('/:id/default-group', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/* ───────── Árbol artículos por businessId (duplicado compatible) ───────── */
-router.get('/:businessId/articles-tree', businesses.getArticlesTree);
+// ⚠️ Ruta legacy ELIMINADA: '/:businessId/articles-tree' (duplicada/innecesaria)
 
 module.exports = router;
