@@ -9,4 +9,3 @@ router.post('/:id/items', ctrl.agregarItems);
 router.delete('/:id/items/:insumoId', ctrl.quitarItem);
 
 module.exports = router;
-
