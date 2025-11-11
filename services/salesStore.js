@@ -10,12 +10,11 @@ const toNum = (v) => {
 
 function parseYMDorDMYtoUTC(dateStr) {
   if (!dateStr) return null;
-  // Casos típicos:
-  // - "2025-11-03"
-  // - "03/11/2025"
+  // "2025-11-03"
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
     return new Date(`${dateStr}T00:00:00Z`);
   }
+  // "03/11/2025"
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(dateStr);
   if (m) {
     const [_, dd, mm, yyyy] = m;
@@ -23,13 +22,19 @@ function parseYMDorDMYtoUTC(dateStr) {
   }
   // fallback
   const d = new Date(dateStr);
-  return Number.isFinite(+d) ? new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())) : null;
+  return Number.isFinite(+d)
+    ? new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+    : null;
 }
 
-/* 
-   Normaliza ambos formatos:
-   - fullinvoicebydate: { factura: { numero, total, cabecera{ fecha, ... }, items[] } }
-   - invoicebydate:     { order: { orderData{ orderId, orderDate, totalSales }, orderItems:[{ orderItem{ title, quantity, productPrice, totalPrice, ... } }] } }
+/*
+  Normaliza ambos formatos:
+  - fullinvoicebydate:
+    { numero, total, cabecera{ fecha }, items:[{ nombre_art, cantidad, precio, total, cod_art? }] }
+
+  - invoicebydate:
+    { order:{ orderData{ orderId, orderDate, totalSales },
+              orderItems:[{ orderItem{ title, quantity, productPrice, totalPrice, cod_art? } }] } }
 */
 function normalizeInvoices(businessId, rawDocs) {
   const sales = [];
@@ -42,16 +47,15 @@ function normalizeInvoices(businessId, rawDocs) {
     touchedDays.add(s.occurred_at.toISOString().slice(0, 10)); // YYYY-MM-DD
     return s;
   };
+
   const pushItem = (sale_idx, line_pos, data) => {
-    // data: { article_id?, sku?, article_name, qty, unit_price, line_total }
     items.push({
       business_id: businessId,
       sale_idx,
       line_pos,
       article_id: data.article_id ?? null,
-      sku: data.sku ?? null,                  // 👈 NUEVO
-      article_name: data.article_name || null,
-      name: data.article_name || null,        // 👈 NUEVO (normalizamos a 'name')
+      sku: data.sku ?? null,
+      name: data.article_name || null,
       qty: toNum(data.qty),
       unit_price: toNum(data.unit_price),
       line_total: toNum(data.line_total),
@@ -64,7 +68,6 @@ function normalizeInvoices(businessId, rawDocs) {
       const external = String(doc.numero);
       const occurred = parseYMDorDMYtoUTC(doc.cabecera?.fecha || doc.fecha);
       const total = toNum(doc.total);
-
       const sale_idx = sales.length;
       pushSale(external, occurred, total);
 
@@ -76,13 +79,12 @@ function normalizeInvoices(businessId, rawDocs) {
 
         pushItem(sale_idx, i + 1, {
           article_id: it.cod_art ?? null,
-          sku: it.cod_art ? String(it.cod_art) : null,   // 👈 NUEVO
+          sku: it.cod_art ? String(it.cod_art) : null,
           article_name: nombre,
           qty: cantidad,
           unit_price: precio,
           line_total: lineTotal,
         });
-
       });
       return;
     }
@@ -94,7 +96,6 @@ function normalizeInvoices(businessId, rawDocs) {
       const oid = od.orderId ? String(od.orderId) : null;
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
       const total = toNum(od.totalSales);
-
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
 
@@ -108,26 +109,25 @@ function normalizeInvoices(businessId, rawDocs) {
 
         pushItem(sale_idx, i + 1, {
           article_id: oi.cod_art ?? null,
-          sku: oi.cod_art ? String(oi.cod_art) : null,   // 👈 NUEVO
+          sku: oi.cod_art ? String(oi.cod_art) : null,
           article_name: title,
           qty,
           unit_price: price,
           line_total: lineTot,
         });
-
       });
       return;
     }
 
-    // Si viene otro objeto raro, lo ignoramos para no romper
+    // Otros formatos desconocidos se ignoran de forma segura
   });
 
   return { sales, items, touchedDays: Array.from(touchedDays) };
 }
 
 /**
- * Inserta/actualiza ventas e ítems y recalcula agregados diarios SOLO para los días tocados.
- * Devuelve { upserted, updated, minDay, maxDay }
+ * Inserta/actualiza ventas e ítems, hace un mapeo por nombre exacto (con unaccent)
+ * y recalcula agregados diarios SOLO para los días tocados.
  */
 async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
   const { sales, items, touchedDays } = normalizeInvoices(businessId, rawDocs);
@@ -137,7 +137,7 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
   try {
     await client.query('BEGIN');
 
-    // 1) UPSERT app_sales y quedarnos con los IDs (por external_id)
+    // 1) UPSERT app_sales (clave: business_id + external_id)
     const saleIdMap = new Map(); // sale_idx -> sale_id
     let upserted = 0, updated = 0;
 
@@ -155,16 +155,15 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
       if (rows[0].inserted) upserted++; else updated++;
     }
 
-    // 2) Reemplazamos líneas por venta (simple y seguro para mantener consistencia)
-    //    (Si querés micro-diff, lo podemos hacer después)
-    //    Armamos bulk insert con VALUES
+    // 2) Reemplazar líneas por venta (consistencia simple)
     if (items.length) {
-      // Borramos líneas previas de estas ventas
       const saleIds = Array.from(saleIdMap.values());
-      await client.query(
-        `DELETE FROM app_sales_items WHERE sale_id = ANY($1::int[])`,
-        [saleIds]
-      );
+      if (saleIds.length) {
+        await client.query(
+          `DELETE FROM app_sales_items WHERE sale_id = ANY($1::int[])`,
+          [saleIds]
+        );
+      }
 
       const values = [];
       const params = [];
@@ -174,30 +173,49 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
         if (!sale_id) return;
         values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
         params.push(
-          sale_id,
-          it.line_pos,
-          it.article_id,
-          it.sku ?? null,                // 👈 NUEVO
-          it.name ?? it.article_name ?? null, // 👈 NUEVO
-          it.qty,
-          it.line_total
+          sale_id,                      // sale_id
+          it.line_pos,                  // line_pos
+          it.article_id,                // article_id (puede venir)
+          it.sku ?? null,               // sku
+          it.name ?? null,              // name
+          it.qty,                       // qty
+          it.line_total                 // amount
         );
       });
 
       if (values.length) {
         await client.query(
-          `INSERT INTO app_sales_items (sale_id, line_pos, article_id, sku, name, qty, amount)
-     VALUES ${values.join(',')}`,
+          `INSERT INTO app_sales_items
+             (sale_id, line_pos, article_id, sku, name, qty, amount)
+           VALUES ${values.join(',')}`,
           params
+        );
+      }
+
+      // 2.b Mini-mapeo inmediato por nombre exacto (barato) dentro de estas ventas
+      if (saleIds.length) {
+        await client.query(
+          `UPDATE app_sales_items si
+             SET article_id = aa.id
+           FROM app_sales s
+           JOIN app_articles aa
+             ON aa.business_id = s.business_id
+          WHERE s.id = si.sale_id
+            AND si.sale_id = ANY($1::int[])
+            AND si.article_id IS NULL
+            AND si.name IS NOT NULL
+            AND lower(unaccent(si.name)) = lower(unaccent(aa.name))`,
+          [saleIds]
         );
       }
     }
 
-    // 3) Recalcular agregados para los días tocados
+    // 3) Agregados diarios para días tocados
+    let minDay = null, maxDay = null;
     if (touchedDays.length) {
       const days = touchedDays.sort();
-      const minDay = days[0];
-      const maxDay = days[days.length - 1];
+      minDay = days[0];
+      maxDay = days[days.length - 1];
 
       await client.query(
         `DELETE FROM sales_daily WHERE business_id = $1 AND day = ANY($2::date[]);`,
@@ -208,44 +226,41 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
         [businessId, days]
       );
 
-      // sales_daily (totales por ticket)
+      // Totales por día (tickets)
       await client.query(
         `INSERT INTO sales_daily (business_id, day, total, tx_count)
-     SELECT s.business_id,
-            (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-            SUM(s.total) AS total,
-            COUNT(*)     AS tx_count
-     FROM app_sales s
-     WHERE s.business_id = $1
-       AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-     GROUP BY 1,2;`,
+           SELECT s.business_id,
+                  (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+                  SUM(s.total) AS total,
+                  COUNT(*)     AS tx_count
+             FROM app_sales s
+            WHERE s.business_id = $1
+              AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+         GROUP BY 1,2;`,
         [businessId, days]
       );
 
-      // sales_daily_items (por artículo, excluye NULL y monto 0)
+      // Ítems por artículo (excluye NULL y montos 0)
       await client.query(
         `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-     SELECT s.business_id,
-            (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-            si.article_id,
-            SUM(si.qty)    AS qty,
-            SUM(si.amount) AS amount
-     FROM app_sales_items si
-     JOIN app_sales s ON s.id = si.sale_id
-     WHERE s.business_id = $1
-       AND si.article_id IS NOT NULL
-       AND si.amount > 0
-       AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
-     GROUP BY 1,2,3;`,
+           SELECT s.business_id,
+                  (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+                  si.article_id,
+                  SUM(si.qty)    AS qty,
+                  SUM(si.amount) AS amount
+             FROM app_sales_items si
+             JOIN app_sales s ON s.id = si.sale_id
+            WHERE s.business_id = $1
+              AND si.article_id IS NOT NULL
+              AND si.amount > 0
+              AND (s.occurred_at AT TIME ZONE 'UTC')::date = ANY($2::date[])
+         GROUP BY 1,2,3;`,
         [businessId, days]
       );
-
-      await client.query('COMMIT');
-      return { upserted, updated, minDay, maxDay };
     }
 
     await client.query('COMMIT');
-    return { upserted, updated, minDay: null, maxDay: null };
+    return { upserted, updated, minDay, maxDay };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -254,73 +269,53 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
   }
 }
 
-// services/salesStore.js
-async function upsertDailyAggregates(pool, businessId, fromYmd, toYmd) {
-  // Asumimos app_sales y app_sales_items están OK (con article_id no-null en origen).
-  const sql = `
-  WITH range AS (
-    SELECT $1::int AS business_id,
-           $2::date AS dfrom,
-           $3::date AS dto
-  ),
-  base AS (
-    SELECT s.business_id,
-           s.occurred_at::date AS day,
-           i.article_id,
-           i.qty,
-           i.amount
-    FROM app_sales s
-    JOIN app_sales_items i ON i.sale_id = s.id
-    JOIN range r ON r.business_id = s.business_id
-    WHERE s.business_id = $1
-      AND s.occurred_at::date BETWEEN $2::date AND $3::date
-      AND i.article_id IS NOT NULL        -- 🔒 evita NULLs aquí
-  ),
-  agg_day AS (
-    SELECT business_id, day,
-           COALESCE(SUM(amount),0)::numeric(14,2) AS total,
-           COUNT(DISTINCT (business_id, day, /*venta*/ sale_id)) AS tx_count
-    FROM (
-      SELECT b.business_id, b.day, b.amount, s.id AS sale_id
-      FROM base b
-      JOIN app_sales s ON s.business_id=b.business_id AND s.occurred_at::date=b.day
-    ) x
-    GROUP BY business_id, day
-  ),
-  agg_items AS (
-    SELECT business_id, day, article_id,
-           COALESCE(SUM(qty),0)::numeric(14,3)    AS qty,
-           COALESCE(SUM(amount),0)::numeric(14,2) AS amount
-    FROM base
-    GROUP BY business_id, day, article_id
-  )
-  -- Upsert sales_daily
-  INSERT INTO sales_daily AS sd (business_id, day, total, tx_count)
-  SELECT a.business_id, a.day, a.total, a.tx_count
-  FROM agg_day a
-  ON CONFLICT (business_id, day) DO UPDATE
-    SET total   = EXCLUDED.total,
-        tx_count= EXCLUDED.tx_count;
-
-  -- Upsert sales_daily_items
-  INSERT INTO sales_daily_items AS sdi (business_id, day, article_id, qty, amount)
-  SELECT a.business_id, a.day, a.article_id, a.qty, a.amount
-  FROM agg_items a
-  ON CONFLICT (business_id, day, article_id) DO UPDATE
-    SET qty    = EXCLUDED.qty,
-        amount = EXCLUDED.amount;
-  `;
-
+/**
+ * Recalcula agregados diarios (sales_daily y sales_daily_items) para un rango [fromYmd..toYmd].
+ * Útil para backfills o regeneraciones manuales.
+ */
+async function upsertDailyAggregates(businessId, fromYmd, toYmd) {
   await pool.query('BEGIN');
   try {
-    await pool.query(`
-      DELETE FROM sales_daily_items
-       WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;
-      DELETE FROM sales_daily
-       WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;`,
+    await pool.query(
+      `DELETE FROM sales_daily_items
+        WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;
+       DELETE FROM sales_daily
+        WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;`,
       [businessId, fromYmd, toYmd]
     );
-    await pool.query(sql, [businessId, fromYmd, toYmd]);
+
+    // Totales por día
+    await pool.query(
+      `INSERT INTO sales_daily (business_id, day, total, tx_count)
+         SELECT s.business_id,
+                (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+                SUM(s.total) AS total,
+                COUNT(*)     AS tx_count
+           FROM app_sales s
+          WHERE s.business_id = $1
+            AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+       GROUP BY 1,2;`,
+      [businessId, fromYmd, toYmd]
+    );
+
+    // Ítems por artículo (excluye NULL y montos 0)
+    await pool.query(
+      `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
+         SELECT s.business_id,
+                (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+                si.article_id,
+                SUM(si.qty)    AS qty,
+                SUM(si.amount) AS amount
+           FROM app_sales_items si
+           JOIN app_sales s ON s.id = si.sale_id
+          WHERE s.business_id = $1
+            AND si.article_id IS NOT NULL
+            AND si.amount > 0
+            AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+       GROUP BY 1,2,3;`,
+      [businessId, fromYmd, toYmd]
+    );
+
     await pool.query('COMMIT');
   } catch (e) {
     await pool.query('ROLLBACK');
@@ -331,5 +326,5 @@ async function upsertDailyAggregates(pool, businessId, fromYmd, toYmd) {
 module.exports = {
   normalizeInvoices,
   upsertSalesBatch,
+  upsertDailyAggregates,
 };
-
