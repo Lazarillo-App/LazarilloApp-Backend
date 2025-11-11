@@ -1,29 +1,33 @@
-/* eslint-disable no-console */
 // controllers/syncController.js
+/* eslint-disable no-console */
 const pool = require('../config/db');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
-/* Fetch nativo (Node ≥18) con fallback */
+// fetch nativo (Node 18+) o fallback a node-fetch
 const fetchNative =
   (typeof globalThis.fetch === 'function')
     ? ((...args) => globalThis.fetch(...args))
     : require('node-fetch');
 
-/* Config Maxi via ENV */
 const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
 const FETCH_RETRIES    = Number(process.env.MAXI_FETCH_RETRIES || 2);
-const ITEMS_PATH       = (process.env.MAXI_ITEMS_PATH || '/estadisticas/menu').replace(/\/+$/, '');
+
+/* ======================= Utils básicos ======================= */
+function simpleHash(str = '') {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return String(h >>> 0);
+}
+const norm = s => String(s ?? '').trim();
+const orSinCategoria = s => (norm(s) || 'Sin categoría');
+const orSinSubrubro  = s => (norm(s) || 'Sin subrubro');
 
 function parseDate(zd, fallback) {
   if (zd == null || zd === '') return new Date(fallback);
-  if (zd instanceof Date) return Number.isNaN(+zd) ? new Date(fallback) : zd;
-  if (typeof zd === 'number') {
-    const d = new Date(zd);
-    return Number.isNaN(+d) ? new Date(fallback) : d;
-  }
-  const d = new Date(String(zd));
-  return Number.isNaN(+d) ? new Date(fallback) : d;
+  if (zd instanceof Date)     return Number.isNaN(+zd) ? new Date(fallback) : zd;
+  if (typeof zd === 'number') { const d = new Date(zd); return Number.isNaN(+d) ? new Date(fallback) : d; }
+  const d = new Date(String(zd)); return Number.isNaN(+d) ? new Date(fallback) : d;
 }
 function ymd(d) {
   if (!(d instanceof Date) || Number.isNaN(+d)) d = new Date();
@@ -34,6 +38,7 @@ function ymd(d) {
 }
 function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
 
+/* ========== Fetch con timeout + reintentos (429/5xx) ========== */
 async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -43,66 +48,130 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
       const res = await fetchNative(url, { ...options, signal: ctrl.signal });
       clearTimeout(t);
       if (res.ok) return res;
-      if ([429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
-        const delay = 200 * (attempt + 1) ** 2;
-        await new Promise(r => setTimeout(r, delay));
+      if ([429,500,502,503,504].includes(res.status) && attempt < retries) {
+        await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2));
         continue;
       }
       const txt = await res.text().catch(() => '');
-      const err = new Error(`HTTP ${res.status} - ${txt.slice(0, 200)}`);
-      err.status = res.status;
+      const err = new Error(`HTTP ${res.status} - ${txt.slice(0,200)}`); err.status = res.status;
       throw err;
     } catch (e) {
-      clearTimeout(t);
-      lastErr = e;
-      if (attempt < retries) {
-        const delay = 200 * (attempt + 1) ** 2;
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
+      clearTimeout(t); lastErr = e;
+      if (attempt < retries) { await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2)); continue; }
       throw lastErr;
     }
   }
   throw lastErr || new Error('fetchWithRetry unknown error');
 }
 
-/* MAXI: login + fetch menú/ítems */
-async function maxiLogin({ email, pass, codcli }) {
-  const url = `${BASE}/login`;
-  const body = { email, pass, cod_cli: String(codcli) };
-  const res = await fetchWithRetry(url, {
+/* =================== MAXI: login y artículos =================== */
+async function maxiLogin({ email, password, codcli }) {
+  const res = await fetchWithRetry(`${BASE}/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json', 'Accept':'application/json' },
+    body: JSON.stringify({ email, pass: password, cod_cli: String(codcli) })
   });
-  const data = await res.json().catch(() => ({}));
-  const ok = data?.resultCode === 'SUCCESS' && data?.content?.tokenAccess;
-  if (!ok) {
-    const msg = data?.resultDescription || `login_failed_${res.status}`;
-    const err = new Error(msg); err.status = 502; throw err;
+  const j = await res.json().catch(() => ({}));
+  if (j?.resultCode !== 'SUCCESS' || !j?.content?.tokenAccess) {
+    const id = j?.resultId || 'login_failed';
+    throw new Error(`maxi_login_failed_${id}`);
   }
-  return data.content.tokenAccess;
-}
-async function maxiFetchItems({ token, codcli }) {
-  const u = new URL(`${BASE}${ITEMS_PATH}`);
-  u.searchParams.set('cod_cli', String(codcli));
-  u.searchParams.set('codcli',  String(codcli));
-  const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` } });
-  const d = await res.json().catch(() => ({}));
-  const candidates = [
-    d?.content?.articulos,
-    d?.content?.items,
-    d?.items,
-    d?.articulos,
-    d?.content?.content?.articulos,
-    Array.isArray(d) ? d : null,
-  ];
-  return candidates.find(Array.isArray) || [];
+  return j.content.tokenAccess;
 }
 
-/* UPSERT en public.maxi_articles */
+/**
+ * Trae menú extendido (menuweb/menuextendido) y flatea a artículos con SWAP:
+ *   app.categoria = subrubro Maxi
+ *   app.subrubro  = rubro Maxi
+ */
+async function fetchMaxiArticles({ token, from, to }) {
+  const u = new URL(`${BASE}/menuweb/menuextendido`);
+  if (from) u.searchParams.set('fechaInicio', from);
+  if (to)   u.searchParams.set('fechaFin', to);
+
+  const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` } });
+  const j = await res.json().catch(() => ({}));
+  if (j?.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
+
+  // Estructuras observadas
+  const root = Array.isArray(j?.content)
+    ? j.content
+    : Array.isArray(j?.menu?.content)
+    ? j.menu.content
+    : Array.isArray(j?.data?.content)
+    ? j.data.content
+    : [];
+
+  const items = [];
+  const seen = new Set();
+
+  const isArticle = (o = {}) => {
+    const hasId   = ['id','idArticulo','codart','codigo','codigoArticulo'].some(k => k in o);
+    const hasInfo = ['descripcion','descripcionl','nombre','precio','precioVenta','importe'].some(k => k in o);
+    return hasId && hasInfo;
+  };
+  const num     = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const getName = (o) => String(o?.descripcion ?? o?.descripcionl ?? o?.nombre ?? '').trim();
+
+  // push con SWAP
+  const pushArt = (o, { rubroNombre, subrubroNombre }) => {
+    const id = num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
+    if (!Number.isFinite(id) || seen.has(id)) return;
+    seen.add(id);
+    items.push({
+      id,
+      nombre: getName(o),
+      categoria: orSinCategoria(subrubroNombre), // SWAP
+      subrubro : orSinSubrubro(rubroNombre),     // SWAP
+      precio: num(o.precio ?? o.precioVenta ?? o.importe, 0),
+      costo : num(o.costo  ?? o.costoPromedio, 0),
+      raw: o,
+    });
+  };
+
+  // Walker rubro -> subrubros -> articulos
+  for (const rubro of root) {
+    const rubroNombre =
+      String(
+        rubro?.nombre ??
+        rubro?.rubroNombre ??
+        rubro?.rubro?.descripcion ??
+        rubro?.rubro ??
+        ''
+      ).trim() || 'Sin subrubro'; // (recuerda: rubro Maxi → subrubro app)
+
+    // Artículos colgados del rubro
+    const artsRubro = Array.isArray(rubro?.articulos) ? rubro.articulos : [];
+    for (const a of artsRubro) if (isArticle(a)) pushArt(a, { rubroNombre, subrubroNombre: '' });
+
+    // Subrubros
+    const subrubros = Array.isArray(rubro?.subrubros) ? rubro.subrubros : [];
+    for (const s of subrubros) {
+      const subrubroNombre =
+        String(
+          s?.nombre ?? s?.nombreSubRubro ?? s?.subRubro?.descripcion ?? s?.subrubro ?? ''
+        ).trim() || 'Sin subrubro';
+
+      const arts = Array.isArray(s?.articulos) ? s.articulos : [];
+      for (const a of arts) if (isArticle(a)) pushArt(a, { rubroNombre, subrubroNombre });
+
+      // (Opcional) sub-subrubros
+      const subs2 = Array.isArray(s?.subrubros) ? s.subrubros : [];
+      for (const s2 of subs2) {
+        const subSubNombre =
+          String(s2?.nombre ?? s2?.nombreSubRubro ?? s2?.subRubro?.descripcion ?? s2?.subrubro ?? '').trim()
+          || subrubroNombre;
+        const arts2 = Array.isArray(s2?.articulos) ? s2.articulos : [];
+        for (const a of arts2) if (isArticle(a)) pushArt(a, { rubroNombre, subrubroNombre: subSubNombre });
+      }
+    }
+  }
+  return { items, raw: root };
+}
+
+/* ========== Upsert en public.maxi_articles (chunked) ========== */
 async function upsertArticles({ client, businessId, items }) {
-  if (!items || !items.length) return 0;
+  if (!items?.length) return 0;
   const CHUNK = 500;
   let total = 0;
 
@@ -113,34 +182,37 @@ async function upsertArticles({ client, businessId, items }) {
     let p = 1;
 
     for (const it of slice) {
-      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo ?? it.cod_art ?? it.articulo_id);
+      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
       if (!Number.isFinite(id)) continue;
 
-      const nombre = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? it.nombre_art ?? '').slice(0, 200) || null);
-      const categoria = (String(it.categoria ?? it.rubro ?? '').trim() || 'Sin categoría');
-      const subrubro  = (String(it.subrubro ?? it.sub_rubro ?? '').trim() || 'Sin subrubro');
-      const precio    = Number(it.precio ?? it.precioVenta ?? it.importe ?? it.precio_sugerido ?? 0) || 0;
-      const costo     = Number(it.costo  ?? it.costoPromedio ?? it.costo_ultima_compra ?? 0) || 0;
+      const nombre   = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0,200) || null);
+      const categoria= orSinCategoria(it.categoria);
+      const subrubro = orSinSubrubro(it.subrubro);
+      const precio   = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo    = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
 
-      values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6}::jsonb,NOW())`);
-      params.push(businessId, id, nombre, categoria, subrubro, precio, costo, JSON.stringify(it.raw ?? it._raw ?? it));
-      p += 7;
+      values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6},$${p+7}::jsonb,NOW())`);
+      params.push(
+        businessId, id, nombre, categoria, subrubro, precio, costo,
+        JSON.stringify(it.raw ?? it._raw ?? it)
+      );
+      p += 8;
     }
-
     if (!values.length) continue;
 
     const sql = `
       INSERT INTO public.maxi_articles
         (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at)
       VALUES ${values.join(',')}
-      ON CONFLICT (business_id, articulo_id) DO UPDATE SET
-        nombre    = EXCLUDED.nombre,
-        categoria = EXCLUDED.categoria,
-        subrubro  = EXCLUDED.subrubro,
-        precio    = EXCLUDED.precio,
-        costo     = EXCLUDED.costo,
-        raw       = EXCLUDED.raw,
-        updated_at= NOW()
+      ON CONFLICT (business_id, articulo_id)
+      DO UPDATE SET
+        nombre   = EXCLUDED.nombre,
+        categoria= EXCLUDED.categoria,
+        subrubro = EXCLUDED.subrubro,
+        precio   = EXCLUDED.precio,
+        costo    = EXCLUDED.costo,
+        raw      = EXCLUDED.raw,
+        updated_at = NOW()
     `;
     await client.query(sql, params);
     total += slice.length;
@@ -148,65 +220,132 @@ async function upsertArticles({ client, businessId, items }) {
   return total;
 }
 
-/* Credenciales Maxi desde biz.props.maxi */
-function loadMaxiCredsFromBiz(biz) {
-  const props = biz?.props || {};
-  const mx = props.maxi || props.maxi_credentials || {};
-  const email = mx.email || mx.user || null;
-  const codcli = mx.codcli || mx.codigo || null;
+/* ============================ Handlers ============================ */
 
-  const secret =
-    mx.pass_enc ??
-    mx.password_enc ??
-    mx.password ??
-    mx.pass ??
-    null;
-
-  const pass = decryptSecretCompat(secret);
-  if (!email || !pass || !codcli) {
-    const err = new Error('missing_maxi_credentials'); err.status = 400; throw err;
-  }
-  return { email, pass, codcli };
-}
-
-/* ─────────── Endpoints: catálogo ─────────── */
-
-// GET /api/businesses/:id/articles
-exports.listArticlesFromDB = async (req, res) => {
-  const biz = req.business;
+/**
+ * POST /businesses/:id/sync
+ * body: { scope: 'articles' | 'all', from?, to? }
+ */
+exports.syncNow = async (req, res) => {
+  const biz = req.business; // cargado por requireBusinessAccessParam
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+
+  const { scope = 'articles', from, to } = req.body || {};
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
+  const f = ymd(parseDate(from, startOfMonth));
+  const t = ymd(parseDate(to,   yesterday));
+
+  // Credenciales desde biz.props
+  const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
+  const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || mx.pass || '');
+  if (!(mx.email && password && mx.codcli)) {
+    return res.status(400).json({ error: 'maxi_not_configured' });
+  }
+
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
-      `SELECT articulo_id, nombre, categoria, subrubro, precio, costo
-         FROM public.maxi_articles
-        WHERE business_id = $1
-        ORDER BY nombre ASC`,
-      [biz.id],
-    );
-    res.json({ ok: true, items: rows, count: rows.length });
+    // 1) Login Maxi
+    const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
+
+    let upserted = 0;
+    let mapped   = 0;
+    let cacheHash = null;
+
+    if (scope === 'articles' || scope === 'all') {
+      // 2) Traer artículos + árbol crudo
+      const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
+
+      // 3) Cachear árbol crudo para auditoría (hash)
+      const rawStr = JSON.stringify(raw ?? []);
+      cacheHash = simpleHash(rawStr);
+      await pool.query(`
+        INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
+        VALUES ($1, $2::jsonb, $3, NOW())
+        ON CONFLICT (business_id, hash) DO UPDATE SET updated_at = NOW()
+      `, [biz.id, rawStr, cacheHash]);
+
+      // 4) Upsert de artículos
+      await client.query('BEGIN');
+      upserted = await upsertArticles({ client, businessId: biz.id, items });
+
+      // 5) Refrescar mapeo directo (si usás esta tabla)
+      const r = await client.query(`
+        WITH src AS (
+          SELECT business_id, articulo_id,
+                 NULLIF(btrim(categoria),'') AS categoria,
+                 NULLIF(btrim(subrubro),'')  AS subrubro
+          FROM public.maxi_articles
+          WHERE business_id = $1
+        )
+        INSERT INTO public.maxi_article_map (business_id, articulo_id, categoria, subrubro, updated_at)
+        SELECT business_id,
+               articulo_id,
+               COALESCE(categoria,'[PENDIENTE]'),
+               COALESCE(subrubro,'[PENDIENTE]'),
+               NOW()
+        FROM src
+        ON CONFLICT (business_id, articulo_id) DO UPDATE
+          SET categoria = EXCLUDED.categoria,
+              subrubro  = EXCLUDED.subrubro,
+              updated_at= NOW()
+      `, [biz.id]);
+      mapped = r.rowCount || 0;
+
+      await client.query('COMMIT');
+    }
+
+    return res.json({ ok: true, business_id: biz.id, scope: 'articles', from: f, to: t, upserted, mapped, cacheHash });
   } catch (e) {
-    console.error('listArticlesFromDB error:', e);
-    res.status(500).json({ error: 'internal', detail: e.message });
+    try { await client.query('ROLLBACK'); } catch {}
+    const msg = String(e?.message || '');
+    if (msg.includes('maxi_login_failed') || e.status === 401 || msg.includes('401')) {
+      return res.status(401).json({ error: 'unauthorized', detail: 'Maxi login failed/401' });
+    }
+    if (msg.includes('maxi_not_configured')) {
+      return res.status(400).json({ error: 'maxi_not_configured' });
+    }
+    console.error('syncNow error:', e?.stack || e);
+    return res.status(500).json({ error: 'internal', detail: msg });
+  } finally {
+    client.release();
   }
 };
 
-// GET /api/businesses/:id/articles/tree  (subrubro > categoría > artículos)
+/**
+ * GET /businesses/:id/articles (lista plana)
+ */
+exports.listArticlesFromDB = async (req, res) => {
+  const biz = req.business;
+  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+  const { rows } = await pool.query(`
+    SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+    FROM public.maxi_articles
+    WHERE business_id = $1
+    ORDER BY categoria, subrubro, nombre
+  `, [biz.id]);
+  res.json({ items: rows });
+};
+
+/**
+ * GET /businesses/:id/articles/tree (subrubro > categoría > artículos)
+ */
 exports.listArticlesTreeFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
   try {
-    const { rows } = await pool.query(
-      `SELECT articulo_id, nombre, categoria, subrubro, precio
-         FROM public.maxi_articles
-        WHERE business_id = $1
-        ORDER BY subrubro, categoria, nombre`,
-      [biz.id],
-    );
+    const { rows } = await pool.query(`
+      SELECT articulo_id, nombre, categoria, subrubro, precio
+      FROM public.maxi_articles
+      WHERE business_id = $1
+      ORDER BY subrubro, categoria, nombre
+    `, [biz.id]);
 
     const bySub = new Map();
     for (const r of rows) {
-      const sub = r.subrubro || 'Sin subrubro';
-      const cat = r.categoria || 'Sin categoría';
+      const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
+      const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
       if (!bySub.has(sub)) bySub.set(sub, new Map());
       const byCat = bySub.get(sub);
       if (!byCat.has(cat)) byCat.set(cat, []);
@@ -217,58 +356,50 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       subrubro,
       categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos })),
     }));
-
-    const categoriasCount = tree.reduce((a, s) => a + (s.categorias?.length || 0), 0);
-    const articulosCount  = tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0);
-
-    res.json({ ok: true, resumen: { subrubros: tree.length, categorias: categoriasCount, articulos: articulosCount }, tree });
+    const resumen = {
+      subrubros: tree.length,
+      categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
+      articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
+    };
+    res.json({ ok: true, resumen, tree });
   } catch (e) {
     console.error('listArticlesTreeFromDB error:', e);
     res.status(500).json({ error: 'internal', detail: e.message });
   }
 };
 
-// POST /api/businesses/:id/sync  (catálogo)
-exports.syncNow = async (req, res) => {
+/**
+ * GET /businesses/:id/maxi-articles-proxy?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * (solo para diagnóstico: pega a Maxi y devuelve items ya SWAPeados)
+ */
+exports.maxiArticlesProxy = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
-  const scope = String(req.body?.scope || 'articles').toLowerCase();
-  const now = new Date();
-  const defFrom = addDays(now, -30);
-  const from = parseDate(req.body?.from, defFrom);
-  const to   = parseDate(req.body?.to, now);
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday    = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
+  const from = ymd(parseDate(req.query.from, startOfMonth));
+  const to   = ymd(parseDate(req.query.to,   yesterday));
 
-  const client = await pool.connect();
   try {
-    const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
-    const token = await maxiLogin({ email, pass, codcli });
+    const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
+    const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || mx.pass || '');
+    if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
-    let upserted = 0;
-    let mapped = 0; // reservado a futuro
-
-    if (scope === 'articles' || scope === 'all') {
-      const items = await maxiFetchItems({ token, codcli });
-      await client.query('BEGIN');
-      upserted = await upsertArticles({ client, businessId: biz.id, items });
-      await client.query('COMMIT');
-    }
-
-    return res.json({ ok: true, business_id: biz.id, scope, from: ymd(from), to: ymd(to), upserted, mapped });
+    const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
+    const { items } = await fetchMaxiArticles({ token, from, to });
+    res.json({ from, to, items });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.error('syncNow error:', e);
-    const status = e.status || (String(e.message || '').includes('401') ? 401 : 500);
-    return res.status(status).json({ error: 'sync_failed', detail: e.message || 'sync_failed' });
-  } finally {
-    client.release();
+    console.error('maxiArticlesProxy error:', e);
+    res.status(500).json({ error: 'internal', detail: e.message });
   }
 };
 
-/* Legacy (410) */
+/* ===== Compat (legacy) — ventas movidas a /api/ventas y salesSyncController ===== */
 exports.salesSummaryFromDB = async (_req, res) => {
-  res.status(410).json({ error: 'gone', detail: 'Usá /api/ventas/summary con X-Business-Id.' });
+  res.status(410).json({ error: 'gone', detail: 'Reemplazado por /api/ventas/summary (con X-Business-Id).' });
 };
 exports.salesSeriesFromDB = async (_req, res) => {
-  res.status(410).json({ error: 'gone', detail: 'Usá /api/ventas/by-article con X-Business-Id.' });
+  res.status(410).json({ error: 'gone', detail: 'Reemplazado por /api/ventas/by-article (con X-Business-Id).' });
 };
