@@ -42,15 +42,16 @@ function normalizeInvoices(businessId, rawDocs) {
     touchedDays.add(s.occurred_at.toISOString().slice(0, 10)); // YYYY-MM-DD
     return s;
   };
-
   const pushItem = (sale_idx, line_pos, data) => {
-    // data: { article_id?, article_name, qty, unit_price, line_total }
+    // data: { article_id?, sku?, article_name, qty, unit_price, line_total }
     items.push({
       business_id: businessId,
       sale_idx,
       line_pos,
-      article_id: data.article_id ?? null,         // si tu pipeline resuelve ID en otro paso, dejalo null
-      article_name: data.article_name || null,     // útil para joins posteriores
+      article_id: data.article_id ?? null,
+      sku: data.sku ?? null,                  // 👈 NUEVO
+      article_name: data.article_name || null,
+      name: data.article_name || null,        // 👈 NUEVO (normalizamos a 'name')
       qty: toNum(data.qty),
       unit_price: toNum(data.unit_price),
       line_total: toNum(data.line_total),
@@ -71,16 +72,17 @@ function normalizeInvoices(businessId, rawDocs) {
         const nombre = it.nombre_art || it.title || it.descripcion || 'Item';
         const cantidad = toNum(it.cantidad);
         const precio = toNum(it.precio);
-        // Para fullinvoice no viene total por línea → lo calculamos
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
         pushItem(sale_idx, i + 1, {
           article_id: it.cod_art ?? null,
+          sku: it.cod_art ? String(it.cod_art) : null,   // 👈 NUEVO
           article_name: nombre,
           qty: cantidad,
           unit_price: precio,
           line_total: lineTotal,
         });
+
       });
       return;
     }
@@ -102,17 +104,17 @@ function normalizeInvoices(businessId, rawDocs) {
         const title = oi.title || oi.nombre_art || 'Item';
         const qty = toNum(oi.quantity);
         const price = toNum(oi.productPrice);
-        // Clave del bug: si totalPrice viene 0 o ausente, calcular qty*price
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
-        // Si tu pipeline resuelve artículo, dejá article_id en null y conservá el nombre
         pushItem(sale_idx, i + 1, {
           article_id: oi.cod_art ?? null,
+          sku: oi.cod_art ? String(oi.cod_art) : null,   // 👈 NUEVO
           article_name: title,
           qty,
           unit_price: price,
           line_total: lineTot,
         });
+
       });
       return;
     }
@@ -170,21 +172,22 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
       items.forEach((it) => {
         const sale_id = saleIdMap.get(it.sale_idx);
         if (!sale_id) return;
-        values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+        values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
         params.push(
           sale_id,
           it.line_pos,
           it.article_id,
-          it.article_name,
+          it.sku ?? null,                // 👈 NUEVO
+          it.name ?? it.article_name ?? null, // 👈 NUEVO
           it.qty,
-          it.line_total // 🔴 usamos line_total para el monto de la línea
+          it.line_total
         );
       });
 
       if (values.length) {
         await client.query(
-          `INSERT INTO app_sales_items (sale_id, line_pos, article_id, article_name, qty, amount)
-           VALUES ${values.join(',')}`,
+          `INSERT INTO app_sales_items (sale_id, line_pos, article_id, sku, name, qty, amount)
+     VALUES ${values.join(',')}`,
           params
         );
       }
