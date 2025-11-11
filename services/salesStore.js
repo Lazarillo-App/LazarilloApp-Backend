@@ -328,7 +328,6 @@ async function upsertDailyAggregates(pool, businessId, fromYmd, toYmd) {
   }
 }
 
-
 module.exports = {
   normalizeInvoices,
   upsertSalesBatch,
