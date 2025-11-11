@@ -8,11 +8,18 @@ const multer = require('multer');
 const businesses = require('../controllers/businessController');
 const syncCtrl = require('../controllers/syncController');
 // const salesSyncCtrl = require('../controllers/salesSyncController'); // ← legacy/opcional
+
 const { authRequired } = require('../middleware/authMiddleware');
-const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+// Si seguís usando el viejo param-guard, podés quitarlo. Lo reemplazamos por loadActiveBusiness.
+//// const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+
 const { refreshMenu } = require('../controllers/maxiMenuController');
 
-// Para mantener consistencia en handlers que ya movimos a businessController
+// Carga de negocio activo + membresía (lee businessId de header/query/body)
+const { loadActiveBusiness } = require('../middleware/activeBusiness');
+const { requireOwner, requireManager, requireStaff, requireViewer } = require('../middleware/requireBizRole');
+
+// Para mantener consistencia en handlers movidos a businessController
 const ctrl = require('../controllers/businessController');
 
 // Sync ventana simple (últimos N días)
@@ -28,7 +35,6 @@ function ensureFn(name, fn) {
 }
 
 /* ───────── Fallbacks defensivos para controladores opcionales ───────── */
-// Si tenés un ping real en otro controller, ponelo ahí; si no, queda 501 prolijo.
 const maxiPing = ensureFn('salesSyncCtrl.maxiPing', undefined);
 const syncSalesForBusiness = ensureFn('salesSyncCtrl.syncSalesForBusiness', undefined);
 
@@ -53,12 +59,33 @@ const upload = multer({
   }
 });
 
-/* ───────── Auth + param ───────── */
+/* ───────── Auth global ───────── */
 router.use(authRequired);
-router.param('id', requireBusinessAccessParam);
 
-/* ───────── Upload logo ───────── */
-router.post('/:id/logo', (req, res, next) => {
+/* 
+ * Para rutas que llevan :id usamos este pequeño adaptador:
+ * - inyecta businessId en req.query para que loadActiveBusiness lo capture
+ * - luego ejecuta loadActiveBusiness que coloca req.business + req.membership
+ */
+function withBizFromParam(req, _res, next) {
+  if (req.params?.id) req.query.businessId = req.params.id;
+  next();
+}
+
+/* ───────── Rutas SIN :id (no requieren negocio cargado) ───────── */
+// CRUD base (crear negocio = asigna owner en el controller)
+router.get('/', businesses.listMine);          // ver mis negocios (auth)
+router.post('/', businesses.create);           // crear negocio (asigna owner al creador)
+
+// Negocio activo guardado en el perfil/props de usuario (no necesita rol de negocio)
+router.get('/active', businesses.getActive);
+router.patch('/active', businesses.setActive);
+
+/* ───────── Rutas CON :id (cargan negocio + membership) ───────── */
+router.use('/:id', withBizFromParam, loadActiveBusiness);
+
+/* ───────── Branding / logos ───────── */
+router.post('/:id/logo', requireManager, (req, res, next) => {
   const uploadAny = upload.any();
   uploadAny(req, res, (err) => {
     if (err) {
@@ -79,34 +106,25 @@ router.post('/:id/logo', (req, res, next) => {
   });
 });
 
-/* ───────── Branding: setear URL directa ───────── */
-router.patch('/:id/branding-url', businesses.setBrandingUrl);
+router.patch('/:id/branding-url', requireManager, businesses.setBrandingUrl);
 
 /* ───────── MAXI: ping (diagnóstico) ───────── */
-router.get('/:id/maxi-ping', maxiPing);
+router.get('/:id/maxi-ping', requireViewer, maxiPing);
 
-/* ───────── CRUD base de negocios ───────── */
-router.get('/', businesses.listMine);
-router.post('/', businesses.create);
-
-// Negocio activo
-router.get('/active', businesses.getActive);
-router.patch('/active', businesses.setActive);
-
-// Por :id (req.business viene de router.param)
-router.get('/:id', businesses.getOne);
-router.patch('/:id', businesses.update);
-router.delete('/:id', businesses.remove);
-router.post('/:id/select', businesses.select);
+/* ───────── CRUD por :id ───────── */
+router.get('/:id', requireViewer, businesses.getOne);     // ver datos del negocio
+router.patch('/:id', requireManager, businesses.update);   // editar branding, props, etc.
+router.delete('/:id', requireOwner, businesses.remove);    // eliminar negocio (solo owner)
+router.post('/:id/select', requireViewer, businesses.select);
 
 /* ───────── Maxi credenciales / estado ───────── */
-router.get('/:id/maxi-status', businesses.maxiStatus);
-router.post('/:id/maxi-credentials', businesses.maxiSave);
+router.get('/:id/maxi-status', requireViewer, businesses.maxiStatus);
+router.post('/:id/maxi-credentials', requireManager, businesses.maxiSave); // owner/manager
 
-// RAW Maxi para diagnóstico (usa flujo del probe)
-router.get('/:id/maxi-raw-invoices', businesses.maxiRawInvoices);
-router.get('/:id/maxi-items', businesses.maxiItemsByDate);
-router.post('/:id/maxi-refresh-menu', refreshMenu);
+/* ───────── RAW Maxi para diagnóstico (usa flujo del probe) ───────── */
+router.get('/:id/maxi-raw-invoices', requireManager, businesses.maxiRawInvoices);
+router.get('/:id/maxi-items',        requireManager, businesses.maxiItemsByDate);
+router.post('/:id/maxi-refresh-menu', requireManager, refreshMenu);
 
 /* ───────── Catálogo / Ventas (legacy compat) ───────── */
 const {
@@ -117,19 +135,23 @@ const {
   syncNow,
 } = syncCtrl;
 
-router.get('/:id/articles', listArticlesFromDB);
-router.get('/:id/articles/tree', listArticlesTreeFromDB);
-router.get('/:id/sales/summary', salesSummaryFromDB);
-router.get('/:id/sales/:articuloId', salesSeriesFromDB);
+// Lecturas → viewer+
+router.get('/:id/articles',          requireViewer, listArticlesFromDB);
+router.get('/:id/articles/tree',     requireViewer, listArticlesTreeFromDB);
+router.get('/:id/sales/summary',     requireViewer, salesSummaryFromDB);
+router.get('/:id/sales/:articuloId', requireViewer, salesSeriesFromDB);
+
+// Legacy (dispara backfill/otros) → manager+
+router.post('/:id/sync', requireManager, syncNow);
 
 /* ───────── Sync ventas (oficial) ─────────
-   Soporta mode=auto | range | backfill_30d en ctrl.syncSales
+   Soporta mode=auto | range | backfill_30d en ctrl.syncSales (manager+)
 */
-router.post('/:id/sync-sales-7d', ensureFn('businesses.syncSalesLast7d', ctrl.syncSalesLast7d));
-router.post('/:id/sync-sales',   ensureFn('businesses.syncSales',       ctrl.syncSales));
+router.post('/:id/sync-sales-7d', requireManager, ensureFn('businesses.syncSalesLast7d', ctrl.syncSalesLast7d));
+router.post('/:id/sync-sales',    requireManager, ensureFn('businesses.syncSales',       ctrl.syncSales));
 
-/* ───────── Sync manual: “últimos N días” (default 7) ───────── */
-router.post('/:id/sync-sales-window', async (req, res, next) => {
+/* ───────── Sync manual: “últimos N días” (default 7) → manager+ ───────── */
+router.post('/:id/sync-sales-window', requireManager, async (req, res, next) => {
   try {
     const biz = req.business;
     const windowDays = Math.min(Math.max(parseInt(req.body?.windowDays ?? '7', 10), 1), 30);
@@ -140,17 +162,14 @@ router.post('/:id/sync-sales-window', async (req, res, next) => {
   }
 });
 
-// Legacy de catálogo/otros (responde y puede disparar backfill)
-router.post('/:id/sync', syncNow);
-
-/* ───────── Default group helpers ───────── */
-router.get('/:id/default-group', (req, res) => {
+/* ───────── Default group helpers (viewer+ lectura / manager+ escritura) ───────── */
+router.get('/:id/default-group', requireViewer, (req, res) => {
   const biz = req.business;
   const defaultId = biz?.props?.default_group_id ?? null;
   res.json({ ok: true, business_id: biz.id, default_group_id: defaultId });
 });
 
-router.patch('/:id/default-group', async (req, res, next) => {
+router.patch('/:id/default-group', requireManager, async (req, res, next) => {
   try {
     const biz = req.business;
     const groupId = (req.body?.groupId === null) ? null : Number(req.body?.groupId);
@@ -168,6 +187,6 @@ router.patch('/:id/default-group', async (req, res, next) => {
 });
 
 /* ───────── Árbol artículos por businessId (duplicado compatible) ───────── */
-router.get('/:businessId/articles-tree', businesses.getArticlesTree);
+router.get('/:businessId/articles-tree', withBizFromParam, loadActiveBusiness, requireViewer, businesses.getArticlesTree);
 
 module.exports = router;
