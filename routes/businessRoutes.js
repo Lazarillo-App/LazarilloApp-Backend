@@ -115,23 +115,18 @@ router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFr
 
 /* ───────── Adapter para sync ventas (acepta query o body) ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {
-  // Soportá modo por query (?mode=auto|window|range|backfill|backfill_30d)
   const qMode = String(req.query.mode || '').toLowerCase();
   let mode = req.body?.mode || qMode || 'auto';
   if (qMode === 'backfill') mode = 'backfill_30d';
 
   const patch = { mode };
 
-  // Window: ?windowDays=7
   if (req.query.windowDays && !req.body?.windowDays) {
     patch.windowDays = parseInt(String(req.query.windowDays), 10);
   }
-
-  // Range: ?from=YYYY-MM-DD&to=YYYY-MM-DD
   if (req.query.from && !req.body?.from) patch.from = req.query.from;
   if (req.query.to   && !req.body?.to)   patch.to   = req.query.to;
 
-  // Dryrun opcional
   if ((req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true') && !req.body?.dryrun) {
     patch.dryrun = true;
   }
@@ -141,12 +136,20 @@ function adaptSyncSalesQueryToBody(req, _res, next) {
 }
 
 /* ───────── Sync ventas (oficial) ─────────
-   salesSyncController.syncSalesForBusiness espera (req,res,next) y lee req.body
+   OJO: syncSalesForBusiness no es handler Express; armamos wrapper.
 */
 router.post(
   '/:id/sync-sales',
   adaptSyncSalesQueryToBody,
-  ensureFn('syncSalesForBusiness', syncSalesForBusiness)
+  async (req, res, next) => {
+    try {
+      const biz = req.business; // seteado por requireBusinessAccessParam
+      const out = await syncSalesForBusiness(biz, req.body);
+      res.json({ ok: true, business_id: biz.id, sales: out });
+    } catch (e) {
+      next(e);
+    }
+  }
 );
 
 /* ───────── Sync catálogo (manual) ───────── */
