@@ -362,28 +362,63 @@ exports.maxiSalesProbe = async (req, res) => {
     const from = String(req.query.from || '').slice(0, 10);
     const to   = String(req.query.to   || '').slice(0, 10);
 
-    const makers = [
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventas/detalle`);      u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventas`);              u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/ventas`);                           u.searchParams.set('cod_cli',codcli); u.searchParams.set('desde',from);        u.searchParams.set('hasta',to);     return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos`);     u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos/detalle`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventas_por_articulo`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventasporarticulo`);   u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+    // ── Candidatos de rutas conocidas/posibles ──
+    const paths = [
+      '/estadisticas/ventas/detalle',
+      '/estadisticas/ventas',
+      '/ventas',
+      '/estadisticas/ventasarticulos',
+      '/estadisticas/ventasarticulos/detalle',
+      '/estadisticas/ventas_por_articulo',
+      '/estadisticas/ventasporarticulo',
+      '/estadisticas/ventas-por-articulo',
+      '/estadisticas/ventas-por-articulos',
+      '/estadisticas/ventas/detalles',         // a veces pluralizan
+      '/estadisticas/ventas/por-articulo',
+      '/estadisticas/ventasdiarias',           // daily
+      '/estadisticas/ventas/diarias',
     ];
 
-    const tried = [];
-    const hits = [];
+    // ── combinaciones de parámetros ──
+    const qpVariants = (base, f, t) => ([
+      // GET con cod_cli
+      (p)=>{ const u=new URL(base+p); u.searchParams.set('cod_cli', String(codcli)); u.searchParams.set('fechaInicio', f); u.searchParams.set('fechaFin', t); return { method:'GET', url:u.toString(), body:null }; },
+      (p)=>{ const u=new URL(base+p); u.searchParams.set('cod_cli', String(codcli)); u.searchParams.set('desde', f); u.searchParams.set('hasta', t); return { method:'GET', url:u.toString(), body:null }; },
+      (p)=>{ const u=new URL(base+p); u.searchParams.set('codcli',  String(codcli)); u.searchParams.set('fechaInicio', f); u.searchParams.set('fechaFin', t); return { method:'GET', url:u.toString(), body:null }; },
+      (p)=>{ const u=new URL(base+p); u.searchParams.set('codcli',  String(codcli)); u.searchParams.set('desde', f); u.searchParams.set('hasta', t); return { method:'GET', url:u.toString(), body:null }; },
 
-    for (const mk of makers) {
-      const url = mk(BASE);
-      try {
-        const r = await fetchNative(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }});
-        const text = await r.text();
-        let json = null;
-        try { json = JSON.parse(text); } catch {}
-        const arrays =
-          (json && [
+      // POST JSON con cod_cli
+      (p)=>({ method:'POST', url: base+p, body: { cod_cli: String(codcli), fechaInicio: f, fechaFin: t } }),
+      (p)=>({ method:'POST', url: base+p, body: { cod_cli: String(codcli), desde: f,       hasta: t   } }),
+      (p)=>({ method:'POST', url: base+p, body: { codcli:  String(codcli), fechaInicio: f, fechaFin: t } }),
+      (p)=>({ method:'POST', url: base+p, body: { codcli:  String(codcli), desde: f,       hasta: t   } }),
+    ]);
+
+    const tried = [];
+    const hits  = [];
+
+    for (const p of paths) {
+      for (const mk of qpVariants(BASE, from, to)) {
+        const reqSpec = mk(p);
+        try {
+          const opt = {
+            method: reqSpec.method,
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'application/json',
+            }
+          };
+          if (reqSpec.method === 'POST') {
+            opt.headers['Content-Type'] = 'application/json';
+            opt.body = JSON.stringify(reqSpec.body);
+          }
+          const r = await fetchNative(reqSpec.url, opt);
+          const text = await r.text();
+          let json = null;
+          try { json = JSON.parse(text); } catch {}
+
+          // Buscamos un array plausible
+          const arrays = json ? [
             json?.content?.detalle,
             json?.content?.items,
             json?.content?.ventas,
@@ -392,16 +427,27 @@ exports.maxiSalesProbe = async (req, res) => {
             json?.items,
             Array.isArray(json?.content) ? json.content : null,
             Array.isArray(json) ? json : null,
-          ].filter(Array.isArray)) || [];
+          ].filter(Array.isArray) : [];
+          const rows = arrays[0]?.length || 0;
 
-        const rows = arrays[0] || [];
-        tried.push({ url, status: r.status, resultCode: json?.resultCode, keys: json ? Object.keys(json) : null, contentKeys: json?.content ? Object.keys(json.content) : null, rows: rows.length, preview: text.slice(0, 400) });
+          tried.push({
+            url: reqSpec.url,
+            method: reqSpec.method,
+            status: r.status,
+            resultCode: json?.resultCode,
+            keys: json ? Object.keys(json) : null,
+            contentKeys: json?.content ? Object.keys(json.content) : null,
+            rows,
+            preview: text.slice(0, 400),
+          });
 
-        if (r.ok && rows.length > 0) {
-          hits.push({ url, rows: rows.length });
+          // Tomamos como hit si (res.ok && rows>0)
+          if (r.ok && rows > 0) {
+            hits.push({ url: reqSpec.url, method: reqSpec.method, rows });
+          }
+        } catch (e) {
+          tried.push({ url: reqSpec.url, method: reqSpec.method, error: String(e?.message || e) });
         }
-      } catch (e) {
-        tried.push({ url, error: String(e?.message || e) });
       }
     }
 
@@ -410,3 +456,4 @@ exports.maxiSalesProbe = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
