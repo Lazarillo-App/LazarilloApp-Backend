@@ -261,13 +261,19 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd) {
   try {
     await client.query('BEGIN');
 
+    // ✅ Después: una sentencia por query
     await client.query(
       `DELETE FROM sales_daily_items
-         WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;
-       DELETE FROM sales_daily
-         WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date;`,
+     WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date`,
       [businessId, fromYmd, toYmd]
     );
+
+    await client.query(
+      `DELETE FROM sales_daily
+     WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date`,
+      [businessId, fromYmd, toYmd]
+    );
+
 
     // Totales por día
     await client.query(
@@ -313,5 +319,5 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd) {
 module.exports = {
   normalizeInvoices,
   upsertSalesBatch,
-  upsertDailyAggregates, 
+  upsertDailyAggregates,
 };

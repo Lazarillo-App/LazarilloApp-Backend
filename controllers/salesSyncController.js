@@ -51,12 +51,21 @@ exports.syncDaily = async (req, res) => {
   res.json({ ok: true, business_id: biz.id, ...out });
 };
 
+
 exports.syncWindow = async (req, res) => {
-  const biz = req.business;
-  const { from, to } = req.body || {};
-  if (!from || !to) return res.status(400).json({ error:'from_to_required' });
-  const out = await runWindow({ businessId: biz.id, days: 7, req }); // usa clamp interno
-  res.json({ ok: true, business_id: biz.id, ...out, from, to });
+  try {
+    const biz = req.business;
+    const { from, to, dryrun = false } = req.body || {};
+    if (!from || !to) {
+      return res.status(400).json({ error: 'from_to_required' });
+    }
+    // Reutilizamos el flujo probado que ya maneja login + upsert + agregados
+    const out = await exports.syncSalesForBusiness(biz, { from, to, dryrun });
+    return res.json({ ok: true, business_id: biz.id, ...out });
+  } catch (e) {
+    const status = e.status || 500;
+    return res.status(status).json({ error: 'internal', message: e.message || 'sync_window_failed' });
+  }
 };
 
 /* ────────────────────────────────────────────────────────────── */
