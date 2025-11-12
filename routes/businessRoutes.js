@@ -12,17 +12,12 @@ const {
   salesSummaryFromDB,
   salesSeriesFromDB,
   syncNow,
-  maxiArticlesProxy,
 } = require('../controllers/syncController');
 
+const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
-const { maxiPing,
-  syncSalesForBusiness,
-  maxiSalesProbe,
-  maxiSalesProbeV2, } = require('../controllers/salesSyncController');
-
 
 /* ───────── Helper anti-crash ───────── */
 function ensureFn(name, fn) {
@@ -60,8 +55,8 @@ router.param('id', requireBusinessAccessParam);
 
 /* ───────── Logo: subir archivo ───────── */
 const uploadFields = upload.fields([
-  { name: 'file', maxCount: 1 },
-  { name: 'logo', maxCount: 1 },
+  { name: 'file',  maxCount: 1 },
+  { name: 'logo',  maxCount: 1 },
   { name: 'image', maxCount: 1 },
 ]);
 router.post('/:id/logo', (req, res, next) => {
@@ -71,19 +66,17 @@ router.post('/:id/logo', (req, res, next) => {
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-              'upload_error',
+          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+          'upload_error',
       });
     }
     const files = req.files || {};
     req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
 
-    return res.status(400).json({ error: 'missing_file', accept: ['png','jpg','jpeg','webp','gif','svg'], max_mb: 2 });
+    if (!req.file && !req.body?.url) return res.status(400).json({ error: 'missing_file' });
     return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
 });
-
-router.get('/:id/maxi-articles-proxy', ensureFn('maxiArticlesProxy', maxiArticlesProxy));
 
 /* ───────── Branding URL directa ───────── */
 router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
@@ -120,9 +113,6 @@ router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticles
 router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
 router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
 
-router.get('/:id/maxi-sales-probe', ensureFn('maxiSalesProbe', maxiSalesProbe));
-router.get('/:id/maxi-sales-probe-v2', ensureFn('maxiSalesProbeV2', maxiSalesProbeV2));
-
 /* ───────── Adapter para sync ventas (acepta query o body) ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {
   const qMode = String(req.query.mode || '').toLowerCase();
@@ -134,10 +124,8 @@ function adaptSyncSalesQueryToBody(req, _res, next) {
   if (req.query.windowDays && !req.body?.windowDays) {
     patch.windowDays = parseInt(String(req.query.windowDays), 10);
   }
-  const cut = (s) => String(s || '').slice(0, 10); // YYYY-MM-DD
-  if (req.query.from && !req.body?.from) patch.from = cut(req.query.from);
-  if (req.query.to && !req.body?.to) patch.to = cut(req.query.to);
-
+  if (req.query.from && !req.body?.from) patch.from = req.query.from;
+  if (req.query.to   && !req.body?.to)   patch.to   = req.query.to;
 
   if ((req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true') && !req.body?.dryrun) {
     patch.dryrun = true;
