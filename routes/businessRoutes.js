@@ -1,3 +1,4 @@
+// routes/businessRoutes.js
 const express = require('express');
 const router = express.Router();
 const path = require('path');
@@ -17,14 +18,9 @@ const {
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
-const {
-  maxiPing,
-  syncSalesForBusiness,
-  maxiSalesProbe,
-  maxiSalesProbeV2,
-} = require('../controllers/salesSyncController');
 
-const salesV2 = require('../controllers/salesSyncController');
+// 🔴 ÚNICA importación del controlador de ventas
+const sales = require('../controllers/salesSyncController');
 
 /* ───────── Helper anti-crash ───────── */
 function ensureFn(name, fn) {
@@ -62,8 +58,8 @@ router.param('id', requireBusinessAccessParam);
 
 /* ───────── Logo: subir archivo ───────── */
 const uploadFields = upload.fields([
-  { name: 'file', maxCount: 1 },
-  { name: 'logo', maxCount: 1 },
+  { name: 'file',  maxCount: 1 },
+  { name: 'logo',  maxCount: 1 },
   { name: 'image', maxCount: 1 },
 ]);
 router.post('/:id/logo', (req, res, next) => {
@@ -73,15 +69,15 @@ router.post('/:id/logo', (req, res, next) => {
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-              'upload_error',
+          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+          'upload_error',
       });
     }
     const files = req.files || {};
     req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
 
     if (!req.file && !req.body?.url) {
-      return res.status(400).json({ error: 'missing_file', accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], max_mb: 2 });
+      return res.status(400).json({ error: 'missing_file', accept: ['png','jpg','jpeg','webp','gif','svg'], max_mb: 2 });
     }
     return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
@@ -93,8 +89,8 @@ router.get('/:id/maxi-articles-proxy', ensureFn('maxiArticlesProxy', maxiArticle
 /* ───────── Branding URL directa ───────── */
 router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
 
-/* ───────── MAXI: ping ───────── */
-router.get('/:id/maxi-ping', ensureFn('maxiPing', maxiPing));
+/* ───────── MAXI: ping (usa sales.maxiPing) ───────── */
+router.get('/:id/maxi-ping', ensureFn('sales.maxiPing', sales.maxiPing));
 
 /* ───────── CRUD base ───────── */
 router.get('/', ensureFn('businesses.listMine', businesses.listMine));
@@ -113,89 +109,58 @@ router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 /* ───────── Maxi credenciales / estado ───────── */
 router.get('/:id/maxi-status', ensureFn('businesses.maxiStatus', businesses.maxiStatus));
 router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.maxiSave));
-
 router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 
-/* ───────── Catálogo / Ventas (legacy lectura) ───────── */
+/* ───────── Catálogo (lecturas legacy) ───────── */
 router.get('/:id/articles', ensureFn('listArticlesFromDB', listArticlesFromDB));
 router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
 router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
 router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
 
-/* ───────── Ventas: probes y sync (monolítico) ───────── */
-router.get('/:id/maxi-sales-probe', ensureFn('maxiSalesProbe', maxiSalesProbe));
-router.get('/:id/maxi-sales-probe-v2', ensureFn('maxiSalesProbeV2', maxiSalesProbeV2));
+/* ───────── Ventas: probes (diagnóstico) ───────── */
+router.get('/:id/maxi-sales-probe',    ensureFn('sales.maxiSalesProbe',   sales.maxiSalesProbe));
+router.get('/:id/maxi-sales-probe-v2', ensureFn('sales.maxiSalesProbeV2', sales.maxiSalesProbeV2));
 
-/* ───────── Ventas V2 (oficiales) ───────── */
-// Probe (no escribe DB)
-router.get(
-  '/:id/maxi-invoice-probe',
-  ensureFn('salesV2.maxiInvoiceProbe', salesV2.maxiInvoiceProbe)
-);
+/* ───────── Ventas V2 (estables) ───────── */
+router.post('/:id/sync-sales/window',              ensureFn('sales.syncWindow',        sales.syncWindow));
+router.post('/:id/sync-sales/backfill-once',       ensureFn('sales.backfillOnce',      sales.backfillOnce));
+router.post('/:id/sync-sales/daily-auto',          ensureFn('sales.dailyAuto',         sales.dailyAuto));
+router.post('/:id/sync-sales/rebuild-aggregates',  ensureFn('sales.rebuildAggregates', sales.rebuildAggregates));
 
-// Ventana exacta from/to (ESCRIBE DB usando normalizador)
-router.post(
-  '/:id/sync-sales/window',
-  ensureFn('salesV2.syncWindow', salesV2.syncWindow)
-);
-
-// Backfill inicial UNA SOLA VEZ (últimos 7 días hasta AYER)
-router.post(
-  '/:id/sync-sales/backfill-once',
-  ensureFn('salesV2.syncBackfillOnce', salesV2.syncBackfillOnce)
-);
-
-// Incremental diario (desde último día hasta AYER)
-router.post(
-  '/:id/sync-sales/daily-auto',
-  ensureFn('salesV2.syncDailyAuto', salesV2.syncDailyAuto)
-);
-
-// Recalcular agregados entre fechas (si cambiaste mapeos o normalizador)
-router.post(
-  '/:id/sync-sales/rebuild-aggregates',
-  ensureFn('salesV2.rebuildAggregates', salesV2.rebuildAggregates)
-);
-
-
-/* Adapter para sync ventas (acepta query o body) */
+/* ───────── Adapter legacy para sync por body/query ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {
   const qMode = String(req.query.mode || '').toLowerCase();
   let mode = req.body?.mode || qMode || 'auto';
   if (qMode === 'backfill') mode = 'backfill_30d';
 
   const patch = { mode };
-
   if (req.query.windowDays && !req.body?.windowDays) {
     patch.windowDays = parseInt(String(req.query.windowDays), 10);
   }
-  if (req.query.from && !req.body?.from) patch.from = req.query.from;
-  if (req.query.to && !req.body?.to) patch.to = req.query.to;
+  const cut = (s) => String(s || '').slice(0, 10);
+  if (req.query.from && !req.body?.from) patch.from = cut(req.query.from);
+  if (req.query.to && !req.body?.to)     patch.to   = cut(req.query.to);
 
   if ((req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true') && !req.body?.dryrun) {
     patch.dryrun = true;
   }
-
   req.body = { ...(req.body || {}), ...patch };
   next();
 }
 
-/* Sync ventas (oficial, usa salesSyncController.syncSalesForBusiness) */
 router.post(
   '/:id/sync-sales',
   adaptSyncSalesQueryToBody,
   async (req, res, next) => {
     try {
-      const biz = req.business; // seteado por requireBusinessAccessParam
-      const out = await syncSalesForBusiness(biz, req.body);
+      const biz = req.business;
+      const out = await sales.syncSalesForBusiness(biz, req.body);
       res.json({ ok: true, business_id: biz.id, sales: out });
-    } catch (e) {
-      next(e);
-    }
+    } catch (e) { next(e); }
   }
 );
 
-/* Sync catálogo (manual) */
+/* ───────── Sync catálogo (manual) ───────── */
 router.post('/:id/sync', ensureFn('syncNow', syncNow));
 
 /* Default group helpers */
