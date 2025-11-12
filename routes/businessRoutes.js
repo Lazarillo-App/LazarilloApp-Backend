@@ -18,7 +18,10 @@ const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncCont
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
-const { maxiSalesProbe, maxiSalesProbeV2, } = require('../controllers/salesSyncController');
+const { maxiPing,
+  syncSalesForBusiness,
+  maxiSalesProbe,
+  maxiSalesProbeV2, } = require('../controllers/salesSyncController');
 
 
 /* ───────── Helper anti-crash ───────── */
