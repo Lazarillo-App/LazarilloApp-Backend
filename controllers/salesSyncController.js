@@ -117,15 +117,33 @@ async function maxiLogin({ email, pass, codcli }) {
 
 /* ───────────── MAXI: traer ventas por rango (normalizador flexible) ───────────── */
 async function maxiFetchSalesRange({ token, codcli, from, to }) {
-  const makers = [
-    (b)=>{ const u=new URL(`${b}/estadisticas/ventas/detalle`);           u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-    (b)=>{ const u=new URL(`${b}/estadisticas/ventas`);                   u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-    (b)=>{ const u=new URL(`${b}/ventas`);                                u.searchParams.set('cod_cli',codcli); u.searchParams.set('desde',from);        u.searchParams.set('hasta',to);     return u.toString(); },
-    (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos`);          u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-    (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos/detalle`);  u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-    (b)=>{ const u=new URL(`${b}/estadisticas/ventas_por_articulo`);      u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-    (b)=>{ const u=new URL(`${b}/estadisticas/ventasporarticulo`);        u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+  const paths = [
+    '/estadisticas/ventas/detalle',
+    '/estadisticas/ventas',
+    '/ventas',
+    '/estadisticas/ventasarticulos',
+    '/estadisticas/ventasarticulos/detalle',
+    '/estadisticas/ventas_por_articulo',
+    '/estadisticas/ventasporarticulo',
+    '/estadisticas/ventas-por-articulo',
+    '/estadisticas/ventas-por-articulos',
+    '/estadisticas/ventas/detalles',
+    '/estadisticas/ventas/por-articulo',
+    '/estadisticas/ventasdiarias',
+    '/estadisticas/ventas/diarias',
   ];
+
+  const makeReqs = (base, p, f, t) => ([
+    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('cod_cli', String(codcli)); u.searchParams.set('fechaInicio', f); u.searchParams.set('fechaFin', t); return u.toString(); })() },
+    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('cod_cli', String(codcli)); u.searchParams.set('desde', f);       u.searchParams.set('hasta', t);     return u.toString(); })() },
+    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('codcli',  String(codcli)); u.searchParams.set('fechaInicio', f); u.searchParams.set('fechaFin', t); return u.toString(); })() },
+    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('codcli',  String(codcli)); u.searchParams.set('desde', f);       u.searchParams.set('hasta', t);     return u.toString(); })() },
+
+    { method:'POST', url: base+p, body: { cod_cli: String(codcli), fechaInicio: f, fechaFin: t } },
+    { method:'POST', url: base+p, body: { cod_cli: String(codcli), desde: f,       hasta: t   } },
+    { method:'POST', url: base+p, body: { codcli:  String(codcli), fechaInicio: f, fechaFin: t } },
+    { method:'POST', url: base+p, body: { codcli:  String(codcli), desde: f,       hasta: t   } },
+  ]);
 
   const tryNormalize = (json) => {
     const arrays = [
@@ -140,7 +158,7 @@ async function maxiFetchSalesRange({ token, codcli, from, to }) {
     ].filter(Array.isArray);
     const rows = arrays[0] || [];
     const nnum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-    const mapped = rows.map((o = {}) => {
+    return rows.map((o = {}) => {
       const id = Number(o.articulo_id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo ?? o.id);
       const fechaRaw = o.day ?? o.fecha ?? o.fechaVenta ?? o.fecha_venta ?? o.dia ?? o.fechaEmision;
       const day = String(fechaRaw || '').slice(0, 10);
@@ -149,30 +167,30 @@ async function maxiFetchSalesRange({ token, codcli, from, to }) {
       if (!Number.isFinite(id) || !day) return null;
       return { id, day, qty, amount };
     }).filter(Boolean);
-    return mapped;
   };
 
-  let lastErr;
-  for (const mk of makers) {
-    const url = mk(BASE);
-    try {
-      const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
-      const txt = await res.text();
-      let json = null;
-      try { json = JSON.parse(txt); } catch { /* podría venir CSV/HTML => descartamos */ }
+  for (const p of paths) {
+    for (const spec of makeReqs(BASE, p, from, to)) {
+      try {
+        const opt = {
+          method: spec.method,
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        };
+        if (spec.method === 'POST') {
+          opt.headers['Content-Type'] = 'application/json';
+          opt.body = JSON.stringify(spec.body);
+        }
+        const res = await fetchWithRetry(spec.url, opt);
+        const txt = await res.text();
+        let json = null; try { json = JSON.parse(txt); } catch {}
+        if (!res.ok) continue;
+        if (json?.resultCode && json.resultCode !== 'SUCCESS') continue;
 
-      // Si Maxi devolvió un NOT_FOUND / error, seguimos probando
-      if (!res.ok || (json && json.resultCode && json.resultCode !== 'SUCCESS')) {
-        continue;
+        const lines = json ? tryNormalize(json) : [];
+        if (lines.length > 0) return lines;
+      } catch {
+        // probar siguiente combinación
       }
-
-      const lines = json ? tryNormalize(json) : [];
-      if (lines.length > 0) return lines;
-
-      // si respondió 200 pero sin líneas, seguimos probando alternativas
-    } catch (e) {
-      lastErr = e;
-      continue;
     }
   }
   throw new Error('maxi_sales_fetch_failed');
