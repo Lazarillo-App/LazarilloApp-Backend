@@ -11,15 +11,14 @@ const {
   listArticlesTreeFromDB,
   salesSummaryFromDB,
   salesSeriesFromDB,
-   maxiSalesProbeV2, 
   syncNow,
-} = require('../controllers/syncController'); 
+} = require('../controllers/syncController');
 
 const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
-const { maxiSalesProbe } = require('../controllers/salesSyncController');
+const { maxiSalesProbe, maxiSalesProbeV2, } = require('../controllers/salesSyncController');
 
 
 /* ───────── Helper anti-crash ───────── */
@@ -58,8 +57,8 @@ router.param('id', requireBusinessAccessParam);
 
 /* ───────── Logo: subir archivo ───────── */
 const uploadFields = upload.fields([
-  { name: 'file',  maxCount: 1 },
-  { name: 'logo',  maxCount: 1 },
+  { name: 'file', maxCount: 1 },
+  { name: 'logo', maxCount: 1 },
   { name: 'image', maxCount: 1 },
 ]);
 router.post('/:id/logo', (req, res, next) => {
@@ -69,8 +68,8 @@ router.post('/:id/logo', (req, res, next) => {
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error',
+            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+              'upload_error',
       });
     }
     const files = req.files || {};
@@ -117,7 +116,7 @@ router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFrom
 router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
 
 router.get('/:id/maxi-sales-probe', ensureFn('maxiSalesProbe', maxiSalesProbe));
-router.get('/:id/maxi-sales-probe-v2', ensureFn('maxiSalesProbeV2',  maxiSalesProbeV2));
+router.get('/:id/maxi-sales-probe-v2', ensureFn('maxiSalesProbeV2', maxiSalesProbeV2));
 
 /* ───────── Adapter para sync ventas (acepta query o body) ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {
@@ -131,7 +130,7 @@ function adaptSyncSalesQueryToBody(req, _res, next) {
     patch.windowDays = parseInt(String(req.query.windowDays), 10);
   }
   if (req.query.from && !req.body?.from) patch.from = req.query.from;
-  if (req.query.to   && !req.body?.to)   patch.to   = req.query.to;
+  if (req.query.to && !req.body?.to) patch.to = req.query.to;
 
   if ((req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true') && !req.body?.dryrun) {
     patch.dryrun = true;
