@@ -1,39 +1,49 @@
 // services/maxiSalesService.js
-const fetch = require('node-fetch');
+/* eslint-disable no-console */
+'use strict';
+
 const { getCreds } = require('../services/maxiCredsService');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
-const MAXI_BASE = process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar';
-const STATS_BASE = process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar';
+// Usa fetch nativo (Node 18+) y cae a node-fetch si hace falta
+const fetchNative =
+  (typeof globalThis.fetch === 'function')
+    ? ((...args) => globalThis.fetch(...args))
+    : require('node-fetch');
+
+const MAXI_BASE  = (process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/,'');
+const STATS_BASE = (process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/,'');
 const CONC = Math.max(1, Number(process.env.MAXI_FETCH_CONCURRENCY || 3));
 
 /* ───────── fechas (UTC) ───────── */
-function pad2(n) { return String(n).padStart(2, '0'); }
-function ymd(d) { return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`; }
-function at00UTC(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
-function addDaysUTC(d, n) { return new Date(d.getTime() + n * 86400000); }
+function pad2(n){ return String(n).padStart(2,'0'); }
+function ymd(d){ return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`; }
+function at00UTC(d){ return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); }
+function addDaysUTC(d, n){ return new Date(d.getTime() + n * 86400000); }
 
 /* ───────── bearer cache ───────── */
 const tokenCache = new Map();
 
+/* ✅ LOGIN CORRECTO: sin Authorization; POST con email/pass/cod_cli */
 async function loginMaxi(email, pass, codcli) {
-  const url = `${MAXI_BASE.replace(/\/+$/, '')}/login`;
-  const r = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${bearer}`,
-      Accept: 'application/json'
-    }
+  const url = `${MAXI_BASE}/login`;
+  const r = await fetchNative(url, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json', 'Accept':'application/json' },
+    body: JSON.stringify({ email, pass, cod_cli: String(codcli) })
   });
-  const txt = await r.text().catch(() => '');
-  let j; try { j = JSON.parse(txt); } catch { }
-  if (!r.ok || j?.resultCode !== 'SUCCESS') {
+
+  const txt = await r.text().catch(()=> '');
+  let j; try { j = JSON.parse(txt); } catch {}
+
+  const ok = r.ok && j?.resultCode === 'SUCCESS' && j?.content?.tokenAccess;
+  if (!ok) {
     const err = new Error(j?.resultDescription || r.statusText || 'login Maxi falló');
     err.status = r.status || 502;
+    err._body = txt.slice(0, 400);
     throw err;
   }
-  const token = j?.content?.tokenAccess;
-  if (!token) { const e = new Error('token Maxi vacío'); e.status = 502; throw e; }
-  return token;
+  return j.content.tokenAccess;
 }
 
 /**
@@ -54,7 +64,7 @@ async function getBearer(businessId, req) {
   if (cached && cached.expMs > now) return cached.token;
 
   const creds = await getCreds(businessId);
-  const email = (creds?.email || '').trim();
+  const email  = (creds?.email || '').trim();
   const codcli = (creds?.cod_cli || creds?.codcli || '').trim();
   const password =
     creds?.pass ??
@@ -73,35 +83,34 @@ async function getBearer(businessId, req) {
 
 /* ───────── low-level fetch (invoicebydate) ───────── */
 async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
-  const base = STATS_BASE.replace(/\/+$/, '');
-  const url = `${base}/estadisticas/invoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
+  const url = `${STATS_BASE}/estadisticas/invoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
 
-  for (let i = 0; i < 3; i++) {
-    const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
-    const txt = await r.text().catch(() => '');
-    let j; try { j = JSON.parse(txt); } catch { }
+  for (let i=0;i<3;i++){
+    const r = await fetchNative(url, { headers: { Authorization: `Bearer ${bearer}` } });
+    const txt = await r.text().catch(()=> '');
+    let j; try { j = JSON.parse(txt); } catch {}
     const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
 
     if (ok) {
       return (j?.content?.content) ? j.content.content
-        : (j?.content) ? j.content
-          : j ?? {};
+           : (j?.content)          ? j.content
+           : j ?? {};
     }
 
-    if ([429, 502, 503].includes(r.status)) {
+    if ([429,502,503].includes(r.status)) {
       if (i === 2) {
         const e = new Error(j?.resultDescription || r.statusText || 'Maxi 5xx');
         e.status = r.status || 502;
-        e._maxi = { status: r.status, fromYMD, toYMD, bodyPreview: String(txt).slice(0, 200) };
+        e._maxi = { status: r.status, fromYMD, toYMD, bodyPreview: String(txt).slice(0,200) };
         throw e;
       }
-      await new Promise(res => setTimeout(res, 400 * (i + 1) ** 2));
+      await new Promise(res => setTimeout(res, 400 * (i+1)**2));
       continue;
     }
 
     const e = new Error(j?.resultDescription || r.statusText || txt || 'error Maxi');
     e.status = r.status || 502;
-    e._maxi = { status: r.status, fromYMD, toYMD, bodyPreview: String(txt).slice(0, 200) };
+    e._maxi = { status: r.status, fromYMD, toYMD, bodyPreview: String(txt).slice(0,200) };
     throw e;
   }
   const e = new Error('Maxi retries exhausted'); e.status = 502; throw e;
@@ -129,7 +138,7 @@ function buildWindows(fromDate, toDate, winDays = 7) {
   if (A > T) return [];
 
   const out = [];
-  for (let cur = new Date(A); cur <= T;) {
+  for (let cur = new Date(A); cur <= T; ) {
     const a = new Date(cur);
     const b = addDaysUTC(a, winDays - 1);
     const stop = b < T ? b : T;
@@ -145,26 +154,21 @@ function extractFacturas(payload) {
 
   // fullinvoicebydate variantes
   const content = payload?.content ?? payload;
-  const inner = content?.content ?? content;
+  const inner   = content?.content ?? content;
 
-  // Caso clásico fullinvoicebydate: { content: { content: { facturas: [ { factura }, ... ] } } }
-  if (Array.isArray(inner?.facturas)) {
-    return inner.facturas.filter(Boolean);
-  }
-  // Variante: { facturas: [ { factura }, ... ] }
-  if (Array.isArray(payload?.facturas)) {
-    return payload.facturas.filter(Boolean);
-  }
+  // { content: { content: { facturas:[{ factura }, ...] } } }
+  if (Array.isArray(inner?.facturas)) return inner.facturas.filter(Boolean);
 
-  // ───────── invoicebydate ─────────
-  // Formato: array de { order: { orderData, orderItems: [ { orderItem } ] } }
-  // Puede venir como { content: [ ... ] } o directamente [ ... ]
+  // { facturas:[{ factura }, ...] }
+  if (Array.isArray(payload?.facturas)) return payload.facturas.filter(Boolean);
+
+  // invoicebydate: array con órdenes
   const arr = Array.isArray(inner) ? inner : (Array.isArray(payload) ? payload : null);
   if (arr && arr.length) {
     if (arr.some(x => x?.order?.orderData || x?.orderData)) {
       return arr.map(x => {
-        if (x?.order?.orderData) return x;             // { order: { orderData, orderItems } }
-        if (x?.orderData) return { order: x }; // { orderData, orderItems }  => envolver
+        if (x?.order?.orderData) return x;             // { order:{...} }
+        if (x?.orderData)         return { order: x };  // wrap
         return x;
       });
     }
@@ -172,7 +176,6 @@ function extractFacturas(payload) {
   }
 
   if (Array.isArray(content)) return content;
-
   return [];
 }
 
@@ -181,13 +184,13 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   const windows7 = buildWindows(fromDate, toDate, 7);
 
   const results = new Array(windows7.length);
-  const errors = new Array(windows7.length).fill(null);
+  const errors  = new Array(windows7.length).fill(null);
 
   let idx = 0;
-  async function worker() {
+  async function worker(){
     while (idx < windows7.length) {
       const my = idx++;
-      const [a, b] = windows7[my];
+      const [a,b] = windows7[my];
       try {
         results[my] = await fetchInvoiceByDate(a, b, bearer);
       } catch (e) {
@@ -195,10 +198,10 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(conc, windows7.length) }, worker));
+  await Promise.all(Array.from({length: Math.min(conc, windows7.length)}, worker));
 
   const outPayloads = [];
-  for (let i = 0; i < windows7.length; i++) {
+  for (let i=0;i<windows7.length;i++){
     if (!errors[i]) { outPayloads.push(results[i]); continue; }
     const err = errors[i];
     if ((err?.status || 0) >= 500) {
@@ -239,11 +242,11 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
     let arr = extractFacturas(p);
     if (!Array.isArray(arr) || !arr.length) continue;
 
-    // Si es fullinvoicebydate: [{ factura }, ...] → extraemos la factura
+    // fullinvoicebydate: [{ factura }, ...] → extraer factura
     if (arr[0] && typeof arr[0] === 'object' && Object.prototype.hasOwnProperty.call(arr[0], 'factura')) {
       arr = arr.map(x => x?.factura || x).filter(Boolean);
     }
-    // invoicebydate retorna órdenes (mantener tal cual; el normalizador las entiende)
+    // invoicebydate: devolver órdenes tal cual
     if (arr.length) facturas.push(...arr);
   }
   return facturas;
