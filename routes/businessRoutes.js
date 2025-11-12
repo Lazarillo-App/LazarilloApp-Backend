@@ -24,6 +24,8 @@ const {
   maxiSalesProbeV2,
 } = require('../controllers/salesSyncController');
 
+const salesV2 = require('../controllers/salesSyncController');
+
 /* ───────── Helper anti-crash ───────── */
 function ensureFn(name, fn) {
   if (typeof fn !== 'function') {
@@ -71,15 +73,15 @@ router.post('/:id/logo', (req, res, next) => {
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error',
+            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+              'upload_error',
       });
     }
     const files = req.files || {};
     req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
 
     if (!req.file && !req.body?.url) {
-      return res.status(400).json({ error: 'missing_file', accept: ['png','jpg','jpeg','webp','gif','svg'], max_mb: 2 });
+      return res.status(400).json({ error: 'missing_file', accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], max_mb: 2 });
     }
     return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
@@ -123,6 +125,38 @@ router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFr
 /* ───────── Ventas: probes y sync (monolítico) ───────── */
 router.get('/:id/maxi-sales-probe', ensureFn('maxiSalesProbe', maxiSalesProbe));
 router.get('/:id/maxi-sales-probe-v2', ensureFn('maxiSalesProbeV2', maxiSalesProbeV2));
+
+/* ───────── Ventas V2 (oficiales) ───────── */
+// Probe (no escribe DB)
+router.get(
+  '/:id/maxi-invoice-probe',
+  ensureFn('salesV2.maxiInvoiceProbe', salesV2.maxiInvoiceProbe)
+);
+
+// Ventana exacta from/to (ESCRIBE DB usando normalizador)
+router.post(
+  '/:id/sync-sales/window',
+  ensureFn('salesV2.syncWindow', salesV2.syncWindow)
+);
+
+// Backfill inicial UNA SOLA VEZ (últimos 7 días hasta AYER)
+router.post(
+  '/:id/sync-sales/backfill-once',
+  ensureFn('salesV2.syncBackfillOnce', salesV2.syncBackfillOnce)
+);
+
+// Incremental diario (desde último día hasta AYER)
+router.post(
+  '/:id/sync-sales/daily-auto',
+  ensureFn('salesV2.syncDailyAuto', salesV2.syncDailyAuto)
+);
+
+// Recalcular agregados entre fechas (si cambiaste mapeos o normalizador)
+router.post(
+  '/:id/sync-sales/rebuild-aggregates',
+  ensureFn('salesV2.rebuildAggregates', salesV2.rebuildAggregates)
+);
+
 
 /* Adapter para sync ventas (acepta query o body) */
 function adaptSyncSalesQueryToBody(req, _res, next) {
