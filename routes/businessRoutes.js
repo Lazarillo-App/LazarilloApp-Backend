@@ -18,6 +18,8 @@ const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncCont
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
+const { maxiSalesProbe } = require('../controllers/salesSyncController');
+
 
 /* ───────── Helper anti-crash ───────── */
 function ensureFn(name, fn) {
@@ -112,6 +114,8 @@ router.get('/:id/articles', ensureFn('listArticlesFromDB', listArticlesFromDB));
 router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
 router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
 router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
+
+router.get('/:id/maxi-sales-probe', ensureFn('maxiSalesProbe', maxiSalesProbe));
 
 /* ───────── Adapter para sync ventas (acepta query o body) ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {

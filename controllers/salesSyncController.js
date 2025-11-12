@@ -376,3 +376,45 @@ exports.adminSyncSales = async (req, res) => {
   }
 };
 
+exports.maxiSalesProbe = async (req, res) => {
+  try {
+    const biz = req.business;
+    const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
+    const token = await maxiLogin({ email, pass, codcli });
+
+    const from = String(req.query.from || '').slice(0,10);
+    const to   = String(req.query.to   || '').slice(0,10);
+
+    const urls = [
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventas/detalle`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventas`);         u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/ventas`);                      u.searchParams.set('cod_cli',codcli); u.searchParams.set('desde',from);       u.searchParams.set('hasta',to);     return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventas/detallado`);u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+    ];
+
+    const tried = [];
+    for (const make of urls) {
+      const url = make(BASE);
+      try {
+        const r = await fetchNative(url, { headers: { Authorization: `Bearer ${token}`, Accept:'application/json' }});
+        const text = await r.text();
+        tried.push({ url, status: r.status, len: text.length, preview: text.slice(0, 600) });
+        const json = JSON.parse(text);
+        return res.json({
+          ok: true,
+          hit: url,
+          status: r.status,
+          keys: Object.keys(json || {}),
+          contentKeys: json?.content ? Object.keys(json.content || {}) : null,
+          tried
+        });
+      } catch (e) {
+        tried.push({ url, error: String(e?.message||e) });
+      }
+    }
+    res.status(502).json({ ok:false, error:'no_endpoint_yielded_json', tried });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:e.message });
+  }
+};
