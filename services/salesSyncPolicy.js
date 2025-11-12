@@ -1,7 +1,9 @@
 // services/salesSyncPolicy.js
+'use strict';
+
 const pool = require('../config/db');
 const { fetchSalesRanged } = require('./maxiSalesService');
-const { upsertSalesBatch } = require('./salesStore');
+const { upsertSalesBatch, upsertDailyAggregates, reconcileSalesMappings } = require('./salesStore');
 
 /* ───────────────────── Advisory lock por negocio ───────────────────── */
 function lockKeyFor(businessId) { return 0x53A1E5 ^ Number(businessId); }
@@ -25,7 +27,6 @@ const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.get
 const ymd  = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
 const addDaysUTC = (d, n) => new Date(d.getTime() + n*86400000);
 
-/** Devuelve { from, to } de los últimos N días **hasta ayer** */
 function lastNDaysUntilYesterday(N = 7) {
   const now = new Date();
   const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); // hoy (UTC) 00:00
@@ -35,7 +36,6 @@ function lastNDaysUntilYesterday(N = 7) {
   return { from: toISODate(start), to: toISODate(end) };
 }
 
-/** AYER (string YYYY-MM-DD) */
 function yesterdayISO() {
   const now = new Date();
   const y = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -45,20 +45,7 @@ function yesterdayISO() {
 
 const INIT_BACKFILL_DAYS = Math.max(1, Number(process.env.INIT_BACKFILL_DAYS || 7));
 
-async function runWindow({ businessId, days = 7, req } = {}) {
-  const today = at00(new Date());
-  const AYER  = addDaysUTC(today, -1);
-  const d = Math.max(1, Math.min(parseInt(days || 7, 10), 30));
-  const to   = ymd(AYER);
-  const from = ymd(addDaysUTC(AYER, -(d-1)));
-
-  const raw    = await fetchSalesRanged({ businessId, from, to, req });
-  const result = await upsertSalesBatch(businessId, raw);
-
-  return { from, to, fetched: raw.length, ...result };
-}
-
-/* ───────────────────── Estado persistente (sales_sync_state) ───────────────────── */
+/* ─────────────────────────── Estado persistente ─────────────────────────── */
 async function readState(client, businessId) {
   const { rows } = await client.query(
     'SELECT * FROM sales_sync_state WHERE business_id=$1',
@@ -69,6 +56,7 @@ async function readState(client, businessId) {
 
 async function upsertState(client, businessId, patch) {
   const keys = Object.keys(patch);
+  if (!keys.length) return null;
   const cols = ['business_id', ...keys];
   const vals = [businessId, ...keys.map(k => patch[k])];
   const params = vals.map((_, i) => `$${i + 1}`).join(', ');
@@ -82,23 +70,44 @@ async function upsertState(client, businessId, patch) {
   return rows[0];
 }
 
-/** Último día con datos (prefiere agregados; si no, crudos) */
-async function getMaxDayFromDB(client, businessId) {
-  const r1 = await client.query(
-    `SELECT MAX(day) AS max_day FROM sales_daily WHERE business_id=$1`,
-    [businessId]
-  );
-  if (r1.rows[0]?.max_day) return r1.rows[0].max_day;
-
-  const r2 = await client.query(
-    `SELECT MAX( (occurred_at AT TIME ZONE 'UTC')::date ) AS max_day
-       FROM app_sales WHERE business_id=$1`,
-    [businessId]
-  );
-  return r2.rows[0]?.max_day || null;
-}
-
 /* ─────────────────────────── API pública ─────────────────────────── */
+/**
+ * Ventana explícita: requiere { from, to } (YYYY-MM-DD).
+ * Hace fetch → upsert → reconcile → rebuild agregados dentro del rango [from..to].
+ */
+async function runWindow({ businessId, from, to, req } = {}) {
+  if (!businessId) { const e = new Error('businessId requerido'); e.status = 400; throw e; }
+  if (!from || !to)  { const e = new Error('from/to requeridos'); e.status = 400; throw e; }
+
+  // Clamp a AYER (UTC) para evitar hoy parcial
+  const end = at00(new Date());
+  end.setUTCDate(end.getUTCDate() - 1);
+  const F = ymd(at00(new Date(from)));
+  const T = ymd(new Date(ymd(at00(new Date(to))) > ymd(end) ? end : at00(new Date(to))));
+
+  const raw    = await fetchSalesRanged({ businessId, from: F, to: T, req });
+  const result = await upsertSalesBatch(businessId, raw); // { upserted, updated, minDay, maxDay }
+
+  // Reconcile + agregados (mismo rango tocado)
+  const rFrom = result.minDay || F;
+  const rTo   = result.maxDay || T;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await reconcileSalesMappings(client, businessId, { fromYmd: rFrom, toYmd: rTo });
+    await client.query('COMMIT');
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.warn('[salesSyncPolicy.runWindow] reconcile skip:', e?.message || e);
+  } finally {
+    client.release();
+  }
+
+  await upsertDailyAggregates(businessId, rFrom, rTo);
+
+  return { from: F, to: T, fetched: raw.length, ...result };
+}
 
 /**
  * Backfill inicial UNA SOLA VEZ (N días hasta AYER).
@@ -123,16 +132,34 @@ async function ensureInitialBackfillOnce({ businessId, req }) {
     }
 
     const { from, to } = lastNDaysUntilYesterday(INIT_BACKFILL_DAYS);
+
+    // Trae + inserta crudos
+    await client.query('COMMIT'); // liberá la transacción antes del fetch externo
     const raw = await fetchSalesRanged({ businessId, from, to, req });
     const res = await upsertSalesBatch(businessId, raw);
 
-    await upsertState(client, businessId, {
-      initial_backfill_done: true,
-      initial_backfill_at: new Date(),
-      last_daily_sync_at: to
-    });
+    // Reconcile + agregados
+    const rFrom = res.minDay || from;
+    const rTo   = res.maxDay || to;
 
-    await client.query('COMMIT');
+    const c2 = await pool.connect();
+    try {
+      await c2.query('BEGIN');
+      await reconcileSalesMappings(c2, businessId, { fromYmd: rFrom, toYmd: rTo });
+      await upsertState(c2, businessId, {
+        initial_backfill_done: true,
+        initial_backfill_at: new Date(),
+        last_daily_sync_at: rTo
+      });
+      await c2.query('COMMIT');
+    } catch (e) {
+      try { await c2.query('ROLLBACK'); } catch {}
+      throw e;
+    } finally {
+      c2.release();
+    }
+
+    await upsertDailyAggregates(businessId, rFrom, rTo);
     return { ok: true, from, to, window_days: INIT_BACKFILL_DAYS, ...res };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
@@ -163,7 +190,6 @@ async function runDailyAuto({ businessId, req }) {
     const state = await readState(client, businessId);
     if (!state?.initial_backfill_done) {
       await client.query('COMMIT'); // liberar transacción antes de delegar
-      // Importante: no mantener el lock mientras hacemos backfill inicial
       return await ensureInitialBackfillOnce({ businessId, req });
     }
 
@@ -189,13 +215,29 @@ async function runDailyAuto({ businessId, req }) {
       return { ok: true, up_to_date: true, last_day: maxDay };
     }
 
-    // Traer lo que falta (desde 'from' hasta AYER)
+    await client.query('COMMIT'); // cerrar antes del fetch externo
+
+    // Traer lo faltante → upsert → reconcile → agregados
     const raw = await fetchSalesRanged({ businessId, from, to, req });
     const res = await upsertSalesBatch(businessId, raw);
 
-    await upsertState(client, businessId, { last_daily_sync_at: to });
+    const rFrom = res.minDay || from;
+    const rTo   = res.maxDay || to;
 
-    await client.query('COMMIT');
+    const c2 = await pool.connect();
+    try {
+      await c2.query('BEGIN');
+      await reconcileSalesMappings(c2, businessId, { fromYmd: rFrom, toYmd: rTo });
+      await upsertState(c2, businessId, { last_daily_sync_at: rTo });
+      await c2.query('COMMIT');
+    } catch (e) {
+      try { await c2.query('ROLLBACK'); } catch {}
+      throw e;
+    } finally {
+      c2.release();
+    }
+
+    await upsertDailyAggregates(businessId, rFrom, rTo);
     return { ok: true, from, to, ...res };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
@@ -203,8 +245,24 @@ async function runDailyAuto({ businessId, req }) {
     throw e;
   } finally {
     try { if (locked) await unlock(client, businessId); } catch {}
-    client.release(); // liberar UNA sola vez
+    client.release();
   }
+}
+
+/** Último día con datos (prefiere agregados; si no, crudos) */
+async function getMaxDayFromDB(client, businessId) {
+  const r1 = await client.query(
+    `SELECT MAX(day) AS max_day FROM sales_daily WHERE business_id=$1`,
+    [businessId]
+  );
+  if (r1.rows[0]?.max_day) return r1.rows[0].max_day;
+
+  const r2 = await client.query(
+    `SELECT MAX( (occurred_at AT TIME ZONE 'UTC')::date ) AS max_day
+       FROM app_sales WHERE business_id=$1`,
+    [businessId]
+  );
+  return r2.rows[0]?.max_day || null;
 }
 
 module.exports = {

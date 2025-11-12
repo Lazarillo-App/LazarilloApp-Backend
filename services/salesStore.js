@@ -316,8 +316,51 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd) {
   }
 }
 
+async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
+  if (!fromYmd || !toYmd) return;
+
+  // 1) Match por código externo (preciso)
+  await client.query(
+    `
+    UPDATE app_sales_items si
+       SET article_id = m.article_id
+      FROM app_sales s
+      JOIN maxi_article_map m
+        ON m.business_id = s.business_id
+       AND m.external_code IS NOT NULL
+     WHERE s.id = si.sale_id
+       AND s.business_id = $1
+       AND si.article_id IS NULL
+       AND si.sku IS NOT NULL
+       AND si.sku = m.external_code
+       AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+    `,
+    [businessId, fromYmd, toYmd]
+  );
+
+  // 2) Match por nombre normalizado (fallback)
+  await client.query(
+    `
+    UPDATE app_sales_items si
+       SET article_id = m.article_id
+      FROM app_sales s
+      JOIN maxi_article_map m
+        ON m.business_id = s.business_id
+     WHERE s.id = si.sale_id
+       AND s.business_id = $1
+       AND si.article_id IS NULL
+       AND si.name IS NOT NULL
+       AND lower(unaccent(si.name)) = lower(unaccent(m.title))
+       AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+    `,
+    [businessId, fromYmd, toYmd]
+  );
+}
+
 module.exports = {
   normalizeInvoices,
   upsertSalesBatch,
   upsertDailyAggregates,
+  upsertDailyAggregates,
+  reconcileSalesMappings,
 };
