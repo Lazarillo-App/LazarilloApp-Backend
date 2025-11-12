@@ -16,7 +16,10 @@ async function fetchMenu({ businessId, req, listmode, list, id_tienda }) {
   const bearer = await getBearer(businessId, req); // respeta X-Maxi-Token o credenciales guardadas
   const url = buildMenuUrl({ listmode, list, id_tienda });
 
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
+  const r = await fetch(url, { headers: {
+    Authorization: `Bearer ${bearer}`,
+    Accept: 'application/json'
+  }});
   const txt = await r.text().catch(()=> '');
   let j; try { j = JSON.parse(txt); } catch {}
   if (!r.ok || j?.resultCode !== 'SUCCESS') {

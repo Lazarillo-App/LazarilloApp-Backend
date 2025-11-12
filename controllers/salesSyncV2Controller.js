@@ -5,7 +5,7 @@ const { fetchSalesRanged } = require('../services/maxiSalesService');
 const { upsertSalesBatch, upsertDailyAggregates } = require('../services/salesStore');
 const { ensureInitialBackfillOnce, runDailyAuto, runWindow } = require('../services/salesSyncPolicy');
 
-/* ───────── PROBE de facturación (no escribe DB) ───────── */
+/* PROBE de facturación (no escribe DB) */
 exports.maxiInvoiceProbe = async (req, res) => {
   try {
     const biz = req.business;
@@ -17,12 +17,11 @@ exports.maxiInvoiceProbe = async (req, res) => {
     return res.json({ ok: true, business_id: biz.id, from, to, docs: docs.slice(0,3), count: docs.length });
   } catch (e) {
     console.error('maxiInvoiceProbe', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'probe_failed' });
+    return res.status(e.status || 500).json({ ok: false, error: e.message || 'probe_failed' });
   }
 };
 
-/* ───────── Ejecuta una ventana puntual (escribe DB) ───────── */
+/* Ejecuta una ventana puntual (escribe DB) */
 exports.syncWindow = async (req, res) => {
   try {
     const biz = req.business;
@@ -35,12 +34,11 @@ exports.syncWindow = async (req, res) => {
     return res.json({ ok: true, business_id: biz.id, from, to, fetched: raw.length, ...out });
   } catch (e) {
     console.error('syncWindow', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'sync_window_failed' });
+    return res.status(e.status || 500).json({ ok: false, error: e.message || 'sync_window_failed' });
   }
 };
 
-/* ───────── Backfill inicial (una vez) ───────── */
+/* Backfill inicial (una vez) */
 exports.syncBackfillOnce = async (req, res) => {
   try {
     const biz = req.business;
@@ -48,12 +46,11 @@ exports.syncBackfillOnce = async (req, res) => {
     return res.json({ ok: true, business_id: biz.id, ...out });
   } catch (e) {
     console.error('syncBackfillOnce', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'backfill_failed' });
+    return res.status(e.status || 500).json({ ok: false, error: e.message || 'backfill_failed' });
   }
 };
 
-/* ───────── Incremental diario automático (desde último día hasta AYER) ───────── */
+/* Incremental diario automático */
 exports.syncDailyAuto = async (req, res) => {
   try {
     const biz = req.business;
@@ -61,12 +58,11 @@ exports.syncDailyAuto = async (req, res) => {
     return res.json({ ok: true, business_id: biz.id, ...out });
   } catch (e) {
     console.error('syncDailyAuto', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'daily_auto_failed' });
+    return res.status(e.status || 500).json({ ok: false, error: e.message || 'daily_auto_failed' });
   }
 };
 
-/* ───────── Recalcular agregados (si cambiaste mapeos, etc.) ───────── */
+/* Recalcular agregados (si cambiaste mapeos, etc.) */
 exports.rebuildAggregates = async (req, res) => {
   try {
     const biz = req.business;
@@ -78,7 +74,10 @@ exports.rebuildAggregates = async (req, res) => {
     return res.json({ ok: true, business_id: biz.id, from, to, rebuilt: true });
   } catch (e) {
     console.error('rebuildAggregates', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'rebuild_failed' });
+    return res.status(e.status || 500).json({ ok: false, error: e.message || 'rebuild_failed' });
   }
 };
+
+/* ── Alias por compatibilidad con rutas antiguas ─────────────────── */
+exports.maxiSalesProbeV2 = exports.maxiInvoiceProbe;
+exports.adminSyncSalesWindow = exports.syncWindow;

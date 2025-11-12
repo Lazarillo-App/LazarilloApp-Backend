@@ -1,4 +1,3 @@
-// routes/businessRoutes.js
 const express = require('express');
 const router = express.Router();
 const path = require('path');
@@ -12,12 +11,18 @@ const {
   salesSummaryFromDB,
   salesSeriesFromDB,
   syncNow,
+  maxiArticlesProxy,
 } = require('../controllers/syncController');
 
-const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
+const {
+  maxiPing,
+  syncSalesForBusiness,
+  maxiSalesProbe,
+  maxiSalesProbeV2,
+} = require('../controllers/salesSyncController');
 
 /* ───────── Helper anti-crash ───────── */
 function ensureFn(name, fn) {
@@ -55,8 +60,8 @@ router.param('id', requireBusinessAccessParam);
 
 /* ───────── Logo: subir archivo ───────── */
 const uploadFields = upload.fields([
-  { name: 'file',  maxCount: 1 },
-  { name: 'logo',  maxCount: 1 },
+  { name: 'file', maxCount: 1 },
+  { name: 'logo', maxCount: 1 },
   { name: 'image', maxCount: 1 },
 ]);
 router.post('/:id/logo', (req, res, next) => {
@@ -73,10 +78,15 @@ router.post('/:id/logo', (req, res, next) => {
     const files = req.files || {};
     req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
 
-    if (!req.file && !req.body?.url) return res.status(400).json({ error: 'missing_file' });
+    if (!req.file && !req.body?.url) {
+      return res.status(400).json({ error: 'missing_file', accept: ['png','jpg','jpeg','webp','gif','svg'], max_mb: 2 });
+    }
     return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
 });
+
+/* ───────── Diagnóstico artículos directo desde Maxi ───────── */
+router.get('/:id/maxi-articles-proxy', ensureFn('maxiArticlesProxy', maxiArticlesProxy));
 
 /* ───────── Branding URL directa ───────── */
 router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
@@ -101,9 +111,6 @@ router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 /* ───────── Maxi credenciales / estado ───────── */
 router.get('/:id/maxi-status', ensureFn('businesses.maxiStatus', businesses.maxiStatus));
 router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.maxiSave));
-// Diagnóstico crudo (si tuvieras handlers):
-// router.get('/:id/maxi-raw-invoices', ensureFn('businesses.maxiRawInvoices', businesses.maxiRawInvoices));
-// router.get('/:id/maxi-items', ensureFn('businesses.maxiItemsByDate', businesses.maxiItemsByDate));
 
 router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 
@@ -113,7 +120,11 @@ router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticles
 router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
 router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
 
-/* ───────── Adapter para sync ventas (acepta query o body) ───────── */
+/* ───────── Ventas: probes y sync (monolítico) ───────── */
+router.get('/:id/maxi-sales-probe', ensureFn('maxiSalesProbe', maxiSalesProbe));
+router.get('/:id/maxi-sales-probe-v2', ensureFn('maxiSalesProbeV2', maxiSalesProbeV2));
+
+/* Adapter para sync ventas (acepta query o body) */
 function adaptSyncSalesQueryToBody(req, _res, next) {
   const qMode = String(req.query.mode || '').toLowerCase();
   let mode = req.body?.mode || qMode || 'auto';
@@ -125,7 +136,7 @@ function adaptSyncSalesQueryToBody(req, _res, next) {
     patch.windowDays = parseInt(String(req.query.windowDays), 10);
   }
   if (req.query.from && !req.body?.from) patch.from = req.query.from;
-  if (req.query.to   && !req.body?.to)   patch.to   = req.query.to;
+  if (req.query.to && !req.body?.to) patch.to = req.query.to;
 
   if ((req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true') && !req.body?.dryrun) {
     patch.dryrun = true;
@@ -135,9 +146,7 @@ function adaptSyncSalesQueryToBody(req, _res, next) {
   next();
 }
 
-/* ───────── Sync ventas (oficial) ─────────
-   OJO: syncSalesForBusiness no es handler Express; armamos wrapper.
-*/
+/* Sync ventas (oficial, usa salesSyncController.syncSalesForBusiness) */
 router.post(
   '/:id/sync-sales',
   adaptSyncSalesQueryToBody,
@@ -152,10 +161,10 @@ router.post(
   }
 );
 
-/* ───────── Sync catálogo (manual) ───────── */
+/* Sync catálogo (manual) */
 router.post('/:id/sync', ensureFn('syncNow', syncNow));
 
-/* ───────── Default group helpers ───────── */
+/* Default group helpers */
 router.get('/:id/default-group', (req, res) => {
   const biz = req.business;
   const defaultId = biz?.props?.default_group_id ?? null;
@@ -178,7 +187,5 @@ router.patch('/:id/default-group', async (req, res, next) => {
     res.json({ ok: true, business_id: biz.id, default_group_id: groupId });
   } catch (e) { next(e); }
 });
-
-/* Ruta legacy eliminada: '/:businessId/articles-tree' */
 
 module.exports = router;

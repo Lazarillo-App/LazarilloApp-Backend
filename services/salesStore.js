@@ -65,6 +65,7 @@ function normalizeInvoices(businessId, rawDocs) {
       const external = String(doc.numero);
       const occurred = parseYMDorDMYtoUTC(doc.cabecera?.fecha || doc.fecha);
       const total = toNum(doc.total);
+      if (!occurred) return;
 
       const sale_idx = sales.length;
       pushSale(external, occurred, total);
@@ -94,6 +95,7 @@ function normalizeInvoices(businessId, rawDocs) {
       const oid = od.orderId ? String(od.orderId) : null;
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
       const total = toNum(od.totalSales);
+      if (!occurred) return;
 
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
