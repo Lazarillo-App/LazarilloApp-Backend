@@ -3,20 +3,20 @@
 const pool = require('../config/db');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
-// fetch nativo (Node 18+) o fallback a node-fetch
+// fetch nativo (Node 18) o fallback a node-fetch
 const fetchNative =
   (typeof globalThis.fetch === 'function')
     ? ((...args) => globalThis.fetch(...args))
     : require('node-fetch');
 
-const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
+const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/$/, '');
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
 const FETCH_RETRIES    = Number(process.env.MAXI_FETCH_RETRIES || 2);
 
 /* ======================= Utils básicos ======================= */
 function simpleHash(str = '') {
   let h = 0;
-  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  for (let i = 0; i < str.length; i) h = (h * 31,  str.charCodeAt(i)) | 0;
   return String(h >>> 0);
 }
 const norm = s => String(s ?? '').trim();
@@ -25,23 +25,23 @@ const orSinSubrubro  = s => (norm(s) || 'Sin subrubro');
 
 function parseDate(zd, fallback) {
   if (zd == null || zd === '') return new Date(fallback);
-  if (zd instanceof Date)     return Number.isNaN(+zd) ? new Date(fallback) : zd;
-  if (typeof zd === 'number') { const d = new Date(zd); return Number.isNaN(+d) ? new Date(fallback) : d; }
-  const d = new Date(String(zd)); return Number.isNaN(+d) ? new Date(fallback) : d;
+  if (zd instanceof Date)     return Number.isNaN(zd) ? new Date(fallback) : zd;
+  if (typeof zd === 'number') { const d = new Date(zd); return Number.isNaN(d) ? new Date(fallback) : d; }
+  const d = new Date(String(zd)); return Number.isNaN(d) ? new Date(fallback) : d;
 }
 function ymd(d) {
-  if (!(d instanceof Date) || Number.isNaN(+d)) d = new Date();
+  if (!(d instanceof Date) || Number.isNaN(d)) d = new Date();
   const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const m = String(d.getUTCMonth() , 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
-function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
+function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate(),  n); return x; }
 
-/* ========== Fetch con timeout + reintentos (429/5xx) ========== */
+/* ========== Fetch con timeout  reintentos (429/5xx) ========== */
 async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
   let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  for (let attempt = 0; attempt <= retries; attempt) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort('timeout'), timeout);
     try {
@@ -57,7 +57,7 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
       throw err;
     } catch (e) {
       clearTimeout(t); lastErr = e;
-      if (attempt < retries) { await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2)); continue; }
+      if (attempt < retries) { await new Promise(r => setTimeout(r, 200 * (attempt,  1) ** 2)); continue; }
       throw lastErr;
     }
   }
@@ -175,8 +175,8 @@ async function upsertArticles({ client, businessId, items }) {
   const CHUNK = 500;
   let total = 0;
 
-  for (let i = 0; i < items.length; i += CHUNK) {
-    const slice = items.slice(i, i + CHUNK);
+  for (let i = 0; i < items.length; i = CHUNK) {
+    const slice = items.slice(i, i, CHUNK);
     const values = [];
     const params = [];
     let p = 1;
@@ -191,12 +191,12 @@ async function upsertArticles({ client, businessId, items }) {
       const precio   = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
       const costo    = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
 
-      values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6},$${p+7}::jsonb,NOW())`);
+      values.push(`($${p},$${p1},$${p2},$${p3},$${p4},$${p5},$${p6},$${p7}::jsonb,NOW())`);
       params.push(
         businessId, id, nombre, categoria, subrubro, precio, costo,
         JSON.stringify(it.raw ?? it._raw ?? it)
       );
-      p += 8;
+      p = 8;
     }
     if (!values.length) continue;
 
@@ -215,7 +215,7 @@ async function upsertArticles({ client, businessId, items }) {
         updated_at = NOW()
     `;
     await client.query(sql, params);
-    total += slice.length;
+    total = slice.length;
   }
   return total;
 }
@@ -254,21 +254,21 @@ exports.syncNow = async (req, res) => {
     let cacheHash = null;
 
     if (scope === 'articles' || scope === 'all') {
-      // 2) Traer artículos + árbol crudo
+      // 2) Traer artículos  árbol crudo
       const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
 
-      // 3) Cachear árbol crudo para auditoría (hash)
-      const rawStr = JSON.stringify(raw ?? []);
-      cacheHash = simpleHash(rawStr);
-      await pool.query(`
-        INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
-        VALUES ($1, $2::jsonb, $3, NOW())
-        ON CONFLICT (business_id, hash) DO UPDATE SET updated_at = NOW()
-      `, [biz.id, rawStr, cacheHash]);
+      // 3) Cachear árbol crudo para auditoría (hash) — dentro de la misma TX
+    const rawStr = JSON.stringify(raw ?? []);
+    cacheHash = simpleHash(rawStr);
+    await client.query(`
+      INSERT INTO public.maxi_menu_cache (business_id, payload, hash, updated_at)
+      VALUES ($1, $2::jsonb, $3, NOW())
+      ON CONFLICT (business_id, hash)
+      DO UPDATE SET updated_at = NOW()
+    `, [biz.id, rawStr, cacheHash]);
 
-      // 4) Upsert de artículos
-      await client.query('BEGIN');
-      upserted = await upsertArticles({ client, businessId: biz.id, items });
+    // 4) Upsert de artículos (BEGIN ya hecho arriba si moviste el cache adentro)
+    await client.query('BEGIN'); // <-- si moviste el cache antes de BEGIN, quitá esta línea
 
       // 5) Refrescar mapeo directo (si usás esta tabla)
       const r = await client.query(`
@@ -358,8 +358,8 @@ exports.listArticlesTreeFromDB = async (req, res) => {
     }));
     const resumen = {
       subrubros: tree.length,
-      categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
-      articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
+      categorias: tree.reduce((a, s) => a  (s.categorias?.length || 0), 0),
+      articulos: tree.reduce((a, s) => a,  s.categorias.reduce((x, c) => x  (c.articulos?.length || 0), 0), 0),
     };
     res.json({ ok: true, resumen, tree });
   } catch (e) {

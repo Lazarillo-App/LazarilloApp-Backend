@@ -12,6 +12,7 @@ const {
   salesSummaryFromDB,
   salesSeriesFromDB,
   syncNow,
+  maxiArticlesProxy,
 } = require('../controllers/syncController');
 
 const { authRequired } = require('../middleware/authMiddleware');
@@ -77,10 +78,12 @@ router.post('/:id/logo', (req, res, next) => {
     const files = req.files || {};
     req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
 
-    if (!req.file && !req.body?.url) return res.status(400).json({ error: 'missing_file' });
+    return res.status(400).json({ error: 'missing_file', accept: ['png','jpg','jpeg','webp','gif','svg'], max_mb: 2 });
     return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
 });
+
+router.get('/:id/maxi-articles-proxy', ensureFn('maxiArticlesProxy', maxiArticlesProxy));
 
 /* ───────── Branding URL directa ───────── */
 router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
@@ -131,8 +134,10 @@ function adaptSyncSalesQueryToBody(req, _res, next) {
   if (req.query.windowDays && !req.body?.windowDays) {
     patch.windowDays = parseInt(String(req.query.windowDays), 10);
   }
-  if (req.query.from && !req.body?.from) patch.from = req.query.from;
-  if (req.query.to && !req.body?.to) patch.to = req.query.to;
+  const cut = (s) => String(s || '').slice(0, 10); // YYYY-MM-DD
+  if (req.query.from && !req.body?.from) patch.from = cut(req.query.from);
+  if (req.query.to && !req.body?.to) patch.to = cut(req.query.to);
+
 
   if ((req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true') && !req.body?.dryrun) {
     patch.dryrun = true;
