@@ -52,19 +52,22 @@ exports.syncDaily = async (req, res) => {
   res.json({ ok: true, business_id: biz.id, ...out });
 };
 
+
 exports.syncWindow = async (req, res) => {
   try {
     const biz = req.business;
     const { from, to, dryrun = false } = req.body || {};
-    if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
-
+    if (!from || !to) {
+      return res.status(400).json({ error: 'from_to_required' });
+    }
+    // Reutilizamos el flujo probado que ya maneja login + upsert + agregados
     const out = await exports.syncSalesForBusiness(biz, { from, to, dryrun });
     return res.json({ ok: true, business_id: biz.id, ...out });
   } catch (e) {
-    return res.status(e.status || 500).json({ error: 'internal', message: e.message || 'sync_window_failed' });
+    const status = e.status || 500;
+    return res.status(status).json({ error: 'internal', message: e.message || 'sync_window_failed' });
   }
 };
-
 
 /* ────────────────────────────────────────────────────────────── */
 /* 1) Mapeo: conciliar líneas de ventas con artículos del catálogo */
