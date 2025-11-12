@@ -94,7 +94,7 @@ app.use('/admin', adminRebuildAgg);
 
 /* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
-app.use('/api/businesses', authRequired, loadActiveBusiness, businessRoutes);
+app.use('/api/businesses', authRequired, businessRoutes);
 
 /* guard global de /api (después de /api/cron y /api/admin) */
 app.use('/api', authRequired, loadActiveBusiness);
