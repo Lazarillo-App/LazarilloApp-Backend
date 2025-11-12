@@ -382,39 +382,54 @@ exports.maxiSalesProbe = async (req, res) => {
     const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
     const token = await maxiLogin({ email, pass, codcli });
 
-    const from = String(req.query.from || '').slice(0,10);
-    const to   = String(req.query.to   || '').slice(0,10);
+    const from = String(req.query.from || '').slice(0, 10);
+    const to   = String(req.query.to   || '').slice(0, 10);
 
-    const urls = [
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventas/detalle`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventas`);         u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/ventas`);                      u.searchParams.set('cod_cli',codcli); u.searchParams.set('desde',from);       u.searchParams.set('hasta',to);     return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventas/detallado`);u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
-      (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+    const makers = [
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventas/detalle`);      u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventas`);              u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/ventas`);                           u.searchParams.set('cod_cli',codcli); u.searchParams.set('desde',from);        u.searchParams.set('hasta',to);     return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos`);     u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventasarticulos/detalle`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventas_por_articulo`); u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
+      (b)=>{ const u=new URL(`${b}/estadisticas/ventasporarticulo`);   u.searchParams.set('cod_cli',codcli); u.searchParams.set('fechaInicio',from); u.searchParams.set('fechaFin',to); return u.toString(); },
     ];
 
     const tried = [];
-    for (const make of urls) {
-      const url = make(BASE);
+    const hits = [];
+
+    for (const mk of makers) {
+      const url = mk(BASE);
       try {
-        const r = await fetchNative(url, { headers: { Authorization: `Bearer ${token}`, Accept:'application/json' }});
+        const r = await fetchNative(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }});
         const text = await r.text();
-        tried.push({ url, status: r.status, len: text.length, preview: text.slice(0, 600) });
-        const json = JSON.parse(text);
-        return res.json({
-          ok: true,
-          hit: url,
-          status: r.status,
-          keys: Object.keys(json || {}),
-          contentKeys: json?.content ? Object.keys(json.content || {}) : null,
-          tried
-        });
+        let json = null;
+        try { json = JSON.parse(text); } catch {}
+        const arrays =
+          (json && [
+            json?.content?.detalle,
+            json?.content?.items,
+            json?.content?.ventas,
+            json?.detalle,
+            json?.ventas,
+            json?.items,
+            Array.isArray(json?.content) ? json.content : null,
+            Array.isArray(json) ? json : null,
+          ].filter(Array.isArray)) || [];
+
+        const rows = arrays[0] || [];
+        tried.push({ url, status: r.status, resultCode: json?.resultCode, keys: json ? Object.keys(json) : null, contentKeys: json?.content ? Object.keys(json.content) : null, rows: rows.length, preview: text.slice(0, 400) });
+
+        if (r.ok && rows.length > 0) {
+          hits.push({ url, rows: rows.length });
+        }
       } catch (e) {
-        tried.push({ url, error: String(e?.message||e) });
+        tried.push({ url, error: String(e?.message || e) });
       }
     }
-    res.status(502).json({ ok:false, error:'no_endpoint_yielded_json', tried });
+
+    return res.json({ ok: true, hits, tried });
   } catch (e) {
-    res.status(500).json({ ok:false, error:e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
