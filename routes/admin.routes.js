@@ -7,7 +7,7 @@ const allowAdminAsBusiness = require('../middleware/allowAdminAsBusiness');
 
 // Controllers
 const adminCtrl = require('../controllers/adminController');
-const { syncSalesForBusiness } = require('../controllers/salesSyncController');
+const salesSync = require('../controllers/salesSyncController'); 
 
 // ───────────────── helpers defensivos ─────────────────
 function ensureFn(name, fn) {
@@ -63,27 +63,31 @@ r.get('/businesses/:id/maxi-menu',
 );
 
 /* ─────────── SYNC VENTAS (admin ejecuta para un negocio) ─────────── */
+// r.post('/businesses/:id/sync-sales',
+//   allowAdminAsBusiness,
+//   async (req, res, next) => {
+//     try {
+//       const bizId = req.businessId; // seteado por allowAdminAsBusiness
+//       const mode =
+//         (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d')
+//           ? 'backfill_30d'
+//           : 'auto';
+//       const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
+//       const from = req.query.from ? new Date(req.query.from) : null;
+//       const to   = req.query.to   ? new Date(req.query.to)   : null;
+
+//       const out = await syncSalesForBusiness(
+//         req.business || { id: bizId },
+//         { mode, from, to, dryrun, req }
+//       );
+
+//       res.json({ ok: true, business_id: bizId, sales: out });
+//     } catch (e) { next(e); }
+//   }
+// );
+
 r.post('/businesses/:id/sync-sales',
   allowAdminAsBusiness,
-  async (req, res, next) => {
-    try {
-      const bizId = req.businessId; // seteado por allowAdminAsBusiness
-      const mode =
-        (req.query.mode === 'backfill' || req.query.mode === 'backfill_30d')
-          ? 'backfill_30d'
-          : 'auto';
-      const dryrun = req.query.dryrun === '1' || req.query.dryrun === 'true';
-      const from = req.query.from ? new Date(req.query.from) : null;
-      const to   = req.query.to   ? new Date(req.query.to)   : null;
-
-      const out = await syncSalesForBusiness(
-        req.business || { id: bizId },
-        { mode, from, to, dryrun, req }
-      );
-
-      res.json({ ok: true, business_id: bizId, sales: out });
-    } catch (e) { next(e); }
-  }
+  ensureFn('adminSyncSales', salesSync.adminSyncSales) 
 );
-
 module.exports = r;

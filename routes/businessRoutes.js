@@ -12,7 +12,7 @@ const {
   salesSummaryFromDB,
   salesSeriesFromDB,
   syncNow,
-} = require('../controllers/syncController');
+} = require('../controllers/syncController'); 
 
 const { maxiPing, syncSalesForBusiness } = require('../controllers/salesSyncController');
 const { authRequired } = require('../middleware/authMiddleware');

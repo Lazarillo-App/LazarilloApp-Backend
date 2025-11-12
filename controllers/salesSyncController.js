@@ -32,6 +32,42 @@ function clampToYesterday(fromDate, toDate) {
   return { from, to: to > y ? y : to };
 }
 
+/* ────────────────────────────────────────────────────────────── */
+/* 1) Mapeo: conciliar líneas de ventas con artículos del catálogo */
+/* ────────────────────────────────────────────────────────────── */
+async function reconcileSalesMappings(client, businessId, { from, to }) {
+  // 1) por SKU / código exacto
+  await client.query(`
+    UPDATE app_sales_items si
+    SET article_id = m.article_id
+    FROM app_sales s
+    JOIN maxi_article_map m
+      ON m.business_id = s.business_id
+     AND m.external_code IS NOT NULL
+   WHERE s.id = si.sale_id
+     AND s.business_id = $1
+     AND si.article_id IS NULL
+     AND si.sku IS NOT NULL            -- ⚠️ cambia a si.code si tu columna se llama "code"
+     AND si.sku = m.external_code
+     AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+  `, [businessId, from, to]);
+
+  // 2) por nombre normalizado
+  await client.query(`
+    UPDATE app_sales_items si
+    SET article_id = m.article_id
+    FROM app_sales s
+    JOIN maxi_article_map m
+      ON m.business_id = s.business_id
+   WHERE s.id = si.sale_id
+     AND s.business_id = $1
+     AND si.article_id IS NULL
+     AND si.name IS NOT NULL           -- ⚠️ cambia a si.article_name si tu columna se llama así
+     AND lower(unaccent(si.name)) = lower(unaccent(m.title))
+     AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+  `, [businessId, from, to]);
+}
+
 /* ───────────── Fetch con reintentos ───────────── */
 async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
   let lastErr;
@@ -244,7 +280,6 @@ exports.maxiPing = async (req, res) => {
   }
 };
 
-// Servicio reutilizable
 exports.syncSalesForBusiness = async (biz, { mode = 'auto', from, to, dryrun = false } = {}) => {
   if (!biz?.id) { const e = new Error('no_active_business'); e.status = 400; throw e; }
 
@@ -255,9 +290,9 @@ exports.syncSalesForBusiness = async (biz, { mode = 'auto', from, to, dryrun = f
 
   const fDate = parseDate(from, defFrom);
   const tDate = parseDate(to,   defTo);
-  const clamped = clampToYesterday(fDate, tDate);
-  const F = ymd(clamped.from);
-  const T = ymd(clamped.to);
+  const { from: clampFrom, to: clampTo } = clampToYesterday(fDate, tDate);
+  const F = ymd(clampFrom);
+  const T = ymd(clampTo);
 
   const client = await pool.connect();
   try {
@@ -269,12 +304,55 @@ exports.syncSalesForBusiness = async (biz, { mode = 'auto', from, to, dryrun = f
     if (dryrun) return { from: F, to: T, upserted: 0, updated: 0, preview: rows.slice(0, 5) };
 
     await client.query('BEGIN');
-    const { upserted, updated } = await upsertSalesDaily({ client, businessId: biz.id, items: rows });
-    await client.query('COMMIT');
 
+    // 1) Upsert diario crudo (maxi_sales_daily)
+    const { upserted, updated } = await upsertSalesDaily({
+      client,
+      businessId: biz.id,
+      items: rows
+    });
+
+    // 2) Conciliar mapeos por SKU y nombre (si usás app_sales/app_sales_items)
+    //    Si todavía NO cargás ventas por factura/líneas, este paso no afectará nada (no rompe).
+    await reconcileSalesMappings(client, biz.id, { from: F, to: T }).catch(() => {});
+
+    // 3) Regenerar agregados para el rango [F..T]
+    // 3.a) sales_daily (total y tx_count) desde maxi_sales_daily
+    await client.query(`DELETE FROM sales_daily WHERE business_id=$1 AND day BETWEEN $2::date AND $3::date`, [biz.id, F, T]);
+    await client.query(`
+      INSERT INTO sales_daily (business_id, day, total, tx_count)
+      SELECT business_id,
+             day,
+             SUM(amount) AS total,
+             COUNT(*)    AS tx_count
+      FROM public.maxi_sales_daily
+      WHERE business_id=$1
+        AND day BETWEEN $2::date AND $3::date
+      GROUP BY business_id, day
+    `, [biz.id, F, T]);
+
+    // 3.b) sales_daily_items por artículo (si existen líneas en app_sales_items mapeadas)
+    await client.query(`DELETE FROM sales_daily_items WHERE business_id=$1 AND day BETWEEN $2::date AND $3::date`, [biz.id, F, T]);
+    await client.query(`
+      INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
+      SELECT
+        s.business_id,
+        (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+        si.article_id,
+        SUM(si.qty)    AS qty,
+        SUM(si.amount) AS amount
+      FROM app_sales_items si
+      JOIN app_sales s ON s.id = si.sale_id
+      WHERE s.business_id = $1
+        AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+        AND si.article_id IS NOT NULL
+      GROUP BY s.business_id, day, si.article_id
+    `, [biz.id, F, T]);
+
+    await client.query('COMMIT');
     return { from: F, to: T, upserted, updated };
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { }
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('syncSalesForBusiness error:', e?.stack || e);
     const err = new Error(e?.message || 'sales_sync_failed'); err.status = e.status || 500; throw err;
   } finally {
@@ -297,3 +375,4 @@ exports.adminSyncSales = async (req, res) => {
     return res.status(status).json({ error: status === 401 ? 'unauthorized' : 'internal', message: e.message || 'sales_sync_failed' });
   }
 };
+

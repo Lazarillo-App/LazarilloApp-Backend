@@ -124,8 +124,9 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 /* 404 + errores */
 app.use((req, res) => res.status(404).json({ error: 'not_found', path: req.originalUrl }));
 app.use((err, req, res, _next) => {
-  console.error('❌ Error:', err);
-  res.status(err.status || 500).json({ error: 'internal', message: err?.message, code: err?.code });
+  console.error('Unhandled error:', err.stack || err);
+  const status = err.status || 500;
+  res.status(status).json({ error: status === 401 ? 'unauthorized' : 'internal', message: err.message || 'internal_error' });
 });
 
 /* ----------- cron en prod ----------- */
