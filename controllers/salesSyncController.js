@@ -124,35 +124,48 @@ async function maxiFetchSalesRange({ token, codcli, from, to }) {
     '/estadisticas/ventasarticulos',
     '/estadisticas/ventasarticulos/detalle',
     '/estadisticas/ventas_por_articulo',
-    '/estadisticas/ventasporarticulo',
     '/estadisticas/ventas-por-articulo',
     '/estadisticas/ventas-por-articulos',
     '/estadisticas/ventas/detalles',
     '/estadisticas/ventas/por-articulo',
     '/estadisticas/ventasdiarias',
     '/estadisticas/ventas/diarias',
+    `/estadisticas/ventas/${codcli}`,
+    `/ventas/${codcli}`,
+    `/estadisticas/ventas/cliente/${codcli}`,
+    `/estadisticas/ventas/por-dia/${codcli}`
   ];
 
-  const makeReqs = (base, p, f, t) => ([
-    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('cod_cli', String(codcli)); u.searchParams.set('fechaInicio', f); u.searchParams.set('fechaFin', t); return u.toString(); })() },
-    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('cod_cli', String(codcli)); u.searchParams.set('desde', f);       u.searchParams.set('hasta', t);     return u.toString(); })() },
-    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('codcli',  String(codcli)); u.searchParams.set('fechaInicio', f); u.searchParams.set('fechaFin', t); return u.toString(); })() },
-    { method:'GET',  url: (()=>{ const u=new URL(base+p); u.searchParams.set('codcli',  String(codcli)); u.searchParams.set('desde', f);       u.searchParams.set('hasta', t);     return u.toString(); })() },
+  const mkGET = (url, params) => {
+    const u = new URL(url);
+    for (const [k,v] of params) if (v != null) u.searchParams.set(k, v);
+    return { method:'GET', url: u.toString() };
+  };
+  const mkPOST = (url, body) => ({ method:'POST', url, body });
 
-    { method:'POST', url: base+p, body: { cod_cli: String(codcli), fechaInicio: f, fechaFin: t } },
-    { method:'POST', url: base+p, body: { cod_cli: String(codcli), desde: f,       hasta: t   } },
-    { method:'POST', url: base+p, body: { codcli:  String(codcli), fechaInicio: f, fechaFin: t } },
-    { method:'POST', url: base+p, body: { codcli:  String(codcli), desde: f,       hasta: t   } },
-  ]);
+  const mkReqs = (base, p, f, t, withClient) => {
+    const pairs = [
+      [['fechaInicio', f], ['fechaFin', t]],
+      [['desde', f],       ['hasta', t]],
+      [['fechaini', f],    ['fechafin', t]],
+      [['inicio', f],      ['fin', t]],
+    ];
+    const addClient = (set) => withClient
+      ? [[['cod_cli', String(codcli)], ...set], [['codcli', String(codcli)], ...set]]
+      : [set];
+
+    const reqs = [];
+    for (const set of pairs) {
+      for (const s of addClient(set)) reqs.push(mkGET(base + p, s));
+      for (const s of addClient(set)) reqs.push(mkPOST(base + p, Object.fromEntries(s)));
+    }
+    return reqs;
+  };
 
   const tryNormalize = (json) => {
     const arrays = [
-      json?.content?.detalle,
-      json?.content?.items,
-      json?.content?.ventas,
-      json?.detalle,
-      json?.ventas,
-      json?.items,
+      json?.content?.detalle, json?.content?.items, json?.content?.ventas,
+      json?.detalle, json?.ventas, json?.items,
       Array.isArray(json?.content) ? json.content : null,
       Array.isArray(json) ? json : null,
     ].filter(Array.isArray);
@@ -169,32 +182,39 @@ async function maxiFetchSalesRange({ token, codcli, from, to }) {
     }).filter(Boolean);
   };
 
-  for (const p of paths) {
-    for (const spec of makeReqs(BASE, p, from, to)) {
-      try {
-        const opt = {
-          method: spec.method,
-          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-        };
-        if (spec.method === 'POST') {
-          opt.headers['Content-Type'] = 'application/json';
-          opt.body = JSON.stringify(spec.body);
-        }
-        const res = await fetchWithRetry(spec.url, opt);
-        const txt = await res.text();
-        let json = null; try { json = JSON.parse(txt); } catch {}
-        if (!res.ok) continue;
-        if (json?.resultCode && json.resultCode !== 'SUCCESS') continue;
+  // Intentamos ISO y DMY, con/sin cod_cli
+  const dateRuns = (() => {
+    const [y,m,d] = from.split('-'); const [Y,M,D] = to.split('-');
+    const fDMY = (y && m && d) ? `${d}/${m}/${y}` : from;
+    const tDMY = (Y && M && D) ? `${D}/${M}/${Y}` : to;
+    return [
+      { f: from, t: to,   withClient: true  },
+      { f: from, t: to,   withClient: false },
+      { f: fDMY, t: tDMY, withClient: true  },
+      { f: fDMY, t: tDMY, withClient: false },
+    ];
+  })();
 
-        const lines = json ? tryNormalize(json) : [];
-        if (lines.length > 0) return lines;
-      } catch {
-        // probar siguiente combinación
+  for (const p of paths) {
+    for (const run of dateRuns) {
+      const reqs = mkReqs(BASE, p, run.f, run.t, run.withClient);
+      for (const spec of reqs) {
+        try {
+          const opt = { method: spec.method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } };
+          if (spec.method === 'POST') { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(spec.body); }
+          const r = await fetchWithRetry(spec.url, opt);
+          const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch {}
+          if (!r.ok) continue;
+          if (json?.resultCode && json.resultCode !== 'SUCCESS') continue;
+          const lines = json ? tryNormalize(json) : [];
+          if (lines.length > 0) return lines;
+        } catch { /* siguiente intento */ }
       }
     }
   }
   throw new Error('maxi_sales_fetch_failed');
 }
+
 
 /* ───────────── UPSERT ventas diarias (qty + amount) ───────────── */
 async function upsertSalesDaily({ client, businessId, items }) {
@@ -475,3 +495,146 @@ exports.maxiSalesProbe = async (req, res) => {
   }
 };
 
+// Probe extendido: prueba rutas, alias de params, GET/POST y 2 formatos de fecha
+exports.maxiSalesProbeV2 = async (req, res) => {
+  try {
+    const biz = req.business;
+    const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
+    const token = await maxiLogin({ email, pass, codcli });
+
+    const fIso = String(req.query.from || '').slice(0, 10);  // YYYY-MM-DD
+    const tIso = String(req.query.to   || '').slice(0, 10);
+    const [y,m,d] = fIso.split('-'); const [Y,M,D] = (tIso||'--').split('-');
+    const fDMY = (y && m && d) ? `${d}/${m}/${y}` : fIso;    // DD/MM/YYYY
+    const tDMY = (Y && M && D) ? `${D}/${M}/${Y}` : tIso;
+
+    const paths = [
+      '/estadisticas/ventas/detalle',
+      '/estadisticas/ventas',
+      '/ventas',
+      '/estadisticas/ventasarticulos',
+      '/estadisticas/ventasarticulos/detalle',
+      '/estadisticas/ventas_por_articulo',
+      '/estadisticas/ventas-por-articulo',
+      '/estadisticas/ventas-por-articulos',
+      '/estadisticas/ventas/detalles',
+      '/estadisticas/ventas/por-articulo',
+      '/estadisticas/ventasdiarias',
+      '/estadisticas/ventas/diarias',
+      // patrones “por cliente” (algunos tenants usan esto)
+      `/estadisticas/ventas/${codcli}`,
+      `/ventas/${codcli}`,
+      `/estadisticas/ventas/cliente/${codcli}`,
+      `/estadisticas/ventas/por-dia/${codcli}`
+    ];
+
+    // variantes de params (GET/POST), con y sin cod_cli
+    const qpVariants = (base, p, f, t, withClient) => {
+      const mkGET = (pairs) => {
+        const u = new URL(base + p);
+        for (const [k,v] of pairs) if (v != null) u.searchParams.set(k, v);
+        return { method:'GET', url:u.toString() };
+      };
+      const mkPOST = (body) => ({
+        method:'POST', url: base + p, body
+      });
+
+      const basePairs = [
+        [['fechaInicio', f], ['fechaFin', t]],
+        [['desde', f],       ['hasta', t]],
+        [['fechaini', f],    ['fechafin', t]],
+        [['inicio', f],      ['fin', t]],
+      ];
+
+      const withOrWithout = (pairs) => {
+        const sets = [];
+        if (withClient) {
+          sets.push([['cod_cli', String(codcli)], ...pairs]);
+          sets.push([['codcli',  String(codcli)], ...pairs]);
+        } else {
+          sets.push([...pairs]); // sin cod_cli
+        }
+        return sets;
+      };
+
+      const reqs = [];
+      for (const pairs of basePairs) {
+        for (const set of withOrWithout(pairs)) reqs.push(mkGET(set));
+        for (const set of withOrWithout(pairs)) {
+          const body = Object.fromEntries(set);
+          reqs.push(mkPOST(body));
+        }
+      }
+      return reqs;
+    };
+
+    const tried = [];
+    const hits  = [];
+
+    // probamos: (paths) × (dos formatos de fecha) × (con/sin cod_cli)
+    const runs = [
+      { f: fIso, t: tIso, withClient: true  },
+      { f: fIso, t: tIso, withClient: false },
+      { f: fDMY, t: tDMY, withClient: true  },
+      { f: fDMY, t: tDMY, withClient: false },
+    ];
+
+    for (const p of paths) {
+      for (const r of runs) {
+        const reqs = qpVariants(BASE, p, r.f, r.t, r.withClient);
+        for (const spec of reqs) {
+          try {
+            const opt = {
+              method: spec.method,
+              headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+            };
+            if (spec.method === 'POST') {
+              opt.headers['Content-Type'] = 'application/json';
+              opt.body = JSON.stringify(spec.body);
+            }
+            const resp = await fetchNative(spec.url, opt);
+            const text = await resp.text();
+            let json = null; try { json = JSON.parse(text); } catch {}
+
+            const arrays = json ? [
+              json?.content?.detalle, json?.content?.items, json?.content?.ventas,
+              json?.detalle, json?.ventas, json?.items,
+              Array.isArray(json?.content) ? json.content : null,
+              Array.isArray(json) ? json : null,
+            ].filter(Array.isArray) : [];
+            const rows = arrays[0]?.length || 0;
+
+            tried.push({
+              method: spec.method,
+              url: spec.url,
+              withClient: r.withClient,
+              dateFmt: (r.f === fIso ? 'ISO' : 'DMY'),
+              status: resp.status,
+              resultCode: json?.resultCode,
+              rows,
+              keys: json ? Object.keys(json) : null,
+              contentKeys: json?.content ? Object.keys(json.content) : null,
+              preview: text.slice(0, 400),
+            });
+
+            if (resp.ok && rows > 0) {
+              hits.push({
+                method: spec.method,
+                url: spec.url,
+                dateFmt: (r.f === fIso ? 'ISO' : 'DMY'),
+                withClient: r.withClient,
+                rows
+              });
+            }
+          } catch (e) {
+            tried.push({ method: spec.method, url: spec.url, error: String(e?.message || e) });
+          }
+        }
+      }
+    }
+
+    return res.json({ ok: true, hits, tried });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
