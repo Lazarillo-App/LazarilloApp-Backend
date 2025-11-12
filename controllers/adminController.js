@@ -177,3 +177,122 @@ exports.restoreUser = async (req, res) => {
     res.status(500).json({ error: 'ADMIN_USER_RESTORE_FAILED' });
   }
 };
+
+// ───────────────── PEEK / AUDITORÍA ─────────────────
+const pad2 = (n)=>String(n).padStart(2,'0');
+const ymd = (d)=>`${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+function parseDate(v,f){ if(!v) return new Date(f); const d=v instanceof Date?v:new Date(String(v)); return Number.isNaN(+d)?new Date(f):d; }
+
+exports.peekVentasSummary = async (req,res)=>{
+  const businessId = req.businessId;
+  if (!businessId) return res.status(400).json({ error:'no_business' });
+
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
+
+  const from = ymd(parseDate(req.query.from, startOfMonth));
+  const to   = ymd(parseDate(req.query.to,   yesterday));
+
+  const { rows } = await db.query(`
+    SELECT articulo_id,
+           SUM(qty)::numeric   AS qty,
+           SUM(amount)::numeric AS amount
+    FROM public.maxi_sales_daily
+    WHERE business_id=$1
+      AND day BETWEEN $2 AND $3
+    GROUP BY articulo_id
+    ORDER BY amount DESC, qty DESC
+  `,[businessId, from, to]);
+
+  res.json({ ok:true, business_id: businessId, from, to, items: rows });
+};
+
+exports.peekVentasSeries = async (req,res)=>{
+  const businessId = req.businessId;
+  const articuloId = Number(req.query.articuloId || req.params.articuloId);
+  let groupBy = String(req.query.groupBy || 'day');
+  if (!['day','week','month'].includes(groupBy)) groupBy = 'day';
+
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
+
+  const from = ymd(parseDate(req.query.from, startOfMonth));
+  const to   = ymd(parseDate(req.query.to,   yesterday));
+
+  const sql = groupBy === 'day'
+    ? `
+      SELECT day AS bucket, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
+      FROM public.maxi_sales_daily
+      WHERE business_id=$1 AND articulo_id=$2
+        AND day >= $3::date AND day <= $4::date
+      GROUP BY day
+      ORDER BY bucket
+    `
+    : `
+      SELECT date_trunc($5, day)::date AS bucket,
+             SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
+      FROM public.maxi_sales_daily
+      WHERE business_id=$1 AND articulo_id=$2
+        AND day >= $3::date AND day <= $4::date
+      GROUP BY bucket
+      ORDER BY bucket
+    `;
+  const params = groupBy === 'day'
+    ? [businessId, articuloId, from, to]
+    : [businessId, articuloId, from, to, groupBy];
+
+  const { rows } = await db.query(sql, params);
+  res.json({ ok:true, business_id: businessId, articuloId, from, to, groupBy, items: rows });
+};
+
+exports.peekArticlesTree = async (req,res)=>{
+  const businessId = req.businessId;
+  const { rows } = await db.query(`
+    SELECT articulo_id, nombre, categoria, subrubro, precio
+    FROM public.maxi_articles
+    WHERE business_id=$1
+    ORDER BY subrubro, categoria, nombre
+  `,[businessId]);
+
+  const bySub = new Map();
+  for (const r of rows) {
+    const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
+    const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
+    if (!bySub.has(sub)) bySub.set(sub, new Map());
+    const byCat = bySub.get(sub);
+    if (!byCat.has(cat)) byCat.set(cat, []);
+    byCat.get(cat).push({ id:r.articulo_id, nombre:r.nombre, precio:r.precio ?? null });
+  }
+  const tree = Array.from(bySub.entries()).map(([subrubro, byCat])=>({
+    subrubro,
+    categorias: Array.from(byCat.entries()).map(([categoria, articulos])=>({ categoria, articulos }))
+  }));
+  const resumen = {
+    subrubros: tree.length,
+    categorias: tree.reduce((a,s)=>a+(s.categorias?.length||0),0),
+    articulos: tree.reduce((a,s)=>a+s.categorias.reduce((x,c)=>x+(c.articulos?.length||0),0),0)
+  };
+  res.json({ ok:true, business_id: businessId, resumen, tree });
+};
+
+exports.peekMaxiStatus = async (req,res)=>{
+  const businessId = req.businessId;
+  const { rows } = await db.query(`SELECT props FROM app_businesses WHERE id=$1 LIMIT 1`,[businessId]);
+  const mx = (rows[0]?.props || {}).maxi || {};
+  const configured = !!(mx.email && (mx.pass_enc || mx.password) && mx.codcli);
+  res.json({ ok:true, business_id: businessId, configured, email: mx.email || null, codcli: mx.codcli || null });
+};
+
+exports.peekMaxiMenuCache = async (req,res)=>{
+  const businessId = req.businessId;
+  const { rows } = await db.query(`
+    SELECT hash, updated_at, jsonb_array_length(payload) AS items_len
+    FROM public.maxi_menu_cache
+    WHERE business_id=$1
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `,[businessId]);
+  res.json({ ok:true, business_id: businessId, cache: rows[0] || null });
+};

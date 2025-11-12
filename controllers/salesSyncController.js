@@ -25,12 +25,10 @@ function ymd(d) {
   return `${y}-${m}-${day}`;
 }
 function addDays(d, n){ const x = new Date(d); x.setUTCDate(x.getUTCDate()+n); return x; }
-function clampToYesterday(rangeFrom, rangeTo) {
-  const now = new Date();
-  const yesterday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()-1));
-  const from = new Date(rangeFrom); const to = new Date(rangeTo);
-  if (to > yesterday) return { from, to: yesterday };
-  return { from, to };
+function clampToYesterday(fromDate, toDate) {
+  const y = new Date(); y.setUTCDate(y.getUTCDate()-1);
+  const from = new Date(fromDate); const to = new Date(toDate);
+  return { from, to: to > y ? y : to };
 }
 
 /* ───────────── Fetch con reintentos ───────────── */
@@ -72,12 +70,7 @@ async function maxiLogin({ email, pass, codcli }) {
   return d.content.tokenAccess;
 }
 
-/* ───────────── MAXI: traer ventas por rango (normalizador flexible) ─────────────
-   NOTA: Maxi suele exponer varias variantes. Probamos algunas rutas conocidas:
-   - /estadisticas/ventas/detalle
-   - /estadisticas/ventas
-   Adaptalo si tu instancia usa otra.
-*/
+/* ───────────── MAXI: traer ventas por rango (normalizador flexible) ───────────── */
 async function maxiFetchSalesRange({ token, codcli, from, to }) {
   const endpoints = [
     // detalle por día/artículo
@@ -88,7 +81,7 @@ async function maxiFetchSalesRange({ token, codcli, from, to }) {
       u.searchParams.set('fechaFin', to);
       return u.toString();
     },
-    // resumen que igual trae líneas por artículo con fecha
+    // resumen (a veces igualmente trae líneas por artículo/fecha)
     (base) => {
       const u = new URL(`${base}/estadisticas/ventas`);
       u.searchParams.set('cod_cli', String(codcli));
@@ -103,42 +96,35 @@ async function maxiFetchSalesRange({ token, codcli, from, to }) {
     try {
       const url = make(BASE);
       const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${token}` } });
-      const j = await res.json().catch(() => ({}));
-      data = j; break;
+      data = await res.json().catch(() => ({}));
+      break;
     } catch (_e) { /* probar siguiente */ }
   }
   if (!data) throw new Error('maxi_sales_fetch_failed');
 
-  // Intentar encontrar array de filas
+  // localizar array
   const arrays = [
-    data?.content?.items, data?.content?.ventas, data?.ventas, data?.items, data?.content, Array.isArray(data) ? data : null
+    data?.content?.items, data?.content?.ventas, data?.ventas, data?.items,
+    Array.isArray(data?.content) ? data.content : null,
+    Array.isArray(data) ? data : null
   ].filter(Array.isArray);
   const rows = arrays[0] || [];
 
-  // Normalización
-  const normNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-  const normArt = (o) => {
-    const id = Number(
-      o.articulo_id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo ?? o.id
-    );
-    const dayRaw = String(
-      o.day ?? o.fecha ?? o.fechaVenta ?? o.fecha_venta ?? o.dia ?? o.fechadia ?? ''
-    ).slice(0, 10);
-    const qty    = normNum(o.qty ?? o.cantidad ?? o.cant ?? o.cantTotal ?? o.unidades);
-    const amount = normNum(o.amount ?? o.importe ?? o.total ?? o.monto);
-    return { id: Number.isFinite(id) ? id : null, day: dayRaw, qty, amount };
+  // normalizar
+  const nnum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const map = (o) => {
+    const id = Number(o.articulo_id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo ?? o.id);
+    const day = String(o.day ?? o.fecha ?? o.fechaVenta ?? o.fecha_venta ?? o.dia ?? '').slice(0,10);
+    const qty = nnum(o.qty ?? o.cantidad ?? o.cant ?? o.unidades);
+    const amount = nnum(o.amount ?? o.importe ?? o.total ?? o.monto);
+    if (!Number.isFinite(id) || !day) return null;
+    return { id, day, qty, amount };
   };
 
-  const out = [];
-  for (const r of rows) {
-    const n = normArt(r);
-    if (!n.id || !n.day) continue;
-    out.push(n);
-  }
-  return out;
+  return rows.map(map).filter(Boolean);
 }
 
-/* ───────────── UPSERT ventas diarias ───────────── */
+/* ───────────── UPSERT ventas diarias (qty + amount) ───────────── */
 async function upsertSalesDaily({ client, businessId, items }) {
   if (!items?.length) return { upserted: 0, updated: 0 };
   const CHUNK = 1000;
@@ -159,21 +145,19 @@ async function upsertSalesDaily({ client, businessId, items }) {
       const amount = Number(it.amount) || 0;
       if (!Number.isFinite(articuloId) || !day) continue;
 
-      values.push(`($${p},$${p+1}::date,$${p+2},$${p+3},NOW())`);
-      params.push(businessId, day, articuloId, qty || amount ? amount : 0); // amount (ver nota abajo)
-      // NOTA: si tu tabla tiene (qty, amount) por separado, ver SQL debajo.
-      p += 4;
+      values.push(`($${p++},$${p++}::date,$${p++},$${p++},$${p++},NOW())`);
+      params.push(businessId, day, articuloId, qty, amount);
     }
     if (!values.length) continue;
 
-    // Si tu tabla tiene qty y amount por separado, usa la versión extendida de SQL (ver más abajo).
     const sql = `
-      INSERT INTO public.maxi_sales_daily (business_id, day, articulo_id, amount, updated_at)
+      INSERT INTO public.maxi_sales_daily (business_id, day, articulo_id, qty, amount, updated_at)
       VALUES ${values.join(',')}
       ON CONFLICT (business_id, day, articulo_id)
       DO UPDATE SET
-        amount = EXCLUDED.amount,
-        updated_at = NOW()
+        qty       = EXCLUDED.qty,
+        amount    = EXCLUDED.amount,
+        updated_at= NOW()
       RETURNING (xmax <> 0) AS was_update
     `;
 
@@ -191,8 +175,7 @@ function loadMaxiCredsFromBiz(biz) {
   const mx = props.maxi || props.maxi_credentials || {};
   const email = mx.email || mx.user || null;
   const codcli = mx.codcli || mx.codigo || null;
-  const secret =
-    mx.pass_enc ?? mx.password_enc ?? mx.password ?? mx.pass ?? null;
+  const secret = mx.pass_enc ?? mx.password_enc ?? mx.password ?? mx.pass ?? null;
   const pass = decryptSecretCompat(secret);
   if (!email || !pass || !codcli) {
     const err = new Error('maxi_not_configured'); err.status = 400; throw err;
@@ -221,36 +204,35 @@ exports.maxiPing = async (req, res) => {
   }
 };
 
-// Usado por routes: router.post('/:id/sync-sales', ...)
+// Función principal para routes: router.post('/:id/sync-sales', ...)
 exports.syncSalesForBusiness = async (biz, { mode = 'auto', from, to, dryrun = false } = {}) => {
   if (!biz?.id) { const e = new Error('no_active_business'); e.status = 400; throw e; }
 
-  // Rango por defecto: últimos 7 días hasta AYER
-  const today = new Date();
-  const defTo = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
-  const defFrom = addDays(defTo, -6);
+  // rango por defecto: últimos 7 días hasta AYER
+  const today  = new Date();
+  const defTo  = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
+  const defFrom= addDays(defTo, -6);
 
-  const f = parseDate(from, defFrom);
-  const t = parseDate(to,   defTo);
-  const { from: F, to: T } = clampToYesterday(ymd(f), ymd(t));
+  const fDate = parseDate(from, defFrom);
+  const tDate = parseDate(to,   defTo);
+  const clamped = clampToYesterday(fDate, tDate);
+  const F = ymd(clamped.from);
+  const T = ymd(clamped.to);
 
   const client = await pool.connect();
   try {
     const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
     const token = await maxiLogin({ email, pass, codcli });
 
-    const rows = await maxiFetchSalesRange({ token, codcli, from: ymd(F), to: ymd(T) });
+    const rows = await maxiFetchSalesRange({ token, codcli, from: F, to: T });
 
-    if (dryrun) {
-      return { from: ymd(F), to: ymd(T), upserted: 0, updated: 0, preview: rows.slice(0, 5) };
-    }
+    if (dryrun) return { from: F, to: T, upserted: 0, updated: 0, preview: rows.slice(0,5) };
 
     await client.query('BEGIN');
-    // 🚨 IMPORTANTE: ajusta `upsertSalesDaily` si tu tabla tiene columnas qty y amount separadas
     const { upserted, updated } = await upsertSalesDaily({ client, businessId: biz.id, items: rows });
     await client.query('COMMIT');
 
-    return { from: ymd(F), to: ymd(T), upserted, updated };
+    return { from: F, to: T, upserted, updated };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
     console.error('syncSalesForBusiness error:', e?.stack || e);
