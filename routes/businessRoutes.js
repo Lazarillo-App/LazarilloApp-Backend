@@ -11,6 +11,7 @@ const {
   listArticlesTreeFromDB,
   salesSummaryFromDB,
   salesSeriesFromDB,
+   maxiSalesProbeV2, 
   syncNow,
 } = require('../controllers/syncController'); 
 
@@ -116,6 +117,7 @@ router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFrom
 router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
 
 router.get('/:id/maxi-sales-probe', ensureFn('maxiSalesProbe', maxiSalesProbe));
+router.get('/:id/maxi-sales-probe-v2', ensureFn('maxiSalesProbeV2',  maxiSalesProbeV2));
 
 /* ───────── Adapter para sync ventas (acepta query o body) ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {
