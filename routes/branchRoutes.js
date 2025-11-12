@@ -21,7 +21,7 @@ const { refreshMenu } = require('../controllers/maxiMenuController');
 
 const { maxiPing } = require('../controllers/salesSyncController');
 
-const salesV2 = require('../controllers/salesSyncV2Controller');
+const salesV2 = require('../controllers/salesSyncController');
 
 /* ───────── Helper anti-crash ───────── */
 function ensureFn(name, fn) {

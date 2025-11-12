@@ -2,6 +2,9 @@
 'use strict';
 
 const pool = require('../config/db');
+// arriba de todo, suma este import (lo usaremos en rebuildAggregates)
+const { upsertDailyAggregates } = require('../services/salesStore');
+
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
 const { ensureInitialBackfillOnce, runDailyAuto, runWindow } = require('../services/salesSyncPolicy');
@@ -643,5 +646,28 @@ exports.maxiSalesProbeV2 = async (req, res) => {
     return res.json({ ok: true, hits, tried });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// al final del archivo, DEBAJO de maxiSalesProbeV2, pegá estos alias:
+
+// ── Aliases para que las rutas V2 no devuelvan 501 ─────────────
+exports.maxiInvoiceProbe  = exports.maxiSalesProbe;   // GET /:id/maxi-invoice-probe
+exports.syncBackfillOnce  = exports.backfillOnce;     // POST /:id/sync-sales/backfill-once
+exports.syncDailyAuto     = exports.syncDaily;        // POST /:id/sync-sales/daily-auto
+
+// Handler faltante en este archivo (rebuildAggregates)
+exports.rebuildAggregates = async (req, res) => {
+  try {
+    const biz = req.business;
+    const from = String(req.body?.from || req.query?.from || '').slice(0,10);
+    const to   = String(req.body?.to   || req.query?.to   || '').slice(0,10);
+    if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
+
+    await upsertDailyAggregates(biz.id, from, to);
+    return res.json({ ok: true, business_id: biz.id, from, to, rebuilt: true });
+  } catch (e) {
+    const status = e.status || 500;
+    return res.status(status).json({ ok: false, error: e.message || 'rebuild_failed' });
   }
 };
