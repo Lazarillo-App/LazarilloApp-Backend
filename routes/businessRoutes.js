@@ -187,4 +187,7 @@ router.patch('/:id/default-group', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+router.post('/:id/sync-sales/reconcile-and-rebuild',
+  ensureFn('sales.reconcileAndRebuild', sales.reconcileAndRebuild));
+
 module.exports = router;

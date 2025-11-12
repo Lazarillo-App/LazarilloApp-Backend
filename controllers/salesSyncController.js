@@ -120,3 +120,26 @@ exports.rebuildAggregates = async (req, res) => {
     return res.status(e.status || 500).json({ ok: false, error: e.message || 'rebuild_failed' });
   }
 };
+
+exports.reconcileAndRebuild = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const { from, to } = req.body || {};
+    // 1) reconciliar mappings (usa tu helper actual)
+    const client = await require('../config/db').connect();
+    try {
+      await client.query('BEGIN');
+      await require('../services/salesStore')
+        .reconcileSalesMappings(client, biz.id, { fromYmd: from, toYmd: to });
+      await client.query('COMMIT');
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch {}
+      throw e;
+    } finally {
+      client.release();
+    }
+    // 2) rebuild agregados
+    await require('../services/salesStore').upsertDailyAggregates(biz.id, from, to);
+    res.json({ ok: true, business_id: String(biz.id), from, to, reconciled: true, rebuilt: true });
+  } catch (e) { next(e); }
+};
