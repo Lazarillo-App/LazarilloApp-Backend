@@ -1,9 +1,8 @@
-// controllers/salesSyncController.js
 /* eslint-disable no-console */
 const pool = require('../config/db');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
-/* ========== Fetch c/timeout y reintentos ========== */
+// fetch nativo o fallback
 const fetchNative =
   (typeof globalThis.fetch === 'function')
     ? ((...args) => globalThis.fetch(...args))
@@ -13,6 +12,28 @@ const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.a
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
 const FETCH_RETRIES    = Number(process.env.MAXI_FETCH_RETRIES || 2);
 
+/* ───────────── Utils de fecha ───────────── */
+function parseDate(zd, fallback) {
+  if (zd == null || zd === '') return new Date(fallback);
+  if (zd instanceof Date)     return Number.isNaN(+zd) ? new Date(fallback) : zd;
+  if (typeof zd === 'number') { const d = new Date(zd); return Number.isNaN(+d) ? new Date(fallback) : d; }
+  const d = new Date(String(zd)); return Number.isNaN(+d) ? new Date(fallback) : d;
+}
+function ymd(d) {
+  if (!(d instanceof Date) || Number.isNaN(+d)) d = new Date();
+  const y = d.getUTCFullYear(), m = String(d.getUTCMonth()+1).padStart(2,'0'), day = String(d.getUTCDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function addDays(d, n){ const x = new Date(d); x.setUTCDate(x.getUTCDate()+n); return x; }
+function clampToYesterday(rangeFrom, rangeTo) {
+  const now = new Date();
+  const yesterday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()-1));
+  const from = new Date(rangeFrom); const to = new Date(rangeTo);
+  if (to > yesterday) return { from, to: yesterday };
+  return { from, to };
+}
+
+/* ───────────── Fetch con reintentos ───────────── */
 async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, timeout = FETCH_TIMEOUT_MS } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -23,264 +44,217 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
       clearTimeout(t);
       if (res.ok) return res;
       if ([429,500,502,503,504].includes(res.status) && attempt < retries) {
-        const delay = 200 * (attempt + 1) ** 2;
-        await new Promise(r => setTimeout(r, delay));
+        await new Promise(r => setTimeout(r, 200 * (attempt+1) ** 2));
         continue;
       }
       const txt = await res.text().catch(() => '');
-      const err = new Error(`HTTP ${res.status} - ${txt.slice(0,200)}`);
-      err.status = res.status;
+      const err = new Error(`HTTP ${res.status} - ${txt.slice(0,200)}`); err.status = res.status;
       throw err;
     } catch (e) {
-      clearTimeout(t);
-      lastErr = e;
-      if (attempt < retries) {
-        const delay = 200 * (attempt + 1) ** 2;
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
+      clearTimeout(t); lastErr = e;
+      if (attempt < retries) { await new Promise(r => setTimeout(r, 200 * (attempt+1) ** 2)); continue; }
       throw lastErr;
     }
   }
   throw lastErr || new Error('fetchWithRetry unknown error');
 }
 
-/* ========== Fechas y helpers ========== */
-function ymd(d) {
-  if (!(d instanceof Date) || Number.isNaN(+d)) d = new Date();
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function parseDate(zd, fallback) {
-  if (zd == null || zd === '') return new Date(fallback);
-  const d = (zd instanceof Date) ? zd : new Date(String(zd));
-  return Number.isNaN(+d) ? new Date(fallback) : d;
-}
-function addDays(d, n) {
-  const x = new Date(d);
-  x.setUTCDate(x.getUTCDate() + n);
-  return x;
-}
-function last7dUntilYesterday() {
-  const y = addDays(new Date(), -1);
-  const from = addDays(y, -6);
-  return { from, to: y };
-}
-
-/* ========== Credenciales Maxi desde biz.props ========== */
-function loadMaxiCredsFromBiz(biz) {
-  const props = biz?.props || {};
-  const mx = props.maxi || props.maxi_credentials || {};
-  const email  = mx.email  || mx.user   || null;
-  const codcli = mx.codcli || mx.codigo || null;
-
-  const secret = mx.pass_enc ?? mx.password_enc ?? mx.password ?? mx.pass ?? null;
-  const pass = decryptSecretCompat(secret);
-
-  if (!email || !pass || !codcli) {
-    const err = new Error('missing_maxi_credentials');
-    err.status = 400;
-    throw err;
-  }
-  return { email, pass, codcli };
-}
-
-/* ========== Maxi: login y fetch ventas ========== */
+/* ───────────── MAXI: login ───────────── */
 async function maxiLogin({ email, pass, codcli }) {
-  const url = `${BASE}/login`;
-  const body = { email, pass, cod_cli: String(codcli) };
-  const res = await fetchWithRetry(url, {
+  const res = await fetchWithRetry(`${BASE}/login`, {
     method: 'POST',
     headers: { 'Content-Type':'application/json', 'Accept':'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  const ok = data?.resultCode === 'SUCCESS' && data?.content?.tokenAccess;
-  if (!ok) {
-    const msg = data?.resultDescription || `login_failed_${res.status}`;
-    const err = new Error(msg);
-    err.status = 502;
-    throw err;
-  }
-  return data.content.tokenAccess;
-}
-
-/**
- * Trae ventas en rango [from..to] (UTC, formato YYYY-MM-DD).
- * Ajustá la ruta si tu instancia usa otro endpoint para ventas.
- * Intentamos varios formatos comunes del payload.
- */
-async function maxiFetchSalesRanged({ token, codcli, from, to }) {
-  // Ruta típica para estadísticas por rango: /estadisticas/ventas (ajustá si difiere)
-  const u = new URL(`${BASE}/estadisticas/ventas`);
-  u.searchParams.set('cod_cli', String(codcli));
-  u.searchParams.set('from', ymd(from));
-  u.searchParams.set('to',   ymd(to));
-
-  const res = await fetchWithRetry(u.toString(), {
-    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ email, pass, cod_cli: String(codcli) })
   });
   const d = await res.json().catch(() => ({}));
+  const ok = d?.resultCode === 'SUCCESS' && d?.content?.tokenAccess;
+  if (!ok) { const msg = d?.resultDescription || `login_failed_${res.status}`; const err = new Error(msg); err.status = 502; throw err; }
+  return d.content.tokenAccess;
+}
 
-  // Normalizamos una lista de items de venta con: fecha, articulo_id, qty, importe
-  const candidates = [
-    d?.content?.ventas, d?.ventas, d?.items, d?.data, d,
+/* ───────────── MAXI: traer ventas por rango (normalizador flexible) ─────────────
+   NOTA: Maxi suele exponer varias variantes. Probamos algunas rutas conocidas:
+   - /estadisticas/ventas/detalle
+   - /estadisticas/ventas
+   Adaptalo si tu instancia usa otra.
+*/
+async function maxiFetchSalesRange({ token, codcli, from, to }) {
+  const endpoints = [
+    // detalle por día/artículo
+    (base) => {
+      const u = new URL(`${base}/estadisticas/ventas/detalle`);
+      u.searchParams.set('cod_cli', String(codcli));
+      u.searchParams.set('fechaInicio', from);
+      u.searchParams.set('fechaFin', to);
+      return u.toString();
+    },
+    // resumen que igual trae líneas por artículo con fecha
+    (base) => {
+      const u = new URL(`${base}/estadisticas/ventas`);
+      u.searchParams.set('cod_cli', String(codcli));
+      u.searchParams.set('fechaInicio', from);
+      u.searchParams.set('fechaFin', to);
+      return u.toString();
+    },
   ];
-  const rows = (candidates.find(Array.isArray) || []).map(x => normalizeSaleItem(x));
 
-  // Filtramos nulos
-  return rows.filter(Boolean);
-}
-
-function normalizeSaleItem(x) {
-  try {
-    // Campos habituales con alias
-    const fecha = x.fecha || x.date || x.dia || x.day || x.fecha_venta;
-    const articuloId = Number(
-      x.articulo_id ?? x.id_articulo ?? x.codart ?? x.codigoArticulo ?? x.codigo ?? x.id
-    );
-    const qty = Number(x.cantidad ?? x.qty ?? x.unidades ?? x.cant ?? 0) || 0;
-    const importe = Number(x.importe ?? x.total ?? x.monto ?? x.venta ?? 0) || 0;
-
-    // Algunas APIs agrupan ventas por artículo/fecha; si viene precio unitario:
-    // const precioUnit = Number(x.precio ?? x.precio_unitario ?? 0);
-
-    if (!fecha || !Number.isFinite(articuloId)) return null;
-    // Normalizamos fecha a YYYY-MM-DD
-    const d = new Date(fecha);
-    const f = Number.isNaN(+d) ? ymd(new Date()) : ymd(d);
-    return { fecha: f, articulo_id: articuloId, qty, importe };
-  } catch {
-    return null;
+  let data = null;
+  for (const make of endpoints) {
+    try {
+      const url = make(BASE);
+      const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${token}` } });
+      const j = await res.json().catch(() => ({}));
+      data = j; break;
+    } catch (_e) { /* probar siguiente */ }
   }
+  if (!data) throw new Error('maxi_sales_fetch_failed');
+
+  // Intentar encontrar array de filas
+  const arrays = [
+    data?.content?.items, data?.content?.ventas, data?.ventas, data?.items, data?.content, Array.isArray(data) ? data : null
+  ].filter(Array.isArray);
+  const rows = arrays[0] || [];
+
+  // Normalización
+  const normNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const normArt = (o) => {
+    const id = Number(
+      o.articulo_id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo ?? o.id
+    );
+    const dayRaw = String(
+      o.day ?? o.fecha ?? o.fechaVenta ?? o.fecha_venta ?? o.dia ?? o.fechadia ?? ''
+    ).slice(0, 10);
+    const qty    = normNum(o.qty ?? o.cantidad ?? o.cant ?? o.cantTotal ?? o.unidades);
+    const amount = normNum(o.amount ?? o.importe ?? o.total ?? o.monto);
+    return { id: Number.isFinite(id) ? id : null, day: dayRaw, qty, amount };
+  };
+
+  const out = [];
+  for (const r of rows) {
+    const n = normArt(r);
+    if (!n.id || !n.day) continue;
+    out.push(n);
+  }
+  return out;
 }
 
-/* ========== Upsert a public.maxi_sales_daily ========== */
-/**
- * Upsert masivo por (business_id, fecha, articulo_id).
- * Columnas sugeridas: business_id, fecha, articulo_id, qty, importe, updated_at.
- * Si tu tabla se llama distinto o tiene más columnas, ajusta el SQL.
- */
-async function upsertSalesBatch({ client, businessId, sales }) {
-  if (!sales?.length) return { upserted: 0, updated: 0 };
-
+/* ───────────── UPSERT ventas diarias ───────────── */
+async function upsertSalesDaily({ client, businessId, items }) {
+  if (!items?.length) return { upserted: 0, updated: 0 };
   const CHUNK = 1000;
   let upserted = 0;
-  for (let i = 0; i < sales.length; i += CHUNK) {
-    const slice = sales.slice(i, i + CHUNK);
+  let updated  = 0;
+
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const slice = items.slice(i, i + CHUNK);
 
     const values = [];
     const params = [];
     let p = 1;
 
-    for (const s of slice) {
-      if (!s?.fecha || !Number.isFinite(s?.articulo_id)) continue;
-      values.push(`($${p}, $${p+1}, $${p+2}, $${p+3}, $${p+4}, NOW())`);
-      params.push(
-        businessId,
-        s.fecha,
-        s.articulo_id,
-        Number(s.qty || 0),
-        Number(s.importe || 0),
-      );
-      p += 5;
+    for (const it of slice) {
+      const articuloId = Number(it.id);
+      const day = String(it.day).slice(0,10);
+      const qty = Number(it.qty) || 0;
+      const amount = Number(it.amount) || 0;
+      if (!Number.isFinite(articuloId) || !day) continue;
+
+      values.push(`($${p},$${p+1}::date,$${p+2},$${p+3},NOW())`);
+      params.push(businessId, day, articuloId, qty || amount ? amount : 0); // amount (ver nota abajo)
+      // NOTA: si tu tabla tiene (qty, amount) por separado, ver SQL debajo.
+      p += 4;
     }
     if (!values.length) continue;
 
+    // Si tu tabla tiene qty y amount por separado, usa la versión extendida de SQL (ver más abajo).
     const sql = `
-      INSERT INTO public.maxi_sales_daily
-        (business_id, fecha, articulo_id, qty, importe, updated_at)
+      INSERT INTO public.maxi_sales_daily (business_id, day, articulo_id, amount, updated_at)
       VALUES ${values.join(',')}
-      ON CONFLICT (business_id, fecha, articulo_id)
+      ON CONFLICT (business_id, day, articulo_id)
       DO UPDATE SET
-        qty       = EXCLUDED.qty,
-        importe   = EXCLUDED.importe,
-        updated_at= NOW()
+        amount = EXCLUDED.amount,
+        updated_at = NOW()
+      RETURNING (xmax <> 0) AS was_update
     `;
-    await client.query(sql, params);
-    upserted += slice.length;
+
+    const r = await client.query(sql, params);
+    const updates = r.rows.filter(row => row.was_update).length;
+    updated  += updates;
+    upserted += (r.rowCount - updates);
   }
-  // Nota: "updated" exacto requeriría RETURNING o diff previo; devolvemos upserted total.
-  return { upserted, updated: 0 };
+  return { upserted, updated };
 }
 
-/* ========== Endpoints/exports ========== */
+/* ───────────── Credenciales desde props ───────────── */
+function loadMaxiCredsFromBiz(biz) {
+  const props = biz?.props || {};
+  const mx = props.maxi || props.maxi_credentials || {};
+  const email = mx.email || mx.user || null;
+  const codcli = mx.codcli || mx.codigo || null;
+  const secret =
+    mx.pass_enc ?? mx.password_enc ?? mx.password ?? mx.pass ?? null;
+  const pass = decryptSecretCompat(secret);
+  if (!email || !pass || !codcli) {
+    const err = new Error('maxi_not_configured'); err.status = 400; throw err;
+  }
+  return { email, pass, codcli };
+}
 
-/**
- * Diagnóstico simple: intenta login y contesta estado.
- * Uso típico: GET /businesses/:id/maxi-ping
- */
+/* ===================== Handlers exportados ===================== */
+
+// GET /businesses/:id/maxi-ping
 exports.maxiPing = async (req, res) => {
+  const biz = req.business;
+  const out = { configured: false, connected: false };
   try {
-    const biz = req.business;
     const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
+    out.configured = true;
     const token = await maxiLogin({ email, pass, codcli });
-    res.json({ ok: true, connected: !!token, email, codcli });
+    out.connected = !!token;
+    return res.json({ ok: true, configured: out.configured, connected: out.connected, email, codcli });
   } catch (e) {
-    const status = e.status || (String(e.message || '').includes('401') ? 401 : 500);
-    res.status(status).json({ ok: false, error: e.message || 'maxi_ping_failed' });
+    if (String(e?.message).includes('maxi_not_configured')) {
+      return res.json({ ok: true, configured: false, connected: false });
+    }
+    console.warn('maxiPing err:', e?.message || e);
+    return res.json({ ok: false, configured: out.configured, connected: false, error: e?.message || 'ping_failed' });
   }
 };
 
-/**
- * Punto de entrada usado por routes/businessRoutes.js:
- *   const out = await syncSalesForBusiness(biz, { mode, from, to, dryrun, req });
- *
- * modes:
- *  - 'auto'           → usa rango recibido (from/to) o calcula 7d hasta ayer si faltan.
- *  - 'backfill_30d'   → ignora from/to y trae últimos 30 días (hasta ayer).
- */
-exports.syncSalesForBusiness = async function syncSalesForBusiness(biz, { mode = 'auto', from, to, dryrun = false } = {}) {
-  if (!biz?.id) {
-    const err = new Error('no_active_business');
-    err.status = 400;
-    throw err;
-  }
+// Usado por routes: router.post('/:id/sync-sales', ...)
+exports.syncSalesForBusiness = async (biz, { mode = 'auto', from, to, dryrun = false } = {}) => {
+  if (!biz?.id) { const e = new Error('no_active_business'); e.status = 400; throw e; }
 
-  // Rango
-  let dFrom, dTo;
-  if (mode === 'backfill_30d') {
-    const { to: y, from: f } = (function () {
-      const y = addDays(new Date(), -1);
-      return { from: addDays(y, -29), to: y };
-    })();
-    dFrom = f; dTo = y;
-  } else {
-    if (from && to) {
-      dFrom = parseDate(from, addDays(new Date(), -7));
-      dTo   = parseDate(to,   addDays(new Date(), -1));
-    } else {
-      const r = last7dUntilYesterday();
-      dFrom = r.from; dTo = r.to;
-    }
-  }
+  // Rango por defecto: últimos 7 días hasta AYER
+  const today = new Date();
+  const defTo = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()-1));
+  const defFrom = addDays(defTo, -6);
 
-  // Credenciales y login
-  const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
-  const token = await maxiLogin({ email, pass, codcli });
+  const f = parseDate(from, defFrom);
+  const t = parseDate(to,   defTo);
+  const { from: F, to: T } = clampToYesterday(ymd(f), ymd(t));
 
-  // Fetch ventas
-  const sales = await maxiFetchSalesRanged({ token, codcli, from: dFrom, to: dTo });
-
-  if (dryrun) {
-    return { mode, from: ymd(dFrom), to: ymd(dTo), upserted: 0, updated: 0, preview_count: sales.length };
-  }
-
-  // Upsert en DB
   const client = await pool.connect();
   try {
+    const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
+    const token = await maxiLogin({ email, pass, codcli });
+
+    const rows = await maxiFetchSalesRange({ token, codcli, from: ymd(F), to: ymd(T) });
+
+    if (dryrun) {
+      return { from: ymd(F), to: ymd(T), upserted: 0, updated: 0, preview: rows.slice(0, 5) };
+    }
+
     await client.query('BEGIN');
-    const { upserted, updated } = await upsertSalesBatch({ client, businessId: biz.id, sales });
+    // 🚨 IMPORTANTE: ajusta `upsertSalesDaily` si tu tabla tiene columnas qty y amount separadas
+    const { upserted, updated } = await upsertSalesDaily({ client, businessId: biz.id, items: rows });
     await client.query('COMMIT');
-    return { mode, from: ymd(dFrom), to: ymd(dTo), upserted, updated };
+
+    return { from: ymd(F), to: ymd(T), upserted, updated };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
-    console.error('syncSalesForBusiness error:', e);
-    const err = new Error(e.message || 'sales_sync_failed');
-    err.status = e.status || 500;
-    throw err;
+    console.error('syncSalesForBusiness error:', e?.stack || e);
+    const err = new Error(e?.message || 'sales_sync_failed'); err.status = e.status || 500; throw err;
   } finally {
     client.release();
   }
