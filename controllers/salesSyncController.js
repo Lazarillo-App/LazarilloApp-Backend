@@ -4,7 +4,8 @@
 const pool = require('../config/db');
 // arriba de todo, suma este import (lo usaremos en rebuildAggregates)
 const { upsertDailyAggregates } = require('../services/salesStore');
-
+const { fetchSalesRanged } = require('../services/maxiSalesService');
+const { upsertSalesBatch } = require('../services/salesStore');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
 const { ensureInitialBackfillOnce, runDailyAuto, runWindow } = require('../services/salesSyncPolicy');
@@ -51,22 +52,19 @@ exports.syncDaily = async (req, res) => {
   res.json({ ok: true, business_id: biz.id, ...out });
 };
 
-
 exports.syncWindow = async (req, res) => {
   try {
     const biz = req.business;
     const { from, to, dryrun = false } = req.body || {};
-    if (!from || !to) {
-      return res.status(400).json({ error: 'from_to_required' });
-    }
-    // Reutilizamos el flujo probado que ya maneja login + upsert + agregados
+    if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
+
     const out = await exports.syncSalesForBusiness(biz, { from, to, dryrun });
     return res.json({ ok: true, business_id: biz.id, ...out });
   } catch (e) {
-    const status = e.status || 500;
-    return res.status(status).json({ error: 'internal', message: e.message || 'sync_window_failed' });
+    return res.status(e.status || 500).json({ error: 'internal', message: e.message || 'sync_window_failed' });
   }
 };
+
 
 /* ────────────────────────────────────────────────────────────── */
 /* 1) Mapeo: conciliar líneas de ventas con artículos del catálogo */
@@ -334,75 +332,44 @@ exports.maxiPing = async (req, res) => {
 exports.syncSalesForBusiness = async (biz, { mode = 'auto', from, to, dryrun = false } = {}) => {
   if (!biz?.id) { const e = new Error('no_active_business'); e.status = 400; throw e; }
 
-  // rango por defecto: últimos 7 días hasta AYER
+  // Rango default: últimos 7 días hasta AYER
   const today = new Date();
   const defTo   = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
-  const defFrom = addDays(defTo, -6);
+  const defFrom = new Date(defTo); defFrom.setUTCDate(defFrom.getUTCDate() - 6);
+
+  const parseDate = (zd, fb) => {
+    if (!zd) return fb;
+    const d = new Date(zd); return Number.isNaN(+d) ? fb : d;
+  };
+  const ymd = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+  const clampToYesterday = (a,b) => {
+    const y = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
+    return { from: a, to: (b > y ? y : b) };
+  };
 
   const fDate = parseDate(from, defFrom);
   const tDate = parseDate(to,   defTo);
-  const { from: clampFrom, to: clampTo } = clampToYesterday(fDate, tDate);
-  const F = ymd(clampFrom);
-  const T = ymd(clampTo);
+  const { from: Fd, to: Td } = clampToYesterday(fDate, tDate);
+  const F = ymd(Fd), T = ymd(Td);
 
-  const client = await pool.connect();
+  // 1) Fetch robusto por ventanas 7d/1d desde services/maxiSalesService
+  const rawDocs = await fetchSalesRanged({ businessId: biz.id, from: F, to: T });
+
+  if (dryrun) {
+    return { from: F, to: T, upserted: 0, updated: 0, preview: rawDocs.slice(0, 3) };
+  }
+
+  // 2) Upsert completo (tickets + líneas) y recalcular tocados
+  const client = await require('../config/db').connect();
   try {
-    const { email, pass, codcli } = loadMaxiCredsFromBiz(biz);
-    const token = await maxiLogin({ email, pass, codcli });
-
-    const rows = await maxiFetchSalesRange({ token, codcli, from: F, to: T });
-
-    if (dryrun) return { from: F, to: T, upserted: 0, updated: 0, preview: rows.slice(0, 5) };
-
     await client.query('BEGIN');
-
-    // 1) Upsert diario crudo (maxi_sales_daily)
-    const { upserted, updated } = await upsertSalesDaily({
-      client,
-      businessId: biz.id,
-      items: rows
-    });
-
-    // 2) Conciliar mapeos por SKU y nombre (si usás app_sales/app_sales_items)
-    await reconcileSalesMappings(client, biz.id, { from: F, to: T }).catch(() => {});
-
-    // 3) Regenerar agregados para el rango [F..T] desde maxi_sales_daily
-    await client.query(`DELETE FROM sales_daily WHERE business_id=$1 AND day BETWEEN $2::date AND $3::date`, [biz.id, F, T]);
-    await client.query(`
-      INSERT INTO sales_daily (business_id, day, total, tx_count)
-      SELECT business_id,
-             day,
-             SUM(amount) AS total,
-             COUNT(*)    AS tx_count
-      FROM public.maxi_sales_daily
-      WHERE business_id=$1
-        AND day BETWEEN $2::date AND $3::date
-      GROUP BY business_id, day
-    `, [biz.id, F, T]);
-
-    await client.query(`DELETE FROM sales_daily_items WHERE business_id=$1 AND day BETWEEN $2::date AND $3::date`, [biz.id, F, T]);
-    await client.query(`
-      INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-      SELECT
-        s.business_id,
-        (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-        si.article_id,
-        SUM(si.qty)    AS qty,
-        SUM(si.amount) AS amount
-      FROM app_sales_items si
-      JOIN app_sales s ON s.id = si.sale_id
-      WHERE s.business_id = $1
-        AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-        AND si.article_id IS NOT NULL
-      GROUP BY s.business_id, day, si.article_id
-    `, [biz.id, F, T]);
-
+    const result = await upsertSalesBatch(biz.id, rawDocs, client);
     await client.query('COMMIT');
-    return { from: F, to: T, upserted, updated };
+    return { from: F, to: T, ...result };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
-    console.error('syncSalesForBusiness error:', e?.stack || e);
-    const err = new Error(e?.message || 'sales_sync_failed'); err.status = e.status || 500; throw err;
+    e.status = e.status || 500;
+    throw e;
   } finally {
     client.release();
   }
