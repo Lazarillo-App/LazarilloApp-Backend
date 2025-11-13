@@ -1,4 +1,5 @@
 // routes/businessRoutes.js
+const { cacheJson } = require('../middleware/cacheJson');
 const express = require('express');
 const router = express.Router();
 const path = require('path');
@@ -101,7 +102,7 @@ router.get('/active', ensureFn('businesses.getActive', businesses.getActive));
 router.patch('/active', ensureFn('businesses.setActive', businesses.setActive));
 
 /* Por :id */
-router.get('/:id', ensureFn('businesses.getOne', businesses.getOne));
+router.get('/:id', cacheJson(60),ensureFn('businesses.getOne', businesses.getOne));
 router.patch('/:id', ensureFn('businesses.update', businesses.update));
 router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
 router.post('/:id/select', ensureFn('businesses.select', businesses.select));
@@ -112,10 +113,10 @@ router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.
 router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 
 /* ───────── Catálogo (lecturas legacy) ───────── */
-router.get('/:id/articles', ensureFn('listArticlesFromDB', listArticlesFromDB));
-router.get('/:id/articles/tree', ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
-router.get('/:id/sales/summary', ensureFn('salesSummaryFromDB', salesSummaryFromDB));
-router.get('/:id/sales/:articuloId', ensureFn('salesSeriesFromDB', salesSeriesFromDB));
+router.get('/:id/articles', cacheJson(300), ensureFn('listArticlesFromDB', listArticlesFromDB));
+router.get('/:id/articles/tree',  cacheJson(300), ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
+router.get('/:id/sales/summary',  cacheJson(300), ensureFn('salesSummaryFromDB', salesSummaryFromDB));
+router.get('/:id/sales/:articuloId',  cacheJson(300), ensureFn('salesSeriesFromDB', salesSeriesFromDB));
 
 /* ───────── Ventas: probes (diagnóstico) ───────── */
 router.get('/:id/maxi-sales-probe',    ensureFn('sales.maxiSalesProbe',   sales.maxiSalesProbe));

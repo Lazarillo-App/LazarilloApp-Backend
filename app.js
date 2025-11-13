@@ -3,7 +3,6 @@ require('dotenv').config();
 require('events').defaultMaxListeners = 30;
 
 const express = require('express');
-const cors = require('cors');
 const morgan = require('morgan');
 const { randomUUID } = require('crypto');
 const path = require('path');
@@ -25,7 +24,10 @@ const adminRoutes        = require('./routes/admin.routes');
 const adminCronRoutes    = require('./routes/adminCronRoutes');        // ⬅ cron sin JWT (X-Cron-Secret)
 const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes');  // ⬅ rebuild agregados (X-Cron-Secret)
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
-const ventasRoutes       = require('./routes/ventasRoutes');
+// ⚠ Usa el nombre real del archivo:
+//    - si tu archivo es routes/ventas.js -> require('./routes/ventas')
+//    - si es routes/ventasRoutes.js     -> require('./routes/ventasRoutes')
+const ventasRoutes       = require('./routes/ventasRoutes'); 
 const insumosRoutes      = require('./routes/insumosRoutes');
 const branchesRoutes     = require('./routes/branchRoutes');
 const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
@@ -34,13 +36,19 @@ const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
 
+// CORS unificado con preflight cacheado
+const corsWithCache = require('./middleware/cors');
+
 const app = express();
 
 /* ----------- básicos ----------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-/* logging simple por request */
+/* ----------- CORS (único, arriba de TODO) ----------- */
+app.use(corsWithCache);
+
+/* ----------- logging simple por request ----------- */
 app.use((req, res, next) => {
   const id = randomUUID().slice(0, 8);
   const t0 = Date.now();
@@ -50,23 +58,6 @@ app.use((req, res, next) => {
   res.on('finish', () => console.log(`⬅️ [${id}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - t0}ms)`));
   next();
 });
-
-/* ----------- CORS ----------- */
-app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'https://lazarillo.com.ar',
-    'http://lazarillo.com.ar',
-    'https://www.lazarillo.com.ar',
-    'https://lazarillo-app.github.io',
-  ],
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization','X-Business-Id','X-Maxi-Token','X-Cron-Secret'],
-  credentials: false,
-  optionsSuccessStatus: 204,
-}));
-app.options(/.*/, cors());
 
 /* ----------- parsers + logger HTTP ----------- */
 app.use(express.json());
@@ -94,18 +85,18 @@ app.use('/admin', adminRebuildAgg);
 
 /* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
-app.use('/api/businesses', authRequired, businessRoutes);
 
-/* guard global de /api (después de /api/cron y /api/admin) */
+// Guard global de /api (después de /api/cron y /api/admin), antes del resto
 app.use('/api', authRequired, loadActiveBusiness);
 
-/* módulos con negocio */
+// módulos con negocio
 app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
 app.use('/api/insumos',               insumosRoutes);
 app.use('/api/ventas',                ventasRoutes);
 app.use('/api/branches',              branchesRoutes);
 
-/* histórico: rutas bajo :businessId */
+// histórico: rutas bajo :businessId
+app.use('/api/businesses',            require('./routes/businessRoutes')); // ya cubierto por guard global
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
 /* util debug */

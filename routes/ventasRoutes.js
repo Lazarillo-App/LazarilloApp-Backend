@@ -1,4 +1,4 @@
-// routes/ventas.js
+// routes/ventasRoutes.js
 const express = require('express');
 const router = express.Router();
 

@@ -373,6 +373,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 };
 
 // PUT /businesses/:businessId/agrupaciones/todo  (nombre canónico)
+// PUT /businesses/:businessId/agrupaciones/todo  (nombre canónico)
 exports.ensureTodoAgrupacion = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
@@ -380,29 +381,54 @@ exports.ensureTodoAgrupacion = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'businessId requerido' });
     }
 
-    const NAME = 'Sin Agrupacion';
+    // Nombre viejo (compatibilidad) y nuevo nombre "oficial"
+    const LEGACY1   = 'Sin Agrupacion';
+    const LEGACY2   = 'Sin Agrupación';
+    const DEFAULT_N = 'Discontinuados';
 
-    const q1 = await pool.query(
-      `SELECT id, nombre FROM agrupaciones
-       WHERE business_id=$1 AND nombre=$2
-       LIMIT 1`,
-      [businessId, NAME]
+    // 1) Mientras exista la vieja "Sin Agrupación", la usamos como grupo TODO
+    const qLegacy = await pool.query(
+      `SELECT id, nombre
+         FROM agrupaciones
+        WHERE business_id = $1
+          AND nombre IN ($2, $3)
+        ORDER BY id ASC
+        LIMIT 1`,
+      [businessId, LEGACY1, LEGACY2]
     );
-    if (q1.rows.length) return res.json(q1.rows[0]);
+    if (qLegacy.rows.length) {
+      return res.json(qLegacy.rows[0]);
+    }
 
-    const q2 = await pool.query(
+    // 2) Si ya existe "Discontinuados", esa pasa a ser el grupo TODO
+    const qDefault = await pool.query(
+      `SELECT id, nombre
+         FROM agrupaciones
+        WHERE business_id = $1
+          AND nombre = $2
+        LIMIT 1`,
+      [businessId, DEFAULT_N]
+    );
+    if (qDefault.rows.length) {
+      return res.json(qDefault.rows[0]);
+    }
+
+    // 3) Si no hay ninguna de las dos, creamos "Discontinuados"
+    const qInsert = await pool.query(
       `INSERT INTO agrupaciones (business_id, nombre, articulos)
        VALUES ($1, $2, '[]'::jsonb)
-       ON CONFLICT (business_id, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
+       ON CONFLICT (business_id, nombre) DO UPDATE SET nombre = EXCLUDED.nombre
        RETURNING id, nombre`,
-      [businessId, NAME]
+      [businessId, DEFAULT_N]
     );
-    return res.status(201).json(q2.rows[0]);
+
+    return res.status(201).json(qInsert.rows[0]);
   } catch (e) {
     console.error('ensureTodoAgrupacion error:', e);
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
 
 // GET /businesses/:businessId/agrupaciones/:id/exclusiones
 exports.listarExclusiones = async (req, res) => {

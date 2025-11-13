@@ -7,6 +7,8 @@
 //   - LEGADO: GET /api/ventas/:articuloId/series?from&to
 //   - COMPAT: GET /api/ventas/by-article?articuloId=&from=&to=&groupBy=
 
+const { cached, makeKey } = require('../utils/cache');
+const { validateClampRange } = require('../utils/range');
 const pool = require('../config/db');
 
 // ====== Helpers fecha ======
@@ -100,33 +102,42 @@ async function getVentas(req, res, next) {
 // ====== LEGADO: ranking artículos (últimos 30 días) ======
 async function getSummary(req, res, next) {
   try {
-    const businessId = getBusinessId(req);
-    if (!businessId) return res.status(400).json({ error: 'Business no resuelto' });
+    const businessId = req.activeBusinessId || Number(req.query.business_id);
+    if (!businessId) return res.status(400).json({ ok:false, error:'business_id requerido' });
 
-    const { F, T } = clampRange(null, null); // 30d hasta AYER por default
-    const lim = Math.min(Math.max(parseInt(req.query.limit || '200', 10), 1), 1000);
+    const { from, to } = validateClampRange({
+      from: req.query.from,
+      to: req.query.to
+    }, 31);
 
-    const { rows } = await pool.query(
-      `SELECT sdi.article_id,
-              SUM(sdi.qty)::numeric(14,3)    AS qty,
-              SUM(sdi.amount)::numeric(14,2) AS amount
-         FROM sales_daily_items sdi
-        WHERE sdi.business_id = $1
-          AND sdi.day BETWEEN $2::date AND $3::date
-        GROUP BY sdi.article_id
-        ORDER BY qty DESC
-        LIMIT $4`,
-      [businessId, ymd(F), ymd(T), lim]
-    );
+    const key = makeKey('ventas-summary', businessId, from, to);
 
-    return res.json({
-      ok: true,
-      business_id: businessId,
-      rango: { from: ymd(F), to: ymd(T) },
-      count: rows.length,
-      items: rows
-    });
-  } catch (err) { next(err); }
+    const data = await cached(key, async () => {
+      const q = `
+        SELECT
+          fecha::date AS dia,
+          SUM(total_neto)  AS neto,
+          SUM(total_bruto) AS bruto,
+          COUNT(*)         AS tickets
+        FROM maxi_sales_daily
+        WHERE business_id = $1
+          AND fecha::date BETWEEN $2::date AND $3::date
+        GROUP BY 1
+        ORDER BY 1;
+      `;
+      const { rows } = await pool.query(q, [businessId, from, to]);
+      return { ok:true, business_id: businessId, rango:{ from, to }, count: rows.length, items: rows };
+    }, 300_000); // 5 min
+
+    const etag = crypto.createHash('sha1').update(JSON.stringify(data)).digest('hex');
+    if (req.headers['if-none-match'] === etag) return res.status(304).end();
+
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.json(data);
+  } catch (e) {
+    next(e);
+  }
 }
 
 // ====== LEGADO/COMPAT: serie por artículo (ID Maxi == article_id) ======
