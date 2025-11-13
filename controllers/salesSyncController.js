@@ -7,19 +7,19 @@ const { upsertSalesBatch, upsertDailyAggregates } = require('../services/salesSt
 const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
 
 /* ───────── helpers fecha ───────── */
-const pad2 = (n) => String(n).padStart(2,'0');
-const ymd  = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
-const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-const addDaysUTC = (d, n) => new Date(d.getTime() + n*86400000);
+const pad2 = (n) => String(n).padStart(2, '0');
+const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear()+ d.getUTCMonth(), d.getUTCDate()));
+const addDaysUTC = (d, n) => new Date(d.getTime(),  n * 86400000);
 
 function parseDate(zd, fb) {
   if (!zd) return fb;
   const d = new Date(zd);
-  return Number.isNaN(+d) ? fb : d;
+  return Number.isNaN(d) ? fb : d;
 }
 function clampToYesterday(a, b) {
   const today = new Date();
-  const AYER  = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
+  const AYER = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   return { from: a, to: b > AYER ? AYER : b };
 }
 
@@ -54,7 +54,7 @@ exports.syncWindow = async (req, res) => {
 
     // clamp hasta AYER
     const defFrom = new Date(`${from}T00:00:00Z`);
-    const defTo   = new Date(`${to}T00:00:00Z`);
+    const defTo = new Date(`${to}T00:00:00Z`);
     const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
     const F = ymd(Fd), T = ymd(Td);
 
@@ -65,7 +65,7 @@ exports.syncWindow = async (req, res) => {
       return res.json({ ok: true, business_id: String(biz.id), from: F, to: T, upserted: 0, updated: 0, preview: rawDocs.slice(0, 3) });
     }
 
-    // 2) Upsert completo de tickets+líneas y agregados tocados
+    // 2) Upsert completo de ticketslíneas y agregados tocados
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -73,7 +73,7 @@ exports.syncWindow = async (req, res) => {
       await client.query('COMMIT');
       return res.json({ ok: true, business_id: String(biz.id), from: F, to: T, ...result });
     } catch (e) {
-      try { await client.query('ROLLBACK'); } catch {}
+      try { await client.query('ROLLBACK'); } catch { }
       throw e;
     } finally {
       client.release();
@@ -110,8 +110,8 @@ exports.dailyAuto = async (req, res) => {
 exports.rebuildAggregates = async (req, res) => {
   try {
     const biz = req.business;
-    const F = String(req.body?.from || req.query?.from || '').slice(0,10);
-    const T = String(req.body?.to   || req.query?.to   || '').slice(0,10);
+    const F = String(req.body?.from || req.query?.from || '').slice(0, 10);
+    const T = String(req.body?.to || req.query?.to || '').slice(0, 10);
     if (!F || !T) return res.status(400).json({ ok: false, error: 'from_to_required' });
 
     await upsertDailyAggregates(biz.id, F, T);
@@ -120,6 +120,73 @@ exports.rebuildAggregates = async (req, res) => {
     return res.status(e.status || 500).json({ ok: false, error: e.message || 'rebuild_failed' });
   }
 };
+
+exports.syncSalesForBusiness = async (biz, body = {}) => {
+  const {
+    mode = 'auto',
+    from,
+    to,
+    dryrun = false,
+    windowDays,
+  } = body || {};
+
+  // 1) Ventana explícita prioritaria
+  if (from && to) {
+    const defFrom = new Date(`${from}T00:00:00Z`);
+    const defTo = new Date(`${to}T00:00:00Z`);
+    const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
+    const F = ymd(Fd), T = ymd(Td);
+
+    // Traer ventas crudas desde Maxi para la ventana y upsertear
+    const rawDocs = await fetchSalesRanged({ businessId: biz.id, from: F, to: T /* req opcional */ });
+    if (dryrun) {
+      return { ok: true, from: F, to: T, upserted: 0, updated: 0, preview: rawDocs.slice(0, 3) };
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await upsertSalesBatch(biz.id, rawDocs, client);
+      await client.query('COMMIT');
+      return { ok: true, from: F, to: T, ...result };
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch { }
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // 2) Despacho por modo
+  switch (String(mode).toLowerCase()) {
+    case 'rebuild-aggregates': {
+      if (!from || !to) {
+        const err = new Error('from/to required for rebuild-aggregates');
+        err.status = 400;
+        throw err;
+      }
+      await upsertDailyAggregates(biz.id, from.slice(0, 10), to.slice(0, 10));
+      return { ok: true, from: from.slice(0, 10), to: to.slice(0, 10), rebuilt: true };
+    }
+    case 'backfill_30d':
+    case 'backfill': {
+      // Corre tu backfill inicial (ajustá si tu política define otra ventana)
+      const out = await ensureInitialBackfillOnce({ businessId: biz.id /*, req opcional */ });
+      return { ok: true, ...out };
+    }
+    case 'window': {
+      const err = new Error('from/to required for window');
+      err.status = 400;
+      throw err;
+    }
+    case 'auto':
+    default: {
+      // Corre tu política automática (normalmente últimos 7 días hasta ayer)
+      const out = await runDailyAuto({ businessId: biz.id, windowDays /*, req opcional */ });
+      return { ok: true, ...out };
+    }
+  }
+};
+
 
 exports.reconcileAndRebuild = async (req, res, next) => {
   try {
@@ -133,7 +200,7 @@ exports.reconcileAndRebuild = async (req, res, next) => {
         .reconcileSalesMappings(client, biz.id, { fromYmd: from, toYmd: to });
       await client.query('COMMIT');
     } catch (e) {
-      try { await client.query('ROLLBACK'); } catch {}
+      try { await client.query('ROLLBACK'); } catch { }
       throw e;
     } finally {
       client.release();
@@ -142,4 +209,102 @@ exports.reconcileAndRebuild = async (req, res, next) => {
     await require('../services/salesStore').upsertDailyAggregates(biz.id, from, to);
     res.json({ ok: true, business_id: String(biz.id), from, to, reconciled: true, rebuilt: true });
   } catch (e) { next(e); }
+};
+
+exports.listDailyItems = async (req, res, next) => {
+  try {
+    const biz = req.business; // seteado por requireBusinessAccessParam
+    const {
+      from,
+      to,
+      articleId,
+      q,
+      limit = 500,
+      offset = 0,
+    } = req.query;
+
+    if (!from || !to) {
+      return res.status(400).json({ error: 'bad_request', message: 'from y to son requeridos (YYYY-MM-DD)' });
+    }
+
+    const params = [biz.id, from, to];
+    const filters = [`sdi.business_id = $1`, `sdi.day BETWEEN $2 AND $3`];
+
+    if (articleId) {
+      params.push(Number(articleId));
+      filters.push(`sdi.article_id = $${params.length}`);
+    }
+
+    // Búsqueda por título (segura con to_jsonb->> por si tu esquema no tiene 'title' exactamente)
+    if (q && String(q).trim()) {
+      params.push(`%${String(q).trim()}%`);
+      const pIdx = params.length;
+      filters.push(`
+        COALESCE(
+          to_jsonb(a)->>'title',
+          to_jsonb(a)->>'name',
+          to_jsonb(a)->>'nombre',
+          to_jsonb(a)->>'descripcion',
+          to_jsonb(a)->>'descripcion_corta',
+          to_jsonb(a)->>'descrip',
+          ''
+        ) ILIKE $${pIdx}
+      `);
+    }
+
+    // Principales filas
+    const sql = `
+      SELECT
+        sdi.day,
+        sdi.article_id,
+        -- título “flexible” del catálogo
+        NULLIF(TRIM(COALESCE(
+          to_jsonb(a)->>'title',
+          to_jsonb(a)->>'name',
+          to_jsonb(a)->>'nombre',
+          to_jsonb(a)->>'descripcion',
+          to_jsonb(a)->>'descripcion_corta',
+          to_jsonb(a)->>'descrip'
+        )), '') AS article_title,
+        sdi.qty,
+        sdi.amount
+      FROM sales_daily_items sdi
+      LEFT JOIN app_articles a
+        ON a.id = sdi.article_id
+       AND a.business_id = sdi.business_id
+      WHERE ${filters.join(' AND ')}
+      ORDER BY sdi.day, sdi.article_id
+      LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+    `;
+
+    // Totales del rango (para cabecera/footers en la UI)
+    const sqlTotals = `
+      SELECT
+        COALESCE(SUM(sdi.qty), 0)::numeric AS qty_total,
+        COALESCE(SUM(sdi.amount), 0)::numeric AS amount_total,
+        COUNT(*)::int AS rows_total
+      FROM sales_daily_items sdi
+      LEFT JOIN app_articles a
+        ON a.id = sdi.article_id
+       AND a.business_id = sdi.business_id
+      WHERE ${filters.join(' AND ')}
+    `;
+
+    const [rows, totals] = await Promise.all([
+      pool.query(sql, params).then(r => r.rows),
+      pool.query(sqlTotals, params).then(r => r.rows[0]),
+    ]);
+
+    res.json({
+      ok: true,
+      business_id: String(biz.id),
+      from,
+      to,
+      filters: { articleId: articleId ? Number(articleId) : null, q: q || null },
+      totals,
+      items: rows,
+    });
+  } catch (e) {
+    next(e);
+  }
 };

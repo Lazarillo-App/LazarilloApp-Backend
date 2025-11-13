@@ -127,6 +127,9 @@ router.post('/:id/sync-sales/backfill-once',       ensureFn('sales.backfillOnce'
 router.post('/:id/sync-sales/daily-auto',          ensureFn('sales.dailyAuto',         sales.dailyAuto));
 router.post('/:id/sync-sales/rebuild-aggregates',  ensureFn('sales.rebuildAggregates', sales.rebuildAggregates));
 
+// NUEVO: listar items agregados por día y artículo
+router.get('/:id/sales/items', ensureFn('sales.listDailyItems', sales.listDailyItems));
+
 /* ───────── Adapter legacy para sync por body/query ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {
   const qMode = String(req.query.mode || '').toLowerCase();
@@ -154,7 +157,7 @@ router.post(
   async (req, res, next) => {
     try {
       const biz = req.business;
-      const out = await sales.syncSalesForBusiness(biz, req.body);
+      const out = await sales.syncSalesForBusiness(biz, req.body, req);
       res.json({ ok: true, business_id: biz.id, sales: out });
     } catch (e) { next(e); }
   }

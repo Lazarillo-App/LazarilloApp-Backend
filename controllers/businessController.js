@@ -8,7 +8,7 @@ const fetch = (...args) => globalThis.fetch(...args);
 
 // Sync ventas (servicios)
 const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
-const { fetchSalesRanged,  getBearer, fetchInvoiceByDate, extractFacturas } = require('../services/maxiSalesService');
+const { fetchSalesRanged, getBearer, fetchInvoiceByDate, extractFacturas } = require('../services/maxiSalesService');
 const { upsertSalesBatch } = require('../services/salesStore');
 
 // Artículos
@@ -35,15 +35,15 @@ function attachBranding(biz) {
 
 // Fechas (UTC día)
 const pad2 = (n) => String(n).padStart(2, '0');
-const ymd  = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-const addDaysUTC = (d, n) => new Date(d.getTime() + n*86400000);
+const addDaysUTC = (d, n) => new Date(d.getTime() + n * 86400000);
 
 function clampToYesterday(fromStr, toStr) {
   const today = at00(new Date());
-  const AYER  = addDaysUTC(today, -1);
+  const AYER = addDaysUTC(today, -1);
   const F = fromStr ? at00(new Date(fromStr)) : AYER;
-  const T = toStr   ? at00(new Date(toStr))   : AYER;
+  const T = toStr ? at00(new Date(toStr)) : AYER;
   const Tc = T > AYER ? AYER : T;
   if (isNaN(+F) || isNaN(+Tc)) throw Object.assign(new Error('invalid_date'), { status: 400 });
   if (F > Tc) throw Object.assign(new Error('from_after_to'), { status: 400 });
@@ -165,6 +165,7 @@ exports.create = async (req, res) => {
     );
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
 
+
     // Backfill inicial 7 días (no bloqueante)
     setImmediate(async () => {
       try {
@@ -173,6 +174,15 @@ exports.create = async (req, res) => {
       } catch (e) {
         console.error(`[backfill:init] biz=${biz.id} ERROR:`, e?.message);
       }
+      try {
+        ensureInitialBackfillOnce({ businessId: biz.id, req }).catch(err =>
+          console.warn('[init backfill]', biz.id, err.message)
+        );
+      } catch { } try {
+        ensureInitialBackfillOnce({ businessId: biz.id, req }).catch(err =>
+          console.warn('[init backfill]', biz.id, err.message)
+        );
+      } catch { }
     });
 
     res.status(201).json({ ok: true, business: biz, activeBusinessId: biz.id });
@@ -201,14 +211,14 @@ exports.update = async (req, res) => {
   const branding = incoming.branding || null;
   const contact = incoming.contact || null;
   const address = incoming.address || null;
-  const social  = incoming.social  || null;
+  const social = incoming.social || null;
   const description = (incoming.description ?? null);
 
   const patch = {
     ...(branding ? { branding } : {}),
     ...(contact ? { contact } : {}),
     ...(address ? { address } : {}),
-    ...(social  ? { social }  : {}),
+    ...(social ? { social } : {}),
     ...(description !== null ? { description } : {})
   };
   const patchIsEmpty = Object.keys(patch).length === 0;
@@ -419,7 +429,7 @@ async function maxiLogin({ email, pass, codcli }) {
 async function maxiInvoiceByDate({ token, from, to }) {
   const u = new URL(`${MAXI_BASE}/estadisticas/invoicebydate`);
   u.searchParams.set('from', from);
-  u.searchParams.set('to',   to);
+  u.searchParams.set('to', to);
   const res = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
   const j = await res.json().catch(() => ({}));
   if (j?.resultCode !== 'SUCCESS') {
@@ -427,7 +437,7 @@ async function maxiInvoiceByDate({ token, from, to }) {
     const err = new Error(msg); err.status = 502; throw err;
   }
   const inner = j?.content?.content || j?.content || {};
-  const arr   = Array.isArray(inner?.facturas) ? inner.facturas : [];
+  const arr = Array.isArray(inner?.facturas) ? inner.facturas : [];
   return arr.map(x => x?.factura).filter(Boolean);
 }
 
@@ -435,7 +445,7 @@ async function maxiInvoiceByDate({ token, from, to }) {
 function chunkRange7d(from, to) {
   const out = [];
   const d0 = new Date(from + 'T00:00:00Z'); // UTC
-  const d1 = new Date(to   + 'T00:00:00Z');
+  const d1 = new Date(to + 'T00:00:00Z');
   if (!(+d0) || !(+d1) || d0 > d1) return out;
   let cur = new Date(d0);
   while (cur <= d1) {
@@ -457,7 +467,7 @@ exports.maxiItemsByDate = async (req, res, next) => {
     if (!biz) return res.status(404).json({ error: 'not_found' });
 
     const from = String(req.query?.from || '').slice(0, 10);
-    const to   = String(req.query?.to   || '').slice(0, 10);
+    const to = String(req.query?.to || '').slice(0, 10);
     if (!from || !to) return res.status(400).json({ error: 'missing_dates', hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD' });
 
     const { rows } = await pool.query(`SELECT props FROM app_businesses WHERE id=$1`, [biz.id]);
@@ -529,16 +539,16 @@ function summarizeInvoices(invoices = []) {
     if (row?.factura) {
       const f = row.factura;
       return {
-        numero:  f.numero ?? null,
-        fecha:   toISODate(f.fecha || f.cabecera?.fecha),
-        hora:    f.cabecera?.hora ?? null,
-        tipo:    f.cabecera?.nombre_cpb ?? null,
+        numero: f.numero ?? null,
+        fecha: toISODate(f.fecha || f.cabecera?.fecha),
+        hora: f.cabecera?.hora ?? null,
+        tipo: f.cabecera?.nombre_cpb ?? null,
         cod_cpb: f.cabecera?.cod_cpb ?? null,
-        total:   Number(f.total ?? f.cabecera?.total ?? 0),
-        neto1:   Number(f.cabecera?.neto1 ?? 0),
-        iva1:    Number(f.cabecera?.iva1 ?? 0),
-        forma:   f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
-        suc:     f.cabecera?.prefijo ?? null,
+        total: Number(f.total ?? f.cabecera?.total ?? 0),
+        neto1: Number(f.cabecera?.neto1 ?? 0),
+        iva1: Number(f.cabecera?.iva1 ?? 0),
+        forma: f.cobro?.forma_cobro_tipo || f.cobro?.nombre || null,
+        suc: f.cabecera?.prefijo ?? null,
         anulado: false
       };
     }
@@ -547,32 +557,32 @@ function summarizeInvoices(invoices = []) {
     const od = row?.order?.orderData || row?.orderData || null;
     if (od) {
       return {
-        numero:  od.orderId ?? null,
-        fecha:   toISODate(od.orderDate),
-        hora:    od.timeClose || od.timeOpen || null,
-        tipo:    null,
+        numero: od.orderId ?? null,
+        fecha: toISODate(od.orderDate),
+        hora: od.timeClose || od.timeOpen || null,
+        tipo: null,
         cod_cpb: null,
-        total:   Number(od.totalSales ?? 0),
-        neto1:   0,
-        iva1:    0,
-        forma:   null,
-        suc:     null,
+        total: Number(od.totalSales ?? 0),
+        neto1: 0,
+        iva1: 0,
+        forma: null,
+        suc: null,
         anulado: false
       };
     }
 
     // Desconocido → generamos algo estable
     return {
-      numero:  null,
-      fecha:   '',
-      hora:    null,
-      tipo:    null,
+      numero: null,
+      fecha: '',
+      hora: null,
+      tipo: null,
       cod_cpb: null,
-      total:   0,
-      neto1:   0,
-      iva1:    0,
-      forma:   null,
-      suc:     null,
+      total: 0,
+      neto1: 0,
+      iva1: 0,
+      forma: null,
+      suc: null,
       anulado: false
     };
   });
@@ -621,7 +631,7 @@ exports.maxiRawInvoices = async (req, res, next) => {
     if (!biz) return res.status(404).json({ error: 'not_found' });
 
     const from = String(req.query?.from || '').slice(0, 10);
-    const to   = String(req.query?.to   || '').slice(0, 10);
+    const to = String(req.query?.to || '').slice(0, 10);
     if (!from || !to) {
       return res.status(400).json({
         error: 'missing_dates',
@@ -630,8 +640,8 @@ exports.maxiRawInvoices = async (req, res, next) => {
     }
 
     // 🔐 Usa el mismo flujo que el probe: bearer cacheado + endpoint correcto
-    const bearer   = await getBearer(biz.id, req);
-    const payload  = await fetchInvoiceByDate(from, to, bearer);
+    const bearer = await getBearer(biz.id, req);
+    const payload = await fetchInvoiceByDate(from, to, bearer);
 
     // 🧩 Normaliza a un array de "factura" (sirve para el summarize)
     const invoices = extractFacturas(payload) || [];
@@ -725,13 +735,13 @@ exports.syncSales = async (req, res, next) => {
     // Rango arbitrario: trae crudo desde Maxi (clamp interno a AYER), normaliza y hace UPSERT
     if (mode === 'range') {
       const from = String(req.query.from || '').slice(0, 10);
-      const to   = String(req.query.to   || '').slice(0, 10);
+      const to = String(req.query.to || '').slice(0, 10);
       if (!from || !to) {
         return res.status(400).json({ error: 'invalid_range', hint: 'use from=YYYY-MM-DD&to=YYYY-MM-DD' });
       }
 
       const rawFacturas = await fetchSalesRanged({ businessId: biz.id, from, to, req });
-      const upsertOut   = await upsertSalesBatch(biz.id, rawFacturas);
+      const upsertOut = await upsertSalesBatch(biz.id, rawFacturas);
 
       return res.json({
         ok: true,
@@ -744,7 +754,7 @@ exports.syncSales = async (req, res, next) => {
       });
     }
 
-    return res.status(400).json({ error: 'invalid_mode', allowed: ['auto','range','backfill_30d'] });
+    return res.status(400).json({ error: 'invalid_mode', allowed: ['auto', 'range', 'backfill_30d'] });
   } catch (e) {
     next(e);
   }
