@@ -381,9 +381,131 @@ exports.maxiArticlesProxy = async (req, res) => {
 };
 
 /* ===== Compat (legacy) — ventas lectura vieja ===== */
-exports.salesSummaryFromDB = async (_req, res) => {
-  res.status(410).json({ error: 'gone', detail: 'Reemplazado por /api/ventas/summary (con X-Business-Id).' });
+exports.salesSummaryFromDB = async (req, res, next) => {
+  try {
+    const bizId =
+      Number(req.business?.id) ||
+      Number(req.params.id) ||
+      Number(req.query.businessId);
+
+    if (!Number.isFinite(bizId)) {
+      return res.status(400).json({ error: 'invalid_business_id' });
+    }
+
+    const from = String(req.query.from || '').slice(0, 10);
+    const to   = String(req.query.to   || '').slice(0, 10);
+    const limit = Number(req.query.limit || 1000) || 1000;
+
+    if (!from || !to) {
+      return res.status(400).json({
+        error: 'from_to_required',
+        hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD',
+      });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT day AS fecha, total, tx_count
+        FROM public.sales_daily
+       WHERE business_id = $1
+         AND day BETWEEN $2 AND $3
+       ORDER BY day ASC
+       LIMIT $4
+      `,
+      [bizId, from, to, limit]
+    );
+
+    const items = rows.map(r => ({
+      fecha: r.fecha,                        // date
+      total: Number(r.total || 0),          // ventas $
+      tx_count: Number(r.tx_count || 0),    // cantidad de tickets
+    }));
+
+    const total = items.reduce((acc, r) => acc + r.total, 0);
+    const txTotal = items.reduce((acc, r) => acc + r.tx_count, 0);
+
+    return res.json({
+      ok: true,
+      business_id: bizId,
+      from,
+      to,
+      total,
+      tx_count: txTotal,
+      items,
+    });
+  } catch (e) {
+    next(e);
+  }
 };
-exports.salesSeriesFromDB = async (_req, res) => {
-  res.status(410).json({ error: 'gone', detail: 'Reemplazado por /api/ventas/by-article (con X-Business-Id).' });
+
+
+/**
+ * GET /api/businesses/:id/sales/:articuloId?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month
+ * Serie por artículo usando sales_daily_items.
+ */
+exports.salesSeriesFromDB = async (req, res, next) => {
+  try {
+    const bizId =
+      Number(req.business?.id) ||
+      Number(req.params.id) ||
+      Number(req.query.businessId);
+
+    const articuloId = Number(req.params.articuloId);
+
+    if (!Number.isFinite(bizId) || !Number.isFinite(articuloId)) {
+      return res.status(400).json({ error: 'invalid_params' });
+    }
+
+    const from = String(req.query.from || '').slice(0, 10);
+    const to   = String(req.query.to   || '').slice(0, 10);
+    let groupBy = String(req.query.groupBy || 'day').toLowerCase();
+
+    if (!from || !to) {
+      return res.status(400).json({
+        error: 'from_to_required',
+        hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD',
+      });
+    }
+
+    if (!['day', 'week', 'month'].includes(groupBy)) {
+      groupBy = 'day';
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT date_trunc($4, day)::date AS bucket,
+             SUM(qty)::numeric        AS qty,
+             SUM(amount)::numeric     AS amount
+        FROM public.sales_daily_items
+       WHERE business_id = $1
+         AND article_id  = $2
+         AND day BETWEEN $3 AND $5
+       GROUP BY bucket
+       ORDER BY bucket
+      `,
+      [bizId, articuloId, from, groupBy, to]
+    );
+
+    const items = rows.map(r => ({
+      label: r.bucket,                // date
+      qty: Number(r.qty || 0),
+      amount: Number(r.amount || 0),
+    }));
+
+    const total = items.reduce((acc, r) => acc + r.qty, 0);
+
+    return res.json({
+      ok: true,
+      business_id: bizId,
+      articulo_id: articuloId,
+      from,
+      to,
+      groupBy,
+      total,
+      items,
+    });
+  } catch (e) {
+    next(e);
+  }
 };
+
