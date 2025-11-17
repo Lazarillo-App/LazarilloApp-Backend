@@ -256,63 +256,92 @@ async function upsertSalesBatch(businessId, rawDocs, clientExtern = null) {
 /**
  * Recalcula agregados entre dos fechas (incl.). Usa qty real.
  */
-async function upsertDailyAggregates(businessId, fromYmd, toYmd) {
-  const client = await pool.connect();
+async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
+  const client = clientOpt || await pool.connect();
+  const ownClient = !clientOpt;
+
   try {
-    await client.query('BEGIN');
+    if (ownClient) {
+      await client.query('BEGIN');
+    }
 
-    // ✅ Después: una sentencia por query
-    await client.query(
-      `DELETE FROM sales_daily_items
-     WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date`,
-      [businessId, fromYmd, toYmd]
-    );
+    const params = [businessId, fromYmd, toYmd];
 
-    await client.query(
-      `DELETE FROM sales_daily
-     WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date`,
-      [businessId, fromYmd, toYmd]
-    );
+    /* 1) sales_daily: totales por día */
+    const sqlDaily = `
+      INSERT INTO sales_daily (business_id, day, total, tx_count)
+      SELECT
+        s.business_id,
+        (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+        SUM(s.total) AS total,
+        COUNT(*)    AS tx_count
+      FROM app_sales s
+      WHERE s.business_id = $1
+        AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2 AND $3
+      GROUP BY s.business_id, (s.occurred_at AT TIME ZONE 'UTC')::date
+      ON CONFLICT (business_id, day)
+      DO UPDATE SET
+        total    = EXCLUDED.total,
+        tx_count = EXCLUDED.tx_count
+    `;
+    await client.query(sqlDaily, params);
 
+    /* 2) sales_daily_items: totales por día + artículo */
+    const sqlItems = `
+      INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
+      SELECT
+        s.business_id,
+        (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+        si.article_id,
+        -- Cantidad: priorizamos si.qty, si no quantity
+        SUM(
+          CASE
+            WHEN si.qty IS NOT NULL AND si.qty <> 0
+              THEN si.qty
+            WHEN si.quantity IS NOT NULL
+              THEN si.quantity
+            ELSE 0
+          END
+        ) AS qty,
+        -- Importe: priorizamos si.amount, si no total
+        SUM(
+          CASE
+            WHEN si.amount IS NOT NULL AND si.amount <> 0
+              THEN si.amount
+            WHEN si.total IS NOT NULL
+              THEN si.total
+            ELSE 0
+          END
+        ) AS amount
+      FROM app_sales_items si
+      JOIN app_sales s
+        ON s.id = si.sale_id
+      WHERE s.business_id = $1
+        AND si.article_id IS NOT NULL
+        AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2 AND $3
+      GROUP BY
+        s.business_id,
+        (s.occurred_at AT TIME ZONE 'UTC')::date,
+        si.article_id
+      ON CONFLICT (business_id, day, article_id)
+      DO UPDATE SET
+        qty    = EXCLUDED.qty,
+        amount = EXCLUDED.amount
+    `;
+    await client.query(sqlItems, params);
 
-    // Totales por día
-    await client.query(
-      `INSERT INTO sales_daily (business_id, day, total, tx_count)
-       SELECT s.business_id,
-              (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-              SUM(s.total) AS total,
-              COUNT(*)     AS tx_count
-       FROM app_sales s
-       WHERE s.business_id = $1
-         AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-       GROUP BY 1,2`,
-      [businessId, fromYmd, toYmd]
-    );
-
-    // Ítems por día/artículo
-    await client.query(
-      `INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-       SELECT s.business_id,
-              (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-              si.article_id,
-              SUM(si.qty)    AS qty,
-              SUM(si.amount) AS amount
-       FROM app_sales_items si
-       JOIN app_sales s ON s.id = si.sale_id
-       WHERE s.business_id = $1
-         AND si.article_id IS NOT NULL
-         AND si.amount > 0
-         AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-       GROUP BY 1,2,3`,
-      [businessId, fromYmd, toYmd]
-    );
-
-    await client.query('COMMIT');
+    if (ownClient) {
+      await client.query('COMMIT');
+    }
   } catch (e) {
-    await client.query('ROLLBACK');
+    if (ownClient) {
+      try { await client.query('ROLLBACK'); } catch {}
+    }
     throw e;
   } finally {
-    client.release();
+    if (ownClient) {
+      client.release();
+    }
   }
 }
 
@@ -360,7 +389,6 @@ async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
 module.exports = {
   normalizeInvoices,
   upsertSalesBatch,
-  upsertDailyAggregates,
   upsertDailyAggregates,
   reconcileSalesMappings,
 };
