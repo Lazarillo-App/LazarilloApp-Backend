@@ -113,10 +113,27 @@ router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.
 router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 
 /* ───────── Catálogo (lecturas legacy) ───────── */
-router.get('/:id/articles', cacheJson(300), ensureFn('listArticlesFromDB', listArticlesFromDB));
+router.get('/:id/articles',       cacheJson(300), ensureFn('listArticlesFromDB', listArticlesFromDB));
 router.get('/:id/articles/tree',  cacheJson(300), ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
-router.get('/:id/sales/summary',  cacheJson(300), ensureFn('salesSummaryFromDB', salesSummaryFromDB));
-router.get('/:id/sales/:articuloId',  cacheJson(300), ensureFn('salesSeriesFromDB', salesSeriesFromDB));
+
+/* ───────── Ventas: items agregados por día ───────── */
+router.get(
+  '/:id/sales/items',
+  ensureFn('sales.listDailyItems', sales.listDailyItems)
+);
+
+/* ───────── Ventas legacy lectura (serie por artículo) ───────── */
+router.get(
+  '/:id/sales/summary',
+  cacheJson(300),
+  ensureFn('salesSummaryFromDB', salesSummaryFromDB)
+);
+
+router.get(
+  '/:id/sales/:articuloId',
+  cacheJson(300),
+  ensureFn('salesSeriesFromDB', salesSeriesFromDB)
+);
 
 /* ───────── Ventas: probes (diagnóstico) ───────── */
 router.get('/:id/maxi-sales-probe',    ensureFn('sales.maxiSalesProbe',   sales.maxiSalesProbe));
@@ -127,9 +144,6 @@ router.post('/:id/sync-sales/window',             ensureFn('sales.syncWindow',  
 router.post('/:id/sync-sales/backfill-once',      ensureFn('sales.backfillOnce',      sales.backfillOnce));
 router.post('/:id/sync-sales/daily-auto',         ensureFn('sales.dailyAuto',         sales.dailyAuto));
 router.post('/:id/sync-sales/rebuild-aggregates', ensureFn('sales.rebuildAggregates', sales.rebuildAggregates));
-
-// NUEVO: listar items agregados por día y artículo
-router.get('/:id/sales/items', ensureFn('sales.listDailyItems', sales.listDailyItems));
 
 /* ───────── Adapter legacy para sync por body/query ───────── */
 function adaptSyncSalesQueryToBody(req, _res, next) {
