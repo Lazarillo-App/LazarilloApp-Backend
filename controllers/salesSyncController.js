@@ -8,15 +8,16 @@ const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSy
 
 /* ───────── helpers fecha ───────── */
 const pad2 = (n) => String(n).padStart(2, '0');
-const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;
+const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear()+ d.getUTCMonth(), d.getUTCDate()));
-const addDaysUTC = (d, n) => new Date(d.getTime(),  n * 86400000);
+const addDaysUTC = (d, n) => new Date(d.getTime() + n * 86400000);
 
 function parseDate(zd, fb) {
   if (!zd) return fb;
-  const d = new Date(zd);
-  return Number.isNaN(d) ? fb : d;
+  const d = zd instanceof Date ? zd : new Date(zd);
+  return Number.isNaN(d.getTime()) ? fb : d;
 }
+
 function clampToYesterday(a, b) {
   const today = new Date();
   const AYER = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
@@ -304,6 +305,16 @@ exports.listDailyItems = async (req, res, next) => {
       totals,
       items: rows,
     });
+  } catch (e) {
+    next(e);
+  }
+};
+
+exports.adminSyncSales = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const out = await exports.syncSalesForBusiness(biz, req.body || {}, req);
+    res.json({ ok: true, business_id: biz.id, sales: out });
   } catch (e) {
     next(e);
   }

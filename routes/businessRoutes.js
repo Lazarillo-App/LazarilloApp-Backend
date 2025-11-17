@@ -123,10 +123,10 @@ router.get('/:id/maxi-sales-probe',    ensureFn('sales.maxiSalesProbe',   sales.
 router.get('/:id/maxi-sales-probe-v2', ensureFn('sales.maxiSalesProbeV2', sales.maxiSalesProbeV2));
 
 /* ───────── Ventas V2 (estables) ───────── */
-router.post('/:id/sync-sales/window',              ensureFn('sales.syncWindow',        sales.syncWindow));
-router.post('/:id/sync-sales/backfill-once',       ensureFn('sales.backfillOnce',      sales.backfillOnce));
-router.post('/:id/sync-sales/daily-auto',          ensureFn('sales.dailyAuto',         sales.dailyAuto));
-router.post('/:id/sync-sales/rebuild-aggregates',  ensureFn('sales.rebuildAggregates', sales.rebuildAggregates));
+router.post('/:id/sync-sales/window',             ensureFn('sales.syncWindow',        sales.syncWindow));
+router.post('/:id/sync-sales/backfill-once',      ensureFn('sales.backfillOnce',      sales.backfillOnce));
+router.post('/:id/sync-sales/daily-auto',         ensureFn('sales.dailyAuto',         sales.dailyAuto));
+router.post('/:id/sync-sales/rebuild-aggregates', ensureFn('sales.rebuildAggregates', sales.rebuildAggregates));
 
 // NUEVO: listar items agregados por día y artículo
 router.get('/:id/sales/items', ensureFn('sales.listDailyItems', sales.listDailyItems));
