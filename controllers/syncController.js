@@ -380,127 +380,154 @@ exports.maxiArticlesProxy = async (req, res) => {
   }
 };
 
-/* ===== Compat (legacy) — ventas lectura vieja ===== */
 exports.salesSummaryFromDB = async (req, res, next) => {
   try {
-    const bizId =
-      Number(req.business?.id) ||
-      Number(req.params.id) ||
-      Number(req.query.businessId);
+    const biz = req.business; // seteado por requireBusinessAccessParam
+    const fromRaw = String(req.query.from || '').slice(0, 10);
+    const toRaw   = String(req.query.to   || '').slice(0, 10);
+    let limit = Number(req.query.limit || 100);
 
-    if (!Number.isFinite(bizId)) {
-      return res.status(400).json({ error: 'invalid_business_id' });
+    if (!fromRaw || !toRaw) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'from_to_required' });
     }
 
-    const from = String(req.query.from || '').slice(0, 10);
-    const to   = String(req.query.to   || '').slice(0, 10);
-    const limit = Number(req.query.limit || 1000) || 1000;
+    if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+    if (limit > 1000) limit = 1000;
 
-    if (!from || !to) {
-      return res.status(400).json({
-        error: 'from_to_required',
-        hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD',
-      });
-    }
+    const paramsBase = [biz.id, fromRaw, toRaw];
 
-    const { rows } = await pool.query(
-      `
-      SELECT day AS fecha, total, tx_count
-        FROM public.sales_daily
-       WHERE business_id = $1
-         AND day BETWEEN $2 AND $3
-       ORDER BY day ASC
-       LIMIT $4
-      `,
-      [bizId, from, to, limit]
-    );
+    // Ranking por artículo
+    const sqlItems = `
+      SELECT
+        sdi.article_id,
+        COALESCE(SUM(sdi.qty), 0)::numeric   AS qty,
+        COALESCE(SUM(sdi.amount), 0)::numeric AS amount,
+        NULLIF(TRIM(COALESCE(
+          to_jsonb(a)->>'title',
+          to_jsonb(a)->>'name',
+          to_jsonb(a)->>'nombre',
+          to_jsonb(a)->>'descripcion',
+          to_jsonb(a)->>'descripcion_corta',
+          to_jsonb(a)->>'descrip'
+        )), '') AS article_title
+      FROM sales_daily_items sdi
+      LEFT JOIN app_articles a
+        ON a.id = sdi.article_id
+       AND a.business_id = sdi.business_id
+      WHERE sdi.business_id = $1
+        AND sdi.day BETWEEN $2 AND $3
+      GROUP BY sdi.article_id, article_title
+      ORDER BY qty DESC
+      LIMIT $4
+    `;
 
-    const items = rows.map(r => ({
-      fecha: r.fecha,                        // date
-      total: Number(r.total || 0),          // ventas $
-      tx_count: Number(r.tx_count || 0),    // cantidad de tickets
-    }));
+    const sqlTotals = `
+      SELECT
+        COALESCE(SUM(sdi.qty),    0)::numeric AS qty_total,
+        COALESCE(SUM(sdi.amount), 0)::numeric AS amount_total
+      FROM sales_daily_items sdi
+      WHERE sdi.business_id = $1
+        AND sdi.day BETWEEN $2 AND $3
+    `;
 
-    const total = items.reduce((acc, r) => acc + r.total, 0);
-    const txTotal = items.reduce((acc, r) => acc + r.tx_count, 0);
+    const [rows, totals] = await Promise.all([
+      pool.query(sqlItems, [...paramsBase, limit]).then(r => r.rows),
+      pool.query(sqlTotals, paramsBase).then(r => r.rows[0] || { qty_total: 0, amount_total: 0 }),
+    ]);
+
+    const totalAmount = Number(totals.amount_total || 0);
+    const totalQty    = Number(totals.qty_total || 0);
 
     return res.json({
       ok: true,
-      business_id: bizId,
-      from,
-      to,
-      total,
-      tx_count: txTotal,
-      items,
+      business_id: biz.id,
+      from: fromRaw,
+      to: toRaw,
+      total: totalAmount,      // $ total del rango
+      tx_count: totalQty,      // lo usamos como "unidades" totales
+      limit,
+      items: rows.map(r => ({
+        article_id: Number(r.article_id),
+        qty: Number(r.qty || 0),
+        amount: Number(r.amount || 0),
+        article_title: r.article_title || null,
+      })),
     });
   } catch (e) {
     next(e);
   }
 };
 
-
 /**
- * GET /api/businesses/:id/sales/:articuloId?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month
- * Serie por artículo usando sales_daily_items.
+ * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
+ *
+ * Serie por ARTÍCULO usando sales_daily_items:
+ * {
+ *   ok, business_id, articulo_id, from, to, groupBy,
+ *   total,
+ *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
+ * }
  */
 exports.salesSeriesFromDB = async (req, res, next) => {
   try {
-    const bizId =
-      Number(req.business?.id) ||
-      Number(req.params.id) ||
-      Number(req.query.businessId);
-
+    const biz = req.business;
     const articuloId = Number(req.params.articuloId);
+    const fromRaw = String(req.query.from || '').slice(0, 10);
+    const toRaw   = String(req.query.to   || '').slice(0, 10);
+    const groupBy = (req.query.groupBy || 'day').toLowerCase();
 
-    if (!Number.isFinite(bizId) || !Number.isFinite(articuloId)) {
-      return res.status(400).json({ error: 'invalid_params' });
+    if (!Number.isFinite(articuloId) || articuloId <= 0) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'invalid_articulo_id' });
+    }
+    if (!fromRaw || !toRaw) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'from_to_required' });
     }
 
-    const from = String(req.query.from || '').slice(0, 10);
-    const to   = String(req.query.to   || '').slice(0, 10);
-    let groupBy = String(req.query.groupBy || 'day').toLowerCase();
-
-    if (!from || !to) {
-      return res.status(400).json({
-        error: 'from_to_required',
-        hint: 'use ?from=YYYY-MM-DD&to=YYYY-MM-DD',
-      });
+    // Por ahora solo soportamos 'day'
+    if (groupBy !== 'day') {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'unsupported_group_by', allowed: ['day'] });
     }
 
-    if (!['day', 'week', 'month'].includes(groupBy)) {
-      groupBy = 'day';
-    }
+    const sql = `
+      SELECT
+        sdi.day AS label,
+        COALESCE(SUM(sdi.qty),    0)::numeric   AS qty,
+        COALESCE(SUM(sdi.amount), 0)::numeric   AS amount
+      FROM sales_daily_items sdi
+      WHERE sdi.business_id = $1
+        AND sdi.article_id  = $2
+        AND sdi.day BETWEEN $3 AND $4
+      GROUP BY sdi.day
+      ORDER BY sdi.day
+    `;
 
-    const { rows } = await pool.query(
-      `
-      SELECT date_trunc($4, day)::date AS bucket,
-             SUM(qty)::numeric        AS qty,
-             SUM(amount)::numeric     AS amount
-        FROM public.sales_daily_items
-       WHERE business_id = $1
-         AND article_id  = $2
-         AND day BETWEEN $3 AND $5
-       GROUP BY bucket
-       ORDER BY bucket
-      `,
-      [bizId, articuloId, from, groupBy, to]
-    );
+    const rows = await pool
+      .query(sql, [biz.id, articuloId, fromRaw, toRaw])
+      .then(r => r.rows);
 
     const items = rows.map(r => ({
-      label: r.bucket,                // date
+      label: r.label, // ya viene como date/iso de PG
       qty: Number(r.qty || 0),
       amount: Number(r.amount || 0),
     }));
 
-    const total = items.reduce((acc, r) => acc + r.qty, 0);
+    const total = items.reduce((acc, it) => acc + (Number(it.qty) || 0), 0);
 
     return res.json({
       ok: true,
-      business_id: bizId,
+      business_id: biz.id,
       articulo_id: articuloId,
-      from,
-      to,
-      groupBy,
+      from: fromRaw,
+      to: toRaw,
+      groupBy: 'day',
       total,
       items,
     });
@@ -508,4 +535,3 @@ exports.salesSeriesFromDB = async (req, res, next) => {
     next(e);
   }
 };
-
