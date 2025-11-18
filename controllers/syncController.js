@@ -10,7 +10,7 @@ const fetchNative =
 
 const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
-const FETCH_RETRIES    = Number(process.env.MAXI_FETCH_RETRIES || 2);
+const FETCH_RETRIES = Number(process.env.MAXI_FETCH_RETRIES || 2);
 
 /* ======================= Utils básicos ======================= */
 function simpleHash(str = '') {
@@ -20,11 +20,11 @@ function simpleHash(str = '') {
 }
 const norm = s => String(s ?? '').trim();
 const orSinCategoria = s => (norm(s) || 'Sin categoría');
-const orSinSubrubro  = s => (norm(s) || 'Sin subrubro');
+const orSinSubrubro = s => (norm(s) || 'Sin subrubro');
 
 function parseDate(zd, fallback) {
   if (zd == null || zd === '') return new Date(fallback);
-  if (zd instanceof Date)     return Number.isNaN(+zd) ? new Date(fallback) : zd;
+  if (zd instanceof Date) return Number.isNaN(+zd) ? new Date(fallback) : zd;
   if (typeof zd === 'number') { const d = new Date(zd); return Number.isNaN(+d) ? new Date(fallback) : d; }
   const d = new Date(String(zd)); return Number.isNaN(+d) ? new Date(fallback) : d;
 }
@@ -47,12 +47,12 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
       const res = await fetchNative(url, { ...options, signal: ctrl.signal });
       clearTimeout(t);
       if (res.ok) return res;
-      if ([429,500,502,503,504].includes(res.status) && attempt < retries) {
+      if ([429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
         await new Promise(r => setTimeout(r, 200 * (attempt + 1) ** 2));
         continue;
       }
       const txt = await res.text().catch(() => '');
-      const err = new Error(`HTTP ${res.status} - ${txt.slice(0,200)}`); err.status = res.status;
+      const err = new Error(`HTTP ${res.status} - ${txt.slice(0, 200)}`); err.status = res.status;
       throw err;
     } catch (e) {
       clearTimeout(t); lastErr = e;
@@ -67,7 +67,7 @@ async function fetchWithRetry(url, options = {}, { retries = FETCH_RETRIES, time
 async function maxiLogin({ email, password, codcli }) {
   const res = await fetchWithRetry(`${BASE}/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept':'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({ email, pass: password, cod_cli: String(codcli) })
   });
   const j = await res.json().catch(() => ({}));
@@ -86,7 +86,7 @@ async function maxiLogin({ email, password, codcli }) {
 async function fetchMaxiArticles({ token, from, to }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
-  if (to)   u.searchParams.set('fechaFin', to);
+  if (to) u.searchParams.set('fechaFin', to);
 
   const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` } });
   const j = await res.json().catch(() => ({}));
@@ -95,20 +95,20 @@ async function fetchMaxiArticles({ token, from, to }) {
   const root = Array.isArray(j?.content)
     ? j.content
     : Array.isArray(j?.menu?.content)
-    ? j.menu.content
-    : Array.isArray(j?.data?.content)
-    ? j.data.content
-    : [];
+      ? j.menu.content
+      : Array.isArray(j?.data?.content)
+        ? j.data.content
+        : [];
 
   const items = [];
   const seen = new Set();
 
   const isArticle = (o = {}) => {
-    const hasId   = ['id','idArticulo','codart','codigo','codigoArticulo'].some(k => k in o);
-    const hasInfo = ['descripcion','descripcionl','nombre','precio','precioVenta','importe'].some(k => k in o);
+    const hasId = ['id', 'idArticulo', 'codart', 'codigo', 'codigoArticulo'].some(k => k in o);
+    const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
     return hasId && hasInfo;
   };
-  const num     = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
   const getName = (o) => String(o?.descripcion ?? o?.descripcionl ?? o?.nombre ?? '').trim();
 
   const pushArt = (o, { rubroNombre, subrubroNombre }) => {
@@ -119,9 +119,9 @@ async function fetchMaxiArticles({ token, from, to }) {
       id,
       nombre: getName(o),
       categoria: orSinCategoria(subrubroNombre), // SWAP
-      subrubro : orSinSubrubro(rubroNombre),     // SWAP
+      subrubro: orSinSubrubro(rubroNombre),     // SWAP
       precio: num(o.precio ?? o.precioVenta ?? o.importe, 0),
-      costo : num(o.costo  ?? o.costoPromedio, 0),
+      costo: num(o.costo ?? o.costoPromedio, 0),
       raw: o,
     });
   };
@@ -176,13 +176,13 @@ async function upsertArticles({ client, businessId, items }) {
       const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
       if (!Number.isFinite(id)) continue;
 
-      const nombre   = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0,200) || null);
-      const categoria= orSinCategoria(it.categoria);
+      const nombre = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null);
+      const categoria = orSinCategoria(it.categoria);
       const subrubro = orSinSubrubro(it.subrubro);
-      const precio   = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo    = Number(it.costo  ?? it.costoPromedio ?? 0) || 0;
+      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
+      const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
 
-      values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},$${p+6},$${p+7}::jsonb,NOW())`);
+      values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},$${p + 6},$${p + 7}::jsonb,NOW())`);
       params.push(
         businessId, id, nombre, categoria, subrubro, precio, costo,
         JSON.stringify(it.raw ?? it._raw ?? it)
@@ -224,9 +224,9 @@ exports.syncNow = async (req, res) => {
   const { scope = 'articles', from, to } = req.body || {};
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday    = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
+  const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
   const f = ymd(parseDate(from, startOfMonth));
-  const t = ymd(parseDate(to,   yesterday));
+  const t = ymd(parseDate(to, yesterday));
 
   const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
   const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || mx.pass || '');
@@ -239,7 +239,7 @@ exports.syncNow = async (req, res) => {
     const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
     let upserted = 0;
-    let mapped   = 0;
+    let mapped = 0;
     let cacheHash = null;
 
     if (scope === 'articles' || scope === 'all') {
@@ -283,7 +283,7 @@ exports.syncNow = async (req, res) => {
 
     return res.json({ ok: true, business_id: biz.id, scope: 'articles', from: f, to: t, upserted, mapped, cacheHash });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     const msg = String(e?.message || '');
     if (msg.includes('maxi_login_failed') || e.status === 401 || msg.includes('401')) {
       return res.status(401).json({ error: 'unauthorized', detail: 'Maxi login failed/401' });
@@ -362,9 +362,9 @@ exports.maxiArticlesProxy = async (req, res) => {
 
   const today = new Date();
   const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday    = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
+  const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
   const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to   = ymd(parseDate(req.query.to,   yesterday));
+  const to = ymd(parseDate(req.query.to, yesterday));
 
   try {
     const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
@@ -380,85 +380,63 @@ exports.maxiArticlesProxy = async (req, res) => {
   }
 };
 
-exports.salesSummaryFromDB = async (req, res, next) => {
+async function salesSummaryFromDB(req, res, next) {
   try {
-    const biz = req.business; // seteado por requireBusinessAccessParam
-    const fromRaw = String(req.query.from || '').slice(0, 10);
-    const toRaw   = String(req.query.to   || '').slice(0, 10);
-    let limit = Number(req.query.limit || 100);
+    const biz = req.business;
+    const { from, to, limit = 50, q } = req.query;
 
-    if (!fromRaw || !toRaw) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'from_to_required' });
+    const client = await pool.connect();
+    try {
+      const sql = `
+        SELECT
+          s.article_id,
+          COALESCE(a.nombre, s.article_title, 'Artículo #' || s.article_id::text) AS title,
+          SUM(s.qty)    AS qty,
+          SUM(s.amount) AS amount
+        FROM sales_daily_items s
+        LEFT JOIN maxi_articles a
+          ON a.business_id = s.business_id
+         AND a.maxi_id     = s.article_id
+        WHERE s.business_id = $1
+          AND s.day >= $2::date
+          AND s.day <= $3::date
+          AND (
+            $4::text IS NULL
+            OR a.nombre ILIKE '%' || $4 || '%'
+            OR s.article_title ILIKE '%' || $4 || '%'
+          )
+        GROUP BY s.article_id, title
+        ORDER BY qty DESC
+        LIMIT $5;
+      `;
+
+      const params = [biz.id, from, to, q || null, Number(limit) || 50];
+      const { rows } = await client.query(sql, params);
+
+      const total = rows.reduce((acc, r) => acc + Number(r.amount || 0), 0);
+
+      res.json({
+        ok: true,
+        business_id: biz.id,
+        from,
+        to,
+        total,
+        tx_count: null, // si tenés tx_count en otra tabla lo podés calcular aparte
+        limit: Number(limit) || 50,
+        items: rows.map((r) => ({
+          article_id: r.article_id,
+          article_title: r.title, // 👈 nunca null
+          qty: Number(r.qty) || 0,
+          amount: Number(r.amount) || 0,
+        })),
+      });
+    } finally {
+      client.release();
     }
-
-    if (!Number.isFinite(limit) || limit <= 0) limit = 100;
-    if (limit > 1000) limit = 1000;
-
-    const paramsBase = [biz.id, fromRaw, toRaw];
-
-    // Ranking por artículo
-    const sqlItems = `
-      SELECT
-        sdi.article_id,
-        COALESCE(SUM(sdi.qty), 0)::numeric   AS qty,
-        COALESCE(SUM(sdi.amount), 0)::numeric AS amount,
-        NULLIF(TRIM(COALESCE(
-          to_jsonb(a)->>'title',
-          to_jsonb(a)->>'name',
-          to_jsonb(a)->>'nombre',
-          to_jsonb(a)->>'descripcion',
-          to_jsonb(a)->>'descripcion_corta',
-          to_jsonb(a)->>'descrip'
-        )), '') AS article_title
-      FROM sales_daily_items sdi
-      LEFT JOIN app_articles a
-        ON a.id = sdi.article_id
-       AND a.business_id = sdi.business_id
-      WHERE sdi.business_id = $1
-        AND sdi.day BETWEEN $2 AND $3
-      GROUP BY sdi.article_id, article_title
-      ORDER BY qty DESC
-      LIMIT $4
-    `;
-
-    const sqlTotals = `
-      SELECT
-        COALESCE(SUM(sdi.qty),    0)::numeric AS qty_total,
-        COALESCE(SUM(sdi.amount), 0)::numeric AS amount_total
-      FROM sales_daily_items sdi
-      WHERE sdi.business_id = $1
-        AND sdi.day BETWEEN $2 AND $3
-    `;
-
-    const [rows, totals] = await Promise.all([
-      pool.query(sqlItems, [...paramsBase, limit]).then(r => r.rows),
-      pool.query(sqlTotals, paramsBase).then(r => r.rows[0] || { qty_total: 0, amount_total: 0 }),
-    ]);
-
-    const totalAmount = Number(totals.amount_total || 0);
-    const totalQty    = Number(totals.qty_total || 0);
-
-    return res.json({
-      ok: true,
-      business_id: biz.id,
-      from: fromRaw,
-      to: toRaw,
-      total: totalAmount,      // $ total del rango
-      tx_count: totalQty,      // lo usamos como "unidades" totales
-      limit,
-      items: rows.map(r => ({
-        article_id: Number(r.article_id),
-        qty: Number(r.qty || 0),
-        amount: Number(r.amount || 0),
-        article_title: r.article_title || null,
-      })),
-    });
   } catch (e) {
     next(e);
   }
-};
+}
 
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
@@ -475,7 +453,7 @@ exports.salesSeriesFromDB = async (req, res, next) => {
     const biz = req.business;
     const articuloId = Number(req.params.articuloId);
     const fromRaw = String(req.query.from || '').slice(0, 10);
-    const toRaw   = String(req.query.to   || '').slice(0, 10);
+    const toRaw = String(req.query.to || '').slice(0, 10);
     const groupBy = (req.query.groupBy || 'day').toLowerCase();
 
     if (!Number.isFinite(articuloId) || articuloId <= 0) {
