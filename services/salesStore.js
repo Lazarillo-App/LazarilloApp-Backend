@@ -404,15 +404,14 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
     await client.query(sqlDaily, params);
 
     /* 2) sales_daily_items: totales por día + artículo
-       ⚠️ Importante: ya NO filtramos si.article_id IS NOT NULL.
-       Así también se guardan líneas aunque aún no tengan mapping a catálogo.
+       👇 Clave: mapeamos NULL → 0 para respetar NOT NULL en sales_daily_items.article_id
     */
     const sqlItems = `
       INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
       SELECT
         s.business_id,
         (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-        si.article_id,
+        COALESCE(si.article_id, 0) AS article_id,
         -- Cantidad: priorizamos si.qty, si no quantity
         SUM(
           CASE
@@ -441,7 +440,7 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
       GROUP BY
         s.business_id,
         (s.occurred_at AT TIME ZONE 'UTC')::date,
-        si.article_id
+        COALESCE(si.article_id, 0)
       ON CONFLICT (business_id, day, article_id)
       DO UPDATE SET
         qty    = EXCLUDED.qty,
