@@ -384,7 +384,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
   try {
     const biz = req.business;
 
-    // Normalizamos parámetros
+    // Normalización de parámetros
     const fromRaw  = String(req.query.from || '').slice(0, 10);
     const toRaw    = String(req.query.to   || '').slice(0, 10);
     const limitRaw = req.query.limit;
@@ -406,8 +406,8 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         SELECT
           s.article_id,
           COALESCE(
-            a.nombre,                         -- nombre desde catálogo sincronizado
-            s.article_title,                  -- nombre guardado en ventas
+            a.nombre,                         -- nombre desde catálogo
+            s.article_title,                  -- nombre desde ventas
             'Artículo #' || s.article_id::text
           ) AS title,
           SUM(s.qty)    AS qty,
@@ -415,13 +415,13 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         FROM sales_daily_items s
         LEFT JOIN maxi_articles a
           ON a.business_id = s.business_id
-         AND a.maxi_id     = s.article_id
+         AND a.article_id  = s.article_id    -- 👈 aquí el cambio clave
         WHERE s.business_id = $1
           AND s.day >= $2::date
           AND s.day <= $3::date
           AND (
             $4::text IS NULL
-            OR a.nombre ILIKE '%' || $4 || '%'
+            OR a.nombre        ILIKE '%' || $4 || '%'
             OR s.article_title ILIKE '%' || $4 || '%'
           )
         GROUP BY s.article_id, title
@@ -450,7 +450,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         from: fromRaw,
         to: toRaw,
         total,
-        tx_count: null,      // si luego querés, acá podés calcular tx_count real
+        tx_count: null,   // si más adelante querés tx_count, se calcula aparte
         limit,
         items,
       });
