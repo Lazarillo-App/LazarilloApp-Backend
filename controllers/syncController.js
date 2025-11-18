@@ -389,13 +389,15 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const toYmd   = String(to   || '').slice(0, 10);
 
     if (!fromYmd || !toYmd) {
-      return res.status(400).json({ ok: false, error: 'from_to_required' });
+      return res
+        .status(400)
+        .json({ ok: false, error: 'from_to_required' });
     }
 
     const lim    = Number(limit) || 50;
     const search = (q && String(q).trim()) || null;
 
-    /* 1) Totales por día desde sales_daily (ya está bien cargado) */
+    /* 1) Totales por día desde sales_daily */
     const sqlTotals = `
       SELECT
         COALESCE(SUM(total), 0)::numeric AS total,
@@ -404,12 +406,18 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       WHERE business_id = $1
         AND day BETWEEN $2::date AND $3::date
     `;
-    const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
+    const { rows: totRows } = await pool.query(sqlTotals, [
+      biz.id,
+      fromYmd,
+      toYmd,
+    ]);
+
     const total   = Number(totRows[0]?.total || 0);
     const txCount = Number(totRows[0]?.tx_count || 0);
 
-    /* 2) Items desde sales_daily_items, joineando con app_articles si existe.
-          NO filtramos article_id = 0, lo mostramos como "Sin mapping (Maxi)".
+    /* 2) Items desde sales_daily_items + app_articles (si existe),
+          usando to_jsonb(a)->>... para no depender del esquema exacto.
+          NO excluimos article_id = 0.
     */
     const params = [biz.id, fromYmd, toYmd];
     let whereExtra = '';
@@ -420,9 +428,12 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       whereExtra = `
         AND (
           COALESCE(
-            a.name,
-            a.nombre,
-            a.descripcion,
+            to_jsonb(a)->>'title',
+            to_jsonb(a)->>'name',
+            to_jsonb(a)->>'nombre',
+            to_jsonb(a)->>'descripcion',
+            to_jsonb(a)->>'descripcion_corta',
+            to_jsonb(a)->>'descrip',
             CASE
               WHEN s.article_id = 0 THEN 'Sin mapping (Maxi)'
               ELSE 'Artículo #' || s.article_id::text
@@ -435,14 +446,22 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const sqlItems = `
       SELECT
         s.article_id,
-        COALESCE(
-          a.name,
-          a.nombre,
-          a.descripcion,
-          CASE
-            WHEN s.article_id = 0 THEN 'Sin mapping (Maxi)'
-            ELSE 'Artículo #' || s.article_id::text
-          END
+        NULLIF(
+          TRIM(
+            COALESCE(
+              to_jsonb(a)->>'title',
+              to_jsonb(a)->>'name',
+              to_jsonb(a)->>'nombre',
+              to_jsonb(a)->>'descripcion',
+              to_jsonb(a)->>'descripcion_corta',
+              to_jsonb(a)->>'descrip',
+              CASE
+                WHEN s.article_id = 0 THEN 'Sin mapping (Maxi)'
+                ELSE 'Artículo #' || s.article_id::text
+              END
+            )
+          ),
+          ''
         ) AS title,
         SUM(s.qty)::numeric    AS qty,
         SUM(s.amount)::numeric AS amount
@@ -468,7 +487,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       total,
       tx_count: txCount,
       limit: lim,
-      items: rows.map(r => ({
+      items: rows.map((r) => ({
         article_id: r.article_id,
         article_title: r.title,
         qty: Number(r.qty || 0),
