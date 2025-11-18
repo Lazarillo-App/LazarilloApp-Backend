@@ -47,41 +47,88 @@ exports.maxiPing = async (req, res) => {
 };
 
 /** POST /api/businesses/:id/sync-sales/window  body: { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD', dryrun?: boolean } */
+// controllers/salesSyncController.js
+
 exports.syncWindow = async (req, res) => {
   try {
     const biz = req.business;
-    const { from, to, dryrun = false } = req.body || {};
-    if (!from || !to) return res.status(400).json({ error: 'from_to_required' });
 
-    // clamp hasta AYER
-    const defFrom = new Date(`${from}T00:00:00Z`);
-    const defTo = new Date(`${to}T00:00:00Z`);
-    const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
-    const F = ymd(Fd), T = ymd(Td);
+    // 1) Normalizar from/to desde body o query
+    const fromRaw = String(
+      (req.body && req.body.from) || (req.query && req.query.from) || ''
+    ).slice(0, 10);
 
-    // 1) Traer desde Maxi por ventanas (services/maxiSalesService)
-    const rawDocs = await fetchSalesRanged({ businessId: biz.id, from: F, to: T, req });
+    const toRaw = String(
+      (req.body && req.body.to) || (req.query && req.query.to) || ''
+    ).slice(0, 10);
 
-    if (dryrun) {
-      return res.json({ ok: true, business_id: String(biz.id), from: F, to: T, upserted: 0, updated: 0, preview: rawDocs.slice(0, 3) });
+    if (!fromRaw || !toRaw) {
+      return res.status(400).json({ ok: false, error: 'from_to_required' });
     }
 
-    // 2) Upsert completo de ticketslíneas y agregados tocados
+    // 2) Clamp hasta AYER (mantengo tu lógica)
+    const defFrom = new Date(`${fromRaw}T00:00:00Z`);
+    const defTo   = new Date(`${toRaw}T00:00:00Z`);
+
+    const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
+    const F = ymd(Fd);
+    const T = ymd(Td);
+
+    // 3) Flag de dryrun desde body o query
+    const dryrun = !!(
+      (req.body && req.body.dryrun) ||
+      (req.query && (req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true'))
+    );
+
+    // 4) Traer ventas crudas desde Maxi para ese rango exacto
+    const rawDocs = await fetchSalesRanged({
+      businessId: biz.id,
+      from: F,
+      to: T,
+      req,
+    });
+
+    // Si querés diagnosticar sin tocar DB
+    if (dryrun) {
+      return res.json({
+        ok: true,
+        dryrun: true,
+        business_id: String(biz.id),
+        from: F,
+        to: T,
+        count: Array.isArray(rawDocs) ? rawDocs.length : 0,
+        sample: Array.isArray(rawDocs) ? rawDocs.slice(0, 3) : [],
+      });
+    }
+
+    // 5) Upsert completo dentro de transacción (ventas + items diarios)
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // upsertSalesBatch debe devolver { upserted, updated, minDay, maxDay }
       const result = await upsertSalesBatch(biz.id, rawDocs, client);
+
       await client.query('COMMIT');
-      return res.json({ ok: true, business_id: String(biz.id), from: F, to: T, ...result });
+
+      return res.json({
+        ok: true,
+        business_id: String(biz.id),
+        from: F,
+        to: T,
+        ...result, // upserted, updated, minDay, maxDay
+      });
     } catch (e) {
-      try { await client.query('ROLLBACK'); } catch { }
+      try { await client.query('ROLLBACK'); } catch (_) {}
       throw e;
     } finally {
       client.release();
     }
   } catch (e) {
     console.error('syncWindow error:', e);
-    return res.status(e.status || 500).json({ error: 'internal', message: e.message || 'sync_window_failed' });
+    return res
+      .status(e.status || 500)
+      .json({ error: 'internal', message: e.message || 'sync_window_failed' });
   }
 };
 
