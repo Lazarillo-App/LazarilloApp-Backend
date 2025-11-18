@@ -380,17 +380,36 @@ exports.maxiArticlesProxy = async (req, res) => {
   }
 };
 
-async function salesSummaryFromDB(req, res, next) {
+exports.salesSummaryFromDB = async (req, res, next) => {
   try {
     const biz = req.business;
-    const { from, to, limit = 50, q } = req.query;
+
+    // Normalizamos parámetros
+    const fromRaw  = String(req.query.from || '').slice(0, 10);
+    const toRaw    = String(req.query.to   || '').slice(0, 10);
+    const limitRaw = req.query.limit;
+    const qRaw     = req.query.q;
+
+    // Validación básica de fechas
+    if (!fromRaw || !toRaw) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'from_to_required' });
+    }
+
+    const limit = Number(limitRaw) || 50;
+    const q     = qRaw ? String(qRaw).trim() : null;
 
     const client = await pool.connect();
     try {
       const sql = `
         SELECT
           s.article_id,
-          COALESCE(a.nombre, s.article_title, 'Artículo #' || s.article_id::text) AS title,
+          COALESCE(
+            a.nombre,                         -- nombre desde catálogo sincronizado
+            s.article_title,                  -- nombre guardado en ventas
+            'Artículo #' || s.article_id::text
+          ) AS title,
           SUM(s.qty)    AS qty,
           SUM(s.amount) AS amount
         FROM sales_daily_items s
@@ -410,25 +429,30 @@ async function salesSummaryFromDB(req, res, next) {
         LIMIT $5;
       `;
 
-      const params = [biz.id, from, to, q || null, Number(limit) || 50];
+      const params = [biz.id, fromRaw, toRaw, q, limit];
       const { rows } = await client.query(sql, params);
 
-      const total = rows.reduce((acc, r) => acc + Number(r.amount || 0), 0);
+      const items = rows.map((r) => ({
+        article_id: r.article_id,
+        article_title: r.title || `Artículo #${r.article_id}`,
+        qty: Number(r.qty) || 0,
+        amount: Number(r.amount) || 0,
+      }));
 
-      res.json({
+      const total = items.reduce(
+        (acc, it) => acc + (Number(it.amount) || 0),
+        0
+      );
+
+      return res.json({
         ok: true,
         business_id: biz.id,
-        from,
-        to,
+        from: fromRaw,
+        to: toRaw,
         total,
-        tx_count: null, // si tenés tx_count en otra tabla lo podés calcular aparte
-        limit: Number(limit) || 50,
-        items: rows.map((r) => ({
-          article_id: r.article_id,
-          article_title: r.title, // 👈 nunca null
-          qty: Number(r.qty) || 0,
-          amount: Number(r.amount) || 0,
-        })),
+        tx_count: null,      // si luego querés, acá podés calcular tx_count real
+        limit,
+        items,
       });
     } finally {
       client.release();
@@ -436,7 +460,7 @@ async function salesSummaryFromDB(req, res, next) {
   } catch (e) {
     next(e);
   }
-}
+};
 
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
@@ -467,7 +491,6 @@ exports.salesSeriesFromDB = async (req, res, next) => {
         .json({ ok: false, error: 'from_to_required' });
     }
 
-    // Por ahora solo soportamos 'day'
     if (groupBy !== 'day') {
       return res
         .status(400)
@@ -492,7 +515,7 @@ exports.salesSeriesFromDB = async (req, res, next) => {
       .then(r => r.rows);
 
     const items = rows.map(r => ({
-      label: r.label, // ya viene como date/iso de PG
+      label: r.label,
       qty: Number(r.qty || 0),
       amount: Number(r.amount || 0),
     }));
