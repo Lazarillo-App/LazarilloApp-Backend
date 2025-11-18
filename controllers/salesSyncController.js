@@ -9,7 +9,6 @@ const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSy
 /* ───────── helpers fecha ───────── */
 const pad2 = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-const at00 = (d) => new Date(Date.UTC(d.getUTCFullYear()+ d.getUTCMonth(), d.getUTCDate()));
 const addDaysUTC = (d, n) => new Date(d.getTime() + n * 86400000);
 
 function parseDate(zd, fb) {
@@ -169,7 +168,7 @@ exports.rebuildAggregates = async (req, res) => {
   }
 };
 
-exports.syncSalesForBusiness = async (biz, body = {}) => {
+exports.syncSalesForBusiness = async (biz, body = {}, req) => {
   const {
     mode = 'auto',
     from,
@@ -178,18 +177,24 @@ exports.syncSalesForBusiness = async (biz, body = {}) => {
     windowDays,
   } = body || {};
 
-  // 1) Ventana explícita prioritaria
+  // 1) Ventana explícita
   if (from && to) {
     const defFrom = new Date(`${from}T00:00:00Z`);
-    const defTo = new Date(`${to}T00:00:00Z`);
+    const defTo   = new Date(`${to}T00:00:00Z`);
     const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
     const F = ymd(Fd), T = ymd(Td);
 
-    // Traer ventas crudas desde Maxi para la ventana y upsertear
-    const rawDocs = await fetchSalesRanged({ businessId: biz.id, from: F, to: T /* req opcional */ });
+    const rawDocs = await fetchSalesRanged({
+      businessId: biz.id,
+      from: F,
+      to: T,
+      req,            // 👈 ahora sí entra el req si lo necesitás
+    });
+
     if (dryrun) {
       return { ok: true, from: F, to: T, upserted: 0, updated: 0, preview: rawDocs.slice(0, 3) };
     }
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -197,13 +202,13 @@ exports.syncSalesForBusiness = async (biz, body = {}) => {
       await client.query('COMMIT');
       return { ok: true, from: F, to: T, ...result };
     } catch (e) {
-      try { await client.query('ROLLBACK'); } catch { }
+      try { await client.query('ROLLBACK'); } catch {}
       throw e;
     } finally {
       client.release();
     }
   }
-
+  
   // 2) Despacho por modo
   switch (String(mode).toLowerCase()) {
     case 'rebuild-aggregates': {

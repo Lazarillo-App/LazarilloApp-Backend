@@ -228,106 +228,147 @@ function normalizeInvoices(businessId, rawDocs) {
 }
 
 /**
- * Inserta/actualiza ventas e ítems y recalcula agregados diarios SOLO para los días tocados.
+ * Inserta/actualiza ventas e ítems en app_sales / app_sales_items
+ * y recalcula agregados diarios (sales_daily + sales_daily_items)
+ * SOLO para los días tocados.
+ *
  * Devuelve { upserted, updated, minDay, maxDay }
+ *
+ * Nota: soporta client opcional (para usar dentro de una transacción externa).
  */
-async function upsertSalesBatch(businessId, rawSales) {
+async function upsertSalesBatch(businessId, rawSales, clientOpt) {
   if (!Array.isArray(rawSales) || rawSales.length === 0) {
     return { upserted: 0, updated: 0, minDay: null, maxDay: null };
   }
 
-  // 1) Agrupamos por día y artículo
-  const byDay = agruparPorDiaYArticulo(rawSales);
+  // 1) Normalizar las facturas crudas (fullinvoicebydate / invoicebydate)
+  const { sales, items, touchedDays } = normalizeInvoices(businessId, rawSales);
 
-  const client = await pool.connect();
+  if (sales.length === 0) {
+    return { upserted: 0, updated: 0, minDay: null, maxDay: null };
+  }
+
+  // 2) Rango de días tocados (YYYY-MM-DD)
+  const days = touchedDays.slice().sort();
+  const minDay = days[0];
+  const maxDay = days[days.length - 1];
+
+  const client = clientOpt || await pool.connect();
+  const ownClient = !clientOpt;
+
   let upserted = 0;
-  let updated = 0;
-  let minDay = null;
-  let maxDay = null;
+  let updated  = 0;
 
   try {
-    await client.query('BEGIN');
+    if (ownClient) {
+      await client.query('BEGIN');
+    }
 
-    for (const [day, info] of Object.entries(byDay)) {
-      const totalAmount = Number(info.totalAmount || 0);
-      const txCount = Number(info.txCount || 0);
-      const itemsAgg = info.itemsAgg || [];
+    /* ───────── 2A) UPSERT en app_sales ───────── */
+    const saleIdByIdx = new Array(sales.length);
 
-      // A) Upsert en sales_daily
-      // Ajustá nombres de columnas según tu esquema real:
-      // acá asumo: sales_daily(business_id, day, total, tx_count)
-      const result = await client.query(
+    for (let i = 0; i < sales.length; i += 1) {
+      const s = sales[i];
+
+      // external_id + business_id definen la “venta” única
+      const r = await client.query(
         `
-        INSERT INTO sales_daily (business_id, day, total, tx_count)
-        VALUES ($1, $2::date, $3::numeric, $4::int)
-        ON CONFLICT (business_id, day)
+        INSERT INTO app_sales (business_id, external_id, occurred_at, total)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (business_id, external_id)
         DO UPDATE SET
-          total    = EXCLUDED.total,
-          tx_count = EXCLUDED.tx_count
+          occurred_at = EXCLUDED.occurred_at,
+          total       = EXCLUDED.total
+        RETURNING id, (xmax = 0) AS inserted;
         `,
-        [businessId, day, totalAmount, txCount]
+        [s.business_id, s.external_id, s.occurred_at, s.total]
       );
 
-      // No podemos diferenciar fácil insert vs update solo con rowCount,
-      // pero para estadísticas simples nos sirve:
-      if (result.rowCount) {
-        // contamos todos como "upsert"
-        upserted += 1;
-      }
+      const row = r.rows[0];
+      saleIdByIdx[i] = row.id;
 
-      // B) Borramos detalle previo del día
+      if (row.inserted) upserted += 1;
+      else             updated  += 1;
+    }
+
+    /* ───────── 2B) Reemplazar ÍTEMS de esas ventas ───────── */
+    const saleIdsUnique = [...new Set(saleIdByIdx)].filter(Boolean);
+
+    if (saleIdsUnique.length > 0) {
       await client.query(
         `
-        DELETE FROM sales_daily_items
-        WHERE business_id = $1
-          AND day = $2::date
+        DELETE FROM app_sales_items
+        WHERE sale_id = ANY($1::int[])
+          AND business_id = $2
         `,
-        [businessId, day]
+        [saleIdsUnique, businessId]
       );
+    }
 
-      // C) Insertamos nuevo detalle agregado por artículo
-      if (itemsAgg.length > 0) {
-        const values = [];
-        const params = [];
-        let idx = 1;
+    if (items.length > 0) {
+      const values = [];
+      const params = [];
+      let idx = 1;
 
-        for (const it of itemsAgg) {
-          values.push(
-            `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
-          );
-          params.push(
-            businessId,
-            day,
-            Number(it.article_id),
-            Number(it.qty || 0),
-            Number(it.amount || 0)
-          );
-        }
+      for (const it of items) {
+        const saleId = saleIdByIdx[it.sale_idx];
+        if (!saleId) continue;
 
+        values.push(
+          `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
+        );
+
+        params.push(
+          saleId,                 // sale_id
+          businessId,             // business_id
+          it.article_id ?? null,  // article_id (null si no hay cod_art)
+          it.sku || null,         // sku
+          it.name || null,        // name (titulo observado)
+          toNum(it.qty),          // qty
+          toNum(it.line_total),   // amount
+          toNum(it.line_total)    // total (duplicamos por compat)
+        );
+      }
+
+      if (values.length > 0) {
         await client.query(
           `
-          INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-          VALUES ${values.join(', ')}
+          INSERT INTO app_sales_items
+            (sale_id, business_id, article_id, sku, name, qty, amount, total)
+          VALUES
+            ${values.join(', ')}
           `,
           params
         );
       }
-
-      // D) Actualizamos min/max día
-      if (!minDay || day < minDay) minDay = day;
-      if (!maxDay || day > maxDay) maxDay = day;
     }
 
-    await client.query('COMMIT');
+    /* ───────── 2C) Reconciliar mappings artículo (nombre ↔ maxi_article_map) ───────── */
+    await reconcileSalesMappings(client, businessId, {
+      fromYmd: minDay,
+      toYmd:   maxDay,
+    });
+
+    /* ───────── 2D) Recalcular agregados diarios ───────── */
+    await upsertDailyAggregates(businessId, minDay, maxDay, client);
+
+    if (ownClient) {
+      await client.query('COMMIT');
+    }
 
     return { upserted, updated, minDay, maxDay };
   } catch (e) {
-    await client.query('ROLLBACK');
+    if (ownClient) {
+      try { await client.query('ROLLBACK'); } catch {}
+    }
     throw e;
   } finally {
-    client.release();
+    if (ownClient) {
+      client.release();
+    }
   }
 }
+
 
 /**
  * Recalcula agregados entre dos fechas (incl.). Usa qty real.
