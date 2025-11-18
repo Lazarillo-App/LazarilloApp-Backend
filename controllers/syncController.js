@@ -401,7 +401,8 @@ exports.salesSummaryFromDB = async (req, res, next) => {
 
     const client = await pool.connect();
     try {
-      const sql = `
+      // 1) Ranking por artículo (items)
+      const sqlItems = `
         SELECT
           s.article_id,
           COALESCE(
@@ -413,7 +414,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         FROM sales_daily_items s
         LEFT JOIN maxi_articles a
           ON a.business_id = s.business_id
-         AND (a.raw->>'id')::int = s.article_id   -- unión por id del JSON
+         AND (a.raw->>'id')::int = s.article_id   -- unión por id dentro del JSON
         WHERE s.business_id = $1
           AND s.day >= $2::date
           AND s.day <= $3::date
@@ -426,20 +427,34 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         LIMIT $5;
       `;
 
-      const params = [biz.id, fromRaw, toRaw, q, limit];
-      const { rows } = await client.query(sql, params);
+      const paramsItems = [biz.id, fromRaw, toRaw, q, limit];
 
-      const items = rows.map((r) => ({
+      // 2) Totales globales del período (independientes del filtro q)
+      const sqlTotals = `
+        SELECT
+          COALESCE(SUM(total),    0)::numeric AS amount_total,
+          COALESCE(SUM(tx_count), 0)::int     AS tx_total
+        FROM sales_daily
+        WHERE business_id = $1
+          AND day BETWEEN $2::date AND $3::date
+      `;
+
+      const [rowsItems, totalsRow] = await Promise.all([
+        client.query(sqlItems, paramsItems).then(r => r.rows),
+        client
+          .query(sqlTotals, [biz.id, fromRaw, toRaw])
+          .then(r => r.rows[0] || { amount_total: 0, tx_total: 0 }),
+      ]);
+
+      const items = rowsItems.map((r) => ({
         article_id: r.article_id,
         article_title: r.title || `Artículo #${r.article_id}`,
         qty: Number(r.qty) || 0,
         amount: Number(r.amount) || 0,
       }));
 
-      const total = items.reduce(
-        (acc, it) => acc + (Number(it.amount) || 0),
-        0
-      );
+      const total   = Number(totalsRow.amount_total || 0);
+      const txCount = Number(totalsRow.tx_total || 0);
 
       return res.json({
         ok: true,
@@ -447,7 +462,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         from: fromRaw,
         to: toRaw,
         total,
-        tx_count: null,   // si después querés, lo calculamos aparte
+        tx_count: txCount,  // 👈 ahora viene completo
         limit,
         items,
       });
