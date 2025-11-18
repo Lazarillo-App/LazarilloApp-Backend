@@ -27,6 +27,107 @@ function parseYMDorDMYtoUTC(dateStr) {
     : null;
 }
 
+/**
+ * Agrupa las ventas crudas por día y por artículo.
+ * Intenta adaptarse a varios formatos típicos de Maxi:
+ *  - rawSales = [ { fecha / day / date, items: [ ... ] }, ... ]
+ *  - o ya plano: [ { day, article_id, qty, amount }, ... ]
+ */
+function agruparPorDiaYArticulo(rawSales) {
+  const byDay = new Map();
+
+  for (const venta of rawSales || []) {
+    // Normalizar día (YYYY-MM-DD)
+    const day =
+      (venta.day ||
+       venta.fecha ||
+       venta.date ||
+       (venta.fechaHora && String(venta.fechaHora).slice(0, 10)) ||
+       ''
+      ).slice(0, 10);
+
+    if (!day) continue;
+
+    // Identificador de la transacción (para tx_count)
+    const txId =
+      venta.tx_id ||
+      venta.id ||
+      venta.numero ||
+      venta.nro_comp ||
+      venta.comprobante ||
+      null;
+
+    // Items: si viene un array de items/detalle, lo usamos; si no, tratamos la venta como si fuera un item plano
+    const itemsArray =
+      (Array.isArray(venta.items) && venta.items.length > 0)
+        ? venta.items
+        : (Array.isArray(venta.detalle) && venta.detalle.length > 0)
+          ? venta.detalle
+          : [venta];
+
+    let info = byDay.get(day);
+    if (!info) {
+      info = {
+        totalAmount: 0,
+        txIds: new Set(),
+        itemsMap: new Map(), // key = article_id
+      };
+      byDay.set(day, info);
+    }
+
+    if (txId) info.txIds.add(txId);
+
+    for (const it of itemsArray) {
+      const articleId = Number(
+        it.article_id ??
+        it.articulo_id ??
+        it.item_id ??
+        it.codigo ??
+        it.cod_articulo
+      );
+
+      if (!Number.isFinite(articleId) || articleId <= 0) continue;
+
+      const qty = Number(
+        it.qty ??
+        it.cantidad ??
+        it.quantity ??
+        it.cant
+      ) || 0;
+
+      const amount = Number(
+        it.amount ??
+        it.importe ??
+        it.total ??
+        it.totalLinea ??
+        it.total_linea
+      ) || 0;
+
+      info.totalAmount += amount;
+
+      const prev =
+        info.itemsMap.get(articleId) ||
+        { article_id: articleId, qty: 0, amount: 0 };
+
+      prev.qty += qty;
+      prev.amount += amount;
+
+      info.itemsMap.set(articleId, prev);
+    }
+  }
+
+  // Convertimos el Map a objeto simple para usar después
+  const out = {};
+  for (const [day, info] of byDay.entries()) {
+    out[day] = {
+      totalAmount: info.totalAmount,
+      txCount: info.txIds.size,
+      itemsAgg: Array.from(info.itemsMap.values()),
+    };
+  }
+  return out;
+}
+
 /*
   Normaliza ambos formatos:
   - fullinvoicebydate: { numero, total, cabecera{ fecha }, items[] { cod_art, nombre_art, cantidad, precio, total } }
@@ -131,53 +232,60 @@ function normalizeInvoices(businessId, rawDocs) {
  * Devuelve { upserted, updated, minDay, maxDay }
  */
 async function upsertSalesBatch(businessId, rawSales) {
-  // rawSales = lista de facturas ya normalizadas con items adentro
-  // agrupás por día y por artículo
+  if (!Array.isArray(rawSales) || rawSales.length === 0) {
+    return { upserted: 0, updated: 0, minDay: null, maxDay: null };
+  }
+
+  // 1) Agrupamos por día y artículo
   const byDay = agruparPorDiaYArticulo(rawSales);
 
+  const client = await pool.connect();
+  let upserted = 0;
+  let updated = 0;
   let minDay = null;
   let maxDay = null;
-  let upserted = 0;
-  let updated  = 0;
 
-  const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     for (const [day, info] of Object.entries(byDay)) {
-      const { totalAmount, txCount, itemsAgg } = info;
+      const totalAmount = Number(info.totalAmount || 0);
+      const txCount = Number(info.txCount || 0);
+      const itemsAgg = info.itemsAgg || [];
 
-      // A) upsert en sales_daily
-      const { rowCount } = await client.query(
+      // A) Upsert en sales_daily
+      // Ajustá nombres de columnas según tu esquema real:
+      // acá asumo: sales_daily(business_id, day, total, tx_count)
+      const result = await client.query(
         `
-        INSERT INTO sales_daily (business_id, day, total_amount, tx_count)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO sales_daily (business_id, day, total, tx_count)
+        VALUES ($1, $2::date, $3::numeric, $4::int)
         ON CONFLICT (business_id, day)
         DO UPDATE SET
-          total_amount = EXCLUDED.total_amount,
-          tx_count     = EXCLUDED.tx_count
+          total    = EXCLUDED.total,
+          tx_count = EXCLUDED.tx_count
         `,
         [businessId, day, totalAmount, txCount]
       );
 
-      if (rowCount === 1) {
-        // No podemos saber fácil si fue insert u update
-        // pero si querés llevar la cuenta:
-        // podés hacer un SELECT previo o usar RETURNING con xmax = 0 como truco,
-        // por ahora dejamos upserted/updated aproximados.
+      // No podemos diferenciar fácil insert vs update solo con rowCount,
+      // pero para estadísticas simples nos sirve:
+      if (result.rowCount) {
+        // contamos todos como "upsert"
         upserted += 1;
-      } else {
-        updated += 1;
       }
 
-      // B) limpiás detalle viejo del día
+      // B) Borramos detalle previo del día
       await client.query(
-        `DELETE FROM sales_daily_items
-         WHERE business_id = $1 AND day = $2`,
+        `
+        DELETE FROM sales_daily_items
+        WHERE business_id = $1
+          AND day = $2::date
+        `,
         [businessId, day]
       );
 
-      // C) insertás items agregados del día
+      // C) Insertamos nuevo detalle agregado por artículo
       if (itemsAgg.length > 0) {
         const values = [];
         const params = [];
@@ -190,22 +298,22 @@ async function upsertSalesBatch(businessId, rawSales) {
           params.push(
             businessId,
             day,
-            it.article_id,
-            it.qty,
-            it.amount
+            Number(it.article_id),
+            Number(it.qty || 0),
+            Number(it.amount || 0)
           );
         }
 
         await client.query(
           `
           INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-          VALUES ${values.join(',')}
+          VALUES ${values.join(', ')}
           `,
           params
         );
       }
 
-      // actualizar min/max day
+      // D) Actualizamos min/max día
       if (!minDay || day < minDay) minDay = day;
       if (!maxDay || day > maxDay) maxDay = day;
     }
