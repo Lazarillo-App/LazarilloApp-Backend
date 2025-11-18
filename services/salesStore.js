@@ -233,8 +233,6 @@ function normalizeInvoices(businessId, rawDocs) {
  * SOLO para los días tocados.
  *
  * Devuelve { upserted, updated, minDay, maxDay }
- *
- * Nota: soporta client opcional (para usar dentro de una transacción externa).
  */
 async function upsertSalesBatch(businessId, rawSales, clientOpt) {
   if (!Array.isArray(rawSales) || rawSales.length === 0) {
@@ -270,7 +268,6 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
     for (let i = 0; i < sales.length; i += 1) {
       const s = sales[i];
 
-      // external_id + business_id definen la “venta” única
       const r = await client.query(
         `
         INSERT INTO app_sales (business_id, external_id, occurred_at, total)
@@ -291,7 +288,7 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
       else             updated  += 1;
     }
 
-    /* ───────── 2B) Reemplazar ÍTEMS de esas ventas ───────── */
+    /* ───────── 2B) Limpiar ítems anteriores de esas ventas ───────── */
     const saleIdsUnique = [...new Set(saleIdByIdx)].filter(Boolean);
 
     if (saleIdsUnique.length > 0) {
@@ -299,12 +296,12 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
         `
         DELETE FROM app_sales_items
         WHERE sale_id = ANY($1::int[])
-          AND business_id = $2
         `,
-        [saleIdsUnique, businessId]
+        [saleIdsUnique]
       );
     }
 
+    /* ───────── 2C) Insertar ítems normalizados ───────── */
     if (items.length > 0) {
       const values = [];
       const params = [];
@@ -315,18 +312,17 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
         if (!saleId) continue;
 
         values.push(
-          `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
+          `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
         );
 
         params.push(
           saleId,                 // sale_id
-          businessId,             // business_id
-          it.article_id ?? null,  // article_id (null si no hay cod_art)
+          it.article_id ?? null,  // article_id
           it.sku || null,         // sku
-          it.name || null,        // name (titulo observado)
+          it.name || null,        // name
           toNum(it.qty),          // qty
           toNum(it.line_total),   // amount
-          toNum(it.line_total)    // total (duplicamos por compat)
+          toNum(it.line_total)    // total (compatibilidad)
         );
       }
 
@@ -334,7 +330,7 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
         await client.query(
           `
           INSERT INTO app_sales_items
-            (sale_id, business_id, article_id, sku, name, qty, amount, total)
+            (sale_id, article_id, sku, name, qty, amount, total)
           VALUES
             ${values.join(', ')}
           `,
@@ -343,13 +339,13 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
       }
     }
 
-    /* ───────── 2C) Reconciliar mappings artículo (nombre ↔ maxi_article_map) ───────── */
+    /* ───────── 2D) Reconciliar mappings de artículos ───────── */
     await reconcileSalesMappings(client, businessId, {
       fromYmd: minDay,
       toYmd:   maxDay,
     });
 
-    /* ───────── 2D) Recalcular agregados diarios ───────── */
+    /* ───────── 2E) Recalcular agregados diarios ───────── */
     await upsertDailyAggregates(businessId, minDay, maxDay, client);
 
     if (ownClient) {
@@ -368,7 +364,6 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
     }
   }
 }
-
 
 /**
  * Recalcula agregados entre dos fechas (incl.). Usa qty real.
