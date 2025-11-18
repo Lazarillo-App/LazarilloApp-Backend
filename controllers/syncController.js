@@ -383,92 +383,98 @@ exports.maxiArticlesProxy = async (req, res) => {
 exports.salesSummaryFromDB = async (req, res, next) => {
   try {
     const biz = req.business;
+    const { from, to, limit = 50, q } = req.query;
 
-    // Normalizar parámetros
-    const fromRaw  = String(req.query.from || '').slice(0, 10);
-    const toRaw    = String(req.query.to   || '').slice(0, 10);
-    const limitRaw = req.query.limit;
-    const qRaw     = req.query.q;
+    const fromYmd = String(from || '').slice(0, 10);
+    const toYmd   = String(to   || '').slice(0, 10);
 
-    if (!fromRaw || !toRaw) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'from_to_required' });
+    if (!fromYmd || !toYmd) {
+      return res.status(400).json({ ok: false, error: 'from_to_required' });
     }
 
-    const limit = Number(limitRaw) || 50;
-    const q     = qRaw ? String(qRaw).trim() : null;
+    const lim    = Number(limit) || 50;
+    const search = (q && String(q).trim()) || null;
 
-    const client = await pool.connect();
-    try {
-      // 1) Ranking por artículo (items)
-      const sqlItems = `
-        SELECT
-          s.article_id,
+    /* 1) Totales por día desde sales_daily (ya está bien cargado) */
+    const sqlTotals = `
+      SELECT
+        COALESCE(SUM(total), 0)::numeric AS total,
+        COALESCE(SUM(tx_count), 0)::int  AS tx_count
+      FROM sales_daily
+      WHERE business_id = $1
+        AND day BETWEEN $2::date AND $3::date
+    `;
+    const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
+    const total   = Number(totRows[0]?.total || 0);
+    const txCount = Number(totRows[0]?.tx_count || 0);
+
+    /* 2) Items desde sales_daily_items, joineando con app_articles si existe.
+          NO filtramos article_id = 0, lo mostramos como "Sin mapping (Maxi)".
+    */
+    const params = [biz.id, fromYmd, toYmd];
+    let whereExtra = '';
+
+    if (search) {
+      params.push(`%${search}%`);
+      const pIdx = params.length;
+      whereExtra = `
+        AND (
           COALESCE(
-            a.nombre,                         -- nombre desde catálogo
-            'Artículo #' || s.article_id::text
-          ) AS title,
-          SUM(s.qty)    AS qty,
-          SUM(s.amount) AS amount
-        FROM sales_daily_items s
-        LEFT JOIN maxi_articles a
-          ON a.business_id = s.business_id
-         AND (a.raw->>'id')::int = s.article_id   -- unión por id dentro del JSON
-        WHERE s.business_id = $1
-          AND s.day >= $2::date
-          AND s.day <= $3::date
-          AND (
-            $4::text IS NULL
-            OR a.nombre ILIKE '%' || $4 || '%'
-          )
-        GROUP BY s.article_id, title
-        ORDER BY qty DESC
-        LIMIT $5;
+            a.name,
+            a.nombre,
+            a.descripcion,
+            CASE
+              WHEN s.article_id = 0 THEN 'Sin mapping (Maxi)'
+              ELSE 'Artículo #' || s.article_id::text
+            END
+          ) ILIKE $${pIdx}
+        )
       `;
-
-      const paramsItems = [biz.id, fromRaw, toRaw, q, limit];
-
-      // 2) Totales globales del período (independientes del filtro q)
-      const sqlTotals = `
-        SELECT
-          COALESCE(SUM(total),    0)::numeric AS amount_total,
-          COALESCE(SUM(tx_count), 0)::int     AS tx_total
-        FROM sales_daily
-        WHERE business_id = $1
-          AND day BETWEEN $2::date AND $3::date
-      `;
-
-      const [rowsItems, totalsRow] = await Promise.all([
-        client.query(sqlItems, paramsItems).then(r => r.rows),
-        client
-          .query(sqlTotals, [biz.id, fromRaw, toRaw])
-          .then(r => r.rows[0] || { amount_total: 0, tx_total: 0 }),
-      ]);
-
-      const items = rowsItems.map((r) => ({
-        article_id: r.article_id,
-        article_title: r.title || `Artículo #${r.article_id}`,
-        qty: Number(r.qty) || 0,
-        amount: Number(r.amount) || 0,
-      }));
-
-      const total   = Number(totalsRow.amount_total || 0);
-      const txCount = Number(totalsRow.tx_total || 0);
-
-      return res.json({
-        ok: true,
-        business_id: biz.id,
-        from: fromRaw,
-        to: toRaw,
-        total,
-        tx_count: txCount,  // 👈 ahora viene completo
-        limit,
-        items,
-      });
-    } finally {
-      client.release();
     }
+
+    const sqlItems = `
+      SELECT
+        s.article_id,
+        COALESCE(
+          a.name,
+          a.nombre,
+          a.descripcion,
+          CASE
+            WHEN s.article_id = 0 THEN 'Sin mapping (Maxi)'
+            ELSE 'Artículo #' || s.article_id::text
+          END
+        ) AS title,
+        SUM(s.qty)::numeric    AS qty,
+        SUM(s.amount)::numeric AS amount
+      FROM sales_daily_items s
+      LEFT JOIN app_articles a
+        ON a.id = s.article_id
+       AND a.business_id = s.business_id
+      WHERE s.business_id = $1
+        AND s.day BETWEEN $2::date AND $3::date
+        ${whereExtra}
+      GROUP BY s.article_id, title
+      ORDER BY qty DESC
+      LIMIT ${lim}
+    `;
+
+    const { rows } = await pool.query(sqlItems, params);
+
+    return res.json({
+      ok: true,
+      business_id: biz.id,
+      from: fromYmd,
+      to: toYmd,
+      total,
+      tx_count: txCount,
+      limit: lim,
+      items: rows.map(r => ({
+        article_id: r.article_id,
+        article_title: r.title,
+        qty: Number(r.qty || 0),
+        amount: Number(r.amount || 0),
+      })),
+    });
   } catch (e) {
     next(e);
   }
