@@ -370,7 +370,8 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
 }
 
 /**
- * Recalcula agregados entre dos fechas (incl.). Usa qty real.
+ * Recalcula agregados entre dos fechas (incl.).
+ * Usa app_sales y app_sales_items como fuente única de verdad.
  */
 async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
   const client = clientOpt || await pool.connect();
@@ -383,7 +384,7 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
 
     const params = [businessId, fromYmd, toYmd];
 
-    /* 1) sales_daily: totales por día */
+    /* 1) sales_daily: totales por día (tickets) */
     const sqlDaily = `
       INSERT INTO sales_daily (business_id, day, total, tx_count)
       SELECT
@@ -402,7 +403,10 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
     `;
     await client.query(sqlDaily, params);
 
-    /* 2) sales_daily_items: totales por día + artículo */
+    /* 2) sales_daily_items: totales por día + artículo
+       ⚠️ Importante: ya NO filtramos si.article_id IS NOT NULL.
+       Así también se guardan líneas aunque aún no tengan mapping a catálogo.
+    */
     const sqlItems = `
       INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
       SELECT
@@ -433,7 +437,6 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
       JOIN app_sales s
         ON s.id = si.sale_id
       WHERE s.business_id = $1
-        AND si.article_id IS NOT NULL
         AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2 AND $3
       GROUP BY
         s.business_id,
