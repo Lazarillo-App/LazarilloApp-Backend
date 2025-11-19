@@ -3,7 +3,7 @@ const pool = require('../config/db');
 const { parse } = require('csv-parse/sync');
 
 const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
-const maxiSuppliesRepo = require('../repos/maxiSuppliesRepo');
+const { upsertFromMaxi } = require('../repos/maxiSuppliesRepo');
 
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
@@ -305,38 +305,6 @@ exports.__cleanupNullInsumos = async (req, res) => {
   }
 };
 
-// ===================== SYNC DESDE MAXI (estadisticasmaster/insumos) =====================
-
-exports.syncFromMaxi = async (req, res) => {
-  try {
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-
-    // 1) Traer insumos crudos desde Maxi
-    const raw = await fetchMaxiInsumos({ businessId, req });
-
-    // 2) Normalizar shape
-    const norm = normalizarInsumosMaxi(raw);
-
-    // 3) Guardar snapshot en maxi_supplies (upsert)
-    const synced = await maxiSuppliesRepo.upsertMany(businessId, norm);
-
-    return res.json({
-      ok: true,
-      business_id: businessId,
-      received: raw.length,
-      normalized: norm.length,
-      synced,
-    });
-  } catch (e) {
-    console.error('syncFromMaxi error:', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'internal' });
-  }
-};
-
 /**
  * Lista insumos desde maxi_supplies para el negocio activo.
  * Esto NO toca la tabla insumos manual; es el espejo directo de Maxi.
@@ -353,6 +321,38 @@ exports.listarMaxi = async (req, res) => {
   } catch (e) {
     console.error('listarMaxi error:', e);
     return res.status(500).json({ ok: false, error: e.message || 'internal' });
+  }
+};
+
+exports.syncFromMaxi = async (req, res) => {
+  try {
+    const businessId =
+      req.activeBusinessId ||
+      Number(req.params?.businessId) ||
+      Number(req.query?.businessId);
+
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'businessId requerido' });
+    }
+
+    const raw = await fetchMaxiInsumos({ businessId, req });
+    const norm = normalizarInsumosMaxi(raw);
+    const summary = await upsertFromMaxi(norm);
+
+    return res.json({
+      ok: true,
+      business_id: businessId,
+      received: raw.length,
+      normalized: norm.length,
+      synced: summary.total,
+      inserted: summary.inserted,
+      updated: summary.updated,
+      skipped: summary.skipped,
+    });
+  } catch (e) {
+    console.error('syncFromMaxi error:', e);
+    const status = e.status || 500;
+    return res.status(status).json({ ok: false, error: e.message || 'internal_error' });
   }
 };
 

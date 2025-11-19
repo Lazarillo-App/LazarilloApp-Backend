@@ -1,83 +1,62 @@
-// repos/maxiSuppliesRepo.js
-/* eslint-disable no-console */
+// repos/insumosRepo.js
 'use strict';
-
 const pool = require('../config/db');
 
-async function upsertMany(businessId, items = []) {
-  if (!businessId) throw new Error('businessId requerido en upsertMany(maxi_supplies)');
-  if (!Array.isArray(items) || !items.length) return 0;
+async function upsertFromMaxi(items = []) {
+  const client = await pool.connect();
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
 
-  const values = [];
-  const params = [];
-  let i = 1;
+  try {
+    await client.query('BEGIN');
 
-  for (const it of items) {
-    values.push(
-      `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
-    );
+    for (const it of items) {
+      const codigo = it.codigo ?? it.codigoMaxi ?? it.codigo_maxi;
+      if (!codigo && codigo !== 0) { skipped++; continue; }
 
-    params.push(
-      Number(businessId),
-      it.codigo ?? null,
-      it.nombre ?? '',
-      it.rubro ?? null,
-      it.medida ?? null,
-      it.precio ?? null,
-      it.iva ?? '',
-      it.imp_int ?? null,
-      it.discontinuado ? true : false,
-      JSON.stringify(it.raw || it)
-    );
+      const nombre     = (it.nombre ?? '').trim();
+      const unidadMed  = it.medida ?? it.unidadMed ?? it.unidad_med ?? null;
+      const precioRef  = it.precio ?? it.precioRef ?? it.precio_ref ?? null;
+      const rubro      = it.rubro ?? null;
+      const activo     = it.discontinuado ? false : true; // discontinuado=1 → inactivo
+
+      const r = await client.query(
+        `INSERT INTO insumos (codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, activo)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (codigo_maxi) DO UPDATE SET
+           nombre      = EXCLUDED.nombre,
+           unidad_med  = EXCLUDED.unidad_med,
+           precio_ref  = EXCLUDED.precio_ref,
+           rubro       = EXCLUDED.rubro,
+           origen      = EXCLUDED.origen,
+           activo      = EXCLUDED.activo,
+           updated_at  = NOW()
+         RETURNING (xmax = 0) AS inserted`,
+        [
+          String(codigo),
+          nombre,
+          unidadMed,
+          precioRef == null ? null : Number(precioRef),
+          rubro,
+          'maxi',
+          activo,
+        ]
+      );
+
+      if (r.rows?.[0]?.inserted) inserted++;
+      else updated++;
+    }
+
+    await client.query('COMMIT');
+    return { inserted, updated, skipped, total: inserted + updated + skipped };
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('upsertFromMaxi error:', e);
+    throw e;
+  } finally {
+    client.release();
   }
-
-  const sql = `
-    INSERT INTO maxi_supplies
-      (business_id, codigo, nombre, rubro, medida, precio, iva, imp_int, discontinuado, raw)
-    VALUES
-      ${values.join(',\n')}
-    ON CONFLICT (business_id, codigo) DO UPDATE SET
-      nombre        = EXCLUDED.nombre,
-      rubro         = EXCLUDED.rubro,
-      medida        = EXCLUDED.medida,
-      precio        = EXCLUDED.precio,
-      iva           = EXCLUDED.iva,
-      imp_int       = EXCLUDED.imp_int,
-      discontinuado = EXCLUDED.discontinuado,
-      raw           = EXCLUDED.raw,
-      updated_at    = NOW()
-  `;
-
-  await pool.query(sql, params);
-  return items.length;
 }
 
-async function listForBusiness(businessId) {
-  if (!businessId) throw new Error('businessId requerido en listForBusiness(maxi_supplies)');
-
-  const { rows } = await pool.query(
-    `
-    SELECT
-      codigo              AS codigo,
-      nombre              AS nombre,
-      rubro               AS rubro,
-      medida              AS medida,
-      precio              AS precio,
-      iva                 AS iva,
-      imp_int             AS imp_int,
-      discontinuado       AS discontinuado,
-      updated_at
-    FROM maxi_supplies
-    WHERE business_id = $1
-    ORDER BY rubro NULLS LAST, nombre NULLS LAST, codigo
-    `,
-    [businessId]
-  );
-
-  return rows;
-}
-
-module.exports = {
-  upsertMany,
-  listForBusiness,
-};
+module.exports = { upsertFromMaxi };
