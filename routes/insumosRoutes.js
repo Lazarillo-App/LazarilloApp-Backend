@@ -3,6 +3,7 @@ const ctrl = require('../controllers/insumosController');
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 const maxiInsumosCtrl = require('../controllers/insumosController');
+const { authRequired } = require('../middleware/authMiddleware');
 
 // Maxi: sync + listado snapshot
 router.post('/maxi-sync', ctrl.syncFromMaxi);  // POST /api/insumos/maxi-sync
