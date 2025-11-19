@@ -2,6 +2,7 @@ const router = require('express').Router();
 const ctrl = require('../controllers/insumosController');
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+const maxiInsumosCtrl = require('../controllers/insumosController');
 
 // Maxi: sync + listado snapshot
 router.post('/maxi-sync', ctrl.syncFromMaxi);  // POST /api/insumos/maxi-sync
@@ -21,7 +22,8 @@ router.post('/bulk-csv', upload.single('file'), ctrl.bulkUpsertCSV);
 router.post('/admin/cleanup-null', ctrl.__cleanupNullInsumos);
 
 
-// (opcional)
+// SYNC
+router.post('/:businessId/maxi-sync-insumos', authRequired, maxiInsumosCtrl.syncFromMaxi);
 router.post('/sync-compras', ctrl.syncDesdeCompras);
 
 module.exports = router;

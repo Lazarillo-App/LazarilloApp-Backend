@@ -16,7 +16,6 @@ const {
   maxiArticlesProxy,
 } = require('../controllers/syncController');
 
-const maxiInsumosCtrl = require('../controllers/insumosController');
 const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
@@ -208,9 +207,5 @@ router.patch('/:id/default-group', async (req, res, next) => {
 
 router.post('/:id/sync-sales/reconcile-and-rebuild',
   ensureFn('sales.reconcileAndRebuild', sales.reconcileAndRebuild));
-
-/* ───────── Insumos ───────── */
-
-router.post('/:businessId/maxi-sync-insumos', authRequired, maxiInsumosCtrl.syncFromMaxi);
 
 module.exports = router;
