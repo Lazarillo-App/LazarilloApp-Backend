@@ -2,10 +2,22 @@
 const pool = require('../config/db');
 const { parse } = require('csv-parse/sync');
 
+const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
+const maxiSuppliesRepo = require('../repos/maxiSuppliesRepo');
+
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
 if (process.env.NODE_ENV !== 'production') {
   console.log('💡 insumosController.js cargado (modo limpio)');
+}
+
+function getBusinessIdFromReq(req) {
+  // depende de cómo lo deja loadActiveBusiness, pero cubrimos las 2 variantes
+  if (req.business && req.business.id) return Number(req.business.id);
+  if (req.user && req.user.active_business_id) return Number(req.user.active_business_id);
+
+  const hdr = req.header('X-Business-Id') || req.query.businessId;
+  return hdr ? Number(hdr) : null;
 }
 
 // ===================== LISTAR / CRUD BÁSICO =====================
@@ -290,6 +302,57 @@ exports.__cleanupNullInsumos = async (req, res) => {
     return res.status(500).json({ ok:false, error: e.message });
   } finally {
     client.release();
+  }
+};
+
+// ===================== SYNC DESDE MAXI (estadisticasmaster/insumos) =====================
+
+exports.syncFromMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    // 1) Traer insumos crudos desde Maxi
+    const raw = await fetchMaxiInsumos({ businessId, req });
+
+    // 2) Normalizar shape
+    const norm = normalizarInsumosMaxi(raw);
+
+    // 3) Guardar snapshot en maxi_supplies (upsert)
+    const synced = await maxiSuppliesRepo.upsertMany(businessId, norm);
+
+    return res.json({
+      ok: true,
+      business_id: businessId,
+      received: raw.length,
+      normalized: norm.length,
+      synced,
+    });
+  } catch (e) {
+    console.error('syncFromMaxi error:', e);
+    const status = e.status || 500;
+    return res.status(status).json({ ok: false, error: e.message || 'internal' });
+  }
+};
+
+/**
+ * Lista insumos desde maxi_supplies para el negocio activo.
+ * Esto NO toca la tabla insumos manual; es el espejo directo de Maxi.
+ */
+exports.listarMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const items = await maxiSuppliesRepo.listForBusiness(businessId);
+    return res.json({ ok: true, business_id: businessId, items });
+  } catch (e) {
+    console.error('listarMaxi error:', e);
+    return res.status(500).json({ ok: false, error: e.message || 'internal' });
   }
 };
 

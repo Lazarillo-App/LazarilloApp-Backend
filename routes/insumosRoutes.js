@@ -3,7 +3,11 @@ const ctrl = require('../controllers/insumosController');
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-// CRUD
+// Maxi: sync + listado snapshot
+router.post('/maxi-sync', ctrl.syncFromMaxi);  // POST /api/insumos/maxi-sync
+router.get('/maxi', ctrl.listarMaxi);          // GET  /api/insumos/maxi
+
+// CRUD manual
 router.get('/', ctrl.listar);
 router.post('/', ctrl.crearManual);
 router.put('/:id', ctrl.actualizar);
