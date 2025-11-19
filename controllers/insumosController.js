@@ -3,7 +3,7 @@ const pool = require('../config/db');
 const { parse } = require('csv-parse/sync');
 
 const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
-const { upsertFromMaxi } = require('../repos/maxiSuppliesRepo');
+const { upsertFromMaxi } = require('../repos/insumosRepo');
 
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
@@ -326,16 +326,13 @@ exports.listarMaxi = async (req, res) => {
 
 exports.syncFromMaxi = async (req, res) => {
   try {
-    const businessId =
-      req.activeBusinessId ||
-      Number(req.params?.businessId) ||
-      Number(req.query?.businessId);
+    const businessId = getBusinessIdFromReq(req);   // 👈 USAR SIEMPRE ESTA
 
     if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'businessId requerido' });
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const raw = await fetchMaxiInsumos({ businessId, req });
+    const raw  = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
     const summary = await upsertFromMaxi(norm);
 
