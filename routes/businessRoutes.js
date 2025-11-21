@@ -236,4 +236,18 @@ router.post(
   viewPrefsCtrl.saveViewPref
 );
 
+router.get(
+  '/:id/fav-group',
+  authRequired,
+  loadBusiness,
+  viewPrefsCtrl.getFavoriteGroup
+);
+
+router.post(
+  '/:id/fav-group',
+  authRequired,
+  loadBusiness,
+  viewPrefsCtrl.saveFavoriteGroup
+);
+
 module.exports = router;
