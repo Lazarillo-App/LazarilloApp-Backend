@@ -394,7 +394,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     }
 
     // 🔍 Traemos ventas diarias agregadas por artículo y fecha
-    // Cambiá `maxi_sales_daily` / `app_articles` según tus tablas reales
     const sql = `
       SELECT
         d.business_id,
@@ -422,14 +421,13 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
     const { rows } = await pool.query(sql, [businessId, from, to]);
 
-    // 📄 Armamos CSV
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="ventas_${businessId}_${from}_${to}.csv"`
     );
 
-    // BOM para que Excel respete UTF-8
+    // BOM UTF-8
     res.write('\uFEFF');
 
     const headers = [
