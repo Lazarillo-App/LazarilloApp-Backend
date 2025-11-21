@@ -371,3 +371,94 @@ exports.adminSyncSales = async (req, res, next) => {
     next(e);
   }
 };
+
+function csvEscape(val) {
+  if (val == null) return '';
+  const s = String(val);
+  if (/[;"\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+exports.exportSalesCsv = async function exportSalesCsv(req, res) {
+  try {
+    const businessId = Number(req.params.id);
+    const { from, to } = req.query;
+
+    if (!Number.isFinite(businessId)) {
+      return res.status(400).json({ error: 'businessId inválido' });
+    }
+    if (!from || !to) {
+      return res.status(400).json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
+    }
+
+    // 🔍 Traemos ventas diarias agregadas por artículo y fecha
+    // Cambiá `maxi_sales_daily` / `app_articles` según tus tablas reales
+    const sql = `
+      SELECT
+        d.business_id,
+        d.date::date AS fecha,
+        d.article_id,
+        COALESCE(a.nombre, a.descripcion, a.nombre_maxi, '#'||d.article_id::text) AS articulo_nombre,
+        COALESCE(a.codigo, a.codigo_maxi, a.articulo_codigo) AS articulo_codigo,
+        SUM(d.qty)    AS qty,
+        SUM(d.amount) AS amount
+      FROM maxi_sales_daily d
+      LEFT JOIN app_articles a
+        ON a.business_id = d.business_id
+       AND a.article_id_maxi = d.article_id
+      WHERE d.business_id = $1
+        AND d.date::date >= $2::date
+        AND d.date::date <= $3::date
+      GROUP BY
+        d.business_id,
+        fecha,
+        d.article_id,
+        articulo_nombre,
+        articulo_codigo
+      ORDER BY fecha ASC, articulo_nombre ASC;
+    `;
+
+    const { rows } = await pool.query(sql, [businessId, from, to]);
+
+    // 📄 Armamos CSV
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="ventas_${businessId}_${from}_${to}.csv"`
+    );
+
+    // BOM para que Excel respete UTF-8
+    res.write('\uFEFF');
+
+    const headers = [
+      'business_id',
+      'fecha',
+      'article_id',
+      'articulo_codigo',
+      'articulo_nombre',
+      'qty',
+      'amount',
+    ];
+    res.write(headers.join(';') + '\n');
+
+    for (const r of rows) {
+      const line = [
+        csvEscape(r.business_id),
+        csvEscape(r.fecha?.toISOString?.().slice(0, 10) || r.fecha),
+        csvEscape(r.article_id),
+        csvEscape(r.articulo_codigo || ''),
+        csvEscape(r.articulo_nombre || ''),
+        csvEscape(r.qty || 0),
+        csvEscape(r.amount || 0),
+      ].join(';');
+      res.write(line + '\n');
+    }
+
+    res.end();
+  } catch (e) {
+    console.error('[salesExportController] error exportando CSV', e);
+    res.status(500).json({ error: 'Error exportando CSV' });
+  }
+};

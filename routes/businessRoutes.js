@@ -134,6 +134,7 @@ router.get(
   cacheJson(300),
   ensureFn('salesSeriesFromDB', salesSeriesFromDB)
 );
+router.get('/:id/sales/export', authRequired, sales.exportSalesCsv);
 
 /* ───────── Ventas: probes (diagnóstico) ───────── */
 router.get('/:id/maxi-sales-probe',    ensureFn('sales.maxiSalesProbe',   sales.maxiSalesProbe));
