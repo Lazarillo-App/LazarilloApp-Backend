@@ -393,26 +393,32 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       return res.status(400).json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
     }
 
+    // 🔍 Usamos sales_daily_items (la misma tabla que listDailyItems)
     const sql = `
       SELECT
-        d.business_id,
-        d.date::date AS fecha,
-        d.article_id,
-        COALESCE(a.nombre, a.descripcion, a.nombre_maxi, '#'||d.article_id::text) AS articulo_nombre,
+        sdi.business_id,
+        sdi.day::date AS fecha,
+        sdi.article_id,
+        COALESCE(
+          a.nombre,
+          a.descripcion,
+          a.nombre_maxi,
+          '#'||sdi.article_id::text
+        ) AS articulo_nombre,
         COALESCE(a.codigo, a.codigo_maxi, a.articulo_codigo) AS articulo_codigo,
-        SUM(d.qty)    AS qty,
-        SUM(d.amount) AS amount
-      FROM maxi_sales_daily d
+        SUM(sdi.qty)    AS qty,
+        SUM(sdi.amount) AS amount
+      FROM sales_daily_items sdi
       LEFT JOIN app_articles a
-        ON a.business_id = d.business_id
-       AND a.article_id_maxi = d.article_id
-      WHERE d.business_id = $1
-        AND d.date::date >= $2::date
-        AND d.date::date <= $3::date
+        ON a.id = sdi.article_id
+       AND a.business_id = sdi.business_id
+      WHERE sdi.business_id = $1
+        AND sdi.day::date >= $2::date
+        AND sdi.day::date <= $3::date
       GROUP BY
-        d.business_id,
+        sdi.business_id,
         fecha,
-        d.article_id,
+        sdi.article_id,
         articulo_nombre,
         articulo_codigo
       ORDER BY fecha ASC, articulo_nombre ASC;
@@ -420,13 +426,14 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
     const { rows } = await pool.query(sql, [businessId, from, to]);
 
+    // 📄 Headers CSV
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="ventas_${businessId}_${from}_${to}.csv"`
     );
 
-    // BOM UTF-8
+    // BOM UTF-8 para Excel
     res.write('\uFEFF');
 
     const headers = [
