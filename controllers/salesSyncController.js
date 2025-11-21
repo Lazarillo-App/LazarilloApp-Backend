@@ -393,19 +393,33 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       return res.status(400).json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
     }
 
-    // 🔍 Usamos sales_daily_items (la misma tabla que listDailyItems)
+    // 🔍 Usamos sales_daily_items (igual que listDailyItems)
     const sql = `
       SELECT
         sdi.business_id,
         sdi.day::date AS fecha,
         sdi.article_id,
+
+        -- Nombre del artículo de forma "tolerante" como en listDailyItems
         COALESCE(
-          a.nombre,
-          a.descripcion,
-          a.nombre_maxi,
-          '#'||sdi.article_id::text
+          NULLIF(TRIM(COALESCE(
+            to_jsonb(a)->>'title',
+            to_jsonb(a)->>'name',
+            to_jsonb(a)->>'nombre',
+            to_jsonb(a)->>'descripcion',
+            to_jsonb(a)->>'descripcion_corta',
+            to_jsonb(a)->>'descrip'
+          )), ''),
+          '#' || sdi.article_id::text
         ) AS articulo_nombre,
-        COALESCE(a.codigo, a.codigo_maxi, a.articulo_codigo) AS articulo_codigo,
+
+        -- Código del artículo de forma flexible
+        NULLIF(TRIM(COALESCE(
+          to_jsonb(a)->>'codigo',
+          to_jsonb(a)->>'codigo_maxi',
+          to_jsonb(a)->>'articulo_codigo'
+        )), '') AS articulo_codigo,
+
         SUM(sdi.qty)    AS qty,
         SUM(sdi.amount) AS amount
       FROM sales_daily_items sdi
