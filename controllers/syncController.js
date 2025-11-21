@@ -415,10 +415,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const total   = Number(totRows[0]?.total || 0);
     const txCount = Number(totRows[0]?.tx_count || 0);
 
-    /* 2) Items desde sales_daily_items + app_articles (si existe),
-          usando to_jsonb(a)->>... para no depender del esquema exacto.
-          NO excluimos article_id = 0.
-    */
+    /* 2) Items desde sales_daily_items + app_articles + categorias + subrubros */
     const params = [biz.id, fromYmd, toYmd];
     let whereExtra = '';
 
@@ -446,33 +443,24 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const sqlItems = `
       SELECT
         s.article_id,
-        NULLIF(
-          TRIM(
-            COALESCE(
-              to_jsonb(a)->>'title',
-              to_jsonb(a)->>'name',
-              to_jsonb(a)->>'nombre',
-              to_jsonb(a)->>'descripcion',
-              to_jsonb(a)->>'descripcion_corta',
-              to_jsonb(a)->>'descrip',
-              CASE
-                WHEN s.article_id = 0 THEN 'Sin mapping (Maxi)'
-                ELSE 'Artículo #' || s.article_id::text
-              END
-            )
-          ),
-          ''
-        ) AS title,
+        MAX(a.name)    AS nombre,
+        MAX(c.nombre)  AS rubro,
+        MAX(sr.nombre) AS subrubro,
         SUM(s.qty)::numeric    AS qty,
         SUM(s.amount)::numeric AS amount
       FROM sales_daily_items s
       LEFT JOIN app_articles a
         ON a.id = s.article_id
        AND a.business_id = s.business_id
+      LEFT JOIN categorias c
+        ON c.id = a.categoria_id
+      LEFT JOIN subrubros sr
+        ON sr.id = a.subrubro_id
       WHERE s.business_id = $1
         AND s.day BETWEEN $2::date AND $3::date
+        AND s.article_id <> 0
         ${whereExtra}
-      GROUP BY s.article_id, title
+      GROUP BY s.article_id
       ORDER BY qty DESC
       LIMIT ${lim}
     `;
@@ -489,7 +477,9 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       limit: lim,
       items: rows.map((r) => ({
         article_id: r.article_id,
-        article_title: r.title,
+        article_title: r.nombre || '',
+        rubro: r.rubro || '',
+        subrubro: r.subrubro || '',
         qty: Number(r.qty || 0),
         amount: Number(r.amount || 0),
       })),
@@ -498,6 +488,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     next(e);
   }
 };
+
 
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day

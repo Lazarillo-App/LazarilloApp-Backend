@@ -390,10 +390,12 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       return res.status(400).json({ error: 'businessId inválido' });
     }
     if (!from || !to) {
-      return res.status(400).json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
+      return res
+        .status(400)
+        .json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
     }
 
-    // 🔍 Usamos sales_daily_items (igual que listDailyItems)
+    // 🔍 Usamos sales_daily_items + app_articles + categorias + subrubros
     const sql = `
       SELECT
         sdi.business_id,
@@ -420,22 +422,36 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           to_jsonb(a)->>'articulo_codigo'
         )), '') AS articulo_codigo,
 
+        c.nombre  AS rubro,
+        sr.nombre AS subrubro,
+
         SUM(sdi.qty)    AS qty,
         SUM(sdi.amount) AS amount
       FROM sales_daily_items sdi
       LEFT JOIN app_articles a
         ON a.id = sdi.article_id
        AND a.business_id = sdi.business_id
+      LEFT JOIN categorias c
+        ON c.id = a.categoria_id
+      LEFT JOIN subrubros sr
+        ON sr.id = a.subrubro_id
       WHERE sdi.business_id = $1
         AND sdi.day::date >= $2::date
         AND sdi.day::date <= $3::date
+        AND sdi.article_id <> 0
       GROUP BY
         sdi.business_id,
         fecha,
         sdi.article_id,
         articulo_nombre,
-        articulo_codigo
-      ORDER BY fecha ASC, articulo_nombre ASC;
+        articulo_codigo,
+        c.nombre,
+        sr.nombre
+      ORDER BY
+        fecha ASC,
+        rubro NULLS LAST,
+        subrubro NULLS LAST,
+        articulo_nombre ASC;
     `;
 
     const { rows } = await pool.query(sql, [businessId, from, to]);
@@ -456,6 +472,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       'article_id',
       'articulo_codigo',
       'articulo_nombre',
+      'rubro',
+      'subrubro',
       'qty',
       'amount',
     ];
@@ -464,10 +482,14 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     for (const r of rows) {
       const line = [
         csvEscape(r.business_id),
-        csvEscape(r.fecha?.toISOString?.().slice(0, 10) || r.fecha),
+        csvEscape(
+          r.fecha?.toISOString?.().slice(0, 10) || r.fecha
+        ),
         csvEscape(r.article_id),
         csvEscape(r.articulo_codigo || ''),
         csvEscape(r.articulo_nombre || ''),
+        csvEscape(r.rubro || ''),
+        csvEscape(r.subrubro || ''),
         csvEscape(r.qty || 0),
         csvEscape(r.amount || 0),
       ].join(';');
