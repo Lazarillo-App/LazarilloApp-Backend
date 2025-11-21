@@ -393,7 +393,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       return res.status(400).json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
     }
 
-    // 🔍 Traemos ventas diarias agregadas por artículo y fecha
     const sql = `
       SELECT
         d.business_id,

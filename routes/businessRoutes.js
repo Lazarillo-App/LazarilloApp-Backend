@@ -116,6 +116,12 @@ router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 router.get('/:id/articles',       cacheJson(300), ensureFn('listArticlesFromDB', listArticlesFromDB));
 router.get('/:id/articles/tree',  cacheJson(300), ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
 
+/* ───────── Ventas: export CSV ───────── */
+router.get(
+  '/:id/sales/export',
+  ensureFn('sales.exportSalesCsv', sales.exportSalesCsv)
+);
+
 /* ───────── Ventas: items agregados por día ───────── */
 router.get(
   '/:id/sales/items',
@@ -133,11 +139,6 @@ router.get(
   '/:id/sales/:articuloId',
   cacheJson(300),
   ensureFn('salesSeriesFromDB', salesSeriesFromDB)
-);
-
-router.get(
-  '/:id/sales/export',
-  ensureFn('sales.exportSalesCsv', sales.exportSalesCsv)
 );
 
 /* ───────── Ventas: probes (diagnóstico) ───────── */
