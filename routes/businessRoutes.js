@@ -17,8 +17,10 @@ const {
 } = require('../controllers/syncController');
 
 const { authRequired } = require('../middleware/authMiddleware');
+const loadBusiness = require('../middleware/loadBusiness');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
+const viewPrefsCtrl = require('../controllers/viewPrefsController');
 
 // 🔴 ÚNICA importación del controlador de ventas
 const sales = require('../controllers/salesSyncController');
@@ -219,5 +221,19 @@ router.patch('/:id/default-group', async (req, res, next) => {
 
 router.post('/:id/sync-sales/reconcile-and-rebuild',
   ensureFn('sales.reconcileAndRebuild', sales.reconcileAndRebuild));
+
+  router.get(
+  '/:id/view-prefs',
+  authRequired,
+  loadBusiness,
+  viewPrefsCtrl.getViewPrefs
+);
+
+router.post(
+  '/:id/view-prefs',
+  authRequired,
+  loadBusiness,
+  viewPrefsCtrl.saveViewPref
+);
 
 module.exports = router;
