@@ -135,6 +135,10 @@ router.get(
   ensureFn('salesSummaryFromDB', salesSummaryFromDB)
 );
 
+// ⚠️ primero las rutas "fijas"
+router.get('/:id/sales/export', authRequired, sales.exportSalesCsv);
+
+// 👇 después la genérica con :articuloId
 router.get(
   '/:id/sales/:articuloId',
   cacheJson(300),
