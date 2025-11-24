@@ -67,9 +67,10 @@ function getBusinessId(req) {
 
 const TODO_NAME_INITIAL = 'Sin Agrupacion';
 const TODO_NAME_LEGACY = 'Sin Agrupación';
-const TODO_NAME_FUTURE = 'Discontinuados';
+const DISC_NAME = 'Discontinuados';
 
-const TODO_NAMES = [TODO_NAME_INITIAL, TODO_NAME_LEGACY, TODO_NAME_FUTURE];
+// solo nombres que significan "grupo automático de sobrantes"
+const TODO_NAMES = [TODO_NAME_INITIAL, TODO_NAME_LEGACY];
 
 const normName = (s) =>
   String(s || '')
@@ -80,7 +81,12 @@ const normName = (s) =>
 
 const isTodoName = (s) => {
   const n = normName(s);
-  return n === 'sin agrupacion' || n === 'discontinuados';
+  return n === 'sin agrupacion' || n === 'sin agrupación' || n === 'todo';
+};
+
+const isDiscontinuadosName = (s) => {
+  const n = normName(s);
+  return n === 'discontinuados' || n === 'descontinuados';
 };
 
 /* ========================= CRUD Agrupaciones ========================= */
@@ -154,13 +160,11 @@ exports.actualizarAgrupacion = async (req, res) => {
       prevNombre = prevRows[0]?.nombre || null;
     } catch (_) { }
 
-
     const sets = [];
     const vals = [];
     const push = (col, val) => { vals.push(val); sets.push(`${col} = $${vals.length}`); };
 
     let todoRenamedOutOfTodo = false;
-    let newNombreValor = null;
 
     if (req.body?.nombre !== undefined) {
       const nombre = String(req.body.nombre ?? '').trim();
@@ -168,9 +172,12 @@ exports.actualizarAgrupacion = async (req, res) => {
         return res.status(400).json({ ok: false, error: 'El nombre no puede quedar vacío' });
       }
 
-      newNombreValor = nombre;
+      // 🚫 No permitir renombrar "Discontinuados"
+      if (prevNombre && isDiscontinuadosName(prevNombre) && nombre !== prevNombre) {
+        return res.status(400).json({ ok: false, error: 'La agrupación "Discontinuados" no se puede renombrar' });
+      }
 
-      // ¿Era un nombre "automático" y ahora pasa a otro nombre cualquiera?
+      // ✅ Si era el grupo automático (Sin Agrupación/TODO) y pasa a otro nombre → disparar recreación del TODO
       if (prevNombre && isTodoName(prevNombre) && !isTodoName(nombre)) {
         todoRenamedOutOfTodo = true;
       }
@@ -196,14 +203,24 @@ exports.actualizarAgrupacion = async (req, res) => {
 
     const updated = rows[0];
 
-    // Si sacamos al grupo del "rol automático", nos aseguramos de que exista "Discontinuados"
+    // 🔁 Si sacamos al grupo del "rol automático", nos aseguramos de recrear "Sin Agrupacion"
     if (todoRenamedOutOfTodo) {
       try {
         await pool.query(
           `INSERT INTO agrupaciones (business_id, nombre, articulos)
        VALUES ($1, $2, '[]'::jsonb)
        ON CONFLICT (business_id, nombre) DO NOTHING`,
-          [businessId, TODO_NAME_FUTURE]
+          [businessId, TODO_NAME_INITIAL]
+        );
+      } catch (_) { }
+
+      // y garantizamos también que exista "Discontinuados"
+      try {
+        await pool.query(
+          `INSERT INTO agrupaciones (business_id, nombre, articulos)
+       VALUES ($1, $2, '[]'::jsonb)
+       ON CONFLICT (business_id, nombre) DO NOTHING`,
+          [businessId, DISC_NAME]
         );
       } catch (_) { }
     }
@@ -225,11 +242,24 @@ exports.eliminarAgrupacion = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
+    // mirar nombre antes de borrar
+    const { rows: prevRows } = await pool.query(
+      `SELECT nombre FROM agrupaciones WHERE id=$1 AND business_id=$2`,
+      [id, businessId]
+    );
+    if (!prevRows.length) {
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    }
+
+    const nombre = prevRows[0].nombre || '';
+    if (isTodoName(nombre) || isDiscontinuadosName(nombre)) {
+      return res.status(400).json({ ok: false, error: 'Esta agrupación especial no se puede eliminar' });
+    }
+
     const r = await pool.query(
       `DELETE FROM agrupaciones WHERE id=$1 AND business_id=$2`,
       [id, businessId]
     );
-    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
 
     // Limpieza de exclusiones (si existen)
     try {
@@ -433,10 +463,8 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 };
 
 // PUT /businesses/:businessId/agrupaciones/todo
-// Devuelve el grupo automático de "sobrantes".
-// Compatibilidad: si existe "Discontinuados", lo usa.
-// Si no, reutiliza "Sin Agrupacion / Sin Agrupación" si existe.
-// Si no hay ninguno, crea "Discontinuados".
+// Devuelve el grupo automático de "sobrantes" (Sin Agrupacion).
+// Además garantiza que exista también "Discontinuados".
 exports.ensureTodoAgrupacion = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
@@ -444,33 +472,42 @@ exports.ensureTodoAgrupacion = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'businessId requerido' });
     }
 
-    // 1) ¿Ya hay alguno de los nombres especiales?
-    const { rows: existing } = await pool.query(
+    // 1) ¿Ya hay un grupo "Sin Agrupacion / Sin Agrupación / TODO"?
+    const { rows: all } = await pool.query(
       `SELECT id, nombre
          FROM agrupaciones
-        WHERE business_id = $1
-          AND nombre = ANY($2::text[])
-        ORDER BY id ASC`,
-      [businessId, TODO_NAMES]
+        WHERE business_id = $1`,
+      [businessId]
     );
 
-    if (existing.length) {
-      // Preferimos "Discontinuados" si existe
-      const preferred =
-        existing.find(r => normName(r.nombre) === normName(TODO_NAME_FUTURE)) ||
-        existing[0];
-      return res.json(preferred);
+    let todoRow = all.find(r => isTodoName(r.nombre)) || null;
+    let discRow = all.find(r => isDiscontinuadosName(r.nombre)) || null;
+
+    // 2) Si no existe TODO → crearlo
+    if (!todoRow) {
+      const { rows } = await pool.query(
+        `INSERT INTO agrupaciones (business_id, nombre, articulos)
+         VALUES ($1, $2, '[]'::jsonb)
+         ON CONFLICT (business_id, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
+         RETURNING id, nombre`,
+        [businessId, TODO_NAME_INITIAL]
+      );
+      todoRow = rows[0];
     }
 
-    // 2) No hay ninguno: creamos "Discontinuados" como nuevo grupo automático
-    const { rows } = await pool.query(
-      `INSERT INTO agrupaciones (business_id, nombre, articulos)
-       VALUES ($1, $2, '[]'::jsonb)
-       ON CONFLICT (business_id, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
-       RETURNING id, nombre`,
-      [businessId, TODO_NAME_FUTURE]
-    );
-    return res.status(201).json(rows[0]);
+    // 3) Asegurar también "Discontinuados"
+    if (!discRow) {
+      try {
+        await pool.query(
+          `INSERT INTO agrupaciones (business_id, nombre, articulos)
+           VALUES ($1, $2, '[]'::jsonb)
+           ON CONFLICT (business_id, nombre) DO NOTHING`,
+          [businessId, DISC_NAME]
+        );
+      } catch (_) { }
+    }
+
+    return res.json(todoRow);
   } catch (e) {
     console.error('ensureTodoAgrupacion error:', e);
     return res.status(500).json({ ok: false, error: e.message });
