@@ -25,12 +25,7 @@ function getBusinessIdFromReq(req) {
 // ===================== LISTAR / CRUD BÁSICO =====================
 exports.listar = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-
-    const {
+    let {
       page = 1,
       limit = 50,
       search = '',
@@ -38,124 +33,124 @@ exports.listar = async (req, res) => {
       unidadMed,
       origen,
       activo = 'true',
-      elaborado = 'all',      // 👈 NUEVO: 'true' | 'false' | 'all'
       orderBy = 'nombre',
       order = 'ASC'
     } = req.query;
 
     const where = [];
-    // $1 SIEMPRE es businessId para el join con insumo_rubros
-    const params = [businessId];
+    const params = [];
 
-    // 🔍 búsqueda por nombre / código
-    if (search) {
-      params.push(`%${search}%`);
-      const idx1 = params.length;
-      params.push(`%${search}%`);
+    // 🔍 Búsqueda por texto (nombre / codigo_maxi)
+    const searchTrim = String(search || '').trim();
+    if (searchTrim !== '') {
+      const term = `%${searchTrim}%`;
+      // primero pusheamos, luego calculamos índices
+      params.push(term, term);
       const idx2 = params.length;
-      where.push(`(ins.nombre ILIKE $${idx1} OR ins.codigo_maxi ILIKE $${idx2})`);
+      const idx1 = params.length - 1;
+      // codigo_maxi::text por si la columna no es TEXT
+      where.push(`(nombre ILIKE $${idx1} OR codigo_maxi::text ILIKE $${idx2})`);
     }
 
-    // filtro por rubro (código numérico)
-    if (rubro) {
-      params.push(Number(rubro));
-      const idx = params.length;
-      where.push(`ins.rubro = $${idx}`);
+    // 🎯 Filtro por rubro (INT seguro)
+    if (rubro !== undefined && rubro !== null && rubro !== '') {
+      const nRubro = Number(rubro);
+      if (!Number.isFinite(nRubro)) {
+        return res
+          .status(400)
+          .json({ ok: false, error: 'Parámetro rubro inválido' });
+      }
+      params.push(nRubro);
+      where.push(`rubro = $${params.length}`);
     }
 
+    // 🎯 Filtro por unidad de medida
     if (unidadMed) {
       params.push(unidadMed);
-      const idx = params.length;
-      where.push(`ins.unidad_med = $${idx}`);
+      where.push(`unidad_med = $${params.length}`);
     }
 
+    // 🎯 Filtro por origen
     if (origen) {
       params.push(origen);
-      const idx = params.length;
-      where.push(`ins.origen = $${idx}`);
+      where.push(`origen = $${params.length}`);
     }
 
+    // 🎯 Filtro por activo (booleano)
     if (activo !== 'all') {
-      params.push(activo === 'true');
-      const idx = params.length;
-      where.push(`ins.activo = $${idx}`);
+      const boolActivo = String(activo) === 'true';
+      params.push(boolActivo);
+      where.push(`activo = $${params.length}`);
     }
 
-    // 🔀 separar elaborados / no elaborados, usando insumo_rubros.es_elaborador
-    if (elaborado === 'true') {
-      params.push(true);
-      const idx = params.length;
-      where.push(`ir.es_elaborador = $${idx}`);
-    } else if (elaborado === 'false') {
-      params.push(false);
-      const idx = params.length;
-      // tratamos NULL como no elaborado
-      where.push(`COALESCE(ir.es_elaborador, false) = $${idx}`);
-    }
-
+    // 📄 Paginado
     const rawLimit = Number(limit) || 50;
-    const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
+    const hardLimit = Math.min(Math.max(rawLimit, 1), 500);
     const currentPage = Math.max(Number(page) || 1, 1);
     const offset = (currentPage - 1) * hardLimit;
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
+    // 🧾 Orden
     const validOrderByWhitelist = [
       'nombre',
       'codigo_maxi',
       'unidad_med',
       'precio_ref',
       'created_at',
-      'updated_at',
+      'updated_at'
     ];
-    const validOrderBy = validOrderByWhitelist.includes(orderBy) ? orderBy : 'nombre';
-    const validOrder = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
+    const validOrderBy = validOrderByWhitelist.includes(orderBy)
+      ? orderBy
+      : 'nombre';
+    const validOrder =
+      String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-    const dataSql = `
-      SELECT ins.*,
-             COALESCE(NULLIF(TRIM(ins.codigo_maxi), ''), 'INS-' || ins.id) AS codigo_mostrar,
-             ir.nombre        AS rubro_nombre,
-             ir.es_elaborador AS rubro_es_elaborador
-        FROM insumos ins
-        LEFT JOIN insumo_rubros ir
-          ON ir.codigo = ins.rubro
-         AND ir.business_id = $1
-       ${whereSql}
-       ORDER BY ins.${validOrderBy} ${validOrder}
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    const dataQuery = `
+      SELECT *,
+             COALESCE(NULLIF(TRIM(codigo_maxi), ''), 'INS-' || id) AS codigo_mostrar
+      FROM insumos
+      ${whereSql}
+      ORDER BY ${validOrderBy} ${validOrder}
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `;
 
-    const countSql = `
+    const countQuery = `
       SELECT COUNT(*)::int AS total
-        FROM insumos ins
-        LEFT JOIN insumo_rubros ir
-          ON ir.codigo = ins.rubro
-         AND ir.business_id = $1
-       ${whereSql}
+      FROM insumos
+      ${whereSql}
     `;
+
+    const dataParams = [...params, hardLimit, offset];
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[insumosController.listar] whereSql =', whereSql);
+      console.log('[insumosController.listar] params   =', params);
+    }
 
     const [dataRes, countRes] = await Promise.all([
-      pool.query(dataSql, [...params, hardLimit, offset]),
-      pool.query(countSql, params)
+      pool.query(dataQuery, dataParams),
+      pool.query(countQuery, params)
     ]);
 
-    const total = countRes.rows[0]?.total ?? 0;
+    const total = countRes.rows[0].total;
 
     res.json({
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page : currentPage,
+        page: currentPage,
         limit: hardLimit,
         total,
         pages: Math.max(Math.ceil(total / hardLimit), 1)
       }
     });
   } catch (e) {
-    console.error(e);
+    console.error('insumosController.listar error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
+
 
 exports.crearManual = async (req, res) => {
   try {
