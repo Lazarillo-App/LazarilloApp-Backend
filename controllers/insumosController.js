@@ -4,7 +4,7 @@ const { parse } = require('csv-parse/sync');
 const { fetchMaxiInsumos, normalizarInsumosMaxi,
   fetchMaxiInsumosRubros, normalizarInsumosRubros } = require('../services/maxiSuppliesService');
 const { upsertFromMaxi } = require('../repos/insumosRepo');
-const insumosRubrosRepo = require('../repos/insumosRubrosRepo');  // 🔹 NUEVO
+const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 
 
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
