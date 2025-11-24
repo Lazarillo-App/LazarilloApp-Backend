@@ -370,7 +370,15 @@ exports.listarRubrosMaxi = async (req, res) => {
     }
 
     const items = await insumosRubrosRepo.listRubrosForBusiness(businessId);
-    return res.json({ ok: true, business_id: businessId, items });
+
+    const decorados = items.map((r) => ({
+      ...r,
+      es_elaborado: r.nombre
+        ? r.nombre.trim().toUpperCase().startsWith('ELABORAD')
+        : false,
+    }));
+
+    return res.json({ ok: true, business_id: businessId, items: decorados });
   } catch (e) {
     console.error('listarRubrosMaxi error:', e);
     return res.status(500).json({ ok: false, error: e.message || 'internal' });

@@ -1,4 +1,3 @@
-// services/maxiSuppliesService.js
 /* eslint-disable no-console */
 'use strict';
 
@@ -9,6 +8,8 @@ const fetchNative =
   (typeof globalThis.fetch === 'function')
     ? ((...args) => globalThis.fetch(...args))
     : require('node-fetch');
+
+/* =============== INSUMOS =============== */
 
 function extractInsumosPayload(payload) {
   if (!payload) return [];
@@ -21,21 +22,6 @@ function extractInsumosPayload(payload) {
 
   // Si algún día lo envían como { insumos:[...] }
   if (Array.isArray(content2?.insumos)) return content2.insumos;
-
-  return [];
-}
-
-function extractInsumosRubrosPayload(payload) {
-  if (!payload) return [];
-
-  const c1 = payload.content ?? payload;
-  const c2 = c1.content ?? c1;
-
-  // caso normal: content: [ {codigo, nombre, cptoCaja}, ... ]
-  if (Array.isArray(c2)) return c2;
-
-  // por si un día viene como { rubros:[...] }
-  if (Array.isArray(c2?.rubros)) return c2.rubros;
 
   return [];
 }
@@ -56,7 +42,7 @@ async function fetchMaxiInsumos({ businessId, req }) {
   const bearer = await getBearer(businessId, req);
   const url = `${STATS_BASE}/estadisticasmaster/insumos`;
 
-  console.log('[maxiSupplies] GET', url);
+  console.log('[maxiSupplies] GET insumos', url);
 
   const r = await fetchNative(url, {
     method: 'GET',
@@ -68,11 +54,7 @@ async function fetchMaxiInsumos({ businessId, req }) {
 
   const txt = await r.text().catch(() => '');
   let j;
-  try {
-    j = JSON.parse(txt);
-  } catch {
-    j = null;
-  }
+  try { j = JSON.parse(txt); } catch { j = null; }
 
   const ok =
     r.ok &&
@@ -90,59 +72,11 @@ async function fetchMaxiInsumos({ businessId, req }) {
   }
 
   const insumos = extractInsumosPayload(j);
-  console.log('[maxiSupplies] Insumos recibidos:', Array.isArray(insumos) ? insumos.length : 0);
+  console.log('[maxiSupplies] Insumos recibidos:',
+    Array.isArray(insumos) ? insumos.length : 0
+  );
 
   return Array.isArray(insumos) ? insumos : [];
-}
-
-/* 🔹 NUEVO: fetch rubros de insumos */
-async function fetchMaxiInsumosRubros({ businessId, req }) {
-  if (!businessId) {
-    const e = new Error('businessId requerido para fetchMaxiInsumosRubros');
-    e.status = 400;
-    throw e;
-  }
-
-  const bearer = await getBearer(businessId, req);
-  const url = `${STATS_BASE}/estadisticasmaster/rubrodeinsumos`;
-
-  console.log('[maxiSupplies] GET rubrodeinsumos', url);
-
-  const r = await fetchNative(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${bearer}`,
-      Accept: 'application/json',
-    },
-  });
-
-  const txt = await r.text().catch(() => '');
-  let j;
-  try {
-    j = JSON.parse(txt);
-  } catch {
-    j = null;
-  }
-
-  const ok =
-    r.ok &&
-    (!j?.resultCode || j?.resultCode === 'SUCCESS');
-
-  if (!ok) {
-    const err = new Error(j?.resultDescription || r.statusText || 'Error Maxi rubro insumos');
-    err.status = r.status || 502;
-    err._maxi = {
-      status: r.status,
-      url,
-      bodyPreview: String(txt).slice(0, 300),
-    };
-    throw err;
-  }
-
-  const rubros = extractInsumosRubrosPayload(j);
-  console.log('[maxiSupplies] Rubros insumos recibidos:', Array.isArray(rubros) ? rubros.length : 0);
-
-  return Array.isArray(rubros) ? rubros : [];
 }
 
 /**
@@ -170,7 +104,76 @@ function normalizarInsumosMaxi(items = []) {
     .filter(Boolean);
 }
 
-/* 🔹 NUEVO: normalizador de rubros de insumos */
+/* =============== RUBROS DE INSUMOS =============== */
+
+function extractInsumosRubrosPayload(payload) {
+  if (!payload) return [];
+
+  const c1 = payload.content ?? payload;
+  const c2 = c1?.content ?? c1;
+
+  if (Array.isArray(c2)) return c2;
+  if (Array.isArray(c2?.rubros)) return c2.rubros;
+
+  return [];
+}
+
+/**
+ * fetchMaxiInsumosRubros({ businessId, req })
+ * - Usa el mismo bearer que el resto
+ * - Llama a /estadisticasmaster/rubrodeinsumos
+ */
+async function fetchMaxiInsumosRubros({ businessId, req }) {
+  if (!businessId) {
+    const e = new Error('businessId requerido para fetchMaxiInsumosRubros');
+    e.status = 400;
+    throw e;
+  }
+
+  const bearer = await getBearer(businessId, req);
+  const url = `${STATS_BASE}/estadisticasmaster/rubrodeinsumos`;
+
+  console.log('[maxiSupplies] GET rubrodeinsumos', url);
+
+  const r = await fetchNative(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${bearer}`,
+      Accept: 'application/json',
+    },
+  });
+
+  const txt = await r.text().catch(() => '');
+  let j;
+  try { j = JSON.parse(txt); } catch { j = null; }
+
+  const ok =
+    r.ok &&
+    (!j?.resultCode || j?.resultCode === 'SUCCESS');
+
+  if (!ok) {
+    const err = new Error(j?.resultDescription || r.statusText || 'Error Maxi rubros de insumos');
+    err.status = r.status || 502;
+    err._maxi = {
+      status: r.status,
+      url,
+      bodyPreview: String(txt).slice(0, 300),
+    };
+    throw err;
+  }
+
+  const rubros = extractInsumosRubrosPayload(j);
+  console.log('[maxiSupplies] Rubros insumos recibidos:',
+    Array.isArray(rubros) ? rubros.length : 0
+  );
+
+  return Array.isArray(rubros) ? rubros : [];
+}
+
+/**
+ * normalizarInsumosRubros(items)
+ * - Normaliza rubros de insumos
+ */
 function normalizarInsumosRubros(items = []) {
   return items
     .map((it) => {
