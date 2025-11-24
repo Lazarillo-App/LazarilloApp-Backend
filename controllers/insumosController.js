@@ -1,9 +1,11 @@
 // controllers/insumosController.js
 const pool = require('../config/db');
 const { parse } = require('csv-parse/sync');
-
-const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
+const { fetchMaxiInsumos, normalizarInsumosMaxi,
+        fetchMaxiInsumosRubros, normalizarInsumosRubros } = require('../services/maxiSuppliesService');
 const { upsertFromMaxi } = require('../repos/insumosRepo');
+const insumosRubrosRepo = require('../repos/insumosRubrosRepo');  // 🔹 NUEVO
+
 
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
@@ -348,6 +350,53 @@ exports.syncFromMaxi = async (req, res) => {
     });
   } catch (e) {
     console.error('syncFromMaxi error:', e);
+    const status = e.status || 500;
+    return res.status(status).json({ ok: false, error: e.message || 'internal_error' });
+  }
+};
+
+/**
+ * Lista rubros de insumos desde tabla insumo_rubros
+ * para el negocio activo.
+ */
+exports.listarRubrosMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const items = await insumosRubrosRepo.listRubrosForBusiness(businessId);
+    return res.json({ ok: true, business_id: businessId, items });
+  } catch (e) {
+    console.error('listarRubrosMaxi error:', e);
+    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+  }
+};
+
+/**
+ * Sincroniza rubros de insumos desde Maxi → insumo_rubros.
+ */
+exports.syncRubrosFromMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const raw  = await fetchMaxiInsumosRubros({ businessId, req });
+    const norm = normalizarInsumosRubros(raw);
+    const summary = await insumosRubrosRepo.upsertRubrosForBusiness(businessId, norm);
+
+    return res.json({
+      ok: true,
+      business_id: businessId,
+      received   : raw.length,
+      normalized : norm.length,
+      ...summary,
+    });
+  } catch (e) {
+    console.error('syncRubrosFromMaxi error:', e);
     const status = e.status || 500;
     return res.status(status).json({ ok: false, error: e.message || 'internal_error' });
   }

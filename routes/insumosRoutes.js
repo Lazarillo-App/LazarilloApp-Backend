@@ -1,27 +1,52 @@
+// routes/insumosRoutes.js
 const router = require('express').Router();
 const ctrl = require('../controllers/insumosController');
 const multer = require('multer');
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-// Maxi: sync + listado snapshot
-router.post('/maxi-sync', ctrl.syncFromMaxi);  // POST /api/insumos/maxi-sync
-router.get('/maxi', ctrl.listarMaxi);          // GET  /api/insumos/maxi
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
-// CRUD manual
+/* ================== Maxi: INSUMOS ================== */
+// POST /api/insumos/maxi-sync  → sincroniza insumos desde Maxi a tabla `insumos`
+router.post('/maxi-sync', ctrl.syncFromMaxi);
+
+// GET  /api/insumos/maxi      → lista insumos espejo Maxi (tabla maxi_supplies o similar)
+router.get('/maxi', ctrl.listarMaxi);
+
+/* ================== Maxi: RUBROS DE INSUMOS ================== */
+// POST /api/insumos/maxi/rubros/sync → sincroniza rubros de insumos desde Maxi a `insumo_rubros`
+router.post('/maxi/rubros/sync', ctrl.syncRubrosFromMaxi);
+
+// GET  /api/insumos/maxi/rubros      → lista rubros de insumos guardados para el negocio
+router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
+
+/* ================== CRUD MANUAL INSUMOS ================== */
+// GET  /api/insumos
 router.get('/', ctrl.listar);
+
+// POST /api/insumos
 router.post('/', ctrl.crearManual);
+
+// PUT  /api/insumos/:id
 router.put('/:id', ctrl.actualizar);
+
+// DELETE /api/insumos/:id
 router.delete('/:id', ctrl.eliminar);
 
-// Bulk
+/* ================== BULK (JSON / CSV) ================== */
+// POST /api/insumos/bulk
 router.post('/bulk', ctrl.bulkUpsert);
+
+// POST /api/insumos/bulk-csv  (campo "file")
 router.post('/bulk-csv', upload.single('file'), ctrl.bulkUpsertCSV);
 
-// Mantenimiento
+/* ================== MANTENIMIENTO / UTILIDADES ================== */
+// POST /api/insumos/admin/cleanup-null
 router.post('/admin/cleanup-null', ctrl.__cleanupNullInsumos);
 
-// (opcional) sync-compras
+// (opcional) sync desde compras
 router.post('/sync-compras', ctrl.syncDesdeCompras);
-router.post('/:businessId/maxi-sync-insumos', ctrl.syncFromMaxi);
 
 module.exports = router;
