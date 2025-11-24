@@ -25,6 +25,11 @@ function getBusinessIdFromReq(req) {
 // ===================== LISTAR / CRUD BÁSICO =====================
 exports.listar = async (req, res) => {
   try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
     let {
       page = 1,
       limit = 50,
@@ -40,6 +45,9 @@ exports.listar = async (req, res) => {
     const where = [];
     const params = [];
 
+    // 🔒 SIEMPRE filtrar por negocio
+    params.push(businessId);
+    where.push(`business_id = $${params.length}`);
     // 🔍 Búsqueda por texto (nombre / codigo_maxi)
     const searchTrim = String(search || '').trim();
     if (searchTrim !== '') {
@@ -154,26 +162,30 @@ exports.listar = async (req, res) => {
 
 exports.crearManual = async (req, res) => {
   try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
     const b = req.body || {};
 
-    // 🔒 exigir nombre válido (evitar basura que luego se limpia)
     if (!b.nombre || !String(b.nombre).trim()) {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
     }
 
     const { rows } = await pool.query(
       `INSERT INTO insumos
-        (codigo_maxi, nombre, unidad_med, precio_ref, rubro,
+        (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
          envase, vencimiento, resumen, cant_ingredientes,
          agrupacion_base, costo_ref, nota, origen, activo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING *`,
       [
+        businessId,
         b.codigoMaxi || null,
         b.nombre || '',
         b.unidadMed || null,
         num(b.precioRef),
-        // 👇 podés mandar o no; si no mandás, queda null
         b.rubro ?? null,
         b.envase ?? null,
         b.vencimiento ?? null,
@@ -246,8 +258,13 @@ exports.eliminar = async (req, res) => {
 // ===================== BULK (JSON/CSV) =====================
 exports.bulkUpsert = async (req, res) => {
   try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok:false, error:'Negocio activo requerido' });
+    }
+
     const items = Array.isArray(req.body) ? req.body : [];
-    if (!items.length) return res.status(400).json({ ok: false, error: 'Body debe ser un array de insumos' });
+    if (!items.length) return res.status(400).json({ ok:false, error:'Body debe ser un array de insumos' });
 
     const client = await pool.connect();
     let inserted = 0, updated = 0, skipped = 0;
@@ -258,19 +275,17 @@ exports.bulkUpsert = async (req, res) => {
         const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
         if (!codigo || String(codigo).trim() === '') { skipped++; continue; }
 
-        const nombre = (it.nombre ?? '').trim();
+        const nombre     = (it.nombre ?? '').trim();
         const unidad_med = it.unidadMed ?? it.unidad_med ?? null;
         const precio_ref = (it.precioRef ?? it.precio_ref ?? null);
-        const origen = it.origen ?? 'manual';
-        const activo = typeof it.activo === 'boolean' ? it.activo : true;
-
-        // rubro deprecado: solo si viene
-        const rubro = it.rubro ?? null;
+        const origen     = it.origen ?? 'manual';
+        const activo     = typeof it.activo === 'boolean' ? it.activo : true;
+        const rubro      = it.rubro ?? null;
 
         const r = await client.query(
-          `INSERT INTO insumos (codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, activo)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)
-           ON CONFLICT (codigo_maxi) DO UPDATE SET
+          `INSERT INTO insumos (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, activo)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
              nombre=EXCLUDED.nombre,
              unidad_med=EXCLUDED.unidad_med,
              precio_ref=EXCLUDED.precio_ref,
@@ -279,7 +294,16 @@ exports.bulkUpsert = async (req, res) => {
              activo=EXCLUDED.activo,
              updated_at=NOW()
            RETURNING (xmax = 0) AS inserted`,
-          [String(codigo), nombre, unidad_med, (precio_ref == null ? null : Number(precio_ref)), rubro, origen, activo]
+          [
+            businessId,
+            String(codigo),
+            nombre,
+            unidad_med,
+            (precio_ref == null ? null : Number(precio_ref)),
+            rubro,
+            origen,
+            activo
+          ]
         );
         if (r.rows?.[0]?.inserted) inserted++; else updated++;
       }
@@ -290,10 +314,10 @@ exports.bulkUpsert = async (req, res) => {
       client.release();
     }
 
-    return res.json({ ok: true, summary: { inserted, updated, skipped, total: inserted + updated + skipped } });
+    return res.json({ ok:true, summary:{ inserted, updated, skipped, total: inserted+updated+skipped } });
   } catch (e) {
     console.error('bulkUpsert error:', e.message);
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok:false, error:e.message });
   }
 };
 
@@ -395,9 +419,9 @@ exports.syncFromMaxi = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const raw = await fetchMaxiInsumos({ businessId, req });
+    const raw  = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
-    const summary = await upsertFromMaxi(norm);
+    const summary = await upsertFromMaxi(businessId, norm);  // 👈 ahora pasa businessId
 
     return res.json({
       ok: true,
