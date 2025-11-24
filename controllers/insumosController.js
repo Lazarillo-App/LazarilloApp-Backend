@@ -25,6 +25,11 @@ function getBusinessIdFromReq(req) {
 // ===================== LISTAR / CRUD BÁSICO =====================
 exports.listar = async (req, res) => {
   try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
     const {
       page = 1,
       limit = 50,
@@ -33,24 +38,60 @@ exports.listar = async (req, res) => {
       unidadMed,
       origen,
       activo = 'true',
+      elaborado = 'all',      // 👈 NUEVO: 'true' | 'false' | 'all'
       orderBy = 'nombre',
       order = 'ASC'
     } = req.query;
 
     const where = [];
-    const params = [];
+    // $1 SIEMPRE es businessId para el join con insumo_rubros
+    const params = [businessId];
 
+    // 🔍 búsqueda por nombre / código
     if (search) {
-      params.push(`%${search}%`, `%${search}%`);
-      where.push(`(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`);
+      params.push(`%${search}%`);
+      const idx1 = params.length;
+      params.push(`%${search}%`);
+      const idx2 = params.length;
+      where.push(`(ins.nombre ILIKE $${idx1} OR ins.codigo_maxi ILIKE $${idx2})`);
     }
+
+    // filtro por rubro (código numérico)
     if (rubro) {
       params.push(Number(rubro));
-      where.push(`rubro = $${params.length}`);
+      const idx = params.length;
+      where.push(`ins.rubro = $${idx}`);
     }
-    if (unidadMed) { params.push(unidadMed); where.push(`unidad_med = $${params.length}`); }
-    if (origen) { params.push(origen); where.push(`origen = $${params.length}`); }
-    if (activo !== 'all') { params.push(activo === 'true'); where.push(`activo = $${params.length}`); }
+
+    if (unidadMed) {
+      params.push(unidadMed);
+      const idx = params.length;
+      where.push(`ins.unidad_med = $${idx}`);
+    }
+
+    if (origen) {
+      params.push(origen);
+      const idx = params.length;
+      where.push(`ins.origen = $${idx}`);
+    }
+
+    if (activo !== 'all') {
+      params.push(activo === 'true');
+      const idx = params.length;
+      where.push(`ins.activo = $${idx}`);
+    }
+
+    // 🔀 separar elaborados / no elaborados, usando insumo_rubros.es_elaborador
+    if (elaborado === 'true') {
+      params.push(true);
+      const idx = params.length;
+      where.push(`ir.es_elaborador = $${idx}`);
+    } else if (elaborado === 'false') {
+      params.push(false);
+      const idx = params.length;
+      // tratamos NULL como no elaborado
+      where.push(`COALESCE(ir.es_elaborador, false) = $${idx}`);
+    }
 
     const rawLimit = Number(limit) || 50;
     const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
@@ -59,30 +100,52 @@ exports.listar = async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    // No incluimos "codigo_mostrar" en el ORDER BY porque es un alias calculado.
-    const validOrderByWhitelist = ['nombre', 'codigo_maxi', 'unidad_med', 'precio_ref', 'created_at', 'updated_at'];
+    const validOrderByWhitelist = [
+      'nombre',
+      'codigo_maxi',
+      'unidad_med',
+      'precio_ref',
+      'created_at',
+      'updated_at',
+    ];
     const validOrderBy = validOrderByWhitelist.includes(orderBy) ? orderBy : 'nombre';
     const validOrder = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
 
+    const dataSql = `
+      SELECT ins.*,
+             COALESCE(NULLIF(TRIM(ins.codigo_maxi), ''), 'INS-' || ins.id) AS codigo_mostrar,
+             ir.nombre        AS rubro_nombre,
+             ir.es_elaborador AS rubro_es_elaborador
+        FROM insumos ins
+        LEFT JOIN insumo_rubros ir
+          ON ir.codigo = ins.rubro
+         AND ir.business_id = $1
+       ${whereSql}
+       ORDER BY ins.${validOrderBy} ${validOrder}
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+
+    const countSql = `
+      SELECT COUNT(*)::int AS total
+        FROM insumos ins
+        LEFT JOIN insumo_rubros ir
+          ON ir.codigo = ins.rubro
+         AND ir.business_id = $1
+       ${whereSql}
+    `;
+
     const [dataRes, countRes] = await Promise.all([
-      pool.query(
-        `SELECT *,
-                COALESCE(NULLIF(TRIM(codigo_maxi), ''), 'INS-' || id) AS codigo_mostrar
-         FROM insumos
-         ${whereSql}
-         ORDER BY ${validOrderBy} ${validOrder}
-         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-        [...params, hardLimit, offset]
-      ),
-      pool.query(`SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`, params)
+      pool.query(dataSql, [...params, hardLimit, offset]),
+      pool.query(countSql, params)
     ]);
 
-    const total = countRes.rows[0].total;
+    const total = countRes.rows[0]?.total ?? 0;
+
     res.json({
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page: currentPage,
+        page : currentPage,
         limit: hardLimit,
         total,
         pages: Math.max(Math.ceil(total / hardLimit), 1)
