@@ -34,59 +34,106 @@ exports.listar = async (req, res) => {
       origen,
       activo = 'true',
       orderBy = 'nombre',
-      order = 'ASC'
+      order = 'ASC',
+      elaborados,        // 👈 NUEVO: 'true' | 'false' | undefined
     } = req.query;
 
     const where = [];
     const params = [];
 
-    // 🔹 Negocio activo
+    // 🔹 Negocio activo (multi-tenant)
     const businessId = getBusinessIdFromReq(req);
     if (businessId) {
       params.push(businessId);
       where.push(`business_id = $${params.length}`);
     }
 
+    // 🔍 búsqueda por nombre / código
     if (search) {
       params.push(`%${search}%`, `%${search}%`);
-      where.push(`(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`);
+      where.push(
+        `(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`
+      );
     }
 
-    // 👇 OJO: rubro en tu tabla es varchar(255), no integer
-    if (rubro !== undefined && rubro !== null && String(rubro).trim() !== '') {
-      params.push(String(rubro).trim());
+    // 🔹 filtro por rubro (código Maxi guardado como texto)
+    if (rubro) {
+      params.push(String(rubro));        // 👈 aseguramos comparar como texto
       where.push(`rubro = $${params.length}`);
     }
 
-    if (unidadMed) { params.push(unidadMed); where.push(`unidad_med = $${params.length}`); }
-    if (origen)    { params.push(origen);    where.push(`origen = $${params.length}`); }
+    if (unidadMed) {
+      params.push(unidadMed);
+      where.push(`unidad_med = $${params.length}`);
+    }
+    if (origen) {
+      params.push(origen);
+      where.push(`origen = $${params.length}`);
+    }
     if (activo !== 'all') {
       params.push(activo === 'true');
       where.push(`activo = $${params.length}`);
     }
 
+    // 🔹 filtro por elaborados / no elaborados usando insumo_rubros
+    //   - elaborados = 'true'  → solo rubros con es_elaborador = true
+    //   - elaborados = 'false' → rubros donde NO es_elaborador o sin rubro
+    if (elaborados === 'true') {
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM insumo_rubros ir
+          WHERE ir.business_id = insumos.business_id
+            AND ir.codigo::text = insumos.rubro
+            AND ir.es_elaborador = TRUE
+        )
+      `);
+    } else if (elaborados === 'false') {
+      where.push(`
+        NOT EXISTS (
+          SELECT 1
+          FROM insumo_rubros ir
+          WHERE ir.business_id = insumos.business_id
+            AND ir.codigo::text = insumos.rubro
+            AND ir.es_elaborador = TRUE
+        )
+      `);
+    }
+
     const rawLimit = Number(limit) || 50;
     const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
     const currentPage = Math.max(Number(page) || 1, 1);
-    const offset   = (currentPage - 1) * hardLimit;
+    const offset = (currentPage - 1) * hardLimit;
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const validOrderByWhitelist = ['nombre', 'codigo_maxi', 'unidad_med', 'precio_ref', 'created_at', 'updated_at'];
-    const validOrderBy = validOrderByWhitelist.includes(orderBy) ? orderBy : 'nombre';
-    const validOrder   = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
+    const validOrderByWhitelist = [
+      'nombre',
+      'codigo_maxi',
+      'unidad_med',
+      'precio_ref',
+      'created_at',
+      'updated_at',
+    ];
+    const validOrderBy = validOrderByWhitelist.includes(orderBy)
+      ? orderBy
+      : 'nombre';
+    const validOrder =
+      String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
-        `SELECT *,
-                COALESCE(NULLIF(TRIM(codigo_maxi), ''), 'INS-' || id) AS codigo_mostrar
+        `SELECT *
          FROM insumos
          ${whereSql}
          ORDER BY ${validOrderBy} ${validOrder}
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         [...params, hardLimit, offset]
       ),
-      pool.query(`SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`, params)
+      pool.query(
+        `SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`,
+        params
+      ),
     ]);
 
     const total = countRes.rows[0].total;
@@ -94,58 +141,12 @@ exports.listar = async (req, res) => {
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page : currentPage,
+        page: currentPage,
         limit: hardLimit,
         total,
-        pages: Math.max(Math.ceil(total / hardLimit), 1)
-      }
+        pages: Math.max(Math.ceil(total / hardLimit), 1),
+      },
     });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-exports.crearManual = async (req, res) => {
-  try {
-    const b = req.body || {};
-
-    // Negocio
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-
-    if (!b.nombre || !String(b.nombre).trim()) {
-      return res.status(400).json({ ok: false, error: 'Nombre requerido' });
-    }
-
-    const { rows } = await pool.query(
-      `INSERT INTO insumos
-        (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
-         envase, vencimiento, resumen, cant_ingredientes,
-         agrupacion_base, costo_ref, nota, origen, activo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-       RETURNING *`,
-      [
-        businessId,
-        b.codigoMaxi || null,
-        b.nombre || '',
-        b.unidadMed || null,
-        num(b.precioRef),
-        b.rubro ?? null,
-        b.envase ?? null,
-        b.vencimiento ?? null,
-        b.resumen ?? null,
-        b.cantIngredientes ?? null,
-        b.agrupacionBase || null,
-        num(b.costoRef),
-        b.nota || null,
-        b.origen || 'manual',
-        b.activo ?? true
-      ]
-    );
-    res.status(201).json({ ok: true, data: rows[0] });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: e.message });
