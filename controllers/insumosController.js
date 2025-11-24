@@ -153,6 +153,58 @@ exports.listar = async (req, res) => {
   }
 };
 
+exports.crearManual = async (req, res) => {
+  try {
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const b = req.body || {};
+
+    // 🔒 exigir nombre válido
+    if (!b.nombre || !String(b.nombre).trim()) {
+      return res.status(400).json({ ok: false, error: 'Nombre requerido' });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO insumos
+        (business_id,
+         codigo_maxi, nombre, unidad_med, precio_ref, rubro,
+         envase, vencimiento, resumen, cant_ingredientes,
+         agrupacion_base, costo_ref, nota, origen, activo)
+       VALUES
+        ($1,
+         $2,$3,$4,$5,$6,
+         $7,$8,$9,$10,
+         $11,$12,$13,$14,$15)
+       RETURNING *`,
+      [
+        businessId,
+        b.codigoMaxi || null,
+        b.nombre || '',
+        b.unidadMed || null,
+        num(b.precioRef),
+        b.rubro ?? null,
+        b.envase ?? null,
+        b.vencimiento ?? null,
+        b.resumen ?? null,
+        b.cantIngredientes ?? null,
+        b.agrupacionBase || null,
+        num(b.costoRef),
+        b.nota || null,
+        b.origen || 'manual',
+        b.activo ?? true,
+      ]
+    );
+
+    res.status(201).json({ ok: true, data: rows[0] });
+  } catch (e) {
+    console.error('crearManual error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
 exports.actualizar = async (req, res) => {
   try {
     const { id } = req.params, b = req.body || {};
@@ -361,15 +413,15 @@ exports.listarMaxi = async (req, res) => {
 
 exports.syncFromMaxi = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);   // 👈 USAR SIEMPRE ESTA
+    const businessId = getBusinessIdFromReq(req);   
 
     if (!businessId) {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const raw  = await fetchMaxiInsumos({ businessId, req });
+    const raw = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
-    const summary = await upsertFromMaxi(businessId, norm); // 👈 ahora pasa businessId
+    const summary = await upsertFromMaxi(norm);
 
     return res.json({
       ok: true,
@@ -400,15 +452,7 @@ exports.listarRubrosMaxi = async (req, res) => {
     }
 
     const items = await insumosRubrosRepo.listRubrosForBusiness(businessId);
-
-    const decorados = items.map((r) => ({
-      ...r,
-      es_elaborado: r.nombre
-        ? r.nombre.trim().toUpperCase().startsWith('ELABORAD')
-        : false,
-    }));
-
-    return res.json({ ok: true, business_id: businessId, items: decorados });
+    return res.json({ ok: true, business_id: businessId, items });
   } catch (e) {
     console.error('listarRubrosMaxi error:', e);
     return res.status(500).json({ ok: false, error: e.message || 'internal' });

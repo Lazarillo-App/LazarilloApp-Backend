@@ -10,9 +10,9 @@ const upload = multer({
 
 /* ================== Maxi: INSUMOS ================== */
 // POST /api/insumos/maxi-sync  → sincroniza insumos desde Maxi a tabla `insumos`
-router.post('/maxi-sync', ctrl.syncFromMaxi);
+router.post('/maxi-sync', ctrl.syncFromMaxi);      // 👈 SIN paréntesis
 
-// GET  /api/insumos/maxi      → lista insumos espejo Maxi (tabla maxi_supplies o similar)
+// GET  /api/insumos/maxi      → lista insumos espejo Maxi (si lo usás)
 router.get('/maxi', ctrl.listarMaxi);
 
 /* ================== Maxi: RUBROS DE INSUMOS ================== */
