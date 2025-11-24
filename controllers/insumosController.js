@@ -2,7 +2,7 @@
 const pool = require('../config/db');
 const { parse } = require('csv-parse/sync');
 const { fetchMaxiInsumos, normalizarInsumosMaxi,
-        fetchMaxiInsumosRubros, normalizarInsumosRubros } = require('../services/maxiSuppliesService');
+  fetchMaxiInsumosRubros, normalizarInsumosRubros } = require('../services/maxiSuppliesService');
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');  // 🔹 NUEVO
 
@@ -29,7 +29,7 @@ exports.listar = async (req, res) => {
       page = 1,
       limit = 50,
       search = '',
-      // rubro, // deprecado
+      rubro,
       unidadMed,
       origen,
       activo = 'true',
@@ -44,22 +44,25 @@ exports.listar = async (req, res) => {
       params.push(`%${search}%`, `%${search}%`);
       where.push(`(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`);
     }
-    // if (rubro) { params.push(rubro); where.push(`rubro = $${params.length}`); } // deprecado
+    if (rubro) {
+      params.push(Number(rubro));
+      where.push(`rubro = $${params.length}`);
+    }
     if (unidadMed) { params.push(unidadMed); where.push(`unidad_med = $${params.length}`); }
-    if (origen)    { params.push(origen);    where.push(`origen = $${params.length}`); }
+    if (origen) { params.push(origen); where.push(`origen = $${params.length}`); }
     if (activo !== 'all') { params.push(activo === 'true'); where.push(`activo = $${params.length}`); }
 
     const rawLimit = Number(limit) || 50;
     const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
     const currentPage = Math.max(Number(page) || 1, 1);
-    const offset   = (currentPage - 1) * hardLimit;
+    const offset = (currentPage - 1) * hardLimit;
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     // No incluimos "codigo_mostrar" en el ORDER BY porque es un alias calculado.
     const validOrderByWhitelist = ['nombre', 'codigo_maxi', 'unidad_med', 'precio_ref', 'created_at', 'updated_at'];
     const validOrderBy = validOrderByWhitelist.includes(orderBy) ? orderBy : 'nombre';
-    const validOrder   = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
+    const validOrder = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -79,7 +82,7 @@ exports.listar = async (req, res) => {
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page : currentPage,
+        page: currentPage,
         limit: hardLimit,
         total,
         pages: Math.max(Math.ceil(total / hardLimit), 1)
@@ -138,18 +141,18 @@ exports.actualizar = async (req, res) => {
     const sets = [], vals = [];
     const push = (c, v) => { vals.push(v); sets.push(`${c}=$${vals.length}`); };
 
-    if (b.nombre           !== undefined) push('nombre', b.nombre);
-    if (b.unidadMed        !== undefined) push('unidad_med', b.unidadMed);
-    if (b.precioRef        !== undefined) push('precio_ref', num(b.precioRef));
-    if (b.rubro            !== undefined) push('rubro', b.rubro);
-    if (b.envase           !== undefined) push('envase', b.envase);
-    if (b.vencimiento      !== undefined) push('vencimiento', b.vencimiento);
-    if (b.resumen          !== undefined) push('resumen', b.resumen);
+    if (b.nombre !== undefined) push('nombre', b.nombre);
+    if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
+    if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
+    if (b.rubro !== undefined) push('rubro', b.rubro);
+    if (b.envase !== undefined) push('envase', b.envase);
+    if (b.vencimiento !== undefined) push('vencimiento', b.vencimiento);
+    if (b.resumen !== undefined) push('resumen', b.resumen);
     if (b.cantIngredientes !== undefined) push('cant_ingredientes', b.cantIngredientes);
-    if (b.agrupacionBase   !== undefined) push('agrupacion_base', b.agrupacionBase);
-    if (b.costoRef         !== undefined) push('costo_ref', num(b.costoRef));
-    if (b.nota             !== undefined) push('nota', b.nota);
-    if (b.activo           !== undefined) push('activo', b.activo);
+    if (b.agrupacionBase !== undefined) push('agrupacion_base', b.agrupacionBase);
+    if (b.costoRef !== undefined) push('costo_ref', num(b.costoRef));
+    if (b.nota !== undefined) push('nota', b.nota);
+    if (b.activo !== undefined) push('activo', b.activo);
 
     if (!sets.length) return res.json({ ok: true, data: null });
 
@@ -186,7 +189,7 @@ exports.eliminar = async (req, res) => {
 exports.bulkUpsert = async (req, res) => {
   try {
     const items = Array.isArray(req.body) ? req.body : [];
-    if (!items.length) return res.status(400).json({ ok:false, error:'Body debe ser un array de insumos' });
+    if (!items.length) return res.status(400).json({ ok: false, error: 'Body debe ser un array de insumos' });
 
     const client = await pool.connect();
     let inserted = 0, updated = 0, skipped = 0;
@@ -197,11 +200,11 @@ exports.bulkUpsert = async (req, res) => {
         const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
         if (!codigo || String(codigo).trim() === '') { skipped++; continue; }
 
-        const nombre     = (it.nombre ?? '').trim();
+        const nombre = (it.nombre ?? '').trim();
         const unidad_med = it.unidadMed ?? it.unidad_med ?? null;
         const precio_ref = (it.precioRef ?? it.precio_ref ?? null);
-        const origen     = it.origen ?? 'manual';
-        const activo     = typeof it.activo === 'boolean' ? it.activo : true;
+        const origen = it.origen ?? 'manual';
+        const activo = typeof it.activo === 'boolean' ? it.activo : true;
 
         // rubro deprecado: solo si viene
         const rubro = it.rubro ?? null;
@@ -229,18 +232,18 @@ exports.bulkUpsert = async (req, res) => {
       client.release();
     }
 
-    return res.json({ ok:true, summary:{ inserted, updated, skipped, total: inserted+updated+skipped } });
+    return res.json({ ok: true, summary: { inserted, updated, skipped, total: inserted + updated + skipped } });
   } catch (e) {
     console.error('bulkUpsert error:', e.message);
-    return res.status(500).json({ ok:false, error:e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
 exports.bulkUpsertCSV = async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok:false, error:'Subí un CSV en el campo "file"' });
+    if (!req.file) return res.status(400).json({ ok: false, error: 'Subí un CSV en el campo "file"' });
     const text = req.file.buffer.toString('utf8');
-    const rows = parse(text, { columns:true, skip_empty_lines:true, trim:true });
+    const rows = parse(text, { columns: true, skip_empty_lines: true, trim: true });
 
     // Normalizamos columnas comunes y reusamos bulkUpsert
     req.body = rows.map(r => ({
@@ -256,7 +259,7 @@ exports.bulkUpsertCSV = async (req, res) => {
     return exports.bulkUpsert(req, res);
   } catch (e) {
     console.error('bulkUpsertCSV error:', e.message);
-    return res.status(500).json({ ok:false, error:e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
@@ -301,7 +304,7 @@ exports.__cleanupNullInsumos = async (req, res) => {
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('__cleanupNullInsumos error:', e.message);
-    return res.status(500).json({ ok:false, error: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   } finally {
     client.release();
   }
@@ -334,7 +337,7 @@ exports.syncFromMaxi = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const raw  = await fetchMaxiInsumos({ businessId, req });
+    const raw = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
     const summary = await upsertFromMaxi(norm);
 
@@ -384,15 +387,15 @@ exports.syncRubrosFromMaxi = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const raw  = await fetchMaxiInsumosRubros({ businessId, req });
+    const raw = await fetchMaxiInsumosRubros({ businessId, req });
     const norm = normalizarInsumosRubros(raw);
     const summary = await insumosRubrosRepo.upsertRubrosForBusiness(businessId, norm);
 
     return res.json({
       ok: true,
       business_id: businessId,
-      received   : raw.length,
-      normalized : norm.length,
+      received: raw.length,
+      normalized: norm.length,
       ...summary,
     });
   } catch (e) {
@@ -407,7 +410,7 @@ exports.syncRubrosFromMaxi = async (req, res) => {
 // Para desactivarlo sin borrar, usa la flag de entorno: ENABLE_SYNC_COMPRAS=false
 exports.syncDesdeCompras = async (req, res) => {
   if (String(process.env.ENABLE_SYNC_COMPRAS || 'false').toLowerCase() !== 'true') {
-    return res.status(503).json({ ok:false, error:'syncDesdeCompras deshabilitado' });
+    return res.status(503).json({ ok: false, error: 'syncDesdeCompras deshabilitado' });
   }
-  return res.status(501).json({ ok:false, error:'No implementado en modo limpio' });
+  return res.status(501).json({ ok: false, error: 'No implementado en modo limpio' });
 };
