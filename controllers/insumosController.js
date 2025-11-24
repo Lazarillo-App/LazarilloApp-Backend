@@ -25,12 +25,7 @@ function getBusinessIdFromReq(req) {
 // ===================== LISTAR / CRUD BÁSICO =====================
 exports.listar = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-
-    let {
+    const {
       page = 1,
       limit = 50,
       search = '',
@@ -45,129 +40,81 @@ exports.listar = async (req, res) => {
     const where = [];
     const params = [];
 
-    // 🔒 SIEMPRE filtrar por negocio
-    params.push(businessId);
-    where.push(`business_id = $${params.length}`);
-    // 🔍 Búsqueda por texto (nombre / codigo_maxi)
-    const searchTrim = String(search || '').trim();
-    if (searchTrim !== '') {
-      const term = `%${searchTrim}%`;
-      // primero pusheamos, luego calculamos índices
-      params.push(term, term);
-      const idx2 = params.length;
-      const idx1 = params.length - 1;
-      // codigo_maxi::text por si la columna no es TEXT
-      where.push(`(nombre ILIKE $${idx1} OR codigo_maxi::text ILIKE $${idx2})`);
+    // 🔹 Negocio activo
+    const businessId = getBusinessIdFromReq(req);
+    if (businessId) {
+      params.push(businessId);
+      where.push(`business_id = $${params.length}`);
     }
 
-    // 🎯 Filtro por rubro (INT seguro)
-    if (rubro !== undefined && rubro !== null && rubro !== '') {
-      const nRubro = Number(rubro);
-      if (!Number.isFinite(nRubro)) {
-        return res
-          .status(400)
-          .json({ ok: false, error: 'Parámetro rubro inválido' });
-      }
-      params.push(nRubro);
+    if (search) {
+      params.push(`%${search}%`, `%${search}%`);
+      where.push(`(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`);
+    }
+
+    // 👇 OJO: rubro en tu tabla es varchar(255), no integer
+    if (rubro !== undefined && rubro !== null && String(rubro).trim() !== '') {
+      params.push(String(rubro).trim());
       where.push(`rubro = $${params.length}`);
     }
 
-    // 🎯 Filtro por unidad de medida
-    if (unidadMed) {
-      params.push(unidadMed);
-      where.push(`unidad_med = $${params.length}`);
-    }
-
-    // 🎯 Filtro por origen
-    if (origen) {
-      params.push(origen);
-      where.push(`origen = $${params.length}`);
-    }
-
-    // 🎯 Filtro por activo (booleano)
+    if (unidadMed) { params.push(unidadMed); where.push(`unidad_med = $${params.length}`); }
+    if (origen)    { params.push(origen);    where.push(`origen = $${params.length}`); }
     if (activo !== 'all') {
-      const boolActivo = String(activo) === 'true';
-      params.push(boolActivo);
+      params.push(activo === 'true');
       where.push(`activo = $${params.length}`);
     }
 
-    // 📄 Paginado
     const rawLimit = Number(limit) || 50;
-    const hardLimit = Math.min(Math.max(rawLimit, 1), 500);
+    const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
     const currentPage = Math.max(Number(page) || 1, 1);
-    const offset = (currentPage - 1) * hardLimit;
+    const offset   = (currentPage - 1) * hardLimit;
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    // 🧾 Orden
-    const validOrderByWhitelist = [
-      'nombre',
-      'codigo_maxi',
-      'unidad_med',
-      'precio_ref',
-      'created_at',
-      'updated_at'
-    ];
-    const validOrderBy = validOrderByWhitelist.includes(orderBy)
-      ? orderBy
-      : 'nombre';
-    const validOrder =
-      String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-
-    const dataQuery = `
-      SELECT *,
-             COALESCE(NULLIF(TRIM(codigo_maxi), ''), 'INS-' || id) AS codigo_mostrar
-      FROM insumos
-      ${whereSql}
-      ORDER BY ${validOrderBy} ${validOrder}
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-    `;
-
-    const countQuery = `
-      SELECT COUNT(*)::int AS total
-      FROM insumos
-      ${whereSql}
-    `;
-
-    const dataParams = [...params, hardLimit, offset];
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('[insumosController.listar] whereSql =', whereSql);
-      console.log('[insumosController.listar] params   =', params);
-    }
+    const validOrderByWhitelist = ['nombre', 'codigo_maxi', 'unidad_med', 'precio_ref', 'created_at', 'updated_at'];
+    const validOrderBy = validOrderByWhitelist.includes(orderBy) ? orderBy : 'nombre';
+    const validOrder   = (String(order).toUpperCase() === 'DESC') ? 'DESC' : 'ASC';
 
     const [dataRes, countRes] = await Promise.all([
-      pool.query(dataQuery, dataParams),
-      pool.query(countQuery, params)
+      pool.query(
+        `SELECT *,
+                COALESCE(NULLIF(TRIM(codigo_maxi), ''), 'INS-' || id) AS codigo_mostrar
+         FROM insumos
+         ${whereSql}
+         ORDER BY ${validOrderBy} ${validOrder}
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, hardLimit, offset]
+      ),
+      pool.query(`SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`, params)
     ]);
 
     const total = countRes.rows[0].total;
-
     res.json({
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page: currentPage,
+        page : currentPage,
         limit: hardLimit,
         total,
         pages: Math.max(Math.ceil(total / hardLimit), 1)
       }
     });
   } catch (e) {
-    console.error('insumosController.listar error:', e);
+    console.error(e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
 
-
 exports.crearManual = async (req, res) => {
   try {
+    const b = req.body || {};
+
+    // Negocio
     const businessId = getBusinessIdFromReq(req);
     if (!businessId) {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
-
-    const b = req.body || {};
 
     if (!b.nombre || !String(b.nombre).trim()) {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
@@ -421,7 +368,7 @@ exports.syncFromMaxi = async (req, res) => {
 
     const raw  = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
-    const summary = await upsertFromMaxi(businessId, norm);  // 👈 ahora pasa businessId
+    const summary = await upsertFromMaxi(businessId, norm); // 👈 ahora pasa businessId
 
     return res.json({
       ok: true,

@@ -1,10 +1,11 @@
+// repos/insumosRepo.js
 'use strict';
 const pool = require('../config/db');
 
 /**
  * upsertFromMaxi(businessId, items)
- * - Inserta / actualiza insumos para UN negocio
- * - Usa UNIQUE (business_id, codigo_maxi)
+ * - Guarda/actualiza insumos de Maxi para UN negocio
+ * - Usa la unique (business_id, codigo_maxi)
  */
 async function upsertFromMaxi(businessId, items = []) {
   if (!businessId) {
@@ -21,16 +22,13 @@ async function upsertFromMaxi(businessId, items = []) {
 
     for (const it of items) {
       const codigo = it.codigo ?? it.codigoMaxi ?? it.codigo_maxi;
-      if (!codigo && codigo !== 0) {
-        skipped++;
-        continue;
-      }
+      if (!codigo && codigo !== 0) { skipped++; continue; }
 
-      const nombre     = (it.nombre ?? '').trim();
-      const unidadMed  = it.medida ?? it.unidadMed ?? it.unidad_med ?? null;
-      const precioRef  = it.precio ?? it.precioRef ?? it.precio_ref ?? null;
-      const rubro      = it.rubro ?? null;
-      const activo     = it.discontinuado ? false : true; // discontinuado=1 → inactivo
+      const nombre    = (it.nombre ?? '').trim();
+      const unidadMed = it.medida ?? it.unidadMed ?? it.unidad_med ?? null;
+      const precioRef = it.precio ?? it.precioRef ?? it.precio_ref ?? null;
+      const rubro     = it.rubro ?? null;   // 👈 en tu tabla es varchar(255)
+      const activo    = it.discontinuado ? false : true; // discontinuado=1 → inactivo
 
       const r = await client.query(
         `INSERT INTO insumos (
