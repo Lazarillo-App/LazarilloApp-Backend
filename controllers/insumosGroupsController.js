@@ -191,33 +191,59 @@ exports.addItem = async (req, res) => {
   const groupId = Number(req.params.id);
   const { insumoId } = req.body || {};
 
-  if (!Number.isFinite(groupId) || !Number.isFinite(Number(insumoId))) {
-    return res.status(400).json({ ok: false, error: 'groupId o insumoId inválido' });
+  const insumoIdNum = Number(insumoId);
+
+  if (!Number.isFinite(groupId) || !Number.isFinite(insumoIdNum)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'invalid_params',
+    });
   }
 
   try {
-    // Opcional: validar que el grupo exista
-    const groupResult = await pool.query(
+    // 1) Verificamos que exista la agrupación
+    const groupRes = await pool.query(
       'SELECT id FROM insumo_groups WHERE id = $1',
-      [groupId]
+      [groupId],
     );
-    if (groupResult.rowCount === 0) {
-      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    if (groupRes.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'group_not_found',
+      });
     }
 
-    // Insertar relación, evitando duplicados
+    // 2) Verificamos que exista el insumo
+    const insumoRes = await pool.query(
+      'SELECT id FROM insumos WHERE id = $1',
+      [insumoIdNum],
+    );
+    if (insumoRes.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'insumo_not_found',
+      });
+    }
+
+    // 3) Insertamos en tabla de relación (ajustá nombres si usás otros)
     await pool.query(
       `
       INSERT INTO insumo_group_items (group_id, insumo_id)
       VALUES ($1, $2)
       ON CONFLICT (group_id, insumo_id) DO NOTHING
       `,
-      [groupId, insumoId]
+      [groupId, insumoIdNum],
     );
 
-    return res.json({ ok: true });
+    return res.json({
+      ok: true,
+      data: { groupId, insumoId: insumoIdNum },
+    });
   } catch (err) {
     console.error('[insumosGroupsController.addItem] Error:', err);
-    return res.status(500).json({ ok: false, error: 'Error al agregar insumo a la agrupación' });
+    return res.status(500).json({
+      ok: false,
+      error: 'internal_error',
+    });
   }
 };
