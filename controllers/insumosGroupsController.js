@@ -1,249 +1,301 @@
 // controllers/insumosGroupsController.js
 /* eslint-disable no-console */
-const insumoGroupsRepo = require('../repos/insumoGroupsRepo');
+const pool = require('../config/db');
 
-/**
- * Igual que en insumosController: obtenemos el businessId del request.
- */
-function getBusinessIdFromReq(req) {
+// 👇 ajustá esto si en tu proyecto usás otro helper para obtener el negocio
+function getBusinessId(req) {
+  // si lo guardás en req.business.id:
   if (req.business && req.business.id) return Number(req.business.id);
-  if (req.user && req.user.active_business_id) return Number(req.user.active_business_id);
 
-  const hdr = req.header('X-Business-Id') || req.query.businessId;
-  return hdr ? Number(hdr) : null;
+  // o desde el token / header (adaptar si hace falta)
+  const fromHeader = req.headers['x-business-id'] || req.headers['x-business'];
+  if (fromHeader) return Number(fromHeader);
+
+  return null;
 }
 
-/**
- * GET /api/insumos/groups
- */
-exports.list = async (req, res) => {
-  try {
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
+/* =============== helpers básicos =============== */
+function sendError(res, status, message) {
+  return res.status(status).json({ ok: false, error: message });
+}
 
-    const groups = await insumoGroupsRepo.listForBusiness(businessId, { withItems: true });
-    return res.json({ ok: true, data: groups });
-  } catch (e) {
-    console.error('insumosGroupsController.list error:', e);
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+/* =============== LISTAR GRUPOS =============== */
+// GET /api/insumos/groups
+async function list(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) {
+    return sendError(res, 400, 'business_id requerido');
   }
-};
 
-/**
- * GET /api/insumos/groups/:id
- */
-exports.getOne = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
-    const groupId = Number(req.params.id);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-    if (!Number.isFinite(groupId)) {
-      return res.status(400).json({ ok: false, error: 'ID de grupo inválido' });
-    }
+    const { rows } = await pool.query(
+      `
+      SELECT id, business_id, nombre, descripcion, es_favorita,
+             created_at, updated_at
+      FROM insumo_groups
+      WHERE business_id = $1
+      ORDER BY lower(trim(nombre))
+      `,
+      [bizId]
+    );
 
-    const group = await insumoGroupsRepo.getOne(businessId, groupId);
-    if (!group) {
-      return res.status(404).json({ ok: false, error: 'Grupo de insumos no encontrado' });
-    }
-
-    return res.json({ ok: true, data: group });
-  } catch (e) {
-    console.error('insumosGroupsController.getOne error:', e);
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+    return res.json({ ok: true, data: rows });
+  } catch (err) {
+    console.error('[insumoGroups] list error:', err);
+    return sendError(res, 500, 'Error al listar agrupaciones de insumos');
   }
-};
+}
 
-/**
- * POST /api/insumos/groups
- * Body: { nombre, descripcion?, esFavorita?, insumoIds?: number[] }
- */
-exports.create = async (req, res) => {
+/* =============== OBTENER UNO =============== */
+// GET /api/insumos/groups/:id
+async function getOne(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
+
   try {
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
+    const { rows } = await pool.query(
+      `
+      SELECT id, business_id, nombre, descripcion, es_favorita,
+             created_at, updated_at
+      FROM insumo_groups
+      WHERE id = $1 AND business_id = $2
+      `,
+      [id, bizId]
+    );
 
-    const { nombre, descripcion, esFavorita, insumoIds } = req.body || {};
-    if (!nombre || String(nombre).trim() === '') {
-      return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
-    }
-
-    const group = await insumoGroupsRepo.createGroup({
-      businessId,
-      nombre: String(nombre).trim(),
-      descripcion: descripcion ?? null,
-      esFavorita: !!esFavorita,
-      insumoIds: Array.isArray(insumoIds) ? insumoIds : [],
-    });
-
-    return res.status(201).json({ ok: true, data: group });
-  } catch (e) {
-    console.error('insumosGroupsController.create error:', e);
-    // ⚠️ posible conflicto por nombre duplicado
-    if (e.code === '23505') {
-      return res.status(409).json({ ok: false, error: 'Ya existe una agrupación con ese nombre en este negocio' });
-    }
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+    if (!rows.length) return sendError(res, 404, 'not_found');
+    return res.json({ ok: true, data: rows[0] });
+  } catch (err) {
+    console.error('[insumoGroups] getOne error:', err);
+    return sendError(res, 500, 'Error al obtener agrupación de insumos');
   }
-};
+}
 
-/**
- * PUT /api/insumos/groups/:id
- * Body: { nombre?, descripcion?, esFavorita? }
- */
-exports.update = async (req, res) => {
+/* =============== CREAR GRUPO =============== */
+// POST /api/insumos/groups
+async function create(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const nombre = String(req.body.nombre || '').trim();
+  const descripcion = req.body.descripcion ?? null;
+
+  if (!nombre) return sendError(res, 400, 'El nombre es obligatorio');
+
   try {
-    const businessId = getBusinessIdFromReq(req);
-    const groupId = Number(req.params.id);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-    if (!Number.isFinite(groupId)) {
-      return res.status(400).json({ ok: false, error: 'ID de grupo inválido' });
+    const { rows } = await pool.query(
+      `
+      INSERT INTO insumo_groups (business_id, nombre, descripcion)
+      VALUES ($1, $2, $3)
+      RETURNING id, business_id, nombre, descripcion, es_favorita,
+                created_at, updated_at
+      `,
+      [bizId, nombre, descripcion]
+    );
+
+    return res.status(201).json({ ok: true, data: rows[0] });
+  } catch (err) {
+    console.error('[insumoGroups] create error:', err);
+
+    // UNIQUE: mismo nombre en el mismo negocio
+    if (err.code === '23505') {
+      return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
     }
 
-    const { nombre, descripcion, esFavorita } = req.body || {};
-    const group = await insumoGroupsRepo.updateGroup({
-      businessId,
-      groupId,
-      nombre,
-      descripcion,
-      esFavorita,
-    });
-
-    if (!group) {
-      return res.status(404).json({ ok: false, error: 'Grupo de insumos no encontrado' });
-    }
-
-    return res.json({ ok: true, data: group });
-  } catch (e) {
-    console.error('insumosGroupsController.update error:', e);
-    if (e.code === '23505') {
-      return res.status(409).json({ ok: false, error: 'Ya existe una agrupación con ese nombre en este negocio' });
-    }
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+    return sendError(res, 500, 'Error al crear agrupación de insumos');
   }
-};
+}
 
-/**
- * PUT /api/insumos/groups/:id/items
- * Body: { insumoIds: number[] }
- */
-exports.replaceItems = async (req, res) => {
-  try {
-    const businessId = getBusinessIdFromReq(req);
-    const groupId = Number(req.params.id);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-    if (!Number.isFinite(groupId)) {
-      return res.status(400).json({ ok: false, error: 'ID de grupo inválido' });
-    }
+/* =============== ACTUALIZAR GRUPO =============== */
+// PUT /api/insumos/groups/:id
+async function update(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-    const { insumoIds } = req.body || {};
-    const arr = Array.isArray(insumoIds) ? insumoIds : [];
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
-    const group = await insumoGroupsRepo.replaceGroupItems({
-      businessId,
-      groupId,
-      insumoIds: arr,
-    });
+  const nombre = req.body.nombre != null ? String(req.body.nombre).trim() : null;
+  const descripcion = req.body.descripcion ?? null;
+  const esFavorita = req.body.es_favorita;
 
-    return res.json({ ok: true, data: group });
-  } catch (e) {
-    console.error('insumosGroupsController.replaceItems error:', e);
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+  if (!nombre && descripcion == null && esFavorita == null) {
+    return sendError(res, 400, 'Nada para actualizar');
   }
-};
 
-/**
- * DELETE /api/insumos/groups/:id
- */
-exports.remove = async (req, res) => {
+  const sets = [];
+  const values = [id, bizId];
+  let idx = values.length;
+
+  if (nombre != null && nombre !== '') {
+    idx += 1;
+    sets.push(`nombre = $${idx}`);
+    values.push(nombre);
+  }
+  if (descripcion !== undefined) {
+    idx += 1;
+    sets.push(`descripcion = $${idx}`);
+    values.push(descripcion);
+  }
+  if (esFavorita !== undefined) {
+    idx += 1;
+    sets.push(`es_favorita = $${idx}`);
+    values.push(Boolean(esFavorita));
+  }
+  sets.push('updated_at = now()');
+
   try {
-    const businessId = getBusinessIdFromReq(req);
-    const groupId = Number(req.params.id);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    const { rows } = await pool.query(
+      `
+      UPDATE insumo_groups
+      SET ${sets.join(', ')}
+      WHERE id = $1 AND business_id = $2
+      RETURNING id, business_id, nombre, descripcion, es_favorita,
+                created_at, updated_at
+      `,
+      values
+    );
+
+    if (!rows.length) return sendError(res, 404, 'not_found');
+    return res.json({ ok: true, data: rows[0] });
+  } catch (err) {
+    console.error('[insumoGroups] update error:', err);
+    if (err.code === '23505') {
+      return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
     }
-    if (!Number.isFinite(groupId)) {
-      return res.status(400).json({ ok: false, error: 'ID de grupo inválido' });
+    return sendError(res, 500, 'Error al actualizar agrupación de insumos');
+  }
+}
+
+/* =============== REEMPLAZAR ITEMS (bulk) =============== */
+// PUT /api/insumos/groups/:id/items
+// body: { insumoIds: number[] }
+async function replaceItems(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
+
+  const insumoIds = (req.body.insumoIds || [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n));
+
+  try {
+    // chequear que el grupo pertenece al negocio
+    const { rowCount: groupCount } = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [id, bizId]
+    );
+    if (!groupCount) return sendError(res, 404, 'not_found');
+
+    await pool.query('BEGIN');
+
+    // limpiar items previos
+    await pool.query('DELETE FROM insumo_group_items WHERE group_id = $1', [
+      id,
+    ]);
+
+    // insertar nuevos (si hay)
+    if (insumoIds.length) {
+      const values = [];
+      const placeholders = [];
+      insumoIds.forEach((insumoId, i) => {
+        values.push(id, insumoId);
+        const p1 = 2 * i + 1;
+        const p2 = 2 * i + 2;
+        placeholders.push(`($${p1}, $${p2})`);
+      });
+
+      await pool.query(
+        `
+        INSERT INTO insumo_group_items (group_id, insumo_id)
+        VALUES ${placeholders.join(', ')}
+        ON CONFLICT (group_id, insumo_id) DO NOTHING
+        `,
+        values
+      );
     }
 
-    const ok = await insumoGroupsRepo.deleteGroup(businessId, groupId);
-    if (!ok) {
-      return res.status(404).json({ ok: false, error: 'Grupo de insumos no encontrado' });
-    }
-
+    await pool.query('COMMIT');
     return res.json({ ok: true });
-  } catch (e) {
-    console.error('insumosGroupsController.remove error:', e);
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+  } catch (err) {
+    console.error('[insumoGroups] replaceItems error:', err);
+    await pool.query('ROLLBACK').catch(() => {});
+    return sendError(res, 500, 'Error al actualizar items de la agrupación');
   }
-};
+}
 
-exports.addItem = async (req, res) => {
+/* =============== AGREGAR UN ITEM =============== */
+// POST /api/insumos/groups/:id/items
+// body: { insumoId }
+async function addItem(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
   const groupId = Number(req.params.id);
-  const { insumoId } = req.body || {};
+  const insumoId = Number(req.body.insumoId);
 
-  const insumoIdNum = Number(insumoId);
-
-  if (!Number.isFinite(groupId) || !Number.isFinite(insumoIdNum)) {
-    return res.status(400).json({
-      ok: false,
-      error: 'invalid_params',
-    });
+  if (!Number.isFinite(groupId) || !Number.isFinite(insumoId)) {
+    return sendError(res, 400, 'IDs inválidos');
   }
 
   try {
-    // 1) Verificamos que exista la agrupación
-    const groupRes = await pool.query(
-      'SELECT id FROM insumo_groups WHERE id = $1',
-      [groupId],
+    // validar que el grupo sea del negocio
+    const { rowCount: groupCount } = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [groupId, bizId]
     );
-    if (groupRes.rowCount === 0) {
-      return res.status(404).json({
-        ok: false,
-        error: 'group_not_found',
-      });
-    }
+    if (!groupCount) return sendError(res, 404, 'not_found');
 
-    // 2) Verificamos que exista el insumo
-    const insumoRes = await pool.query(
-      'SELECT id FROM insumos WHERE id = $1',
-      [insumoIdNum],
-    );
-    if (insumoRes.rowCount === 0) {
-      return res.status(404).json({
-        ok: false,
-        error: 'insumo_not_found',
-      });
-    }
-
-    // 3) Insertamos en tabla de relación (ajustá nombres si usás otros)
+    // opcional: validar que el insumo también pertenezca al negocio
     await pool.query(
       `
       INSERT INTO insumo_group_items (group_id, insumo_id)
       VALUES ($1, $2)
       ON CONFLICT (group_id, insumo_id) DO NOTHING
       `,
-      [groupId, insumoIdNum],
+      [groupId, insumoId]
     );
 
-    return res.json({
-      ok: true,
-      data: { groupId, insumoId: insumoIdNum },
-    });
+    return res.json({ ok: true });
   } catch (err) {
-    console.error('[insumosGroupsController.addItem] Error:', err);
-    return res.status(500).json({
-      ok: false,
-      error: 'internal_error',
-    });
+    console.error('[insumoGroups] addItem error:', err);
+    return sendError(res, 500, 'Error al agregar insumo a la agrupación');
   }
+}
+
+/* =============== ELIMINAR GRUPO =============== */
+// DELETE /api/insumos/groups/:id
+async function remove(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
+
+  try {
+    const { rowCount } = await pool.query(
+      'DELETE FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [id, bizId]
+    );
+    if (!rowCount) return sendError(res, 404, 'not_found');
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[insumoGroups] remove error:', err);
+    return sendError(res, 500, 'Error al eliminar la agrupación de insumos');
+  }
+}
+
+module.exports = {
+  list,
+  getOne,
+  create,
+  update,
+  replaceItems,
+  addItem,
+  remove,
 };

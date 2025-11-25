@@ -60,10 +60,10 @@ router.post('/groups', groupsCtrl.create);
 // PUT    /api/insumos/groups/:id
 router.put('/groups/:id', groupsCtrl.update);
 
-// PUT    /api/insumos/groups/:id/items
+// PUT    /api/insumos/groups/:id/items  -> reemplaza TODOS los ítems (bulk)
 router.put('/groups/:id/items', groupsCtrl.replaceItems);
 
-// POST   /api/insumos/groups/:id/items  → agrega 1 insumo a la agrupación
+// POST   /api/insumos/groups/:id/items -> agrega UN insumo a la agrupación
 router.post('/groups/:id/items', groupsCtrl.addItem);
 
 // DELETE /api/insumos/groups/:id
