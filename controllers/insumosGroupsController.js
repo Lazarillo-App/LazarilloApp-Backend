@@ -1,9 +1,9 @@
 /* eslint-disable no-console */
 const pool = require('../config/db');
 
-// 👇 ajustá esto si en tu proyecto usás otro helper para obtener el negocio
+/* =============== OBTENER BUSINESS =============== */
 function getBusinessId(req) {
-  // si lo guardás en req.business.id:
+  // si lo guardás en req.business.id (middleware de negocio)
   if (req.business && req.business.id) return Number(req.business.id);
 
   // o desde el token / header (adaptar si hace falta)
@@ -19,8 +19,10 @@ function sendError(res, status, message) {
 }
 
 /* =============== LISTAR GRUPOS =============== */
-// GET /api/insumos/groups
-// 👉 Ahora devuelve también los items (insumos completos) por grupo
+/**
+ * GET /api/insumos/groups
+ * Devuelve todas las agrupaciones del negocio, con los insumos de cada una en `items`
+ */
 async function list(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) {
@@ -75,8 +77,10 @@ async function list(req, res) {
 }
 
 /* =============== OBTENER UNO =============== */
-// GET /api/insumos/groups/:id
-// 👉 También devuelve items (insumos completos) de ese grupo
+/**
+ * GET /api/insumos/groups/:id
+ * Devuelve una agrupación con sus insumos completos en `items`
+ */
 async function getOne(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -326,6 +330,39 @@ async function addItem(req, res) {
   }
 }
 
+/* =============== QUITAR UN ITEM =============== */
+// DELETE /api/insumos/groups/:id/items/:insumoId
+async function removeItem(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const groupId = Number(req.params.id);
+  const insumoId = Number(req.params.insumoId);
+
+  if (!Number.isFinite(groupId) || !Number.isFinite(insumoId)) {
+    return sendError(res, 400, 'IDs inválidos');
+  }
+
+  try {
+    // validar que el grupo sea del negocio
+    const { rowCount: groupCount } = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [groupId, bizId]
+    );
+    if (!groupCount) return sendError(res, 404, 'not_found');
+
+    await pool.query(
+      'DELETE FROM insumo_group_items WHERE group_id = $1 AND insumo_id = $2',
+      [groupId, insumoId]
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[insumoGroups] removeItem error:', err);
+    return sendError(res, 500, 'Error al quitar insumo de la agrupación');
+  }
+}
+
 /* =============== ELIMINAR GRUPO =============== */
 // DELETE /api/insumos/groups/:id
 async function remove(req, res) {
@@ -349,11 +386,12 @@ async function remove(req, res) {
 }
 
 module.exports = {
-  list,
-  getOne,
-  create,
-  update,
-  replaceItems,
-  addItem,
-  remove,
+  list,         
+  getOne,        
+  create,        
+  update,       
+  replaceItems,  
+  addItem,       
+  removeItem,    
+  remove,       
 };
