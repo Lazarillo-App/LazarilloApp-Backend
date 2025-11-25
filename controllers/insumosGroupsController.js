@@ -186,3 +186,38 @@ exports.remove = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message || 'internal' });
   }
 };
+
+exports.addItem = async (req, res) => {
+  const groupId = Number(req.params.id);
+  const { insumoId } = req.body || {};
+
+  if (!Number.isFinite(groupId) || !Number.isFinite(Number(insumoId))) {
+    return res.status(400).json({ ok: false, error: 'groupId o insumoId inválido' });
+  }
+
+  try {
+    // Opcional: validar que el grupo exista
+    const groupResult = await pool.query(
+      'SELECT id FROM insumo_groups WHERE id = $1',
+      [groupId]
+    );
+    if (groupResult.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    }
+
+    // Insertar relación, evitando duplicados
+    await pool.query(
+      `
+      INSERT INTO insumo_group_items (group_id, insumo_id)
+      VALUES ($1, $2)
+      ON CONFLICT (group_id, insumo_id) DO NOTHING
+      `,
+      [groupId, insumoId]
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[insumosGroupsController.addItem] Error:', err);
+    return res.status(500).json({ ok: false, error: 'Error al agregar insumo a la agrupación' });
+  }
+};
