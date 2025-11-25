@@ -1,4 +1,3 @@
-// controllers/insumosGroupsController.js
 /* eslint-disable no-console */
 const pool = require('../config/db');
 
@@ -21,6 +20,7 @@ function sendError(res, status, message) {
 
 /* =============== LISTAR GRUPOS =============== */
 // GET /api/insumos/groups
+// 👉 Ahora devuelve también los items (insumos completos) por grupo
 async function list(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) {
@@ -30,11 +30,39 @@ async function list(req, res) {
   try {
     const { rows } = await pool.query(
       `
-      SELECT id, business_id, nombre, descripcion, es_favorita,
-             created_at, updated_at
-      FROM insumo_groups
-      WHERE business_id = $1
-      ORDER BY lower(trim(nombre))
+      SELECT 
+        g.id,
+        g.business_id,
+        g.nombre,
+        g.descripcion,
+        g.es_favorita,
+        g.created_at,
+        g.updated_at,
+        COALESCE(
+          json_agg(
+            CASE
+              WHEN i.id IS NOT NULL THEN row_to_json(i)
+              ELSE NULL
+            END
+          ) FILTER (WHERE i.id IS NOT NULL),
+          '[]'::json
+        ) AS items
+      FROM insumo_groups g
+      LEFT JOIN insumo_group_items gi
+        ON gi.group_id = g.id
+      LEFT JOIN insumos i
+        ON i.id = gi.insumo_id
+       AND i.business_id = g.business_id
+      WHERE g.business_id = $1
+      GROUP BY 
+        g.id,
+        g.business_id,
+        g.nombre,
+        g.descripcion,
+        g.es_favorita,
+        g.created_at,
+        g.updated_at
+      ORDER BY lower(trim(g.nombre))
       `,
       [bizId]
     );
@@ -48,6 +76,7 @@ async function list(req, res) {
 
 /* =============== OBTENER UNO =============== */
 // GET /api/insumos/groups/:id
+// 👉 También devuelve items (insumos completos) de ese grupo
 async function getOne(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -58,12 +87,41 @@ async function getOne(req, res) {
   try {
     const { rows } = await pool.query(
       `
-      SELECT id, business_id, nombre, descripcion, es_favorita,
-             created_at, updated_at
-      FROM insumo_groups
-      WHERE id = $1 AND business_id = $2
+      SELECT 
+        g.id,
+        g.business_id,
+        g.nombre,
+        g.descripcion,
+        g.es_favorita,
+        g.created_at,
+        g.updated_at,
+        COALESCE(
+          json_agg(
+            CASE
+              WHEN i.id IS NOT NULL THEN row_to_json(i)
+              ELSE NULL
+            END
+          ) FILTER (WHERE i.id IS NOT NULL),
+          '[]'::json
+        ) AS items
+      FROM insumo_groups g
+      LEFT JOIN insumo_group_items gi
+        ON gi.group_id = g.id
+      LEFT JOIN insumos i
+        ON i.id = gi.insumo_id
+       AND i.business_id = g.business_id
+      WHERE g.business_id = $1
+        AND g.id = $2
+      GROUP BY 
+        g.id,
+        g.business_id,
+        g.nombre,
+        g.descripcion,
+        g.es_favorita,
+        g.created_at,
+        g.updated_at
       `,
-      [id, bizId]
+      [bizId, id]
     );
 
     if (!rows.length) return sendError(res, 404, 'not_found');
