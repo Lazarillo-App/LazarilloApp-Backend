@@ -2,6 +2,7 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/insumosController');
 const multer = require('multer');
+const groupsCtrl = require('../controllers/insumosGroupsController');
 
 const upload = multer({
   storage: multer.memoryStorage(),
