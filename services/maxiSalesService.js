@@ -13,6 +13,10 @@ const fetchNative =
 
 const MAXI_BASE  = (process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/,'');
 const STATS_BASE = (process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/,'');
+
+// 🆕 path configurable: por defecto usamos fullinvoicebydate
+const STATS_INVOICE_PATH = (process.env.MAXI_INVOICE_PATH || '/estadisticas/fullinvoicebydate').replace(/\/+$/,'');
+
 const CONC = Math.max(1, Number(process.env.MAXI_FETCH_CONCURRENCY || 3));
 
 /* ───────── fechas (UTC) ───────── */
@@ -83,7 +87,7 @@ async function getBearer(businessId, req) {
 
 /* ───────── low-level fetch (invoicebydate) ───────── */
 async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
-  const url = `${STATS_BASE}/estadisticas/invoicebydate?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
+  const url = `${STATS_BASE}${STATS_INVOICE_PATH}?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
 
   for (let i=0;i<3;i++){
     const r = await fetchNative(url, { headers: { Authorization: `Bearer ${bearer}` } });

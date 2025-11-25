@@ -137,12 +137,6 @@ router.get(
   ensureFn('salesSummaryFromDB', salesSummaryFromDB)
 );
 
-// 👇 primero export, para que NO lo interprete como :articuloId
-router.get(
-  '/:id/sales/export',
-  ensureFn('sales.exportSalesCsv', sales.exportSalesCsv)
-);
-
 router.get(
   '/:id/sales/:articuloId',
   cacheJson(300),

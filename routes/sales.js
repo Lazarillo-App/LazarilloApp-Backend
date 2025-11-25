@@ -1,4 +1,4 @@
-// routes/sales.js
+// routes/sales.js  (LEGACY / alias a salesSyncController)
 const express = require('express');
 const router = express.Router();
 
@@ -6,19 +6,14 @@ const { authRequired, loadActiveBusiness } = require('../middleware/authMiddlewa
 const forbidAppAdmin = require('../middleware/forbidAppAdmin');
 const { requireBusinessAccess } = require('../middleware/requireBusinessAccess');
 
-const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
-const { fetchSalesRanged } = require('../services/maxiSalesService');
-const { upsertSalesBatch } = require('../services/salesStore');
+const salesSync = require('../controllers/salesSyncController');
 
-// Normaliza businessId desde :id o header/query y valida acceso
 const requireBiz = (req, res, next) => requireBusinessAccess(req, res, next);
 
 /**
- * POST /businesses/:id/sync-sales
- * Query:
- *  - mode=init | auto | range
- *  - from=YYYY-MM-DD (si mode=range)
- *  - to=YYYY-MM-DD   (si mode=range)
+ * LEGACY:
+ * POST /businesses/:id/sync-sales?mode=init|auto|range&from&to
+ * Redirige internamente a salesSync.syncSalesForBusiness
  */
 router.post(
   '/businesses/:id/sync-sales',
@@ -26,46 +21,35 @@ router.post(
   forbidAppAdmin,
   loadActiveBusiness,
   requireBiz,
-  async (req, res) => {
+  async (req, res, next) => {
     try {
-      const businessId = Number(req.params.id);
-      const mode = String(req.query.mode || 'auto').toLowerCase();
+      const biz = req.business;
 
-      if (!businessId) {
-        return res.status(400).json({ error: 'businessId inválido' });
+      const modeQuery = String(req.query.mode || 'auto').toLowerCase();
+      const body = {};
+
+      if (modeQuery === 'init') {
+        body.mode = 'backfill_30d';      // equivalente a backfill inicial
+      } else if (modeQuery === 'range') {
+        body.mode = 'window';
+        body.from = String(req.query.from || '').slice(0, 10);
+        body.to   = String(req.query.to   || '').slice(0, 10);
+      } else {
+        body.mode = 'auto';
       }
 
-      if (mode === 'init') {
-        const out = await ensureInitialBackfillOnce({ businessId, req });
-        return res.json({ ok: true, mode, ...out });
-      }
-
-      if (mode === 'auto') {
-        const out = await runDailyAuto({ businessId, req });
-        return res.json({ ok: true, mode, ...out });
-      }
-
-      if (mode === 'range') {
-        const from = String(req.query.from || '').slice(0, 10);
-        const to   = String(req.query.to   || '').slice(0, 10);
-        if (!from || !to) {
-          return res.status(400).json({ error: 'from/to requeridos (YYYY-MM-DD)' });
-        }
-        const raw = await fetchSalesRanged({ businessId, from, to, req });
-        const up  = await upsertSalesBatch(businessId, raw);
-        return res.json({ ok: true, mode, from, to, sales: up });
-      }
-
-      return res.status(400).json({ error: `mode inválido: ${mode}` });
+      const out = await salesSync.syncSalesForBusiness(biz, body, req);
+      res.json({ ok: true, business_id: biz.id, sales: out });
     } catch (e) {
-      return res.status(e.status || 500).json({ error: 'sync_failed', message: e?.message });
+      next(e);
     }
   }
 );
 
 /**
+ * LEGACY:
  * POST /businesses/:id/sync-sales-7d
- * Atajo: últimos 7 días **hasta AYER**
+ * Alias: modo auto con ventana 7d (la policy decide cómo recortar a AYER).
  */
 router.post(
   '/businesses/:id/sync-sales-7d',
@@ -73,30 +57,14 @@ router.post(
   forbidAppAdmin,
   loadActiveBusiness,
   requireBiz,
-  async (req, res) => {
+  async (req, res, next) => {
     try {
-      const businessId = Number(req.params.id);
-      if (!businessId) return res.status(400).json({ error: 'businessId inválido' });
-
-      // últimos 7 días hasta AYER (en UTC)
-      const now = new Date();
-      const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); // hoy 00:00 UTC
-      end.setUTCDate(end.getUTCDate() - 1); // AYER
-      const start = new Date(end);
-      start.setUTCDate(start.getUTCDate() - 6);
-
-      const pad2 = (n) => String(n).padStart(2, '0');
-      const toISO = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-
-      const from = toISO(start);
-      const to   = toISO(end);
-
-      const raw = await fetchSalesRanged({ businessId, from, to, req });
-      const up  = await upsertSalesBatch(businessId, raw);
-
-      return res.json({ ok: true, mode: '7d', from, to, sales: up });
+      const biz = req.business;
+      const body = { mode: 'auto', windowDays: 7 };
+      const out = await salesSync.syncSalesForBusiness(biz, body, req);
+      res.json({ ok: true, business_id: biz.id, sales: out });
     } catch (e) {
-      return res.status(e.status || 500).json({ error: 'sync_7d_failed', message: e?.message });
+      next(e);
     }
   }
 );

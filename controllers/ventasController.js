@@ -7,6 +7,8 @@
 //   - LEGADO: GET /api/ventas/:articuloId/series?from&to
 //   - COMPAT: GET /api/ventas/by-article?articuloId=&from=&to=&groupBy=
 
+const crypto = require('crypto');
+
 const { cached, makeKey } = require('../utils/cache');
 const { validateClampRange } = require('../utils/range');
 const pool = require('../config/db');
@@ -100,6 +102,7 @@ async function getVentas(req, res, next) {
 // controllers/ventasController.js  (solo PATCH de handlers legacy)
 
 // ====== LEGADO: ranking artículos (últimos 30 días) ======
+
 async function getSummary(req, res, next) {
   try {
     const businessId = req.activeBusinessId || Number(req.query.business_id);
