@@ -26,9 +26,6 @@ router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
 // GET  /api/insumos
 router.get('/', ctrl.listar);
 
-// POST /api/insumos
-router.post('/', ctrl.crearManual);
-
 // PUT  /api/insumos/:id
 router.put('/:id', ctrl.actualizar);
 
@@ -48,5 +45,24 @@ router.post('/admin/cleanup-null', ctrl.__cleanupNullInsumos);
 
 // (opcional) sync desde compras
 router.post('/sync-compras', ctrl.syncDesdeCompras);
+
+/* ================== AGRUPACIONES DE INSUMOS ================== */
+// GET    /api/insumos/groups
+router.get('/groups', groupsCtrl.list);
+
+// GET    /api/insumos/groups/:id
+router.get('/groups/:id', groupsCtrl.getOne);
+
+// POST   /api/insumos/groups
+router.post('/groups', groupsCtrl.create);
+
+// PUT    /api/insumos/groups/:id
+router.put('/groups/:id', groupsCtrl.update);
+
+// PUT    /api/insumos/groups/:id/items
+router.put('/groups/:id/items', groupsCtrl.replaceItems);
+
+// DELETE /api/insumos/groups/:id
+router.delete('/groups/:id', groupsCtrl.remove);
 
 module.exports = router;
