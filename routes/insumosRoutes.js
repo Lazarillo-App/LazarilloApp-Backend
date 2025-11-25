@@ -63,6 +63,9 @@ router.put('/groups/:id', groupsCtrl.update);
 // PUT    /api/insumos/groups/:id/items
 router.put('/groups/:id/items', groupsCtrl.replaceItems);
 
+// POST   /api/insumos/groups/:id/items  → agrega 1 insumo a la agrupación
+router.post('/groups/:id/items', groupsCtrl.addItem);
+
 // DELETE /api/insumos/groups/:id
 router.delete('/groups/:id', groupsCtrl.remove);
 
