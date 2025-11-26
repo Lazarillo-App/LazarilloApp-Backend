@@ -28,32 +28,133 @@ function getBusinessIdFromReq(req) {
 }
 
 // ===================== LISTAR / CRUD BÁSICO =====================
-exports.listarMaxi = async (req, res) => {
+exports.listar = async (req, res) => {
   try {
+    const {
+      page = 1,
+      limit = 50,
+      search = '',
+      rubro,
+      unidadMed,
+      origen,
+      activo = 'true',
+      orderBy = 'nombre',
+      order = 'ASC',
+      elaborados,        // 👈 NUEVO: 'true' | 'false' | undefined
+    } = req.query;
+
+    const where = [];
+    const params = [];
+
+    // 🔹 Negocio activo (multi-tenant)
     const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    if (businessId) {
+      params.push(businessId);
+      where.push(`business_id = $${params.length}`);
     }
 
-    const { rows } = await pool.query(
-      `
-      SELECT *
-      FROM insumos
-      WHERE business_id = $1
-        AND origen = 'maxi'
-      ORDER BY nombre
-      `,
-      [businessId]
-    );
+    // 🔍 búsqueda por nombre / código
+    if (search) {
+      params.push(`%${search}%`, `%${search}%`);
+      where.push(
+        `(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`
+      );
+    }
 
-    return res.json({
+    // 🔹 filtro por rubro (código Maxi guardado como texto)
+    if (rubro) {
+      params.push(String(rubro));        // 👈 aseguramos comparar como texto
+      where.push(`rubro = $${params.length}`);
+    }
+
+    if (unidadMed) {
+      params.push(unidadMed);
+      where.push(`unidad_med = $${params.length}`);
+    }
+    if (origen) {
+      params.push(origen);
+      where.push(`origen = $${params.length}`);
+    }
+    if (activo !== 'all') {
+      params.push(activo === 'true');
+      where.push(`activo = $${params.length}`);
+    }
+
+    // 🔹 filtro por elaborados / no elaborados usando insumo_rubros
+    //   - elaborados = 'true'  → solo rubros con es_elaborador = true
+    //   - elaborados = 'false' → rubros donde NO es_elaborador o sin rubro
+    if (elaborados === 'true') {
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM insumo_rubros ir
+          WHERE ir.business_id = insumos.business_id
+            AND ir.codigo::text = insumos.rubro
+            AND ir.es_elaborador = TRUE
+        )
+      `);
+    } else if (elaborados === 'false') {
+      where.push(`
+        NOT EXISTS (
+          SELECT 1
+          FROM insumo_rubros ir
+          WHERE ir.business_id = insumos.business_id
+            AND ir.codigo::text = insumos.rubro
+            AND ir.es_elaborador = TRUE
+        )
+      `);
+    }
+
+    const rawLimit = Number(limit) || 50;
+    const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
+    const currentPage = Math.max(Number(page) || 1, 1);
+    const offset = (currentPage - 1) * hardLimit;
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const validOrderByWhitelist = [
+      'nombre',
+      'codigo_maxi',
+      'unidad_med',
+      'precio_ref',
+      'created_at',
+      'updated_at',
+    ];
+    const validOrderBy = validOrderByWhitelist.includes(orderBy)
+      ? orderBy
+      : 'nombre';
+    const validOrder =
+      String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(
+        `SELECT *
+         FROM insumos
+         ${whereSql}
+         ORDER BY ${validOrderBy} ${validOrder}
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, hardLimit, offset]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`,
+        params
+      ),
+    ]);
+
+    const total = countRes.rows[0].total;
+    res.json({
       ok: true,
-      business_id: businessId,
-      items: rows,
+      data: dataRes.rows,
+      pagination: {
+        page: currentPage,
+        limit: hardLimit,
+        total,
+        pages: Math.max(Math.ceil(total / hardLimit), 1),
+      },
     });
   } catch (e) {
-    console.error('listarMaxi error:', e);
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+    console.error(e);
+    res.status(500).json({ ok: false, error: e.message });
   }
 };
 
@@ -300,6 +401,10 @@ exports.__cleanupNullInsumos = async (req, res) => {
  * Lista insumos desde maxi_supplies para el negocio activo.
  * Esto NO toca la tabla insumos manual; es el espejo directo de Maxi.
  */
+/**
+ * Lista insumos cargados desde Maxi para el negocio activo,
+ * leyendo directamente la tabla `insumos` (origen = 'maxi').
+ */
 exports.listarMaxi = async (req, res) => {
   try {
     const businessId = getBusinessIdFromReq(req);
@@ -307,8 +412,20 @@ exports.listarMaxi = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const items = await maxiSuppliesRepo.listForBusiness(businessId);
-    return res.json({ ok: true, business_id: businessId, items });
+    const { rows } = await pool.query(
+      `SELECT *
+         FROM insumos
+        WHERE business_id = $1
+          AND origen = 'maxi'
+        ORDER BY nombre ASC`,
+      [businessId]
+    );
+
+    return res.json({
+      ok: true,
+      business_id: businessId,
+      items: rows,
+    });
   } catch (e) {
     console.error('listarMaxi error:', e);
     return res.status(500).json({ ok: false, error: e.message || 'internal' });
