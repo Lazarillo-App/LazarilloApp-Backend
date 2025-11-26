@@ -421,7 +421,9 @@ exports.syncFromMaxi = async (req, res) => {
 
     const raw = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
-    const summary = await upsertFromMaxi(norm);
+
+    // 👇 AHORA SÍ le pasamos el negocio
+    const summary = await upsertFromMaxi(businessId, norm);
 
     return res.json({
       ok: true,
