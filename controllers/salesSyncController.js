@@ -396,13 +396,14 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     }
 
     // 🔍 Usamos sales_daily_items + app_articles + categorias + subrubros
+    //     pero AGREGADO POR SEMANA
     const sql = `
       SELECT
         sdi.business_id,
-        sdi.day::date AS fecha,
+        date_trunc('week', sdi.day)::date AS semana,   
         sdi.article_id,
 
-        -- Nombre del artículo de forma "tolerante" como en listDailyItems
+        -- Nombre del artículo de forma "tolerante"
         COALESCE(
           NULLIF(TRIM(COALESCE(
             to_jsonb(a)->>'title',
@@ -441,14 +442,14 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         AND sdi.article_id <> 0
       GROUP BY
         sdi.business_id,
-        fecha,
+        semana,                 
         sdi.article_id,
         articulo_nombre,
         articulo_codigo,
         c.nombre,
         sr.nombre
       ORDER BY
-        fecha ASC,
+        semana ASC,             
         rubro NULLS LAST,
         subrubro NULLS LAST,
         articulo_nombre ASC;
@@ -466,9 +467,10 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     // BOM UTF-8 para Excel
     res.write('\uFEFF');
 
+    // 👇 cambiamos "fecha" por "semana"
     const headers = [
       'business_id',
-      'fecha',
+      'semana',           
       'article_id',
       'articulo_codigo',
       'articulo_nombre',
@@ -482,9 +484,12 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     for (const r of rows) {
       const line = [
         csvEscape(r.business_id),
+
+        // 👇 usamos "semana" que es un date
         csvEscape(
-          r.fecha?.toISOString?.().slice(0, 10) || r.fecha
+          r.semana?.toISOString?.().slice(0, 10) || r.semana
         ),
+
         csvEscape(r.article_id),
         csvEscape(r.articulo_codigo || ''),
         csvEscape(r.articulo_nombre || ''),
@@ -493,6 +498,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         csvEscape(r.qty || 0),
         csvEscape(r.amount || 0),
       ].join(';');
+
       res.write(line + '\n');
     }
 
