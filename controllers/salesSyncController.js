@@ -67,7 +67,7 @@ exports.syncWindow = async (req, res) => {
 
     // 2) Clamp hasta AYER (mantengo tu lógica)
     const defFrom = new Date(`${fromRaw}T00:00:00Z`);
-    const defTo   = new Date(`${toRaw}T00:00:00Z`);
+    const defTo = new Date(`${toRaw}T00:00:00Z`);
 
     const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
     const F = ymd(Fd);
@@ -118,7 +118,7 @@ exports.syncWindow = async (req, res) => {
         ...result, // upserted, updated, minDay, maxDay
       });
     } catch (e) {
-      try { await client.query('ROLLBACK'); } catch (_) {}
+      try { await client.query('ROLLBACK'); } catch (_) { }
       throw e;
     } finally {
       client.release();
@@ -180,7 +180,7 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
   // 1) Ventana explícita
   if (from && to) {
     const defFrom = new Date(`${from}T00:00:00Z`);
-    const defTo   = new Date(`${to}T00:00:00Z`);
+    const defTo = new Date(`${to}T00:00:00Z`);
     const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
     const F = ymd(Fd), T = ymd(Td);
 
@@ -202,13 +202,13 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
       await client.query('COMMIT');
       return { ok: true, from: F, to: T, ...result };
     } catch (e) {
-      try { await client.query('ROLLBACK'); } catch {}
+      try { await client.query('ROLLBACK'); } catch { }
       throw e;
     } finally {
       client.release();
     }
   }
-  
+
   // 2) Despacho por modo
   switch (String(mode).toLowerCase()) {
     case 'rebuild-aggregates': {
@@ -395,15 +395,33 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         .json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
     }
 
-    // 🔍 Usamos sales_daily_items + app_articles + categorias + subrubros
-    //     pero AGREGADO POR SEMANA
+    // 📊 Ventas semanales por artículo usando sales_daily_items + maxi_article_map
     const sql = `
       SELECT
         sdi.business_id,
-        date_trunc('week', sdi.day)::date AS semana,   
-        sdi.article_id,
 
-        -- Nombre del artículo de forma "tolerante"
+        -- rango de semana: "YYYY-MM-DD a YYYY-MM-DD"
+        to_char(date_trunc('week', sdi.day)::date, 'YYYY-MM-DD')
+          || ' a ' ||
+        to_char((date_trunc('week', sdi.day)::date + 6)::date, 'YYYY-MM-DD')
+          AS fecha_semana,
+
+        -- rubro / subrubro desde la TABLA DE MAPEO
+        m.categoria AS rubro_nombre,
+        m.subrubro  AS subrubro_nombre,
+
+        -- IDs de artículo
+        sdi.article_id AS id_articulo_interno,
+        m.articulo_id  AS id_articulo_maxi,
+
+        -- código del artículo (flexible desde app_articles)
+        NULLIF(TRIM(COALESCE(
+          to_jsonb(a)->>'codigo',
+          to_jsonb(a)->>'codigo_maxi',
+          to_jsonb(a)->>'articulo_codigo'
+        )), '') AS codigo_articulo,
+
+        -- nombre "bonito" del artículo
         COALESCE(
           NULLIF(TRIM(COALESCE(
             to_jsonb(a)->>'title',
@@ -414,45 +432,42 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
             to_jsonb(a)->>'descrip'
           )), ''),
           '#' || sdi.article_id::text
-        ) AS articulo_nombre,
+        ) AS nombre_articulo,
 
-        -- Código del artículo de forma flexible
-        NULLIF(TRIM(COALESCE(
-          to_jsonb(a)->>'codigo',
-          to_jsonb(a)->>'codigo_maxi',
-          to_jsonb(a)->>'articulo_codigo'
-        )), '') AS articulo_codigo,
+        -- totales semanales
+        SUM(sdi.qty)    AS unidades,
+        SUM(sdi.amount) AS venta
 
-        c.nombre  AS rubro,
-        sr.nombre AS subrubro,
-
-        SUM(sdi.qty)    AS qty,
-        SUM(sdi.amount) AS amount
       FROM sales_daily_items sdi
       LEFT JOIN app_articles a
         ON a.id = sdi.article_id
        AND a.business_id = sdi.business_id
-      LEFT JOIN categorias c
-        ON c.id = a.categoria_id
-      LEFT JOIN subrubros sr
-        ON sr.id = a.subrubro_id
+
+      -- mapeo Maxi → rubro/subrubro
+      LEFT JOIN maxi_article_map m
+        ON m.article_id  = sdi.article_id
+       AND m.business_id = sdi.business_id
+
       WHERE sdi.business_id = $1
         AND sdi.day::date >= $2::date
         AND sdi.day::date <= $3::date
         AND sdi.article_id <> 0
+
       GROUP BY
         sdi.business_id,
-        semana,                 
-        sdi.article_id,
-        articulo_nombre,
-        articulo_codigo,
-        c.nombre,
-        sr.nombre
+        fecha_semana,
+        rubro_nombre,
+        subrubro_nombre,
+        id_articulo_interno,
+        id_articulo_maxi,
+        codigo_articulo,
+        nombre_articulo
+
       ORDER BY
-        semana ASC,             
-        rubro NULLS LAST,
-        subrubro NULLS LAST,
-        articulo_nombre ASC;
+        fecha_semana ASC,
+        rubro_nombre NULLS LAST,
+        subrubro_nombre NULLS LAST,
+        nombre_articulo ASC
     `;
 
     const { rows } = await pool.query(sql, [businessId, from, to]);
@@ -461,42 +476,39 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="ventas_${businessId}_${from}_${to}.csv"`
+      `attachment; filename="ventas_semanales_${businessId}_${from}_${to}.csv"`
     );
 
     // BOM UTF-8 para Excel
     res.write('\uFEFF');
 
-    // 👇 cambiamos "fecha" por "semana"
+    // Columnas: semana + rubro/subrubro + artículo + unidades/venta
     const headers = [
       'business_id',
-      'semana',           
-      'article_id',
-      'articulo_codigo',
-      'articulo_nombre',
+      'fecha_semana',
       'rubro',
       'subrubro',
-      'qty',
-      'amount',
+      'id_articulo_interno',
+      'id_articulo_maxi',
+      'codigo_articulo',
+      'nombre_articulo',
+      'unidades',
+      'venta',
     ];
     res.write(headers.join(';') + '\n');
 
     for (const r of rows) {
       const line = [
         csvEscape(r.business_id),
-
-        // 👇 usamos "semana" que es un date
-        csvEscape(
-          r.semana?.toISOString?.().slice(0, 10) || r.semana
-        ),
-
-        csvEscape(r.article_id),
-        csvEscape(r.articulo_codigo || ''),
-        csvEscape(r.articulo_nombre || ''),
-        csvEscape(r.rubro || ''),
-        csvEscape(r.subrubro || ''),
-        csvEscape(r.qty || 0),
-        csvEscape(r.amount || 0),
+        csvEscape(r.fecha_semana), // ya viene como string "YYYY-MM-DD a YYYY-MM-DD"
+        csvEscape(r.rubro_nombre || ''),
+        csvEscape(r.subrubro_nombre || ''),
+        csvEscape(r.id_articulo_interno),
+        csvEscape(r.id_articulo_maxi),
+        csvEscape(r.codigo_articulo || ''),
+        csvEscape(r.nombre_articulo || ''),
+        csvEscape(r.unidades || 0),
+        csvEscape(r.venta || 0),
       ].join(';');
 
       res.write(line + '\n');
