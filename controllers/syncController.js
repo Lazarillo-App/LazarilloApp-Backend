@@ -382,6 +382,7 @@ exports.maxiArticlesProxy = async (req, res) => {
 
 // controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
 
+// controllers/syncController.js
 exports.salesSummaryFromDB = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -442,26 +443,26 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       SELECT
         s.article_id,
 
-        -- Nombre visible
+        -- Nombre visible (tomamos uno por artículo con MAX)
         COALESCE(
-          ma.nombre,
-          m.title,
-          a.name,
+          MAX(ma.nombre),
+          MAX(m.title),
+          MAX(a.name),
           'Artículo #' || s.article_id::text
         )                               AS nombre,
 
         -- Rubro y subrubro según Maxi (fallback al catálogo viejo)
         COALESCE(
-          ma.categoria,
-          m.categoria,
-          c.nombre,
+          MAX(ma.categoria),
+          MAX(m.categoria),
+          MAX(c.nombre),
           '[PENDIENTE]'
         )                               AS rubro,
 
         COALESCE(
-          ma.subrubro,
-          m.subrubro,
-          sr.nombre,
+          MAX(ma.subrubro),
+          MAX(m.subrubro),
+          MAX(sr.nombre),
           '[PENDIENTE]'
         )                               AS subrubro,
 
@@ -513,6 +514,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     next(e);
   }
 };
+
 
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
