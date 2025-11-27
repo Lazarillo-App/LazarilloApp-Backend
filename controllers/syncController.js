@@ -112,9 +112,19 @@ async function fetchMaxiArticles({ token, from, to }) {
   const getName = (o) => String(o?.descripcion ?? o?.descripcionl ?? o?.nombre ?? '').trim();
 
   const pushArt = (o, { rubroNombre, subrubroNombre }) => {
-    const id = num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
+    // Priorizar SIEMPRE el código que usan las estadísticas de Maxi (codart / codigoArticulo)
+    const id = num(
+      it.codart ??
+      it.codigo ??
+      it.codigoArticulo ??
+      it.id ??
+      it.idArticulo,
+      NaN
+    );
+
     if (!Number.isFinite(id) || seen.has(id)) return;
     seen.add(id);
+
     items.push({
       id,
       nombre: getName(o),
@@ -173,7 +183,7 @@ async function upsertArticles({ client, businessId, items }) {
     let p = 1;
 
     for (const it of slice) {
-      const id = Number(it.id ?? it.codart ?? it.codigo ?? it.codigoArticulo);
+      const id = num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
       if (!Number.isFinite(id)) continue;
 
       const nombre = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null);
@@ -389,7 +399,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const { from, to, limit = 50, q } = req.query;
 
     const fromYmd = String(from || '').slice(0, 10);
-    const toYmd   = String(to   || '').slice(0, 10);
+    const toYmd = String(to || '').slice(0, 10);
 
     if (!fromYmd || !toYmd) {
       return res
@@ -397,7 +407,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         .json({ ok: false, error: 'from_to_required' });
     }
 
-    const lim    = Number(limit) || 50;
+    const lim = Number(limit) || 50;
     const search = (q && String(q).trim()) || null;
 
     /* 1) Totales por día desde sales_daily */
@@ -415,7 +425,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       toYmd,
     ]);
 
-    const total   = Number(totRows[0]?.total || 0);
+    const total = Number(totRows[0]?.total || 0);
     const txCount = Number(totRows[0]?.tx_count || 0);
 
     /* 2) Items usando sales_daily_items + maxi_articles / maxi_article_map
