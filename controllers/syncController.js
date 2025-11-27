@@ -380,6 +380,8 @@ exports.maxiArticlesProxy = async (req, res) => {
   }
 };
 
+// controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
+
 exports.salesSummaryFromDB = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -415,24 +417,23 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const total   = Number(totRows[0]?.total || 0);
     const txCount = Number(totRows[0]?.tx_count || 0);
 
-    /* 2) Items: sales_daily_items + maxi_articles (para rubro/subrubro) + app_articles como backup */
+    /* 2) Items usando sales_daily_items + maxi_articles / maxi_article_map
+          y app_articles solo como respaldo
+    */
     const params = [biz.id, fromYmd, toYmd];
     let whereExtra = '';
 
     if (search) {
       params.push(`%${search}%`);
       const pIdx = params.length;
-
-      // 🔎 Buscamos por nombre Maxi, nombre app, rubro/subrubro Maxi
       whereExtra = `
         AND (
           COALESCE(
-            mx.nombre,
+            ma.nombre,
+            m.title,
             a.name,
             'Artículo #' || s.article_id::text
           ) ILIKE $${pIdx}
-          OR mx.categoria ILIKE $${pIdx}
-          OR mx.subrubro ILIKE $${pIdx}
         )
       `;
     }
@@ -440,24 +441,46 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const sqlItems = `
       SELECT
         s.article_id,
-        -- Nombre: preferimos Maxi; si no, app_articles; si no, "Artículo #id"
+
+        -- Nombre visible
         COALESCE(
-          MAX(mx.nombre),
-          MAX(a.name),
+          ma.nombre,
+          m.title,
+          a.name,
           'Artículo #' || s.article_id::text
-        ) AS nombre,
-        -- Rubro/Subrubro: usamos los de Maxi, con fallback a [PENDIENTE]
-        COALESCE(MAX(mx.subrubro), '[PENDIENTE]') AS rubro,
-        COALESCE(MAX(mx.categoria), '[PENDIENTE]') AS subrubro,
+        )                               AS nombre,
+
+        -- Rubro y subrubro según Maxi (fallback al catálogo viejo)
+        COALESCE(
+          ma.categoria,
+          m.categoria,
+          c.nombre,
+          '[PENDIENTE]'
+        )                               AS rubro,
+
+        COALESCE(
+          ma.subrubro,
+          m.subrubro,
+          sr.nombre,
+          '[PENDIENTE]'
+        )                               AS subrubro,
+
         SUM(s.qty)::numeric    AS qty,
         SUM(s.amount)::numeric AS amount
       FROM sales_daily_items s
+      LEFT JOIN maxi_articles ma
+        ON ma.business_id = s.business_id
+       AND ma.articulo_id = s.article_id
+      LEFT JOIN maxi_article_map m
+        ON m.business_id = s.business_id
+       AND m.article_id  = s.article_id
       LEFT JOIN app_articles a
-        ON a.id = s.article_id
-       AND a.business_id = s.business_id
-      LEFT JOIN maxi_articles mx
-        ON mx.business_id = s.business_id
-       AND mx.articulo_id = s.article_id
+        ON a.business_id = s.business_id
+       AND a.id = s.article_id
+      LEFT JOIN categorias c
+        ON c.id = a.categoria_id
+      LEFT JOIN subrubros sr
+        ON sr.id = a.subrubro_id
       WHERE s.business_id = $1
         AND s.day BETWEEN $2::date AND $3::date
         AND s.article_id <> 0
