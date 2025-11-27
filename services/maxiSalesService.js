@@ -161,25 +161,47 @@ function extractFacturas(payload) {
   const inner   = content?.content ?? content;
 
   // { content: { content: { facturas:[{ factura }, ...] } } }
-  if (Array.isArray(inner?.facturas)) return inner.facturas.filter(Boolean);
-
-  // { facturas:[{ factura }, ...] }
-  if (Array.isArray(payload?.facturas)) return payload.facturas.filter(Boolean);
-
-  // invoicebydate: array con órdenes
-  const arr = Array.isArray(inner) ? inner : (Array.isArray(payload) ? payload : null);
-  if (arr && arr.length) {
-    if (arr.some(x => x?.order?.orderData || x?.orderData)) {
-      return arr.map(x => {
-        if (x?.order?.orderData) return x;             // { order:{...} }
-        if (x?.orderData)         return { order: x };  // wrap
-        return x;
-      });
-    }
-    return arr;
+  if (Array.isArray(inner?.facturas)) {
+    return inner.facturas.filter(Boolean);
   }
 
-  if (Array.isArray(content)) return content;
+  // { facturas:[{ factura }, ...] }
+  if (Array.isArray(payload?.facturas)) {
+    return payload.facturas.filter(Boolean);
+  }
+
+  // 🆕 Caso: facturas es un objeto con arrays anidados (por fecha, por algo)
+  const collectNestedFacturas = (facturasObj) => {
+    if (!facturasObj || typeof facturasObj !== 'object') return [];
+    const nested = Object.values(facturasObj)
+      .filter((v) => Array.isArray(v) && v.length > 0);
+    return nested.length ? nested.flat().filter(Boolean) : [];
+  };
+
+  const nestedFromInner   = collectNestedFacturas(inner?.facturas);
+  if (nestedFromInner.length) return nestedFromInner;
+
+  const nestedFromPayload = collectNestedFacturas(payload?.facturas);
+  if (nestedFromPayload.length) return nestedFromPayload;
+
+  // invoicebydate: array con órdenes
+  const arr = Array.isArray(inner)
+    ? inner
+    : (Array.isArray(payload) ? payload : null);
+
+  if (arr && arr.length) {
+    // Si tiene order/orderData, normalizamos
+    if (arr.some((x) => x?.order?.orderData || x?.orderData)) {
+      return arr.map((x) => {
+        if (x?.order?.orderData) return x;
+        if (x?.orderData)        return { order: x };
+        return x;
+      }).filter(Boolean);
+    }
+    return arr.filter(Boolean);
+  }
+
+  if (Array.isArray(content)) return content.filter(Boolean);
   return [];
 }
 
