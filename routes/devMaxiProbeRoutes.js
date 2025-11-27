@@ -47,7 +47,7 @@ router.get('/maxi-probe', async (req, res) => {
 
     const count = Array.isArray(facturasArr) ? facturasArr.length : 0;
 
-    res.json({
+        res.json({
       ok: true,
       business_id: businessId,
       from,
@@ -57,8 +57,20 @@ router.get('/maxi-probe', async (req, res) => {
       tipo_facturas: payload?.facturas ? typeof payload.facturas : null,
       tiene_facturas_array: Array.isArray(payload?.facturas),
       preview_keys: Object.keys(payload || {}).slice(0, 20),
-      // opcional: primera factura para ver la forma (recortá si te molesta)
-      sample_factura: Array.isArray(facturasArr) && facturasArr.length ? facturasArr[0] : null,
+
+      // 🔍 NUEVO: vista rápida de la forma del payload
+      raw_preview: (() => {
+        try {
+          return JSON.stringify(payload).slice(0, 2000); // recortado a 2000 chars
+        } catch {
+          return null;
+        }
+      })(),
+
+      // sigue siendo opcional
+      sample_factura: Array.isArray(facturasArr) && facturasArr.length
+        ? facturasArr[0]
+        : null,
     });
   } catch (e) {
     res.status(e.status || 500).json({
