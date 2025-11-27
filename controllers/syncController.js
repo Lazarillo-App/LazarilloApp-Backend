@@ -22,6 +22,29 @@ const norm = s => String(s ?? '').trim();
 const orSinCategoria = s => (norm(s) || 'Sin categoría');
 const orSinSubrubro = s => (norm(s) || 'Sin subrubro');
 
+// num "seguro" reutilizable en todo el archivo
+const num = (v, d = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+
+/**
+ * Extrae el ID de artículo de Maxi usando SIEMPRE el código visible (codart/codigoArticulo)
+ * y dejando id/idArticulo solo como fallback.
+ */
+const getArticuloId = (o = {}) => {
+  const id = num(
+    o.codart ??
+    o.codigo ??
+    o.codigoArticulo ??
+    o.id ??
+    o.idArticulo ??
+    o.articulo_id,
+    NaN
+  );
+  return Number.isFinite(id) ? id : NaN;
+};
+
 function parseDate(zd, fallback) {
   if (zd == null || zd === '') return new Date(fallback);
   if (zd instanceof Date) return Number.isNaN(+zd) ? new Date(fallback) : zd;
@@ -108,20 +131,12 @@ async function fetchMaxiArticles({ token, from, to }) {
     const hasInfo = ['descripcion', 'descripcionl', 'nombre', 'precio', 'precioVenta', 'importe'].some(k => k in o);
     return hasId && hasInfo;
   };
-  const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+
   const getName = (o) => String(o?.descripcion ?? o?.descripcionl ?? o?.nombre ?? '').trim();
 
   const pushArt = (o, { rubroNombre, subrubroNombre }) => {
-    // Priorizar SIEMPRE el código que usan las estadísticas de Maxi (codart / codigoArticulo)
-    const id = num(
-      it.codart ??
-      it.codigo ??
-      it.codigoArticulo ??
-      it.id ??
-      it.idArticulo,
-      NaN
-    );
-
+    // Usar SIEMPRE el código Maxi (codart / codigo / codigoArticulo)
+    const id = getArticuloId(o);
     if (!Number.isFinite(id) || seen.has(id)) return;
     seen.add(id);
 
@@ -183,18 +198,24 @@ async function upsertArticles({ client, businessId, items }) {
     let p = 1;
 
     for (const it of slice) {
-      const id = num(o.id ?? o.idArticulo ?? o.codart ?? o.codigo ?? o.codigoArticulo, NaN);
+      const id = getArticuloId(it);
       if (!Number.isFinite(id)) continue;
 
       const nombre = (String(it.nombre ?? it.descripcion ?? it.descripcionl ?? '').slice(0, 200) || null);
       const categoria = orSinCategoria(it.categoria);
       const subrubro = orSinSubrubro(it.subrubro);
-      const precio = Number(it.precio ?? it.precioVenta ?? it.importe ?? 0) || 0;
-      const costo = Number(it.costo ?? it.costoPromedio ?? 0) || 0;
+      const precio = num(it.precio ?? it.precioVenta ?? it.importe, 0);
+      const costo = num(it.costo ?? it.costoPromedio, 0);
 
       values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},$${p + 6},$${p + 7}::jsonb,NOW())`);
       params.push(
-        businessId, id, nombre, categoria, subrubro, precio, costo,
+        businessId,
+        id,
+        nombre,
+        categoria,
+        subrubro,
+        precio,
+        costo,
         JSON.stringify(it.raw ?? it._raw ?? it)
       );
       p += 8;
@@ -441,7 +462,6 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         AND (
           COALESCE(
             ma.nombre,
-            m.title,
             a.name,
             'Artículo #' || s.article_id::text
           ) ILIKE $${pIdx}
@@ -451,54 +471,51 @@ exports.salesSummaryFromDB = async (req, res, next) => {
 
     const sqlItems = `
       SELECT
-        s.article_id,
+  s.article_id,
 
-        -- Nombre visible (tomamos uno por artículo con MAX)
-        COALESCE(
-          MAX(ma.nombre),
-          MAX(m.title),
-          MAX(a.name),
-          'Artículo #' || s.article_id::text
-        )                               AS nombre,
+  COALESCE(
+    MAX(ma.nombre),
+    MAX(a.name),
+    'Artículo #' || s.article_id::text
+  )                               AS nombre,
 
-        -- Rubro y subrubro según Maxi (fallback al catálogo viejo)
-        COALESCE(
-          MAX(ma.categoria),
-          MAX(m.categoria),
-          MAX(c.nombre),
-          '[PENDIENTE]'
-        )                               AS rubro,
+  COALESCE(
+    MAX(ma.categoria),
+    MAX(m.categoria),
+    MAX(c.nombre),
+    '[PENDIENTE]'
+  )                               AS rubro,
 
-        COALESCE(
-          MAX(ma.subrubro),
-          MAX(m.subrubro),
-          MAX(sr.nombre),
-          '[PENDIENTE]'
-        )                               AS subrubro,
+  COALESCE(
+    MAX(ma.subrubro),
+    MAX(m.subrubro),
+    MAX(sr.nombre),
+    '[PENDIENTE]'
+  )                               AS subrubro,
 
-        SUM(s.qty)::numeric    AS qty,
-        SUM(s.amount)::numeric AS amount
-      FROM sales_daily_items s
-      LEFT JOIN maxi_articles ma
-        ON ma.business_id = s.business_id
-       AND ma.articulo_id = s.article_id
-      LEFT JOIN maxi_article_map m
-        ON m.business_id = s.business_id
-       AND m.article_id  = s.article_id
-      LEFT JOIN app_articles a
-        ON a.business_id = s.business_id
-       AND a.id = s.article_id
-      LEFT JOIN categorias c
-        ON c.id = a.categoria_id
-      LEFT JOIN subrubros sr
-        ON sr.id = a.subrubro_id
-      WHERE s.business_id = $1
-        AND s.day BETWEEN $2::date AND $3::date
-        AND s.article_id <> 0
-        ${whereExtra}
-      GROUP BY s.article_id
-      ORDER BY qty DESC
-      LIMIT ${lim}
+  SUM(s.qty)::numeric    AS qty,
+  SUM(s.amount)::numeric AS amount
+FROM sales_daily_items s
+LEFT JOIN maxi_articles ma
+  ON ma.business_id = s.business_id
+ AND ma.articulo_id = s.article_id
+LEFT JOIN maxi_article_map m
+  ON m.business_id = s.business_id
+ AND m.articulo_id  = s.article_id
+LEFT JOIN app_articles a
+  ON a.business_id = s.business_id
+ AND a.id = s.article_id
+LEFT JOIN categorias c
+  ON c.id = a.categoria_id
+LEFT JOIN subrubros sr
+  ON sr.id = a.subrubro_id
+WHERE s.business_id = $1
+  AND s.day BETWEEN $2::date AND $3::date
+  AND s.article_id <> 0
+  ${whereExtra}
+GROUP BY s.article_id
+ORDER BY qty DESC
+LIMIT ${lim}
     `;
 
     const { rows } = await pool.query(sqlItems, params);
