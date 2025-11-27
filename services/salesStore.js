@@ -40,10 +40,10 @@ function agruparPorDiaYArticulo(rawSales) {
     // Normalizar día (YYYY-MM-DD)
     const day =
       (venta.day ||
-       venta.fecha ||
-       venta.date ||
-       (venta.fechaHora && String(venta.fechaHora).slice(0, 10)) ||
-       ''
+        venta.fecha ||
+        venta.date ||
+        (venta.fechaHora && String(venta.fechaHora).slice(0, 10)) ||
+        ''
       ).slice(0, 10);
 
     if (!day) continue;
@@ -255,7 +255,7 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
   const ownClient = !clientOpt;
 
   let upserted = 0;
-  let updated  = 0;
+  let updated = 0;
 
   try {
     if (ownClient) {
@@ -285,7 +285,7 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
       saleIdByIdx[i] = row.id;
 
       if (row.inserted) upserted += 1;
-      else             updated  += 1;
+      else updated += 1;
     }
 
     /* ───────── 2B) Limpiar ítems anteriores de esas ventas ───────── */
@@ -346,7 +346,7 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
     /* ───────── 2D) Reconciliar mappings de artículos ───────── */
     await reconcileSalesMappings(client, businessId, {
       fromYmd: minDay,
-      toYmd:   maxDay,
+      toYmd: maxDay,
     });
 
     /* ───────── 2E) Recalcular agregados diarios ───────── */
@@ -359,7 +359,7 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
     return { upserted, updated, minDay, maxDay };
   } catch (e) {
     if (ownClient) {
-      try { await client.query('ROLLBACK'); } catch {}
+      try { await client.query('ROLLBACK'); } catch { }
     }
     throw e;
   } finally {
@@ -447,13 +447,35 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
         amount = EXCLUDED.amount
     `;
     await client.query(sqlItems, params);
+    /* 3) maxi_sales_daily: espejo por día + artículo
+          Usamos sales_daily_items como fuente y sólo guardamos artículos mapeados (> 0)
+       */
+    const sqlMaxiDaily = `
+      INSERT INTO maxi_sales_daily (business_id, articulo_id, day, qty, amount)
+      SELECT
+        business_id,
+        article_id AS articulo_id,
+        day,
+        qty,
+        amount
+      FROM sales_daily_items
+      WHERE business_id = $1
+        AND day BETWEEN $2 AND $3
+        AND article_id > 0
+      ON CONFLICT (business_id, articulo_id, day)
+      DO UPDATE SET
+        qty       = EXCLUDED.qty,
+        amount    = EXCLUDED.amount,
+        updated_at = now()
+    `;
+    await client.query(sqlMaxiDaily, params);
 
     if (ownClient) {
       await client.query('COMMIT');
     }
   } catch (e) {
     if (ownClient) {
-      try { await client.query('ROLLBACK'); } catch {}
+      try { await client.query('ROLLBACK'); } catch { }
     }
     throw e;
   } finally {
@@ -461,7 +483,7 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
       client.release();
     }
   }
-}
+};
 
 async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
   if (!fromYmd || !toYmd) return;
