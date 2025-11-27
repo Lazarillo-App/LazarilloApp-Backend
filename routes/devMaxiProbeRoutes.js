@@ -4,6 +4,7 @@ const router = express.Router();
 
 const { authRequired } = require('../middleware/authMiddleware');
 const { getBearer, fetchInvoiceByDate } = require('../services/maxiSalesService');
+const { runWindow } = require('../services/salesSyncPolicy');
 
 // Requiere Authorization: Bearer <TOKEN_APP>
 router.use(authRequired);
@@ -77,6 +78,37 @@ router.get('/maxi-probe', async (req, res) => {
       error: 'probe_failed',
       message: e?.message,
       info: e?._maxi || null
+    });
+  }
+});
+
+// POST /api/dev/sales-window?biz=31&from=YYYY-MM-DD&to=YYYY-MM-DD
+router.post('/sales-window', async (req, res) => {
+  try {
+    const businessId = Number(req.query.biz);
+    const from = String(req.query.from || '').slice(0, 10);
+    const to   = String(req.query.to   || '').slice(0, 10);
+
+    if (!Number.isFinite(businessId) || !from || !to) {
+      return res.status(400).json({
+        error: 'bad_request',
+        hint: 'use ?biz=<id>&from=YYYY-MM-DD&to=YYYY-MM-DD',
+      });
+    }
+
+    const out = await runWindow({ businessId, from, to, req });
+
+    return res.json({
+      ok: true,
+      mode: 'window',
+      business_id: businessId,
+      ...out, // from, to, fetched, upserted, updated, minDay, maxDay
+    });
+  } catch (e) {
+    console.error('[dev sales-window] error', e);
+    res.status(e.status || 500).json({
+      error: 'window_failed',
+      message: e?.message,
     });
   }
 });
