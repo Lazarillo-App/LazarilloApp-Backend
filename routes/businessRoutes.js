@@ -244,9 +244,6 @@ router.post(
   viewPrefsCtrl.saveFavoriteGroup
 );
 
-router.post(
-  '/:id/rebuild-article-map',
-  businesses.rebuildArticleMap
-);
+router.post('/:businessId/rebuild-article-map', businesses.rebuildForBusiness);
 
 module.exports = router;

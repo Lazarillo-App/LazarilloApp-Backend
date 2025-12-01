@@ -761,21 +761,23 @@ exports.syncSales = async (req, res, next) => {
   }
 };
 
-exports.rebuildArticleMap = async (req, res, next) => {
+exports.rebuildForBusiness = async (req, res, next) => {
   try {
-    const businessId = Number(req.params.id);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'invalid business id' });
+    const businessId = Number(req.params.businessId || req.params.id);
+    if (!businessId) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'businessId inválido',
+      });
     }
 
     await rebuildArticleMapFromAppArticles(businessId);
 
-    return res.json({
+    res.json({
       ok: true,
       business_id: businessId,
-      rebuilt_from: 'app_articles',
     });
   } catch (err) {
     next(err);
   }
-}
+};
