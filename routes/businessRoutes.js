@@ -99,7 +99,10 @@ router.get('/:id/maxi-ping', ensureFn('sales.maxiPing', sales.maxiPing));
 router.get('/', ensureFn('businesses.listMine', businesses.listMine));
 router.post('/', ensureFn('businesses.create', businesses.create));
 
-router.post('/:id/maxi-credentials', ensureFn('businesses.saveMaxiCredentials', businesses.saveMaxiCredentials));
+router.post(
+  '/:id/maxi-credentials',
+  ensureFn('businesses.saveMaxiCredentials', businesses.saveMaxiCredentials)
+);
 
 /* Negocio activo (¡ojo orden antes de '/:id'!) */
 router.get('/active', ensureFn('businesses.getActive', businesses.getActive));
