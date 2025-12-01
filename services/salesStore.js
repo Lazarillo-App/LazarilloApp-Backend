@@ -429,7 +429,7 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
     await client.query(sqlDaily, params);
 
     /* 2) sales_daily_items: totales por día + artículo
-       👇 Clave: mapeamos NULL → 0 para respetar NOT NULL en sales_daily_items.article_id
+       👇 Ojo: NULL → 0 para mantener NOT NULL en article_id
     */
     const sqlItems = `
       INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
@@ -472,9 +472,10 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
         amount = EXCLUDED.amount
     `;
     await client.query(sqlItems, params);
-    /* 3) maxi_sales_daily: espejo por día + artículo
-          Usamos sales_daily_items como fuente y sólo guardamos artículos mapeados (> 0)
-       */
+
+    /* 3) maxi_sales_daily: espejo 1:1 de sales_daily_items
+         👉 SIN filtrar article_id: copiamos también el 0
+    */
     const sqlMaxiDaily = `
       INSERT INTO maxi_sales_daily (business_id, articulo_id, day, qty, amount)
       SELECT
@@ -484,11 +485,12 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
         qty,
         amount
       FROM sales_daily_items
-        AND article_id >= 0
+      WHERE business_id = $1
+        AND day BETWEEN $2 AND $3
       ON CONFLICT (business_id, articulo_id, day)
       DO UPDATE SET
-        qty       = EXCLUDED.qty,
-        amount    = EXCLUDED.amount,
+        qty        = EXCLUDED.qty,
+        amount     = EXCLUDED.amount,
         updated_at = now()
     `;
     await client.query(sqlMaxiDaily, params);
@@ -498,7 +500,7 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
     }
   } catch (e) {
     if (ownClient) {
-      try { await client.query('ROLLBACK'); } catch { }
+      try { await client.query('ROLLBACK'); } catch {}
     }
     throw e;
   } finally {
