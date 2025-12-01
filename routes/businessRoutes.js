@@ -61,8 +61,8 @@ router.param('id', requireBusinessAccessParam);
 
 /* ───────── Logo: subir archivo ───────── */
 const uploadFields = upload.fields([
-  { name: 'file',  maxCount: 1 },
-  { name: 'logo',  maxCount: 1 },
+  { name: 'file', maxCount: 1 },
+  { name: 'logo', maxCount: 1 },
   { name: 'image', maxCount: 1 },
 ]);
 router.post('/:id/logo', (req, res, next) => {
@@ -72,15 +72,15 @@ router.post('/:id/logo', (req, res, next) => {
       return res.status(status).json({
         error:
           err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-          err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-          'upload_error',
+            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
+              'upload_error',
       });
     }
     const files = req.files || {};
     req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
 
     if (!req.file && !req.body?.url) {
-      return res.status(400).json({ error: 'missing_file', accept: ['png','jpg','jpeg','webp','gif','svg'], max_mb: 2 });
+      return res.status(400).json({ error: 'missing_file', accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], max_mb: 2 });
     }
     return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
@@ -104,7 +104,7 @@ router.get('/active', ensureFn('businesses.getActive', businesses.getActive));
 router.patch('/active', ensureFn('businesses.setActive', businesses.setActive));
 
 /* Por :id */
-router.get('/:id', cacheJson(60),ensureFn('businesses.getOne', businesses.getOne));
+router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOne));
 router.patch('/:id', ensureFn('businesses.update', businesses.update));
 router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
 router.post('/:id/select', ensureFn('businesses.select', businesses.select));
@@ -115,8 +115,8 @@ router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.
 router.post('/:id/maxi-refresh-menu', ensureFn('refreshMenu', refreshMenu));
 
 /* ───────── Catálogo (lecturas legacy) ───────── */
-router.get('/:id/articles',       cacheJson(300), ensureFn('listArticlesFromDB', listArticlesFromDB));
-router.get('/:id/articles/tree',  cacheJson(300), ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
+router.get('/:id/articles', cacheJson(300), ensureFn('listArticlesFromDB', listArticlesFromDB));
+router.get('/:id/articles/tree', cacheJson(300), ensureFn('listArticlesTreeFromDB', listArticlesTreeFromDB));
 
 /* ───────── Ventas: export CSV ───────── */
 router.get(
@@ -144,13 +144,13 @@ router.get(
 );
 
 /* ───────── Ventas: probes (diagnóstico) ───────── */
-router.get('/:id/maxi-sales-probe',    ensureFn('sales.maxiSalesProbe',   sales.maxiSalesProbe));
+router.get('/:id/maxi-sales-probe', ensureFn('sales.maxiSalesProbe', sales.maxiSalesProbe));
 router.get('/:id/maxi-sales-probe-v2', ensureFn('sales.maxiSalesProbeV2', sales.maxiSalesProbeV2));
 
 /* ───────── Ventas V2 (estables) ───────── */
-router.post('/:id/sync-sales/window',             ensureFn('sales.syncWindow',        sales.syncWindow));
-router.post('/:id/sync-sales/backfill-once',      ensureFn('sales.backfillOnce',      sales.backfillOnce));
-router.post('/:id/sync-sales/daily-auto',         ensureFn('sales.dailyAuto',         sales.dailyAuto));
+router.post('/:id/sync-sales/window', ensureFn('sales.syncWindow', sales.syncWindow));
+router.post('/:id/sync-sales/backfill-once', ensureFn('sales.backfillOnce', sales.backfillOnce));
+router.post('/:id/sync-sales/daily-auto', ensureFn('sales.dailyAuto', sales.dailyAuto));
 router.post('/:id/sync-sales/rebuild-aggregates', ensureFn('sales.rebuildAggregates', sales.rebuildAggregates));
 
 /* ───────── Adapter legacy para sync por body/query ───────── */
@@ -165,7 +165,7 @@ function adaptSyncSalesQueryToBody(req, _res, next) {
   }
   const cut = (s) => String(s || '').slice(0, 10);
   if (req.query.from && !req.body?.from) patch.from = cut(req.query.from);
-  if (req.query.to && !req.body?.to)     patch.to   = cut(req.query.to);
+  if (req.query.to && !req.body?.to) patch.to = cut(req.query.to);
 
   if ((req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true') && !req.body?.dryrun) {
     patch.dryrun = true;
@@ -216,7 +216,7 @@ router.patch('/:id/default-group', async (req, res, next) => {
 router.post('/:id/sync-sales/reconcile-and-rebuild',
   ensureFn('sales.reconcileAndRebuild', sales.reconcileAndRebuild));
 
-  router.get(
+router.get(
   '/:id/view-prefs',
   authRequired,
   loadBusiness,
@@ -242,6 +242,11 @@ router.post(
   authRequired,
   loadBusiness,
   viewPrefsCtrl.saveFavoriteGroup
+);
+
+router.post(
+  '/:id/rebuild-article-map',
+  businesses.rebuildArticleMap
 );
 
 module.exports = router;

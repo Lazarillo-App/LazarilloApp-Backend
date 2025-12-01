@@ -2,6 +2,7 @@
 const path = require('path');
 const pool = require('../config/db');
 const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
+const { rebuildArticleMapFromAppArticles } = require('../services/maxiArticleMapService');
 
 // fetch compatible en Node 18+ (usa global)
 const fetch = (...args) => globalThis.fetch(...args);
@@ -759,3 +760,22 @@ exports.syncSales = async (req, res, next) => {
     next(e);
   }
 };
+
+exports.rebuildArticleMap = async (req, res, next) => {
+  try {
+    const businessId = Number(req.params.id);
+    if (!Number.isFinite(businessId)) {
+      return res.status(400).json({ ok: false, error: 'invalid business id' });
+    }
+
+    await rebuildArticleMapFromAppArticles(businessId);
+
+    return res.json({
+      ok: true,
+      business_id: businessId,
+      rebuilt_from: 'app_articles',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
