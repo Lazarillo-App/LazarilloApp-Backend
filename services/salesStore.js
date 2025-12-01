@@ -28,10 +28,32 @@ const toNum = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
-// 👇 NUEVO
 function normalizeCode(raw) {
   if (raw == null) return null;
   return String(raw).trim();
+}
+
+function extractCode(it) {
+  const raw =
+    it.cod_art ??
+    it.cod_articulo ??
+    it.codigo ??
+    it.codigo_articulo ??
+    it.code ??
+    it.article_id ??
+    it.articulo_id ??
+    it.item_id ??
+    null;
+
+  if (raw == null || raw === '') {
+    return { externalCode: null, articleId: null };
+  }
+
+  const externalCode = String(raw).trim();
+  const num = Number(externalCode);
+  const articleId = Number.isFinite(num) && num > 0 ? num : null;
+
+  return { externalCode, articleId };
 }
 
 /**
@@ -184,12 +206,11 @@ function normalizeInvoices(businessId, rawDocs) {
         const precio = toNum(it.precio);
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
-        const rawCode = it.cod_art ?? it.codigo ?? it.code ?? null;
-        const externalCode = normalizeCode(rawCode); // 👈 solo limpiamos el código
+        const { externalCode, articleId } = extractCode(it);
 
         pushItem(sale_idx, i + 1, {
-          article_id: null,        // 👈 lo resuelve reconcileSalesMappings
-          sku: externalCode,       // 👈 código Maxi tal cual
+          article_id: articleId,
+          sku: externalCode,
           article_name: nombre,
           qty: cantidad,
           unit_price: precio,
@@ -219,11 +240,10 @@ function normalizeInvoices(businessId, rawDocs) {
         const price = toNum(oi.productPrice);
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
-        const rawCode = oi.cod_art ?? oi.codigo ?? oi.code ?? null;
-        const externalCode = normalizeCode(rawCode);
+        const { externalCode, articleId } = extractCode(oi);
 
         pushItem(sale_idx, i + 1, {
-          article_id: null,
+          article_id: articleId,
           sku: externalCode,
           article_name: title,
           qty,
