@@ -2,11 +2,6 @@
 const pool = require('../config/db');
 
 /* ───────── helpers num/date ───────── */
-const toNum = (v) => {
-  if (v == null || v === '') return 0;
-  const n = Number(String(v).replace(',', '.'));
-  return Number.isFinite(n) ? n : 0;
-};
 
 function parseYMDorDMYtoUTC(dateStr) {
   if (!dateStr) return null;
@@ -25,6 +20,18 @@ function parseYMDorDMYtoUTC(dateStr) {
   return Number.isFinite(+d)
     ? new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
     : null;
+}
+
+const toNum = (v) => {
+  if (v == null || v === '') return 0;
+  const n = Number(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? n : 0;
+};
+
+// 👇 NUEVO
+function normalizeCode(raw) {
+  if (raw == null) return null;
+  return String(raw).trim();
 }
 
 /**
@@ -178,13 +185,11 @@ function normalizeInvoices(businessId, rawDocs) {
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
         const rawCode = it.cod_art ?? it.codigo ?? it.code ?? null;
-        const externalCode = rawCode != null ? String(rawCode) : null;
-        const asNumber = Number(externalCode);
-        const articleId = Number.isFinite(asNumber) ? asNumber : null;
+        const externalCode = normalizeCode(rawCode); // 👈 solo limpiamos el código
 
         pushItem(sale_idx, i + 1, {
-          article_id: articleId,   // 👈 AHORA usamos el código numérico
-          sku: externalCode,       // string del código Maxi
+          article_id: null,        // 👈 lo resuelve reconcileSalesMappings
+          sku: externalCode,       // 👈 código Maxi tal cual
           article_name: nombre,
           qty: cantidad,
           unit_price: precio,
@@ -215,12 +220,10 @@ function normalizeInvoices(businessId, rawDocs) {
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
         const rawCode = oi.cod_art ?? oi.codigo ?? oi.code ?? null;
-        const externalCode = rawCode != null ? String(rawCode) : null;
-        const asNumber = Number(externalCode);
-        const articleId = Number.isFinite(asNumber) ? asNumber : null;
+        const externalCode = normalizeCode(rawCode);
 
         pushItem(sale_idx, i + 1, {
-          article_id: articleId,
+          article_id: null,
           sku: externalCode,
           article_name: title,
           qty,
@@ -499,19 +502,26 @@ async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
   // 1) Match por código externo (preciso)
   await client.query(
     `
-    UPDATE app_sales_items si
-       SET article_id = m.article_id
-      FROM app_sales s
-      JOIN maxi_article_map m
-        ON m.business_id = s.business_id
-       AND m.external_code IS NOT NULL
-     WHERE s.id = si.sale_id
-       AND s.business_id = $1
-       AND si.article_id IS NULL
-       AND si.sku IS NOT NULL
-       AND si.sku = m.external_code
-       AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-    `,
+  UPDATE app_sales_items si
+     SET article_id = m.article_id
+    FROM app_sales s
+    JOIN maxi_article_map m
+      ON m.business_id = s.business_id
+   WHERE s.id = si.sale_id
+     AND s.business_id = $1
+     AND si.article_id IS NULL
+     AND si.sku IS NOT NULL
+     AND (
+       trim(si.sku) = trim(m.external_code)
+       OR (
+         si.sku ~ '^[0-9]+$'
+         AND m.external_code ~ '^[0-9]+$'
+         AND si.sku::bigint = m.external_code::bigint
+       )
+     )
+     AND (s.occurred_at AT TIME ZONE 'UTC')::date
+         BETWEEN $2::date AND $3::date
+  `,
     [businessId, fromYmd, toYmd]
   );
 
