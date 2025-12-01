@@ -139,12 +139,7 @@ function normalizeInvoices(businessId, rawDocs) {
   const touchedDays = new Set();
 
   const pushSale = (external_id, occurred_at, total) => {
-    const s = {
-      business_id: businessId,
-      external_id,
-      occurred_at,
-      total: toNum(total),
-    };
+    const s = { business_id: businessId, external_id, occurred_at, total: toNum(total) };
     sales.push(s);
     touchedDays.add(s.occurred_at.toISOString().slice(0, 10)); // YYYY-MM-DD
     return s;
@@ -182,19 +177,15 @@ function normalizeInvoices(businessId, rawDocs) {
         const precio = toNum(it.precio);
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
-        // 👇 código externo para mapping
-        const externalCode =
-          it.cod_art != null && it.cod_art !== ''
-            ? String(it.cod_art)
-            : it.productId != null
-              ? String(it.productId)
-              : it.product_id != null
-                ? String(it.product_id)
-                : null;
+        // 👇 CLAVE: usamos cod_art como article_id numérico
+        const rawCode = it.cod_art ?? it.codigo ?? it.code ?? null;
+        const externalCode = rawCode != null ? String(rawCode) : null;
+        const asNumber = Number(externalCode);
+        const articleId = Number.isFinite(asNumber) ? asNumber : null;
 
         pushItem(sale_idx, i + 1, {
-          article_id: null,              // se rellenará luego por reconcile
-          sku: externalCode,
+          article_id: articleId,   // 👈 ya no null
+          sku: externalCode,       // guardamos string también
           article_name: nombre,
           qty: cantidad,
           unit_price: precio,
@@ -224,19 +215,15 @@ function normalizeInvoices(businessId, rawDocs) {
         const price = toNum(oi.productPrice);
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
-        // 👇 ACA es donde estaba el tema: usamos también productId
-        const externalCode =
-          oi.cod_art != null && oi.cod_art !== ''
-            ? String(oi.cod_art)
-            : oi.productId != null
-              ? String(oi.productId)
-              : oi.product_id != null
-                ? String(oi.product_id)
-                : null;
+        // 👇 igual que arriba pero para invoicebydate
+        const rawCode = oi.cod_art ?? oi.codigo ?? oi.code ?? null;
+        const externalCode = rawCode != null ? String(rawCode) : null;
+        const asNumber = Number(externalCode);
+        const articleId = Number.isFinite(asNumber) ? asNumber : null;
 
         pushItem(sale_idx, i + 1, {
-          article_id: null,              // se setea luego según map
-          sku: externalCode,             // clave para maxi_article_map.external_code
+          article_id: articleId,
+          sku: externalCode,
           article_name: title,
           qty,
           unit_price: price,
@@ -245,8 +232,6 @@ function normalizeInvoices(businessId, rawDocs) {
       });
       return;
     }
-
-    // otros objetos: ignorar
   });
 
   return { sales, items, touchedDays: Array.from(touchedDays) };
