@@ -1,4 +1,4 @@
--- 006_maxi_sales_unique.sql
+-- 008_maxi_sales_unique.sql
 
 -- Crea la tabla si no existía
 CREATE TABLE IF NOT EXISTS public.maxi_sales_daily (

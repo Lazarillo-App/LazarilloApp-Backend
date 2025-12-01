@@ -139,7 +139,12 @@ function normalizeInvoices(businessId, rawDocs) {
   const touchedDays = new Set();
 
   const pushSale = (external_id, occurred_at, total) => {
-    const s = { business_id: businessId, external_id, occurred_at, total: toNum(total) };
+    const s = {
+      business_id: businessId,
+      external_id,
+      occurred_at,
+      total: toNum(total),
+    };
     sales.push(s);
     touchedDays.add(s.occurred_at.toISOString().slice(0, 10)); // YYYY-MM-DD
     return s;
@@ -177,9 +182,19 @@ function normalizeInvoices(businessId, rawDocs) {
         const precio = toNum(it.precio);
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
+        // 👇 código externo para mapping
+        const externalCode =
+          it.cod_art != null && it.cod_art !== ''
+            ? String(it.cod_art)
+            : it.productId != null
+            ? String(it.productId)
+            : it.product_id != null
+            ? String(it.product_id)
+            : null;
+
         pushItem(sale_idx, i + 1, {
-          article_id: it.cod_art ?? null,
-          sku: it.cod_art ? String(it.cod_art) : null,
+          article_id: null,              // se rellenará luego por reconcile
+          sku: externalCode,
           article_name: nombre,
           qty: cantidad,
           unit_price: precio,
@@ -209,9 +224,19 @@ function normalizeInvoices(businessId, rawDocs) {
         const price = toNum(oi.productPrice);
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
+        // 👇 ACA es donde estaba el tema: usamos también productId
+        const externalCode =
+          oi.cod_art != null && oi.cod_art !== ''
+            ? String(oi.cod_art)
+            : oi.productId != null
+            ? String(oi.productId)
+            : oi.product_id != null
+            ? String(oi.product_id)
+            : null;
+
         pushItem(sale_idx, i + 1, {
-          article_id: oi.cod_art ?? null,
-          sku: oi.cod_art ? String(oi.cod_art) : null,
+          article_id: null,              // se setea luego según map
+          sku: externalCode,             // clave para maxi_article_map.external_code
           article_name: title,
           qty,
           unit_price: price,
@@ -459,9 +484,7 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
         qty,
         amount
       FROM sales_daily_items
-      WHERE business_id = $1
-        AND day BETWEEN $2 AND $3
-        AND article_id > 0
+        AND article_id >= 0
       ON CONFLICT (business_id, articulo_id, day)
       DO UPDATE SET
         qty       = EXCLUDED.qty,
