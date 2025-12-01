@@ -1,7 +1,7 @@
 // controllers/businessController.js
 const path = require('path');
 const pool = require('../config/db');
-const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
+const { decryptSecretCompat, encryptSecret, encryptSecretCompat  } = require('../utils/cryptoField');
 const { rebuildArticleMapFromAppArticles } = require('../services/maxiArticleMapService');
 
 // fetch compatible en Node 18+ (usa global)
@@ -781,3 +781,76 @@ exports.rebuildForBusiness = async (req, res, next) => {
     next(err);
   }
 };
+
+exports.saveMaxiCredentials = async (req, res, next) => {
+  try {
+    const businessId = Number(req.params.id);
+    if (!Number.isFinite(businessId)) {
+      return res.status(400).json({ error: 'invalid_business_id' });
+    }
+
+    // 🔍 log para verificar qué está llegando
+    console.log('[maxi-credentials] body recibido:', req.body);
+
+    let { email, password, codcli } = req.body || {};
+
+    email = (email || '').trim();
+    codcli = (codcli || '').trim();
+    password = (password || '').trim();
+
+    // Traemos el negocio para ver si ya tiene pass
+    const { rows } = await pool.query(
+      'SELECT props FROM businesses WHERE id = $1',
+      [businessId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'business_not_found' });
+    }
+
+    const props = rows[0].props || {};
+    const maxiPrev = props.maxi || {};
+    const hadPrevPass = !!maxiPrev.password_enc;
+
+    // Validaciones mínimas
+    if (!email || !codcli) {
+      return res
+        .status(400)
+        .json({ error: 'missing_fields', detail: 'email y codcli son requeridos' });
+    }
+
+    // Password:
+    // - si ya había una guardada y ahora viene vacío → mantenemos la anterior
+    // - si NO había ninguna y viene vacío → error
+    let passwordEnc = maxiPrev.password_enc || null;
+    if (password) {
+      passwordEnc = encryptSecretCompat(password);
+    } else if (!hadPrevPass) {
+      return res.status(400).json({
+        error: 'missing_fields',
+        detail: 'password requerida la primera vez que configurás Maxi',
+      });
+    }
+
+    const newMaxiCfg = {
+      ...maxiPrev,
+      email,
+      codcli,
+      password_enc: passwordEnc,
+    };
+
+    const newProps = {
+      ...props,
+      maxi: newMaxiCfg,
+    };
+
+    await pool.query(
+      'UPDATE businesses SET props = $2 WHERE id = $1',
+      [businessId, newProps]
+    );
+
+    return res.json({ ok: true, business_id: businessId });
+  } catch (e) {
+    console.error('saveMaxiCredentials error', e);
+    next(e);
+  }
+}
