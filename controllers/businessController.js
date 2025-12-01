@@ -782,48 +782,41 @@ exports.rebuildForBusiness = async (req, res, next) => {
   }
 };
 
+// controllers/businessController.js
+
 exports.saveMaxiCredentials = async (req, res, next) => {
   try {
-    const businessId = Number(req.params.id);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ error: 'invalid_business_id' });
+    const biz = req.business; // viene del router.param('id', requireBusinessAccessParam)
+    if (!biz?.id) {
+      return res.status(404).json({ error: 'business_not_found' });
     }
 
-    // 🔍 log para verificar qué está llegando
     console.log('[maxi-credentials] body recibido:', req.body);
 
     let { email, password, codcli } = req.body || {};
-
     email = (email || '').trim();
     codcli = (codcli || '').trim();
     password = (password || '').trim();
 
-    // Traemos el negocio para ver si ya tiene pass
-    const { rows } = await pool.query(
-      'SELECT props FROM businesses WHERE id = $1',
-      [businessId]
-    );
-    if (!rows.length) {
-      return res.status(404).json({ error: 'business_not_found' });
-    }
-
-    const props = rows[0].props || {};
+    const props = biz.props || {};
     const maxiPrev = props.maxi || {};
-    const hadPrevPass = !!maxiPrev.password_enc;
+    const hadPrevPass = !!maxiPrev.pass_enc;
 
-    // Validaciones mínimas
+    // ⚠️ email y codcli siempre requeridos
     if (!email || !codcli) {
-      return res
-        .status(400)
-        .json({ error: 'missing_fields', detail: 'email y codcli son requeridos' });
+      return res.status(400).json({
+        error: 'missing_fields',
+        detail: 'email y codcli son requeridos',
+      });
     }
 
     // Password:
-    // - si ya había una guardada y ahora viene vacío → mantenemos la anterior
-    // - si NO había ninguna y viene vacío → error
-    let passwordEnc = maxiPrev.password_enc || null;
+    // - si viene algo nuevo → lo ciframos
+    // - si viene vacío pero ya había → dejamos la anterior
+    // - si viene vacío y nunca hubo → error
+    let passEnc = maxiPrev.pass_enc || null;
     if (password) {
-      passwordEnc = encryptSecretCompat(password);
+      passEnc = encryptSecretCompat(password);
     } else if (!hadPrevPass) {
       return res.status(400).json({
         error: 'missing_fields',
@@ -835,7 +828,7 @@ exports.saveMaxiCredentials = async (req, res, next) => {
       ...maxiPrev,
       email,
       codcli,
-      password_enc: passwordEnc,
+      pass_enc: passEnc,      // 🔑 mismo nombre que usa el resto del código
     };
 
     const newProps = {
@@ -844,13 +837,17 @@ exports.saveMaxiCredentials = async (req, res, next) => {
     };
 
     await pool.query(
-      'UPDATE businesses SET props = $2 WHERE id = $1',
-      [businessId, newProps]
+      'UPDATE app_businesses SET props = $2, updated_at = NOW() WHERE id = $1',
+      [biz.id, newProps]
     );
 
-    return res.json({ ok: true, business_id: businessId });
+    return res.json({
+      ok: true,
+      business_id: biz.id,
+      configured: true,
+    });
   } catch (e) {
     console.error('saveMaxiCredentials error', e);
     next(e);
   }
-}
+};
