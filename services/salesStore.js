@@ -187,10 +187,10 @@ function normalizeInvoices(businessId, rawDocs) {
           it.cod_art != null && it.cod_art !== ''
             ? String(it.cod_art)
             : it.productId != null
-            ? String(it.productId)
-            : it.product_id != null
-            ? String(it.product_id)
-            : null;
+              ? String(it.productId)
+              : it.product_id != null
+                ? String(it.product_id)
+                : null;
 
         pushItem(sale_idx, i + 1, {
           article_id: null,              // se rellenará luego por reconcile
@@ -229,10 +229,10 @@ function normalizeInvoices(businessId, rawDocs) {
           oi.cod_art != null && oi.cod_art !== ''
             ? String(oi.cod_art)
             : oi.productId != null
-            ? String(oi.productId)
-            : oi.product_id != null
-            ? String(oi.product_id)
-            : null;
+              ? String(oi.productId)
+              : oi.product_id != null
+                ? String(oi.product_id)
+                : null;
 
         pushItem(sale_idx, i + 1, {
           article_id: null,              // se setea luego según map
@@ -477,22 +477,22 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
          👉 SIN filtrar article_id: copiamos también el 0
     */
     const sqlMaxiDaily = `
-      INSERT INTO maxi_sales_daily (business_id, articulo_id, day, qty, amount)
-      SELECT
-        business_id,
-        article_id AS articulo_id,
-        day,
-        qty,
-        amount
-      FROM sales_daily_items
-      WHERE business_id = $1
-        AND day BETWEEN $2 AND $3
-      ON CONFLICT (business_id, articulo_id, day)
-      DO UPDATE SET
-        qty        = EXCLUDED.qty,
-        amount     = EXCLUDED.amount,
-        updated_at = now()
-    `;
+  INSERT INTO maxi_sales_daily (business_id, articulo_id, day, qty, amount)
+  SELECT
+    business_id,
+    article_id AS articulo_id,
+    day,
+    qty,
+    amount
+  FROM sales_daily_items
+  WHERE business_id = $1
+    AND day BETWEEN $2 AND $3
+  ON CONFLICT (business_id, articulo_id, day)
+  DO UPDATE SET
+    qty        = EXCLUDED.qty,
+    amount     = EXCLUDED.amount,
+    updated_at = now()
+`;
     await client.query(sqlMaxiDaily, params);
 
     if (ownClient) {
@@ -500,7 +500,7 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
     }
   } catch (e) {
     if (ownClient) {
-      try { await client.query('ROLLBACK'); } catch {}
+      try { await client.query('ROLLBACK'); } catch { }
     }
     throw e;
   } finally {
