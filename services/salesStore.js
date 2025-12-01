@@ -177,15 +177,14 @@ function normalizeInvoices(businessId, rawDocs) {
         const precio = toNum(it.precio);
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
-        // 👇 CLAVE: usamos cod_art como article_id numérico
         const rawCode = it.cod_art ?? it.codigo ?? it.code ?? null;
         const externalCode = rawCode != null ? String(rawCode) : null;
         const asNumber = Number(externalCode);
         const articleId = Number.isFinite(asNumber) ? asNumber : null;
 
         pushItem(sale_idx, i + 1, {
-          article_id: articleId,   // 👈 ya no null
-          sku: externalCode,       // guardamos string también
+          article_id: articleId,   // 👈 AHORA usamos el código numérico
+          sku: externalCode,       // string del código Maxi
           article_name: nombre,
           qty: cantidad,
           unit_price: precio,
@@ -215,7 +214,6 @@ function normalizeInvoices(businessId, rawDocs) {
         const price = toNum(oi.productPrice);
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
-        // 👇 igual que arriba pero para invoicebydate
         const rawCode = oi.cod_art ?? oi.codigo ?? oi.code ?? null;
         const externalCode = rawCode != null ? String(rawCode) : null;
         const asNumber = Number(externalCode);
