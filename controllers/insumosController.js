@@ -19,12 +19,32 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 function getBusinessIdFromReq(req) {
-  // depende de cómo lo deja loadActiveBusiness, pero cubrimos las 2 variantes
-  if (req.business && req.business.id) return Number(req.business.id);
-  if (req.user && req.user.active_business_id) return Number(req.user.active_business_id);
+  // 1) HEADER / QUERY → SIEMPRE PRIORIDAD
+  const hdr =
+    req.header('X-Business-Id') ||
+    req.header('X-Business') ||
+    req.headers['x-business-id'] ||
+    req.headers['x-business'] ||
+    req.query.businessId;
 
-  const hdr = req.header('X-Business-Id') || req.query.businessId;
-  return hdr ? Number(hdr) : null;
+  if (hdr != null && hdr !== '') {
+    const n = Number(hdr);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  // 2) CONTEXTO DEL REQUEST (middleware / token)
+  if (req.business && req.business.id) {
+    const n = Number(req.business.id);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  if (req.user && req.user.active_business_id) {
+    const n = Number(req.user.active_business_id);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  // 3) Nada encontrado
+  return null;
 }
 
 // ===================== LISTAR / CRUD BÁSICO =====================

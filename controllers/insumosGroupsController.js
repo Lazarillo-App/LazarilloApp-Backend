@@ -3,12 +3,27 @@ const pool = require('../config/db');
 
 /* =============== OBTENER BUSINESS =============== */
 function getBusinessId(req) {
-  // si lo guardás en req.business.id (middleware de negocio)
-  if (req.business && req.business.id) return Number(req.business.id);
+  const hdr =
+    req.header('X-Business-Id') ||
+    req.header('X-Business') ||
+    req.headers['x-business-id'] ||
+    req.headers['x-business'] ||
+    req.query.businessId;
 
-  // o desde el token / header (adaptar si hace falta)
-  const fromHeader = req.headers['x-business-id'] || req.headers['x-business'];
-  if (fromHeader) return Number(fromHeader);
+  if (hdr != null && hdr !== '') {
+    const n = Number(hdr);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  if (req.business && req.business.id) {
+    const n = Number(req.business.id);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  if (req.user && req.user.active_business_id) {
+    const n = Number(req.user.active_business_id);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
 
   return null;
 }
