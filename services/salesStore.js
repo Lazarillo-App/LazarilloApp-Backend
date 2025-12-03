@@ -564,7 +564,7 @@ async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
         ON m.business_id = s.business_id
      WHERE s.id = si.sale_id
        AND s.business_id = $1
-       AND (si.article_id IS NULL OR si.article_id = 0)
+       AND (si.article_id IS NULL OR si.article_id = 0)  -- 👈 importante
        AND si.name IS NOT NULL
        AND lower(unaccent(si.name)) = lower(unaccent(m.title))
        AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
