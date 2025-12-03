@@ -413,18 +413,32 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
 
     const params = [businessId, fromYmd, toYmd];
 
-    /* 1) sales_daily: totales por día (tickets) */
+    /* 1) sales_daily: totales por día (derivados de los ítems) */
     const sqlDaily = `
       INSERT INTO sales_daily (business_id, day, total, tx_count)
       SELECT
         s.business_id,
         (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-        SUM(s.total) AS total,
-        COUNT(*)    AS tx_count
-      FROM app_sales s
+        -- 💰 Total = suma de los importes de los ítems
+        SUM(
+          CASE
+            WHEN si.amount IS NOT NULL AND si.amount <> 0
+              THEN si.amount
+            WHEN si.total IS NOT NULL
+              THEN si.total
+            ELSE 0
+          END
+        ) AS total,
+        -- 🎟️ Cantidad de tickets distintos
+        COUNT(DISTINCT s.id) AS tx_count
+      FROM app_sales_items si
+      JOIN app_sales s
+        ON s.id = si.sale_id
       WHERE s.business_id = $1
         AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2 AND $3
-      GROUP BY s.business_id, (s.occurred_at AT TIME ZONE 'UTC')::date
+      GROUP BY
+        s.business_id,
+        (s.occurred_at AT TIME ZONE 'UTC')::date
       ON CONFLICT (business_id, day)
       DO UPDATE SET
         total    = EXCLUDED.total,
