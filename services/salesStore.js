@@ -206,10 +206,11 @@ function normalizeInvoices(businessId, rawDocs) {
         const precio = toNum(it.precio);
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
-        const { externalCode, articleId } = extractCode(it);
+        const { externalCode /*, articleId */ } = extractCode(it);
 
+        // 👇 Dejamos article_id en NULL y usamos solo sku para mapear luego
         pushItem(sale_idx, i + 1, {
-          article_id: articleId,
+          article_id: null,
           sku: externalCode,
           article_name: nombre,
           qty: cantidad,
@@ -240,10 +241,10 @@ function normalizeInvoices(businessId, rawDocs) {
         const price = toNum(oi.productPrice);
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
-        const { externalCode, articleId } = extractCode(oi);
+        const { externalCode /*, articleId */ } = extractCode(oi);
 
         pushItem(sale_idx, i + 1, {
-          article_id: articleId,
+          article_id: null,
           sku: externalCode,
           article_name: title,
           qty,
