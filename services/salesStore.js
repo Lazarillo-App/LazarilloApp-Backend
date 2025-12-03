@@ -206,11 +206,9 @@ function normalizeInvoices(businessId, rawDocs) {
         const precio = toNum(it.precio);
         const lineTotal = toNum(it.total) || (cantidad * precio);
 
-        const { externalCode /*, articleId */ } = extractCode(it);
+        const { externalCode } = extractCode(it);
 
-        // 👇 Dejamos article_id en NULL y usamos solo sku para mapear luego
         pushItem(sale_idx, i + 1, {
-          article_id: null,
           sku: externalCode,
           article_name: nombre,
           qty: cantidad,
@@ -241,10 +239,9 @@ function normalizeInvoices(businessId, rawDocs) {
         const price = toNum(oi.productPrice);
         const lineTot = toNum(oi.totalPrice) || (qty * price);
 
-        const { externalCode /*, articleId */ } = extractCode(oi);
+        const { externalCode } = extractCode(oi);
 
         pushItem(sale_idx, i + 1, {
-          article_id: null,
           sku: externalCode,
           article_name: title,
           qty,
@@ -529,19 +526,20 @@ async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
     JOIN maxi_article_map m
       ON m.business_id = s.business_id
    WHERE s.id = si.sale_id
-     AND s.business_id = $1
-     AND si.article_id IS NULL
-     AND si.sku IS NOT NULL
-     AND (
-       trim(si.sku) = trim(m.external_code)
-       OR (
-         si.sku ~ '^[0-9]+$'
-         AND m.external_code ~ '^[0-9]+$'
-         AND si.sku::bigint = m.external_code::bigint
-       )
-     )
-     AND (s.occurred_at AT TIME ZONE 'UTC')::date
-         BETWEEN $2::date AND $3::date
+  AND s.business_id = $1
+  AND (si.article_id IS NULL OR si.article_id = 0) -- 👈 antes sólo IS NULL
+  AND si.sku IS NOT NULL
+  AND (
+    trim(si.sku) = trim(m.external_code)
+    OR (
+      si.sku ~ '^[0-9]+$'
+      AND m.external_code ~ '^[0-9]+$'
+      AND si.sku::bigint = m.external_code::bigint
+    )
+  )
+  AND (s.occurred_at AT TIME ZONE 'UTC')::date
+      BETWEEN $2::date AND $3::date
+
   `,
     [businessId, fromYmd, toYmd]
   );
