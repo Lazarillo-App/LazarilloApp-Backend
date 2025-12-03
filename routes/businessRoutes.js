@@ -251,4 +251,17 @@ router.post(
 
 router.post('/:businessId/rebuild-article-map', businesses.rebuildForBusiness);
 
+router.post('/:id/onboard', async (req, res, next) => {
+  try {
+    const businessId = Number(req.params.id);
+    const daysBack = Number(req.query.daysBack || 7);
+
+    const result = await onboardBusiness(businessId, { daysBack });
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
