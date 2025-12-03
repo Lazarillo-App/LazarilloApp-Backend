@@ -1,4 +1,3 @@
-// services/businessOnboarding.js
 const { importMaxiMenuForBusiness } = require('./maxiMenuService');
 const { syncSalesWindow } = require('./maxiSalesService');
 const { getBusinessById } = require('./businessesStore');
@@ -9,15 +8,11 @@ async function onboardBusiness(businessId, { daysBack = 7 } = {}) {
     throw new Error(`Negocio ${businessId} no existe`);
   }
 
-  // 1) Verificar que tenga credenciales Maxi
-  // (podés llamar internamente a maxi-ping o reusar tu helper)
-  // Si falla, tirás error claro tipo "Faltan credenciales Maxi".
-
   // 2) Importar catálogo Maxi (maxi_articles + maxi_article_map)
   await importMaxiMenuForBusiness(businessId);
 
   // 3) Rango de fechas a sincronizar (últimos N días)
-  const to = new Date(); // hoy
+  const to = new Date();
   const from = new Date();
   from.setDate(to.getDate() - daysBack);
 
