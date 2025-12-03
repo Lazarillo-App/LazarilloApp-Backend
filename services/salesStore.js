@@ -517,30 +517,40 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
 async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
   if (!fromYmd || !toYmd) return;
 
-  // 1) Match por código externo (preciso)
+  // 1) Match por código externo / código numérico (articulo_id)
   await client.query(
     `
-  UPDATE app_sales_items si
-     SET article_id = m.article_id
-    FROM app_sales s
-    JOIN maxi_article_map m
-      ON m.business_id = s.business_id
-   WHERE s.id = si.sale_id
-  AND s.business_id = $1
-  AND (si.article_id IS NULL OR si.article_id = 0) -- 👈 antes sólo IS NULL
-  AND si.sku IS NOT NULL
-  AND (
-    trim(si.sku) = trim(m.external_code)
-    OR (
-      si.sku ~ '^[0-9]+$'
-      AND m.external_code ~ '^[0-9]+$'
-      AND si.sku::bigint = m.external_code::bigint
-    )
-  )
-  AND (s.occurred_at AT TIME ZONE 'UTC')::date
-      BETWEEN $2::date AND $3::date
-
-  `,
+    UPDATE app_sales_items si
+       SET article_id = m.article_id
+      FROM app_sales s
+      JOIN maxi_article_map m
+        ON m.business_id = s.business_id
+     WHERE s.id = si.sale_id
+       AND s.business_id = $1
+       AND (si.article_id IS NULL OR si.article_id = 0)
+       AND (
+         -- Caso 1: match directo por external_code (texto)
+         (
+           si.sku IS NOT NULL
+           AND trim(si.sku) <> ''
+           AND trim(si.sku) = trim(m.external_code)
+         )
+         OR
+         -- Caso 2: sku numérico → comparo con external_code numérico o con m.articulo_id
+         (
+           si.sku ~ '^[0-9]+$'
+           AND (
+             (m.external_code IS NOT NULL
+              AND m.external_code ~ '^[0-9]+$'
+              AND si.sku::bigint = m.external_code::bigint)
+             OR
+             si.sku::bigint = m.articulo_id
+           )
+         )
+       )
+       AND (s.occurred_at AT TIME ZONE 'UTC')::date
+           BETWEEN $2::date AND $3::date
+    `,
     [businessId, fromYmd, toYmd]
   );
 
@@ -554,7 +564,7 @@ async function reconcileSalesMappings(client, businessId, { fromYmd, toYmd }) {
         ON m.business_id = s.business_id
      WHERE s.id = si.sale_id
        AND s.business_id = $1
-       AND si.article_id IS NULL
+       AND (si.article_id IS NULL OR si.article_id = 0)
        AND si.name IS NOT NULL
        AND lower(unaccent(si.name)) = lower(unaccent(m.title))
        AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
