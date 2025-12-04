@@ -468,15 +468,14 @@ CROSS JOIN LATERAL (
   }
 };
 
-exports.adminSyncSales = async (req, res, next) => {
-  try {
-    const biz = req.business;
-    const out = await exports.syncSalesForBusiness(biz, req.body || {}, req);
-    res.json({ ok: true, business_id: biz.id, sales: out });
-  } catch (e) {
-    next(e);
+function csvEscape(val) {
+  if (val == null) return '';
+  const s = String(val);
+  if (/[;"\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
   }
-};
+  return s;
+}
 
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
   try {
@@ -487,12 +486,73 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       return res.status(400).json({ error: 'businessId inválido' });
     }
     if (!from || !to) {
-      return res.status(400).json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
+      return res
+        .status(400)
+        .json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
     }
 
     const sql = `
 WITH
--- aggregated known (article_id != 0) per day
+-- A) unknowns desde app_sales_items (usa campos que realmente existen: title, name, article_name)
+asi_unknowns AS (
+  SELECT
+    (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, '')) ) AS maxi_nombre_norm,
+    SUM(ai.qty)::numeric AS qty,
+    SUM(ai.amount)::numeric AS amount
+  FROM app_sales_items ai
+  JOIN app_sales s ON s.id = ai.sale_id
+  WHERE s.business_id = $1
+    AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+    AND (ai.article_id IS NULL OR ai.article_id = 0)
+  GROUP BY (s.occurred_at AT TIME ZONE 'UTC')::date, UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, '')))
+),
+
+-- B) intentar resolver asi_unknowns contra maxi_articles (primario) y app_articles (fallback)
+unknown_resolved AS (
+  SELECT
+    u.day,
+    u.maxi_nombre_norm,
+    ma.articulo_id AS resolved_article_id,
+    ma.nombre      AS resolved_nombre,
+    u.qty,
+    u.amount
+  FROM asi_unknowns u
+  JOIN public.maxi_articles ma
+    ON ma.business_id = $1
+   AND UPPER(TRIM(ma.nombre)) = u.maxi_nombre_norm
+
+  UNION ALL
+
+  -- fallback contra app_articles si no se resolvió en maxi_articles
+  SELECT
+    u.day,
+    u.maxi_nombre_norm,
+    a.id AS resolved_article_id,
+    COALESCE(a.name, a.nombre)::text AS resolved_nombre,
+    u.qty,
+    u.amount
+  FROM asi_unknowns u
+  LEFT JOIN public.maxi_articles ma2
+    ON ma2.business_id = $1 AND UPPER(TRIM(ma2.nombre)) = u.maxi_nombre_norm
+  JOIN app_articles a
+    ON a.business_id = $1
+   AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = u.maxi_nombre_norm
+  WHERE ma2.articulo_id IS NULL
+),
+
+-- aggregated resolved unknowns (por day + resolved article)
+unknown_resolved_agg AS (
+  SELECT
+    day,
+    resolved_article_id::bigint AS article_id,
+    SUM(qty)::numeric AS qty,
+    SUM(amount)::numeric AS amount
+  FROM unknown_resolved
+  GROUP BY day, resolved_article_id
+),
+
+-- filas "conocidas" (article_id != 0) agregadas por day + article_id desde sales_daily_items
 known_agg AS (
   SELECT
     sdi.day::date AS day,
@@ -506,57 +566,7 @@ known_agg AS (
   GROUP BY sdi.day::date, sdi.article_id
 ),
 
--- unknowns coming from app_sales_items (text titles)
-asi_unknowns AS (
-  SELECT
-    (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.nombre, ''))) AS maxi_nombre_norm,
-    SUM(ai.qty)::numeric AS qty,
-    SUM(ai.amount)::numeric AS amount
-  FROM app_sales_items ai
-  JOIN app_sales s ON s.id = ai.sale_id
-  WHERE s.business_id = $1
-    AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-    AND (ai.article_id IS NULL OR ai.article_id = 0)
-  GROUP BY (s.occurred_at AT TIME ZONE 'UTC')::date, UPPER(TRIM(COALESCE(ai.title, ai.name, ai.nombre, '')))
-),
-
--- resolve unknowns against maxi_articles -> fallback app_articles
-unknown_resolved AS (
-  SELECT
-    u.day,
-    u.maxi_nombre_norm,
-    ma.articulo_id AS resolved_article_id,
-    ma.nombre AS resolved_nombre,
-    u.qty, u.amount
-  FROM asi_unknowns u
-  JOIN public.maxi_articles ma
-    ON ma.business_id = $1
-   AND UPPER(TRIM(ma.nombre)) = u.maxi_nombre_norm
-
-  UNION ALL
-
-  SELECT
-    u.day,
-    u.maxi_nombre_norm,
-    a.id AS resolved_article_id,
-    COALESCE(a.name, a.nombre)::text AS resolved_nombre,
-    u.qty, u.amount
-  FROM asi_unknowns u
-  LEFT JOIN public.maxi_articles ma2
-    ON ma2.business_id = $1 AND UPPER(TRIM(ma2.nombre)) = u.maxi_nombre_norm
-  JOIN app_articles a
-    ON a.business_id = $1
-   AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = u.maxi_nombre_norm
-  WHERE ma2.articulo_id IS NULL
-),
-
-unknown_resolved_agg AS (
-  SELECT day, resolved_article_id::bigint AS article_id, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
-  FROM unknown_resolved
-  GROUP BY day, resolved_article_id
-),
-
+-- sumar known_agg + unknown_resolved_agg por day+article_id
 merged AS (
   SELECT
     COALESCE(k.day, u.day) AS day,
@@ -575,22 +585,33 @@ SELECT
   m.qty,
   m.amount
 FROM merged m
-LEFT JOIN public.maxi_articles ma ON ma.business_id = $1 AND ma.articulo_id = m.article_id
-LEFT JOIN app_articles a ON a.business_id = $1 AND a.id = m.article_id
+LEFT JOIN public.maxi_articles ma
+  ON ma.business_id = $1 AND ma.articulo_id = m.article_id
+LEFT JOIN app_articles a
+  ON a.business_id = $1 AND a.id = m.article_id
 ORDER BY m.day, m.article_id;
 `;
 
     const { rows } = await pool.query(sql, [businessId, from, to]);
 
-    // Headers CSV (coherentes con lo que el SELECT devuelve)
+    // Headers CSV
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="ventas_${businessId}_${from}_${to}.csv"`);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="ventas_semanales_${businessId}_${from}_${to}.csv"`
+    );
 
-    // BOM para Excel
+    // BOM UTF-8 para Excel
     res.write('\uFEFF');
 
-    // Columnas claras y reales
-    const headers = ['business_id', 'day', 'article_id', 'article_title', 'qty', 'amount'];
+    const headers = [
+      'business_id',
+      'fecha',
+      'id_articulo',
+      'nombre_articulo',
+      'unidades',
+      'venta',
+    ];
     res.write(headers.join(';') + '\n');
 
     for (const r of rows) {
@@ -604,9 +625,11 @@ ORDER BY m.day, m.article_id;
       ].join(';');
       res.write(line + '\n');
     }
+
     res.end();
   } catch (e) {
-    console.error('[salesExportController] error exportando CSV', e);
-    res.status(500).json({ error: 'Error exportando CSV', detail: e.message || String(e) });
+    // logging más útil para depurar
+    console.error('[salesExportController] error exportando CSV', e.message, e.detail || '');
+    return res.status(500).json({ error: 'Error exportando CSV', detail: e.message || String(e) });
   }
 };

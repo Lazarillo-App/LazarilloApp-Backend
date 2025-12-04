@@ -443,7 +443,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const txCount = Number(totRows[0]?.tx_count || 0);
 
     /* 2) Items: versión MERGED que intenta resolver article_id = 0 por texto
-       usando tanto sales_daily_items (si tiene texto) como app_sales_items/app_sales.
+       usando app_sales_items (para títulos) + sales_daily_items (para los article_id ya mapeados).
     */
     const params = [biz.id, fromYmd, toYmd];
     let whereExtra = '';
@@ -461,23 +461,10 @@ exports.salesSummaryFromDB = async (req, res, next) => {
 
     const sqlItemsMerged = `
 WITH
--- A) unknowns desde sales_daily_items (si existiese campo texto) agrupados por nombre normalizado
-sd_unknowns AS (
-  SELECT
-    UPPER(TRIM(COALESCE(s.article_title, s.title, s.name, ''))) AS maxi_nombre_norm,
-    SUM(s.qty)::numeric AS qty,
-    SUM(s.amount)::numeric AS amount
-  FROM sales_daily_items s
-  WHERE s.business_id = $1
-    AND s.day BETWEEN $2::date AND $3::date
-    AND (s.article_id IS NULL OR s.article_id = 0)
-  GROUP BY UPPER(TRIM(COALESCE(s.article_title, s.title, s.name, '')))
-),
-
--- B) unknowns desde app_sales_items JOIN app_sales (más probable que tenga títulos)
+-- A) unknowns desde app_sales_items (usa campos que realmente existen: title, name, article_name, sku)
 asi_unknowns AS (
   SELECT
-    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, ''))) AS maxi_nombre_norm,
+    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, ''))) AS maxi_nombre_norm,
     SUM(ai.qty)::numeric AS qty,
     SUM(ai.amount)::numeric AS amount
   FROM app_sales_items ai
@@ -485,15 +472,13 @@ asi_unknowns AS (
   WHERE s.business_id = $1
     AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
     AND (ai.article_id IS NULL OR ai.article_id = 0)
-  GROUP BY UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, '')))
-},
+  GROUP BY UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, '')))
+),
 
--- C) unión de unknowns (sales_daily_items + app_sales_items)
+-- B) aggregated unknown_items (uniendo posibles fuentes de texto; aquí solo usamos app_sales_items porque sales_daily_items no tiene texto)
 unknown_items AS (
   SELECT maxi_nombre_norm, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
   FROM (
-    SELECT * FROM sd_unknowns
-    UNION ALL
     SELECT * FROM asi_unknowns
   ) t
   GROUP BY maxi_nombre_norm
@@ -620,7 +605,6 @@ LIMIT ${Number(lim)}
     next(e);
   }
 };
-
 
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
