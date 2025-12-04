@@ -190,7 +190,7 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
       businessId: biz.id,
       from: F,
       to: T,
-      req,            // 👈 ahora sí entra el req si lo necesitás
+      req,           
     });
 
     if (dryrun) {
@@ -288,7 +288,10 @@ exports.listDailyItems = async (req, res, next) => {
     }
 
     const params = [biz.id, from, to];
-    const filters = [`sdi.business_id = $1`, `sdi.day BETWEEN $2 AND $3`];
+    const filters = [
+      `sdi.business_id = $1`,
+      `sdi.day BETWEEN $2::date AND $3::date`
+    ];
 
     if (articleId) {
       params.push(Number(articleId));
