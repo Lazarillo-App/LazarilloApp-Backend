@@ -461,7 +461,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       WHERE sdi.business_id = $1
         AND sdi.day::date >= $2::date
         AND sdi.day::date <= $3::date
-        AND sdi.article_id <> 0
 
       GROUP BY
         sdi.business_id,
