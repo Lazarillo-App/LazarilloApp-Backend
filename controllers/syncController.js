@@ -423,9 +423,7 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const toYmd = String(to || '').slice(0, 10);
 
     if (!fromYmd || !toYmd) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'from_to_required' });
+      return res.status(400).json({ ok: false, error: 'from_to_required' });
     }
 
     const lim = Number(limit) || 50;
@@ -440,51 +438,166 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       WHERE business_id = $1
         AND day BETWEEN $2::date AND $3::date
     `;
-    const { rows: totRows } = await pool.query(sqlTotals, [
-      biz.id,
-      fromYmd,
-      toYmd,
-    ]);
-
+    const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
     const total = Number(totRows[0]?.total || 0);
     const txCount = Number(totRows[0]?.tx_count || 0);
 
-    /* 2) Items: agregamos por article_id (ignora article_id = 0)
-       y resolvemos nombre desde maxi_articles/app_articles.
-       Si necesitás incluir article_id = 0 (unknowns) necesitaremos
-       una columna de texto en la tabla origen o consultar app_sales_items. */
+    /* 2) Items: versión MERGED que intenta resolver article_id = 0 por texto
+       usando tanto sales_daily_items (si tiene texto) como app_sales_items/app_sales.
+    */
     const params = [biz.id, fromYmd, toYmd];
     let whereExtra = '';
 
     if (search) {
       params.push(`%${search}%`);
       const pIdx = params.length;
-      whereExtra = `AND (
-        COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text)) ILIKE $${pIdx}
-      )`;
+      whereExtra = `
+        AND (
+          COALESCE(ma.nombre, a.name, ('Artículo #' || COALESCE(m.article_id, r.resolved_id)::text))
+          ILIKE $${pIdx}
+        )
+      `;
     }
 
-    const sqlItems = `
-      SELECT
-        s.article_id::bigint AS article_id,
-        COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text)) AS nombre,
-        SUM(s.qty)::numeric AS qty,
-        SUM(s.amount)::numeric AS amount
-      FROM sales_daily_items s
-      LEFT JOIN public.maxi_articles ma
-        ON ma.business_id = $1 AND ma.articulo_id = s.article_id
-      LEFT JOIN app_articles a
-        ON a.business_id = $1 AND a.id = s.article_id
-      WHERE s.business_id = $1
-        AND s.day BETWEEN $2::date AND $3::date
-        AND COALESCE(s.article_id,0) <> 0
-        ${whereExtra}
-      GROUP BY s.article_id, ma.nombre, a.name
-      ORDER BY amount DESC
-      LIMIT ${Number(lim)}
-    `;
+    const sqlItemsMerged = `
+WITH
+-- A) unknowns desde sales_daily_items (si existiese campo texto) agrupados por nombre normalizado
+sd_unknowns AS (
+  SELECT
+    UPPER(TRIM(COALESCE(s.article_title, s.title, s.name, ''))) AS maxi_nombre_norm,
+    SUM(s.qty)::numeric AS qty,
+    SUM(s.amount)::numeric AS amount
+  FROM sales_daily_items s
+  WHERE s.business_id = $1
+    AND s.day BETWEEN $2::date AND $3::date
+    AND (s.article_id IS NULL OR s.article_id = 0)
+  GROUP BY UPPER(TRIM(COALESCE(s.article_title, s.title, s.name, '')))
+),
 
-    const { rows } = await pool.query(sqlItems, params);
+-- B) unknowns desde app_sales_items JOIN app_sales (más probable que tenga títulos)
+asi_unknowns AS (
+  SELECT
+    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, ''))) AS maxi_nombre_norm,
+    SUM(ai.qty)::numeric AS qty,
+    SUM(ai.amount)::numeric AS amount
+  FROM app_sales_items ai
+  JOIN app_sales s ON s.id = ai.sale_id
+  WHERE s.business_id = $1
+    AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
+    AND (ai.article_id IS NULL OR ai.article_id = 0)
+  GROUP BY UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, '')))
+},
+
+-- C) unión de unknowns (sales_daily_items + app_sales_items)
+unknown_items AS (
+  SELECT maxi_nombre_norm, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
+  FROM (
+    SELECT * FROM sd_unknowns
+    UNION ALL
+    SELECT * FROM asi_unknowns
+  ) t
+  GROUP BY maxi_nombre_norm
+),
+
+-- 2) intentar resolver unknown_items contra maxi_articles (primario) y app_articles (fallback)
+unknown_resolved AS (
+  SELECT
+    u.maxi_nombre_norm,
+    ma.articulo_id    AS resolved_article_id,
+    ma.nombre         AS resolved_nombre
+  FROM unknown_items u
+  JOIN public.maxi_articles ma
+    ON ma.business_id = $1
+   AND UPPER(TRIM(ma.nombre)) = u.maxi_nombre_norm
+
+  UNION ALL
+
+  -- fallback por coincidencia en app_articles (si no existe en maxi_articles)
+  SELECT
+    u.maxi_nombre_norm,
+    a.id              AS resolved_article_id,
+    COALESCE(a.name, a.nombre)::text AS resolved_nombre
+  FROM unknown_items u
+  JOIN app_articles a
+    ON a.business_id = $1
+   AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = u.maxi_nombre_norm
+),
+
+-- 3) aggregated unknown_resolved (por si hay múltiples matches)
+unknown_resolved_agg AS (
+  SELECT
+    maxi_nombre_norm,
+    MIN(resolved_article_id)::bigint AS resolved_article_id,
+    MIN(resolved_nombre)::text AS resolved_nombre
+  FROM unknown_resolved
+  GROUP BY maxi_nombre_norm
+),
+
+-- 4) totals por article_id ya existentes (articulos con id != 0) desde sales_daily_items
+known_agg AS (
+  SELECT
+    s.article_id::bigint AS article_id,
+    SUM(s.qty)::numeric AS qty,
+    SUM(s.amount)::numeric AS amount
+  FROM sales_daily_items s
+  WHERE s.business_id = $1
+    AND s.day BETWEEN $2::date AND $3::date
+    AND COALESCE(s.article_id,0) <> 0
+  GROUP BY s.article_id
+),
+
+-- 5) sumar unknowns resueltos a known_agg por article_id
+merged AS (
+  SELECT
+    k.article_id,
+    COALESCE(k.qty,0) + COALESCE(u.qty,0)    AS qty,
+    COALESCE(k.amount,0) + COALESCE(u.amount,0) AS amount
+  FROM known_agg k
+  LEFT JOIN (
+    -- join unknown_items -> unknown_resolved_agg -> amounts
+    SELECT
+      ura.resolved_article_id::bigint AS resolved_id,
+      SUM(ui.qty)::numeric AS qty,
+      SUM(ui.amount)::numeric AS amount
+    FROM unknown_items ui
+    LEFT JOIN unknown_resolved_agg ura
+      ON ui.maxi_nombre_norm = ura.maxi_nombre_norm
+    WHERE ura.resolved_article_id IS NOT NULL
+    GROUP BY ura.resolved_article_id
+  ) u
+    ON u.resolved_id = k.article_id
+)
+
+-- 6) final: devolver top N por amount (si un resolved_id existe pero no había known_agg, lo agregamos)
+SELECT
+  COALESCE(m.article_id, r.resolved_id) AS article_id,
+  COALESCE(ma.nombre, a.name, ('Artículo #' || COALESCE(m.article_id, r.resolved_id)::text)) AS nombre,
+  COALESCE(m.qty, 0) + COALESCE(r.qty, 0) AS qty,
+  COALESCE(m.amount, 0) + COALESCE(r.amount, 0) AS amount
+FROM
+  merged m
+FULL OUTER JOIN (
+  SELECT
+    ura.resolved_article_id::bigint AS resolved_id,
+    SUM(ui.qty)::numeric AS qty,
+    SUM(ui.amount)::numeric AS amount
+  FROM unknown_items ui
+  JOIN unknown_resolved_agg ura
+    ON ui.maxi_nombre_norm = ura.maxi_nombre_norm
+  GROUP BY ura.resolved_article_id
+) r
+  ON r.resolved_id = m.article_id
+LEFT JOIN public.maxi_articles ma
+  ON ma.business_id = $1 AND ma.articulo_id = COALESCE(m.article_id, r.resolved_id)
+LEFT JOIN app_articles a
+  ON a.business_id = $1 AND a.id = COALESCE(m.article_id, r.resolved_id)
+${whereExtra}
+ORDER BY amount DESC
+LIMIT ${Number(lim)}
+`;
+
+    // Ejecutamos la query final
+    const { rows } = await pool.query(sqlItemsMerged, params);
 
     return res.json({
       ok: true,
