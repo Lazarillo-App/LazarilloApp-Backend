@@ -413,198 +413,102 @@ exports.maxiArticlesProxy = async (req, res) => {
 
 // controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
 
-// controllers/syncController.js
+/* salesSummaryFromDB - versión top-N agregada (usa columnas reales) */
 exports.salesSummaryFromDB = async (req, res, next) => {
-  try {
-    const biz = req.business;
-    const { from, to, limit = 50, q } = req.query;
+try {
+const biz = req.business;
+const { from, to, limit = 50, q } = req.query;
 
-    const fromYmd = String(from || '').slice(0, 10);
-    const toYmd = String(to || '').slice(0, 10);
 
-    if (!fromYmd || !toYmd) {
-      return res.status(400).json({ ok: false, error: 'from_to_required' });
-    }
+const fromYmd = String(from || '').slice(0, 10);
+const toYmd = String(to || '').slice(0, 10);
 
-    const lim = Number(limit) || 50;
-    const search = (q && String(q).trim()) || null;
+if (!fromYmd || !toYmd) {
+  return res.status(400).json({ ok: false, error: 'from_to_required' });
+}
 
-    /* 1) Totales por día desde sales_daily */
-    const sqlTotals = `
-      SELECT
-        COALESCE(SUM(total), 0)::numeric AS total,
-        COALESCE(SUM(tx_count), 0)::int  AS tx_count
-      FROM sales_daily
-      WHERE business_id = $1
-        AND day BETWEEN $2::date AND $3::date
-    `;
-    const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
-    const total = Number(totRows[0]?.total || 0);
-    const txCount = Number(totRows[0]?.tx_count || 0);
+const lim = Number(limit) || 50;
+const search = (q && String(q).trim()) || null;
 
-    /* 2) Items: versión MERGED que intenta resolver article_id = 0 por texto
-       usando app_sales_items (para títulos) + sales_daily_items (para los article_id ya mapeados).
-    */
-    const params = [biz.id, fromYmd, toYmd];
-    let whereExtra = '';
-
-    if (search) {
-      params.push(`%${search}%`);
-      const pIdx = params.length;
-      whereExtra = `
-        AND (
-          COALESCE(ma.nombre, a.name, ('Artículo #' || COALESCE(m.article_id, r.resolved_id)::text))
-          ILIKE $${pIdx}
-        )
-      `;
-    }
-
-    const sqlItemsMerged = `
-WITH
--- A) unknowns desde app_sales_items (usa campos que realmente existen: title, name, article_name, sku)
-asi_unknowns AS (
+/* Totales por día desde sales_daily */
+const sqlTotals = `
   SELECT
-    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, ''))) AS maxi_nombre_norm,
-    SUM(ai.qty)::numeric AS qty,
-    SUM(ai.amount)::numeric AS amount
-  FROM app_sales_items ai
-  JOIN app_sales s ON s.id = ai.sale_id
-  WHERE s.business_id = $1
-    AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-    AND (ai.article_id IS NULL OR ai.article_id = 0)
-  GROUP BY UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, '')))
-),
+    COALESCE(SUM(total), 0)::numeric AS total,
+    COALESCE(SUM(tx_count), 0)::int  AS tx_count
+  FROM sales_daily
+  WHERE business_id = $1
+    AND day BETWEEN $2::date AND $3::date
+`;
+const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
+const total = Number(totRows[0]?.total || 0);
+const txCount = Number(totRows[0]?.tx_count || 0);
 
--- B) aggregated unknown_items (uniendo posibles fuentes de texto; aquí solo usamos app_sales_items porque sales_daily_items no tiene texto)
-unknown_items AS (
-  SELECT maxi_nombre_norm, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
-  FROM (
-    SELECT * FROM asi_unknowns
-  ) t
-  GROUP BY maxi_nombre_norm
-),
+const params = [biz.id, fromYmd, toYmd];
+let whereExtra = '';
 
--- 2) intentar resolver unknown_items contra maxi_articles (primario) y app_articles (fallback)
-unknown_resolved AS (
-  SELECT
-    u.maxi_nombre_norm,
-    ma.articulo_id    AS resolved_article_id,
-    ma.nombre         AS resolved_nombre
-  FROM unknown_items u
-  JOIN public.maxi_articles ma
-    ON ma.business_id = $1
-   AND UPPER(TRIM(ma.nombre)) = u.maxi_nombre_norm
+if (search) {
+  params.push(`%${search}%`);
+  const pIdx = params.length;
+  whereExtra = `
+    AND (
+      COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text))
+      ILIKE $${pIdx}
+    )
+  `;
+}
 
-  UNION ALL
+const sqlItems = `
 
-  -- fallback por coincidencia en app_articles (si no existe en maxi_articles)
-  SELECT
-    u.maxi_nombre_norm,
-    a.id              AS resolved_article_id,
-    COALESCE(a.name, a.nombre)::text AS resolved_nombre
-  FROM unknown_items u
-  JOIN app_articles a
-    ON a.business_id = $1
-   AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = u.maxi_nombre_norm
-),
 
--- 3) aggregated unknown_resolved (por si hay múltiples matches)
-unknown_resolved_agg AS (
-  SELECT
-    maxi_nombre_norm,
-    MIN(resolved_article_id)::bigint AS resolved_article_id,
-    MIN(resolved_nombre)::text AS resolved_nombre
-  FROM unknown_resolved
-  GROUP BY maxi_nombre_norm
-),
-
--- 4) totals por article_id ya existentes (articulos con id != 0) desde sales_daily_items
-known_agg AS (
-  SELECT
-    s.article_id::bigint AS article_id,
-    SUM(s.qty)::numeric AS qty,
-    SUM(s.amount)::numeric AS amount
-  FROM sales_daily_items s
-  WHERE s.business_id = $1
-    AND s.day BETWEEN $2::date AND $3::date
-    AND COALESCE(s.article_id,0) <> 0
-  GROUP BY s.article_id
-),
-
--- 5) sumar unknowns resueltos a known_agg por article_id
-merged AS (
-  SELECT
-    k.article_id,
-    COALESCE(k.qty,0) + COALESCE(u.qty,0)    AS qty,
-    COALESCE(k.amount,0) + COALESCE(u.amount,0) AS amount
-  FROM known_agg k
-  LEFT JOIN (
-    -- join unknown_items -> unknown_resolved_agg -> amounts
-    SELECT
-      ura.resolved_article_id::bigint AS resolved_id,
-      SUM(ui.qty)::numeric AS qty,
-      SUM(ui.amount)::numeric AS amount
-    FROM unknown_items ui
-    LEFT JOIN unknown_resolved_agg ura
-      ON ui.maxi_nombre_norm = ura.maxi_nombre_norm
-    WHERE ura.resolved_article_id IS NOT NULL
-    GROUP BY ura.resolved_article_id
-  ) u
-    ON u.resolved_id = k.article_id
-)
-
--- 6) final: devolver top N por amount (si un resolved_id existe pero no había known_agg, lo agregamos)
 SELECT
-  COALESCE(m.article_id, r.resolved_id) AS article_id,
-  COALESCE(ma.nombre, a.name, ('Artículo #' || COALESCE(m.article_id, r.resolved_id)::text)) AS nombre,
-  COALESCE(m.qty, 0) + COALESCE(r.qty, 0) AS qty,
-  COALESCE(m.amount, 0) + COALESCE(r.amount, 0) AS amount
-FROM
-  merged m
-FULL OUTER JOIN (
-  SELECT
-    ura.resolved_article_id::bigint AS resolved_id,
-    SUM(ui.qty)::numeric AS qty,
-    SUM(ui.amount)::numeric AS amount
-  FROM unknown_items ui
-  JOIN unknown_resolved_agg ura
-    ON ui.maxi_nombre_norm = ura.maxi_nombre_norm
-  GROUP BY ura.resolved_article_id
-) r
-  ON r.resolved_id = m.article_id
-LEFT JOIN public.maxi_articles ma
-  ON ma.business_id = $1 AND ma.articulo_id = COALESCE(m.article_id, r.resolved_id)
-LEFT JOIN app_articles a
-  ON a.business_id = $1 AND a.id = COALESCE(m.article_id, r.resolved_id)
+s.article_id,
+COALESCE(MAX(ma.nombre), MAX(a.name), 'Artículo #' || s.article_id::text) AS nombre,
+COALESCE(MAX(ma.categoria), MAX(m.categoria), MAX(c.nombre), '[PENDIENTE]') AS rubro,
+COALESCE(MAX(ma.subrubro), MAX(m.subrubro), MAX(sr.nombre), '[PENDIENTE]') AS subrubro,
+SUM(s.qty)::numeric AS qty,
+SUM(s.amount)::numeric AS amount
+FROM sales_daily_items s
+LEFT JOIN maxi_articles ma ON ma.business_id = s.business_id AND ma.articulo_id = s.article_id
+LEFT JOIN maxi_article_map m ON m.business_id = s.business_id AND m.articulo_id = s.article_id
+LEFT JOIN app_articles a ON a.business_id = s.business_id AND a.id = s.article_id
+LEFT JOIN categorias c ON c.id = a.categoria_id
+LEFT JOIN subrubros sr ON sr.id = a.subrubro_id
+WHERE s.business_id = $1
+AND s.day BETWEEN $2::date AND $3::date
+AND COALESCE(NULLIF(s.article_id::text,''), '0')::bigint <> 0
 ${whereExtra}
-ORDER BY amount DESC
-LIMIT ${Number(lim)}
+GROUP BY s.article_id
+ORDER BY qty DESC
+LIMIT ${lim};
 `;
 
-    // Ejecutamos la query final
-    const { rows } = await pool.query(sqlItemsMerged, params);
 
-    return res.json({
-      ok: true,
-      business_id: biz.id,
-      from: fromYmd,
-      to: toYmd,
-      total,
-      tx_count: txCount,
-      limit: lim,
-      items: rows.map((r) => ({
-        article_id: r.article_id,
-        article_title: r.nombre || '',
-        rubro: r.rubro || '',
-        subrubro: r.subrubro || '',
-        qty: Number(r.qty || 0),
-        amount: Number(r.amount || 0),
-      })),
-    });
-  } catch (e) {
-    next(e);
-  }
+const { rows } = await pool.query(sqlItems, params);
+
+return res.json({
+  ok: true,
+  business_id: biz.id,
+  from: fromYmd,
+  to: toYmd,
+  total,
+  tx_count: txCount,
+  limit: lim,
+  items: rows.map((r) => ({
+    article_id: r.article_id,
+    article_title: r.nombre || '',
+    rubro: r.rubro || '',
+    subrubro: r.subrubro || '',
+    qty: Number(r.qty || 0),
+    amount: Number(r.amount || 0),
+  })),
+});
+
+
+} catch (e) {
+next(e);
+}
 };
+
 
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day

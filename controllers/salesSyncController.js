@@ -468,211 +468,116 @@ CROSS JOIN LATERAL (
   }
 };
 
-// helpers
-// helpers CSV (mantener)
+/* exportSalesCsv - controlador robusto para generar CSV de ventas semanales */
 function csvEscape(val) {
-  if (val == null) return '';
-  const s = String(val);
-  if (/[;"\n]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
+if (val == null) return '';
+const s = String(val);
+if (/[;"\n]/.test(s)) {
+return '"' + s.replace(/"/g, '""') + '"';
+}
+return s;
 }
 
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
-  try {
-    const businessId = Number(req.params.id);
-    const { from, to } = req.query;
+try {
+const businessId = Number(req.params.id);
+const { from, to } = req.query;
 
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ error: 'businessId inválido' });
-    }
-    if (!from || !to) {
-      return res
-        .status(400)
-        .json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
-    }
+```
+if (!Number.isFinite(businessId)) {
+  return res.status(400).json({ error: 'businessId inválido' });
+}
+if (!from || !to) {
+  return res
+    .status(400)
+    .json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
+}
 
-    const sql = `
+const sql = `
+```
+
 WITH
--- A: unknowns desde sales_daily_items (article_id = 0/null) agrupadas por day + nombre normalizado
-sd_unknowns AS (
-  SELECT
-    sdi.day::date AS day,
-    UPPER(TRIM(COALESCE(NULLIF(sdi.article_title, ''), NULLIF(sdi.title, ''), NULLIF(sdi.name, ''), ''))) AS maxi_nombre_norm,
-    SUM(sdi.qty)::numeric AS qty,
-    SUM(sdi.amount)::numeric AS amount
-  FROM sales_daily_items sdi
-  WHERE sdi.business_id = $1
-    AND sdi.day::date BETWEEN $2::date AND $3::date
-    AND (sdi.article_id IS NULL OR sdi.article_id = 0)
-  GROUP BY sdi.day::date, UPPER(TRIM(COALESCE(NULLIF(sdi.article_title, ''), NULLIF(sdi.title, ''), NULLIF(sdi.name, ''), '')))
-),
-
--- B: unknowns desde app_sales_items JOIN app_sales (muchas veces tienen title/name)
-asi_unknowns AS (
-  SELECT
-    (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-    UPPER(TRIM(COALESCE(NULLIF(ai.title,''), NULLIF(ai.name,''), NULLIF(ai.article_name,''), ''))) AS maxi_nombre_norm,
-    SUM(ai.qty)::numeric AS qty,
-    SUM(ai.amount)::numeric AS amount
-  FROM app_sales_items ai
-  JOIN app_sales s ON s.id = ai.sale_id
-  WHERE s.business_id = $1
-    AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
-    AND (ai.article_id IS NULL OR ai.article_id = 0)
-  GROUP BY (s.occurred_at AT TIME ZONE 'UTC')::date, UPPER(TRIM(COALESCE(NULLIF(ai.title,''), NULLIF(ai.name,''), NULLIF(ai.article_name,''), '')))
-},
-
--- C: union de unknowns
-unknown_items AS (
-  SELECT day, maxi_nombre_norm, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
-  FROM (
-    SELECT * FROM sd_unknowns
-    UNION ALL
-    SELECT * FROM asi_unknowns
-  ) t
-  GROUP BY day, maxi_nombre_norm
-),
-
--- D: intentar resolver unknown_items contra maxi_articles (primario) y app_articles (fallback)
-unknown_resolved AS (
-  SELECT
-    ui.day,
-    ui.maxi_nombre_norm,
-    ma.articulo_id::text AS resolved_article_id_text,
-    ma.nombre AS resolved_nombre,
-    ma.categoria AS resolved_rubro,
-    ma.subrubro AS resolved_subrubro,
-    ui.qty,
-    ui.amount
-  FROM unknown_items ui
-  JOIN public.maxi_articles ma
-    ON ma.business_id = $1
-   AND UPPER(TRIM(ma.nombre)) = ui.maxi_nombre_norm
-
-  UNION ALL
-
-  SELECT
-    ui.day,
-    ui.maxi_nombre_norm,
-    a.id::text AS resolved_article_id_text,
-    COALESCE(a.name, '')::text AS resolved_nombre,
-    a.rubro::text AS resolved_rubro,
-    a.subrubro::text AS resolved_subrubro,
-    ui.qty,
-    ui.amount
-  FROM unknown_items ui
-  JOIN app_articles a
-    ON a.business_id = $1
-   AND UPPER(TRIM(COALESCE(a.name, a.normalized_name, ''))) = ui.maxi_nombre_norm
-),
-
--- E: aggregate resolved unknowns per day + resolved id (usamos text y luego limpiamos)
-unknown_resolved_agg AS (
-  SELECT
-    day,
-    NULLIF(resolved_article_id_text, '')::bigint AS article_id, -- evita ''::bigint
-    MIN(resolved_nombre) AS resolved_nombre,
-    MIN(resolved_rubro) AS resolved_rubro,
-    MIN(resolved_subrubro) AS resolved_subrubro,
-    SUM(qty)::numeric AS qty,
-    SUM(amount)::numeric AS amount
-  FROM unknown_resolved
-  WHERE NULLIF(resolved_article_id_text, '') IS NOT NULL
-  GROUP BY day, NULLIF(resolved_article_id_text, '')
-),
-
--- F: known rows (article_id != 0) agregadas por day + article_id
-known_agg AS (
-  SELECT
-    sdi.day::date AS day,
-    sdi.article_id::bigint AS article_id,
-    SUM(sdi.qty)::numeric AS qty,
-    SUM(sdi.amount)::numeric AS amount
-  FROM sales_daily_items sdi
-  WHERE sdi.business_id = $1
-    AND sdi.day::date BETWEEN $2::date AND $3::date
-    AND COALESCE(sdi.article_id,0) <> 0
-  GROUP BY sdi.day::date, sdi.article_id
-),
-
--- G: merge known + resolved
-merged AS (
-  SELECT
-    COALESCE(k.day, u.day) AS day,
-    COALESCE(k.article_id, u.article_id) AS article_id,
-    COALESCE(k.qty,0) + COALESCE(u.qty,0) AS qty,
-    COALESCE(k.amount,0) + COALESCE(u.amount,0) AS amount
-  FROM known_agg k
-  FULL OUTER JOIN unknown_resolved_agg u
-    ON k.day = u.day AND k.article_id = u.article_id
+-- totals por semana (day -> week range)
+sdi2 AS (
+SELECT
+sdi.business_id,
+date_trunc('week', sdi.day)::date AS week_start,
+(date_trunc('week', sdi.day)::date + 6)::date AS week_end,
+sdi.article_id,
+SUM(sdi.qty)::numeric AS unidades,
+SUM(sdi.amount)::numeric AS venta
+FROM sales_daily_items sdi
+WHERE sdi.business_id = $1
+AND sdi.day::date BETWEEN $2::date AND $3::date
+GROUP BY sdi.business_id, date_trunc('week', sdi.day)::date, (date_trunc('week', sdi.day)::date + 6)::date, sdi.article_id
 )
 
 SELECT
-  $1::int AS business_id,
-  m.day AS fecha_semana,
-  COALESCE(ma.categoria, a.rubro, '') AS rubro,
-  COALESCE(ma.subrubro, a.subrubro, '') AS subrubro,
-  CASE WHEN a.id IS NOT NULL THEN a.id ELSE NULL END AS id_articulo_interno,
-  CASE WHEN ma.articulo_id IS NOT NULL THEN ma.articulo_id ELSE NULL END AS id_articulo_maxi,
-  ''::text AS codigo_articulo,
-  COALESCE(ma.nombre, a.name, ('Artículo #' || COALESCE(m.article_id::text, '')) ) AS nombre_articulo,
-  m.qty::numeric AS unidades,
-  m.amount::numeric AS venta
-FROM merged m
-LEFT JOIN public.maxi_articles ma
-  ON ma.business_id = $1 AND ma.articulo_id = m.article_id
-LEFT JOIN app_articles a
-  ON a.business_id = $1 AND a.id = m.article_id
-ORDER BY m.day, m.article_id;
+sdi2.business_id,
+to_char(sdi2.week_start, 'YYYY-MM-DD') || ' a ' || to_char(sdi2.week_end, 'YYYY-MM-DD') AS fecha_semana,
+m.categoria AS rubro_nombre,
+m.subrubro AS subrubro_nombre,
+sdi2.article_id AS id_articulo_interno,
+m.articulo_id AS id_articulo_maxi,
+NULLIF(TRIM(COALESCE( (a.props->>'codigo'), (a.props->>'codigo_maxi'), (a.props->>'articulo_codigo') )), '') AS codigo_articulo,
+COALESCE(
+NULLIF(TRIM(COALESCE( (a.props->>'title'), a.name, a.nombre, (a.props->>'descripcion'), (a.props->>'descripcion_corta'), (a.props->>'descrip'))), ''),
+('#' || COALESCE(sdi2.article_id::text, '')) ) AS nombre_articulo,
+sdi2.unidades AS unidades,
+sdi2.venta AS venta
+FROM sdi2
+LEFT JOIN app_articles a ON a.id = sdi2.article_id AND a.business_id = sdi2.business_id
+LEFT JOIN maxi_article_map m ON m.article_id = sdi2.article_id AND m.business_id = sdi2.business_id
+ORDER BY sdi2.week_start ASC, rubro_nombre NULLS LAST, subrubro_nombre NULLS LAST, nombre_articulo ASC;
 `;
 
-    // Ejecutamos
-    const { rows } = await pool.query(sql, [businessId, from, to]);
+const { rows } = await pool.query(sql, [businessId, from, to]);
 
-    // Encabezados CSV
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="ventas_semanales_${businessId}_${from}_${to}.csv"`
-    );
-    res.write('\uFEFF'); // BOM
+// Headers CSV
+res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+res.setHeader(
+  'Content-Disposition',
+  `attachment; filename="ventas_semanales_${businessId}_${from}_${to}.csv"`
+);
 
-    const headers = [
-      'business_id',
-      'fecha_semana',
-      'rubro',
-      'subrubro',
-      'id_articulo_interno',
-      'id_articulo_maxi',
-      'codigo_articulo',
-      'nombre_articulo',
-      'unidades',
-      'venta',
-    ];
-    res.write(headers.join(';') + '\n');
+// BOM UTF-8 para Excel
+res.write('\uFEFF');
 
-    for (const r of rows) {
-      const line = [
-        csvEscape(r.business_id),
-        csvEscape(r.fecha_semana),
-        csvEscape(r.rubro || ''),
-        csvEscape(r.subrubro || ''),
-        csvEscape(r.id_articulo_interno ?? ''),
-        csvEscape(r.id_articulo_maxi ?? ''),
-        csvEscape(r.codigo_articulo || ''),
-        csvEscape(r.nombre_articulo || ''),
-        csvEscape(r.unidades ?? 0),
-        csvEscape(r.venta ?? 0),
-      ].join(';');
-      res.write(line + '\n');
-    }
+const headers = [
+  'business_id',
+  'fecha_semana',
+  'rubro',
+  'subrubro',
+  'id_articulo_interno',
+  'id_articulo_maxi',
+  'codigo_articulo',
+  'nombre_articulo',
+  'unidades',
+  'venta',
+];
+res.write(headers.join(';') + '\n');
 
-    res.end();
-  } catch (e) {
-    console.error('[salesExportController] error exportando CSV', e);
-    // enviar detalle en dev, pero mensaje genérico al client
-    res.status(500).json({ error: 'Error exportando CSV', detail: e.message });
-  }
+for (const r of rows) {
+  const line = [
+    csvEscape(r.business_id),
+    csvEscape(r.fecha_semana),
+    csvEscape(r.rubro_nombre || ''),
+    csvEscape(r.subrubro_nombre || ''),
+    csvEscape(r.id_articulo_interno),
+    csvEscape(r.id_articulo_maxi),
+    csvEscape(r.codigo_articulo || ''),
+    csvEscape(r.nombre_articulo || ''),
+    csvEscape(r.unidades || 0),
+    csvEscape(r.venta || 0),
+  ].join(';');
+  res.write(line + '\n');
+}
+
+res.end();
+
+
+} catch (e) {
+console.error('[salesExportController] error exportando CSV', e);
+res.status(500).json({ error: 'Error exportando CSV', detail: e.message || String(e) });
+}
 };
