@@ -643,13 +643,13 @@ exports.salesSeriesFromDB = async (req, res, next) => {
 
     const sql = `
       SELECT
-        sdi.day AS label,
+        to_char(sdi.day::date, 'YYYY-MM-DD') AS label,
         COALESCE(SUM(sdi.qty),    0)::numeric   AS qty,
         COALESCE(SUM(sdi.amount), 0)::numeric   AS amount
       FROM sales_daily_items sdi
       WHERE sdi.business_id = $1
         AND sdi.article_id  = $2
-        AND sdi.day BETWEEN $3 AND $4
+        AND sdi.day BETWEEN $3::date AND $4::date
       GROUP BY sdi.day
       ORDER BY sdi.day
     `;
@@ -680,3 +680,4 @@ exports.salesSeriesFromDB = async (req, res, next) => {
     next(e);
   }
 };
+

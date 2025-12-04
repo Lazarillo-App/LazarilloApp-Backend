@@ -468,6 +468,7 @@ CROSS JOIN LATERAL (
   }
 };
 
+// helpers
 function csvEscape(val) {
   if (val == null) return '';
   const s = String(val);
@@ -493,11 +494,25 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
     const sql = `
 WITH
--- A) unknowns desde app_sales_items (usa campos que realmente existen: title, name, article_name)
+-- A) unknowns desde sales_daily_items (si hubiera titulo en otra versión) agrupados por day + nombre normalizado
+sd_unknowns AS (
+  SELECT
+    sdi.day::date AS day,
+    UPPER(TRIM(COALESCE(NULL::text, NULL::text, NULL::text, ''))) AS maxi_nombre_norm,
+    SUM(sdi.qty)::numeric AS qty,
+    SUM(sdi.amount)::numeric AS amount
+  FROM sales_daily_items sdi
+  WHERE sdi.business_id = $1
+    AND sdi.day::date BETWEEN $2::date AND $3::date
+    AND (sdi.article_id IS NULL OR sdi.article_id = 0)
+  GROUP BY sdi.day::date
+),
+
+-- B) unknowns desde app_sales_items JOIN app_sales (sí contiene títulos)
 asi_unknowns AS (
   SELECT
     (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, '')) ) AS maxi_nombre_norm,
+    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, ''))) AS maxi_nombre_norm,
     SUM(ai.qty)::numeric AS qty,
     SUM(ai.amount)::numeric AS amount
   FROM app_sales_items ai
@@ -508,36 +523,47 @@ asi_unknowns AS (
   GROUP BY (s.occurred_at AT TIME ZONE 'UTC')::date, UPPER(TRIM(COALESCE(ai.title, ai.name, ai.article_name, ai.sku, '')))
 ),
 
--- B) intentar resolver asi_unknowns contra maxi_articles (primario) y app_articles (fallback)
+-- C) unión de unknowns (sales_daily_items + app_sales_items)
+unknown_items AS (
+  SELECT day, maxi_nombre_norm, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
+  FROM (
+    SELECT * FROM sd_unknowns
+    UNION ALL
+    SELECT * FROM asi_unknowns
+  ) t
+  GROUP BY day, maxi_nombre_norm
+),
+
+-- D) intentar resolver unknown_items contra maxi_articles (primario) y app_articles (fallback)
 unknown_resolved AS (
   SELECT
-    u.day,
-    u.maxi_nombre_norm,
-    ma.articulo_id AS resolved_article_id,
-    ma.nombre      AS resolved_nombre,
-    u.qty,
-    u.amount
-  FROM asi_unknowns u
+    ui.day,
+    ui.maxi_nombre_norm,
+    ma.articulo_id    AS resolved_article_id,
+    ma.nombre         AS resolved_nombre,
+    ui.qty,
+    ui.amount
+  FROM unknown_items ui
   JOIN public.maxi_articles ma
     ON ma.business_id = $1
-   AND UPPER(TRIM(ma.nombre)) = u.maxi_nombre_norm
+   AND UPPER(TRIM(ma.nombre)) = ui.maxi_nombre_norm
 
   UNION ALL
 
-  -- fallback contra app_articles si no se resolvió en maxi_articles
+  -- fallback por coincidencia en app_articles (si no existe en maxi_articles)
   SELECT
-    u.day,
-    u.maxi_nombre_norm,
+    ui.day,
+    ui.maxi_nombre_norm,
     a.id AS resolved_article_id,
-    COALESCE(a.name, a.nombre)::text AS resolved_nombre,
-    u.qty,
-    u.amount
-  FROM asi_unknowns u
+    COALESCE(a.name, '')::text AS resolved_nombre,
+    ui.qty,
+    ui.amount
+  FROM unknown_items ui
   LEFT JOIN public.maxi_articles ma2
-    ON ma2.business_id = $1 AND UPPER(TRIM(ma2.nombre)) = u.maxi_nombre_norm
+    ON ma2.business_id = $1 AND UPPER(TRIM(ma2.nombre)) = ui.maxi_nombre_norm
   JOIN app_articles a
     ON a.business_id = $1
-   AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = u.maxi_nombre_norm
+   AND UPPER(TRIM(COALESCE(a.name, ''))) = ui.maxi_nombre_norm
   WHERE ma2.articulo_id IS NULL
 ),
 
@@ -581,9 +607,13 @@ merged AS (
 SELECT
   m.day,
   m.article_id,
-  COALESCE(ma.nombre, a.name, ('Artículo #'||m.article_id::text)) AS article_title,
-  m.qty,
-  m.amount
+  COALESCE(ma.articulo_id, NULL) AS id_articulo_maxi,
+  COALESCE(a.id, NULL) AS id_articulo_interno,
+  COALESCE(ma.nombre, a.name, ('Artículo #'||COALESCE(m.article_id, '')::text)) AS nombre_articulo,
+  COALESCE(ma.categoria, a.rubro, '') AS rubro,
+  COALESCE(ma.subrubro, a.subrubro, '') AS subrubro,
+  COALESCE(m.qty,0) AS unidades,
+  COALESCE(m.amount,0) AS venta
 FROM merged m
 LEFT JOIN public.maxi_articles ma
   ON ma.business_id = $1 AND ma.articulo_id = m.article_id
@@ -594,7 +624,7 @@ ORDER BY m.day, m.article_id;
 
     const { rows } = await pool.query(sql, [businessId, from, to]);
 
-    // Headers CSV
+    // 📄 Headers CSV
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
@@ -604,10 +634,15 @@ ORDER BY m.day, m.article_id;
     // BOM UTF-8 para Excel
     res.write('\uFEFF');
 
+    // Columnas en el CSV (separador ';' como antes)
     const headers = [
       'business_id',
       'fecha',
-      'id_articulo',
+      'rubro',
+      'subrubro',
+      'id_articulo_interno',
+      'id_articulo_maxi',
+      'codigo_articulo',
       'nombre_articulo',
       'unidades',
       'venta',
@@ -617,19 +652,24 @@ ORDER BY m.day, m.article_id;
     for (const r of rows) {
       const line = [
         csvEscape(businessId),
-        csvEscape(r.day),
-        csvEscape(r.article_id),
-        csvEscape(r.article_title || ''),
-        csvEscape(r.qty || 0),
-        csvEscape(r.amount || 0),
+        csvEscape(r.day ? r.day.toISOString().slice(0,10) : ''), // fecha YYYY-MM-DD
+        csvEscape(r.rubro || ''),
+        csvEscape(r.subrubro || ''),
+        csvEscape(r.id_articulo_interno || ''),
+        csvEscape(r.id_articulo_maxi || ''),
+        csvEscape(''), // codigo_articulo: no reliable column available aquí (podrías añadir ai.sku si quieres líneas por venta)
+        csvEscape(r.nombre_articulo || ''),
+        csvEscape(r.unidades || 0),
+        csvEscape(r.venta || 0),
       ].join(';');
+
       res.write(line + '\n');
     }
 
     res.end();
   } catch (e) {
-    // logging más útil para depurar
-    console.error('[salesExportController] error exportando CSV', e.message, e.detail || '');
-    return res.status(500).json({ error: 'Error exportando CSV', detail: e.message || String(e) });
+    console.error('[salesExportController] error exportando CSV', e);
+    // si quieres devolver el detalle en dev, puedes enviar e.message
+    res.status(500).json({ error: 'Error exportando CSV', detail: e.message || e.toString() });
   }
 };
