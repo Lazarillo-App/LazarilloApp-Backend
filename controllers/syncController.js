@@ -459,9 +459,22 @@ exports.salesSummaryFromDB = async (req, res, next) => {
       `;
     }
 
-   const sqlItemsMerged = `
+    const sqlItemsMerged = `
 WITH
--- A) unknowns desde app_sales_items JOIN app_sales (más fiable para títulos)
+-- A) unknowns desde sales_daily_items (si existiese campo texto) agrupados por nombre normalizado
+sd_unknowns AS (
+  SELECT
+    UPPER(TRIM(COALESCE(s.article_title, s.title, s.name, ''))) AS maxi_nombre_norm,
+    SUM(s.qty)::numeric AS qty,
+    SUM(s.amount)::numeric AS amount
+  FROM sales_daily_items s
+  WHERE s.business_id = $1
+    AND s.day BETWEEN $2::date AND $3::date
+    AND (s.article_id IS NULL OR s.article_id = 0)
+  GROUP BY UPPER(TRIM(COALESCE(s.article_title, s.title, s.name, '')))
+),
+
+-- B) unknowns desde app_sales_items JOIN app_sales (más probable que tenga títulos)
 asi_unknowns AS (
   SELECT
     UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, ''))) AS maxi_nombre_norm,
@@ -473,16 +486,20 @@ asi_unknowns AS (
     AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
     AND (ai.article_id IS NULL OR ai.article_id = 0)
   GROUP BY UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, '')))
-),
+},
 
--- B) unknown_items = lo que encontramos por texto en app_sales_items
+-- C) unión de unknowns (sales_daily_items + app_sales_items)
 unknown_items AS (
   SELECT maxi_nombre_norm, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
-  FROM asi_unknowns
+  FROM (
+    SELECT * FROM sd_unknowns
+    UNION ALL
+    SELECT * FROM asi_unknowns
+  ) t
   GROUP BY maxi_nombre_norm
 ),
 
--- C) intentar resolver unknown_items contra maxi_articles (primario) y app_articles (fallback)
+-- 2) intentar resolver unknown_items contra maxi_articles (primario) y app_articles (fallback)
 unknown_resolved AS (
   SELECT
     u.maxi_nombre_norm,
@@ -495,6 +512,7 @@ unknown_resolved AS (
 
   UNION ALL
 
+  -- fallback por coincidencia en app_articles (si no existe en maxi_articles)
   SELECT
     u.maxi_nombre_norm,
     a.id              AS resolved_article_id,
@@ -505,7 +523,7 @@ unknown_resolved AS (
    AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = u.maxi_nombre_norm
 ),
 
--- D) aggregated unknown_resolved (por si hay múltiples matches)
+-- 3) aggregated unknown_resolved (por si hay múltiples matches)
 unknown_resolved_agg AS (
   SELECT
     maxi_nombre_norm,
@@ -515,7 +533,7 @@ unknown_resolved_agg AS (
   GROUP BY maxi_nombre_norm
 ),
 
--- E) totals por article_id ya existentes (articulos con id != 0) desde sales_daily_items
+-- 4) totals por article_id ya existentes (articulos con id != 0) desde sales_daily_items
 known_agg AS (
   SELECT
     s.article_id::bigint AS article_id,
@@ -528,7 +546,7 @@ known_agg AS (
   GROUP BY s.article_id
 ),
 
--- F) sumar unknowns resueltos a known_agg por article_id
+-- 5) sumar unknowns resueltos a known_agg por article_id
 merged AS (
   SELECT
     k.article_id,
@@ -536,15 +554,21 @@ merged AS (
     COALESCE(k.amount,0) + COALESCE(u.amount,0) AS amount
   FROM known_agg k
   LEFT JOIN (
-    SELECT ura.resolved_article_id::bigint AS resolved_id, SUM(ui.qty)::numeric AS qty, SUM(ui.amount)::numeric AS amount
+    -- join unknown_items -> unknown_resolved_agg -> amounts
+    SELECT
+      ura.resolved_article_id::bigint AS resolved_id,
+      SUM(ui.qty)::numeric AS qty,
+      SUM(ui.amount)::numeric AS amount
     FROM unknown_items ui
     LEFT JOIN unknown_resolved_agg ura
       ON ui.maxi_nombre_norm = ura.maxi_nombre_norm
     WHERE ura.resolved_article_id IS NOT NULL
     GROUP BY ura.resolved_article_id
-  ) u ON u.resolved_id = k.article_id
+  ) u
+    ON u.resolved_id = k.article_id
 )
 
+-- 6) final: devolver top N por amount (si un resolved_id existe pero no había known_agg, lo agregamos)
 SELECT
   COALESCE(m.article_id, r.resolved_id) AS article_id,
   COALESCE(ma.nombre, a.name, ('Artículo #' || COALESCE(m.article_id, r.resolved_id)::text)) AS nombre,
@@ -553,13 +577,20 @@ SELECT
 FROM
   merged m
 FULL OUTER JOIN (
-  SELECT ura.resolved_article_id::bigint AS resolved_id, SUM(ui.qty)::numeric AS qty, SUM(ui.amount)::numeric AS amount
+  SELECT
+    ura.resolved_article_id::bigint AS resolved_id,
+    SUM(ui.qty)::numeric AS qty,
+    SUM(ui.amount)::numeric AS amount
   FROM unknown_items ui
-  JOIN unknown_resolved_agg ura ON ui.maxi_nombre_norm = ura.maxi_nombre_norm
+  JOIN unknown_resolved_agg ura
+    ON ui.maxi_nombre_norm = ura.maxi_nombre_norm
   GROUP BY ura.resolved_article_id
-) r ON r.resolved_id = m.article_id
-LEFT JOIN public.maxi_articles ma ON ma.business_id = $1 AND ma.articulo_id = COALESCE(m.article_id, r.resolved_id)
-LEFT JOIN app_articles a ON a.business_id = $1 AND a.id = COALESCE(m.article_id, r.resolved_id)
+) r
+  ON r.resolved_id = m.article_id
+LEFT JOIN public.maxi_articles ma
+  ON ma.business_id = $1 AND ma.articulo_id = COALESCE(m.article_id, r.resolved_id)
+LEFT JOIN app_articles a
+  ON a.business_id = $1 AND a.id = COALESCE(m.article_id, r.resolved_id)
 ${whereExtra}
 ORDER BY amount DESC
 LIMIT ${Number(lim)}
@@ -589,6 +620,7 @@ LIMIT ${Number(lim)}
     next(e);
   }
 };
+
 
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day

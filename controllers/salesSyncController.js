@@ -510,7 +510,7 @@ known_agg AS (
 asi_unknowns AS (
   SELECT
     (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, ''))) AS maxi_nombre_norm,
+    UPPER(TRIM(COALESCE(ai.title, ai.name, ai.nombre, ''))) AS maxi_nombre_norm,
     SUM(ai.qty)::numeric AS qty,
     SUM(ai.amount)::numeric AS amount
   FROM app_sales_items ai
@@ -518,7 +518,7 @@ asi_unknowns AS (
   WHERE s.business_id = $1
     AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2::date AND $3::date
     AND (ai.article_id IS NULL OR ai.article_id = 0)
-  GROUP BY (s.occurred_at AT TIME ZONE 'UTC')::date, UPPER(TRIM(COALESCE(ai.title, ai.name, ai.descripcion, ai.nombre, '')))
+  GROUP BY (s.occurred_at AT TIME ZONE 'UTC')::date, UPPER(TRIM(COALESCE(ai.title, ai.name, ai.nombre, '')))
 ),
 
 -- resolve unknowns against maxi_articles -> fallback app_articles
