@@ -468,10 +468,9 @@ CROSS JOIN LATERAL (
   }
 };
 
-/* exportSalesCsv - controlador robusto para generar CSV de ventas semanales */
+// exportSalesCsv - versión corregida (usa a.name en lugar de a.nombre)
 function csvEscape(val) {
   if (val == null) return '';
-  // coerción segura: nunca asumimos que val tiene replace
   const s = String(val);
   if (/[;"\n]/.test(s)) {
     return '"' + s.replace(/"/g, '""') + '"';
@@ -519,8 +518,9 @@ SELECT
   m.articulo_id AS id_articulo_maxi,
   NULLIF(TRIM(COALESCE( (a.props->>'codigo'), (a.props->>'codigo_maxi'), (a.props->>'articulo_codigo') )), '') AS codigo_articulo,
   COALESCE(
-    NULLIF(TRIM(COALESCE( (a.props->>'title'), a.name, a.nombre, (a.props->>'descripcion'), (a.props->>'descripcion_corta'), (a.props->>'descrip'))), ''),
-    ('#' || COALESCE(sdi2.article_id::text, '')) ) AS nombre_articulo,
+    NULLIF(TRIM(COALESCE( (a.props->>'title'), a.name, (a.props->>'descripcion'), (a.props->>'descripcion_corta'), (a.props->>'descrip'))), ''),
+    ('#' || COALESCE(sdi2.article_id::text, ''))
+  ) AS nombre_articulo,
   sdi2.unidades AS unidades,
   sdi2.venta AS venta
 FROM sdi2
@@ -529,6 +529,7 @@ LEFT JOIN maxi_article_map m ON m.article_id = sdi2.article_id AND m.business_id
 ORDER BY sdi2.week_start ASC, rubro_nombre NULLS LAST, subrubro_nombre NULLS LAST, nombre_articulo ASC;
 `;
 
+    // Ejecutar SQL
     const { rows } = await pool.query(sql, [businessId, from, to]);
 
     // Headers CSV
@@ -555,15 +556,14 @@ ORDER BY sdi2.week_start ASC, rubro_nombre NULLS LAST, subrubro_nombre NULLS LAS
     ];
     res.write(headers.join(';') + '\n');
 
-    // iteración segura por filas
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       try {
-        // normalizar/leer cada campo con fallback
         const business_id = ('business_id' in r) ? r.business_id : '';
         const fecha_semana = r.fecha_semana || '';
         const rubro_nombre = r.rubro_nombre || '';
         const subrubro_nombre = r.subrubro_nombre || '';
+        // dejamos id internos tal cual vienen (pueden ser null)
         const id_articulo_interno = (r.id_articulo_interno == null) ? '' : r.id_articulo_interno;
         const id_articulo_maxi = (r.id_articulo_maxi == null) ? '' : r.id_articulo_maxi;
         const codigo_articulo = r.codigo_articulo || '';
@@ -586,16 +586,14 @@ ORDER BY sdi2.week_start ASC, rubro_nombre NULLS LAST, subrubro_nombre NULLS LAS
 
         res.write(line + '\n');
       } catch (rowErr) {
-        // log con contexto y seguimos con la próxima fila (no rompemos todo)
         console.error('[exportSalesCsv] error serializando fila index=%d row=%O err=%O', i, rows[i], rowErr);
-        // opcional: escribir línea indicando error en CSV para no perder posición
+        // marcador en CSV para fila con error (no rompe todo)
         res.write(csvEscape(businessId) + ';' + csvEscape('ERROR_SERIALIZING_ROW') + '\n');
       }
     }
 
     res.end();
   } catch (e) {
-    // log ampliado para debugging
     console.error('[salesExportController] error exportando CSV - message:', e && e.message, 'stack:', e && e.stack);
     res.status(500).json({ error: 'Error exportando CSV', detail: (e && e.message) || String(e), stack: (e && e.stack) || null });
   }
