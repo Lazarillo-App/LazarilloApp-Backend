@@ -584,3 +584,4 @@ module.exports = {
   upsertDailyAggregates,
   reconcileSalesMappings,
 };
+//simplificar este y salessyncpolicy.js

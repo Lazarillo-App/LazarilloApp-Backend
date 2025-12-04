@@ -132,10 +132,13 @@ exports.syncWindow = async (req, res) => {
 };
 
 /** POST /api/businesses/:id/sync-sales/backfill-once */
+
 exports.backfillOnce = async (req, res) => {
   try {
     const biz = req.business;
-    const out = await ensureInitialBackfillOnce({ businessId: biz.id, req });
+    const days = req.body?.days ? Number(req.body.days) : undefined;
+
+    const out = await ensureInitialBackfillOnce({ businessId: biz.id, req, days });
     return res.json({ ok: true, business_id: String(biz.id), ...out });
   } catch (e) {
     return res.status(e.status || 500).json({ ok: false, error: e.message || 'backfill_failed' });
@@ -174,7 +177,6 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
     from,
     to,
     dryrun = false,
-    windowDays,
   } = body || {};
 
   // 1) Ventana explícita
@@ -220,26 +222,31 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
       await upsertDailyAggregates(biz.id, from.slice(0, 10), to.slice(0, 10));
       return { ok: true, from: from.slice(0, 10), to: to.slice(0, 10), rebuilt: true };
     }
-    case 'backfill_30d':
-    case 'backfill': {
-      // Corre tu backfill inicial (ajustá si tu política define otra ventana)
-      const out = await ensureInitialBackfillOnce({ businessId: biz.id /*, req opcional */ });
+
+    case 'backfill_30d': {
+      const out = await ensureInitialBackfillOnce({ businessId: biz.id, days: 30, req });
       return { ok: true, ...out };
     }
+
+    case 'backfill': {
+      const out = await ensureInitialBackfillOnce({ businessId: biz.id, req });
+      return { ok: true, ...out };
+    }
+
     case 'window': {
       const err = new Error('from/to required for window');
       err.status = 400;
       throw err;
     }
+
     case 'auto':
     default: {
-      // Corre tu política automática (normalmente últimos 7 días hasta ayer)
-      const out = await runDailyAuto({ businessId: biz.id, windowDays /*, req opcional */ });
+      // Corre tu política automática (usa INIT_BACKFILL_DAYS y luego incremental)
+      const out = await runDailyAuto({ businessId: biz.id, req });
       return { ok: true, ...out };
     }
   }
 };
-
 
 exports.reconcileAndRebuild = async (req, res, next) => {
   try {

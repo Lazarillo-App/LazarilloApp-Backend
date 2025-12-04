@@ -3,7 +3,7 @@
 
 const pool = require('../config/db');
 const { fetchSalesRanged } = require('./maxiSalesService');
-const { upsertSalesBatch, upsertDailyAggregates, reconcileSalesMappings } = require('./salesStore');
+const { upsertSalesBatch } = require('./salesStore');
 
 /* ───────────────────── Advisory lock por negocio ───────────────────── */
 function lockKeyFor(businessId) { return 0x53A1E5 ^ Number(businessId); }
@@ -85,26 +85,11 @@ async function runWindow({ businessId, from, to, req } = {}) {
   const F = ymd(at00(new Date(from)));
   const T = ymd(new Date(ymd(at00(new Date(to))) > ymd(end) ? end : at00(new Date(to))));
 
-  const raw    = await fetchSalesRanged({ businessId, from: F, to: T, req });
-  const result = await upsertSalesBatch(businessId, raw); // { upserted, updated, minDay, maxDay }
+  // 1) Traer crudo desde Maxi
+  const raw = await fetchSalesRanged({ businessId, from: F, to: T, req });
 
-  // Reconcile + agregados (mismo rango tocado)
-  const rFrom = result.minDay || F;
-  const rTo   = result.maxDay || T;
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await reconcileSalesMappings(client, businessId, { fromYmd: rFrom, toYmd: rTo });
-    await client.query('COMMIT');
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.warn('[salesSyncPolicy.runWindow] reconcile skip:', e?.message || e);
-  } finally {
-    client.release();
-  }
-
-  await upsertDailyAggregates(businessId, rFrom, rTo);
+  // 2) Upsert completo (ventas + ítems + mapping + agregados diarios)
+  const result = await upsertSalesBatch(businessId, raw); // usa su propia transacción
 
   return { from: F, to: T, fetched: raw.length, ...result };
 }
@@ -113,7 +98,17 @@ async function runWindow({ businessId, from, to, req } = {}) {
  * Backfill inicial UNA SOLA VEZ (N días hasta AYER).
  * Se usa al crear un negocio o cuando aún no hay backfill inicial hecho.
  */
-async function ensureInitialBackfillOnce({ businessId, req }) {
+
+async function ensureInitialBackfillOnce({ businessId, req, days }) {
+  if (!businessId) {
+    const e = new Error('businessId requerido');
+    e.status = 400;
+    throw e;
+  }
+
+  // N configurable vía parámetro, sino usa INIT_BACKFILL_DAYS
+  const N = Number(days) > 0 ? Number(days) : INIT_BACKFILL_DAYS;
+
   const client = await pool.connect();
   let locked = false;
   try {
@@ -131,21 +126,24 @@ async function ensureInitialBackfillOnce({ businessId, req }) {
       return { ok: true, already_done: true };
     }
 
-    const { from, to } = lastNDaysUntilYesterday(INIT_BACKFILL_DAYS);
+    const { from, to } = lastNDaysUntilYesterday(N);
 
-    // Trae + inserta crudos
-    await client.query('COMMIT'); // liberá la transacción antes del fetch externo
+    // Cerramos transacción antes de hablar con Maxi
+    await client.query('COMMIT');
+
+    // 1) Traer crudo
     const raw = await fetchSalesRanged({ businessId, from, to, req });
+
+    // 2) Upsert completo (incluye mapping + agregados diarios)
     const res = await upsertSalesBatch(businessId, raw);
 
-    // Reconcile + agregados
     const rFrom = res.minDay || from;
     const rTo   = res.maxDay || to;
 
+    // 3) Actualizar estado de sync
     const c2 = await pool.connect();
     try {
       await c2.query('BEGIN');
-      await reconcileSalesMappings(c2, businessId, { fromYmd: rFrom, toYmd: rTo });
       await upsertState(c2, businessId, {
         initial_backfill_done: true,
         initial_backfill_at: new Date(),
@@ -159,8 +157,7 @@ async function ensureInitialBackfillOnce({ businessId, req }) {
       c2.release();
     }
 
-    await upsertDailyAggregates(businessId, rFrom, rTo);
-    return { ok: true, from, to, window_days: INIT_BACKFILL_DAYS, ...res };
+    return { ok: true, from, to, window_days: N, ...res };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
     e.status = e.status || 500;
@@ -175,6 +172,7 @@ async function ensureInitialBackfillOnce({ businessId, req }) {
  * Incremental diario: desde (último día + 1) hasta AYER.
  * Si nunca hizo backfill inicial, lo dispara primero.
  */
+
 async function runDailyAuto({ businessId, req }) {
   const client = await pool.connect();
   let locked = false;
@@ -217,17 +215,17 @@ async function runDailyAuto({ businessId, req }) {
 
     await client.query('COMMIT'); // cerrar antes del fetch externo
 
-    // Traer lo faltante → upsert → reconcile → agregados
+    // Traer lo faltante → upsert completo (incluye mapping + agregados)
     const raw = await fetchSalesRanged({ businessId, from, to, req });
     const res = await upsertSalesBatch(businessId, raw);
 
     const rFrom = res.minDay || from;
     const rTo   = res.maxDay || to;
 
+    // Actualizar estado de sync
     const c2 = await pool.connect();
     try {
       await c2.query('BEGIN');
-      await reconcileSalesMappings(c2, businessId, { fromYmd: rFrom, toYmd: rTo });
       await upsertState(c2, businessId, { last_daily_sync_at: rTo });
       await c2.query('COMMIT');
     } catch (e) {
@@ -237,7 +235,6 @@ async function runDailyAuto({ businessId, req }) {
       c2.release();
     }
 
-    await upsertDailyAggregates(businessId, rFrom, rTo);
     return { ok: true, from, to, ...res };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
