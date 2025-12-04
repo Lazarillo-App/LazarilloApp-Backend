@@ -190,7 +190,7 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
       businessId: biz.id,
       from: F,
       to: T,
-      req,           
+      req,
     });
 
     if (dryrun) {
@@ -317,41 +317,137 @@ exports.listDailyItems = async (req, res, next) => {
 
     // Principales filas
     const sql = `
-      SELECT
-        sdi.day,
-        sdi.article_id,
-        -- título “flexible” del catálogo
-        NULLIF(TRIM(COALESCE(
-          to_jsonb(a)->>'title',
-          to_jsonb(a)->>'name',
-          to_jsonb(a)->>'nombre',
-          to_jsonb(a)->>'descripcion',
-          to_jsonb(a)->>'descripcion_corta',
-          to_jsonb(a)->>'descrip'
-        )), '') AS article_title,
-        sdi.qty,
-        sdi.amount
-      FROM sales_daily_items sdi
-      LEFT JOIN app_articles a
-        ON a.id = sdi.article_id
-       AND a.business_id = sdi.business_id
-      WHERE ${filters.join(' AND ')}
-      ORDER BY sdi.day, sdi.article_id
-      LIMIT ${Number(limit)} OFFSET ${Number(offset)}
-    `;
+WITH
+unknown_items AS (
+  SELECT
+    sdi.day::date AS day,
+    UPPER(TRIM(COALESCE(sdi.article_title, sdi.title, sdi.name, ''))) AS maxi_nombre_norm,
+    SUM(sdi.qty)::numeric AS qty,
+    SUM(sdi.amount)::numeric AS amount
+  FROM sales_daily_items sdi
+  WHERE sdi.business_id = $1
+    AND sdi.day BETWEEN $2::date AND $3::date
+    AND (sdi.article_id IS NULL OR sdi.article_id = 0)
+  GROUP BY sdi.day::date, UPPER(TRIM(COALESCE(sdi.article_title, sdi.title, sdi.name, '')))
+),
 
-    // Totales del rango (para cabecera/footers en la UI)
+unknown_resolved AS (
+  SELECT
+    ui.day,
+    ui.maxi_nombre_norm,
+    ma.articulo_id AS resolved_article_id,
+    ui.qty,
+    ui.amount
+  FROM unknown_items ui
+  JOIN public.maxi_articles ma
+    ON ma.business_id = $1
+   AND UPPER(TRIM(ma.nombre)) = ui.maxi_nombre_norm
+
+  UNION ALL
+
+  SELECT
+    ui.day,
+    ui.maxi_nombre_norm,
+    a.id AS resolved_article_id,
+    ui.qty,
+    ui.amount
+  FROM unknown_items ui
+  LEFT JOIN public.maxi_articles ma2
+    ON ma2.business_id = $1 AND UPPER(TRIM(ma2.nombre)) = ui.maxi_nombre_norm
+  JOIN app_articles a
+    ON a.business_id = $1
+   AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = ui.maxi_nombre_norm
+  WHERE ma2.articulo_id IS NULL
+),
+
+unknown_resolved_agg AS (
+  SELECT day, resolved_article_id::bigint AS article_id, SUM(qty)::numeric AS qty, SUM(amount)::numeric AS amount
+  FROM unknown_resolved
+  GROUP BY day, resolved_article_id
+),
+
+known_agg AS (
+  SELECT sdi.day::date AS day, sdi.article_id::bigint AS article_id, SUM(sdi.qty)::numeric AS qty, SUM(sdi.amount)::numeric AS amount
+  FROM sales_daily_items sdi
+  WHERE sdi.business_id = $1
+    AND sdi.day BETWEEN $2::date AND $3::date
+    AND COALESCE(sdi.article_id,0) <> 0
+  GROUP BY sdi.day::date, sdi.article_id
+),
+
+merged AS (
+  SELECT COALESCE(k.day,u.day) AS day, COALESCE(k.article_id,u.article_id) AS article_id,
+         COALESCE(k.qty,0)+COALESCE(u.qty,0) AS qty, COALESCE(k.amount,0)+COALESCE(u.amount,0) AS amount
+  FROM known_agg k
+  FULL JOIN unknown_resolved_agg u ON k.day = u.day AND k.article_id = u.article_id
+)
+
+SELECT
+  m.day,
+  m.article_id,
+  NULLIF(TRIM(COALESCE(ma.nombre, a.name, a.nombre)), '') AS article_title,
+  m.qty,
+  m.amount
+FROM merged m
+LEFT JOIN public.maxi_articles ma
+  ON ma.business_id = $1 AND ma.articulo_id = m.article_id
+LEFT JOIN app_articles a
+  ON a.business_id = $1 AND a.id = m.article_id
+ORDER BY m.day, m.article_id
+LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+`;
+
+    // Totales coherentes sobre merged
     const sqlTotals = `
-      SELECT
-        COALESCE(SUM(sdi.qty), 0)::numeric AS qty_total,
-        COALESCE(SUM(sdi.amount), 0)::numeric AS amount_total,
-        COUNT(*)::int AS rows_total
-      FROM sales_daily_items sdi
-      LEFT JOIN app_articles a
-        ON a.id = sdi.article_id
-       AND a.business_id = sdi.business_id
-      WHERE ${filters.join(' AND ')}
-    `;
+WITH
+-- (reutiliza las CTE anteriores, pero solo para totales)
+unknown_items AS (
+  SELECT
+    UPPER(TRIM(COALESCE(sdi.article_title, sdi.title, sdi.name, ''))) AS maxi_nombre_norm,
+    SUM(sdi.qty)::numeric AS qty,
+    SUM(sdi.amount)::numeric AS amount
+  FROM sales_daily_items sdi
+  WHERE sdi.business_id = $1
+    AND sdi.day BETWEEN $2::date AND $3::date
+    AND (sdi.article_id IS NULL OR sdi.article_id = 0)
+  GROUP BY UPPER(TRIM(COALESCE(sdi.article_title, sdi.title, sdi.name, '')))
+),
+
+unknown_resolved_agg AS (
+  SELECT ura.resolved_article_id::bigint AS article_id, SUM(ui.qty)::numeric AS qty, SUM(ui.amount)::numeric AS amount
+  FROM unknown_items ui
+  JOIN (
+    SELECT DISTINCT UPPER(TRIM(ma.nombre)) AS maxi_nombre_norm, ma.articulo_id
+    FROM public.maxi_articles ma WHERE ma.business_id = $1
+  ) ura ON ura.maxi_nombre_norm = ui.maxi_nombre_norm
+  GROUP BY ura.resolved_article_id
+),
+
+known_agg AS (
+  SELECT sdi.article_id::bigint AS article_id, SUM(sdi.qty)::numeric AS qty, SUM(sdi.amount)::numeric AS amount
+  FROM sales_daily_items sdi
+  WHERE sdi.business_id = $1
+    AND sdi.day BETWEEN $2::date AND $3::date
+    AND COALESCE(sdi.article_id,0) <> 0
+  GROUP BY sdi.article_id
+)
+
+SELECT
+  COALESCE(SUM(k.qty),0) + COALESCE(SUM(u.qty),0) AS qty_total,
+  COALESCE(SUM(k.amount),0) + COALESCE(SUM(u.amount),0) AS amount_total,
+  (SELECT COUNT(*) FROM (
+      SELECT DISTINCT COALESCE(k.article_id, u.article_id) FROM known_agg k FULL JOIN unknown_resolved_agg u ON k.article_id = u.article_id
+  ) t) AS rows_total
+FROM (
+  SELECT * FROM known_agg
+) k
+CROSS JOIN LATERAL (
+  SELECT COALESCE(SUM(x.qty),0) AS qty, COALESCE(SUM(x.amount),0) AS amount
+  FROM unknown_resolved_agg x
+  WHERE x.article_id IS NOT NULL
+) u
+;
+`;
 
     const [rows, totals] = await Promise.all([
       pool.query(sql, params).then(r => r.rows),
@@ -407,77 +503,104 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
     // 📊 Ventas semanales por artículo usando sales_daily_items + maxi_article_map
     const sql = `
-      SELECT
-        sdi.business_id,
+WITH
+-- filas desconocidas (article_id = 0/null) agrupadas por day + nombre normalizado
+unknown_items AS (
+  SELECT
+    sdi.day::date AS day,
+    UPPER(TRIM(COALESCE(sdi.article_title, sdi.title, sdi.name, ''))) AS maxi_nombre_norm,
+    SUM(sdi.qty)::numeric AS qty,
+    SUM(sdi.amount)::numeric AS amount
+  FROM sales_daily_items sdi
+  WHERE sdi.business_id = $1
+    AND sdi.day::date BETWEEN $2::date AND $3::date
+    AND (sdi.article_id IS NULL OR sdi.article_id = 0)
+  GROUP BY sdi.day::date, UPPER(TRIM(COALESCE(sdi.article_title, sdi.title, sdi.name, '')))
+),
 
-        -- rango de semana: "YYYY-MM-DD a YYYY-MM-DD"
-        to_char(date_trunc('week', sdi.day)::date, 'YYYY-MM-DD')
-          || ' a ' ||
-        to_char((date_trunc('week', sdi.day)::date + 6)::date, 'YYYY-MM-DD')
-          AS fecha_semana,
+-- intentar resolver contra maxi_articles (primario)
+unknown_resolved AS (
+  SELECT
+    ui.day,
+    ui.maxi_nombre_norm,
+    ma.articulo_id AS resolved_article_id,
+    ma.nombre      AS resolved_nombre,
+    ui.qty,
+    ui.amount
+  FROM unknown_items ui
+  JOIN public.maxi_articles ma
+    ON ma.business_id = $1
+   AND UPPER(TRIM(ma.nombre)) = ui.maxi_nombre_norm
 
-        -- rubro / subrubro desde la TABLA DE MAPEO
-        m.categoria AS rubro_nombre,
-        m.subrubro  AS subrubro_nombre,
+  UNION ALL
 
-        -- IDs de artículo
-        sdi.article_id AS id_articulo_interno,
-        m.articulo_id  AS id_articulo_maxi,
+  -- fallback contra app_articles si no se resolvió en maxi_articles
+  SELECT
+    ui.day,
+    ui.maxi_nombre_norm,
+    a.id AS resolved_article_id,
+    COALESCE(a.name, a.nombre)::text AS resolved_nombre,
+    ui.qty,
+    ui.amount
+  FROM unknown_items ui
+  LEFT JOIN public.maxi_articles ma2
+    ON ma2.business_id = $1 AND UPPER(TRIM(ma2.nombre)) = ui.maxi_nombre_norm
+  JOIN app_articles a
+    ON a.business_id = $1
+   AND UPPER(TRIM(COALESCE(a.name, a.nombre, ''))) = ui.maxi_nombre_norm
+  WHERE ma2.articulo_id IS NULL
+),
 
-        -- código del artículo (flexible desde app_articles)
-        NULLIF(TRIM(COALESCE(
-          to_jsonb(a)->>'codigo',
-          to_jsonb(a)->>'codigo_maxi',
-          to_jsonb(a)->>'articulo_codigo'
-        )), '') AS codigo_articulo,
+-- aggregated resolved unknowns (por day + resolved article)
+unknown_resolved_agg AS (
+  SELECT
+    day,
+    resolved_article_id::bigint AS article_id,
+    SUM(qty)::numeric AS qty,
+    SUM(amount)::numeric AS amount
+  FROM unknown_resolved
+  GROUP BY day, resolved_article_id
+),
 
-        -- nombre "bonito" del artículo
-        COALESCE(
-          NULLIF(TRIM(COALESCE(
-            to_jsonb(a)->>'title',
-            to_jsonb(a)->>'name',
-            to_jsonb(a)->>'nombre',
-            to_jsonb(a)->>'descripcion',
-            to_jsonb(a)->>'descripcion_corta',
-            to_jsonb(a)->>'descrip'
-          )), ''),
-          '#' || sdi.article_id::text
-        ) AS nombre_articulo,
+-- filas "conocidas" (article_id != 0) agregadas por day + article_id
+known_agg AS (
+  SELECT
+    sdi.day::date AS day,
+    sdi.article_id::bigint AS article_id,
+    SUM(sdi.qty)::numeric AS qty,
+    SUM(sdi.amount)::numeric AS amount
+  FROM sales_daily_items sdi
+  WHERE sdi.business_id = $1
+    AND sdi.day::date BETWEEN $2::date AND $3::date
+    AND COALESCE(sdi.article_id,0) <> 0
+  GROUP BY sdi.day::date, sdi.article_id
+),
 
-        -- totales semanales
-        SUM(sdi.qty)    AS unidades,
-        SUM(sdi.amount) AS venta
+-- sumar known_agg + unknown_resolved_agg por day+article_id
+merged AS (
+  SELECT
+    COALESCE(k.day, u.day) AS day,
+    COALESCE(k.article_id, u.article_id) AS article_id,
+    COALESCE(k.qty,0) + COALESCE(u.qty,0) AS qty,
+    COALESCE(k.amount,0) + COALESCE(u.amount,0) AS amount
+  FROM known_agg k
+  FULL OUTER JOIN unknown_resolved_agg u
+    ON k.day = u.day AND k.article_id = u.article_id
+)
 
-      FROM sales_daily_items sdi
-      LEFT JOIN app_articles a
-        ON a.id = sdi.article_id
-       AND a.business_id = sdi.business_id
-
-      -- mapeo Maxi → rubro/subrubro
-      LEFT JOIN maxi_article_map m
-        ON m.article_id  = sdi.article_id
-       AND m.business_id = sdi.business_id
-
-      WHERE sdi.business_id = $1
-        AND sdi.day::date >= $2::date
-        AND sdi.day::date <= $3::date
-
-      GROUP BY
-        sdi.business_id,
-        fecha_semana,
-        rubro_nombre,
-        subrubro_nombre,
-        id_articulo_interno,
-        id_articulo_maxi,
-        codigo_articulo,
-        nombre_articulo
-
-      ORDER BY
-        fecha_semana ASC,
-        rubro_nombre NULLS LAST,
-        subrubro_nombre NULLS LAST,
-        nombre_articulo ASC
-    `;
+SELECT
+  m.day,
+  m.article_id,
+  COALESCE(ma.nombre, a.name, ('Artículo #'||m.article_id::text)) AS article_title,
+  m.qty,
+  m.amount
+FROM merged m
+LEFT JOIN public.maxi_articles ma
+  ON ma.business_id = $1 AND ma.articulo_id = m.article_id
+LEFT JOIN app_articles a
+  ON a.business_id = $1 AND a.id = m.article_id
+ORDER BY m.day, m.article_id;
+`;
 
     const { rows } = await pool.query(sql, [businessId, from, to]);
 
