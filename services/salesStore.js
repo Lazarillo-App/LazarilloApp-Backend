@@ -205,6 +205,9 @@ function normalizeInvoices(businessId, rawDocs) {
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
 
+      
+      const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
+
       if (oid === '0001-00002126') {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔍 DEBUG VENTA PROBLEMÁTICA:', oid);
@@ -224,8 +227,6 @@ function normalizeInvoices(businessId, rawDocs) {
         console.log(JSON.stringify(doc, null, 2));
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
       }
-
-      const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
 
       arr.forEach((wrap, i) => {
         const oi = wrap?.orderItem || wrap || {};
