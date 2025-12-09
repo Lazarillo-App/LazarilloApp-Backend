@@ -205,6 +205,26 @@ function normalizeInvoices(businessId, rawDocs) {
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
 
+      if (oid === '0001-00002126') {
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🔍 DEBUG VENTA PROBLEMÁTICA:', oid);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📦 Total en orderData.totalSales:', total);
+        console.log('📋 Cantidad de orderItems:', arr.length);
+        console.log('\n🧾 orderItems completo:');
+        arr.forEach((wrap, i) => {
+          const oi = wrap?.orderItem || wrap || {};
+          console.log(`\n  Item ${i + 1}:`);
+          console.log('    title:', oi.title);
+          console.log('    quantity:', oi.quantity);
+          console.log('    productPrice:', oi.productPrice);
+          console.log('    totalPrice:', oi.totalPrice);
+        });
+        console.log('\n📄 Documento completo (RAW):');
+        console.log(JSON.stringify(doc, null, 2));
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+      }
+
       const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
 
       arr.forEach((wrap, i) => {
