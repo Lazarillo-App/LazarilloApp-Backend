@@ -83,8 +83,25 @@ async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
   for (let i=0;i<3;i++){
     const r = await fetchNative(url, { headers: { Authorization: `Bearer ${bearer}` } });
     const txt = await r.text().catch(()=> '');
+    
+    console.log('\n🔍 DEBUG fetchInvoiceByDate:');
+    console.log('URL:', url);
+    console.log('Status:', r.status);
+    console.log('Response (primeros 500 chars):', txt.slice(0, 500));
+    
     let j; try { j = JSON.parse(txt); } catch {}
     const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
+
+    if (ok) {
+      // 🆕 DEBUG: Ver qué estructura tiene
+      console.log('Parsed JSON keys:', Object.keys(j || {}));
+      console.log('Content type:', Array.isArray(j?.content) ? 'Array' : typeof j?.content);
+      
+      const result = Array.isArray(j?.content) ? j.content : (Array.isArray(j) ? j : []);
+      console.log('Returning array length:', result.length);
+      
+      return result;
+    }
 
     if (ok) {
       // 🎯 invoicebydate devuelve: { content: [ordenes] } o directamente [ordenes]
