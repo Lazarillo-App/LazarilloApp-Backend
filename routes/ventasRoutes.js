@@ -13,6 +13,10 @@ const {
   getArticleSeriesQuery,
 } = require('../controllers/ventasController');
 
+const salesController = require('../controllers/salesSyncController');
+
+router.get('/diagnostic/raw/:businessId', salesController.diagnosticRaw);
+
 // Normaliza/valida negocio activo o provisto por header/query/param
 const requireBiz = (req, res, next) => requireBusinessAccess(req, res, next);
 

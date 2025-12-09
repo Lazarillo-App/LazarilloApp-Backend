@@ -598,3 +598,92 @@ ORDER BY sdi2.week_start ASC, rubro_nombre NULLS LAST, subrubro_nombre NULLS LAS
     res.status(500).json({ error: 'Error exportando CSV', detail: (e && e.message) || String(e), stack: (e && e.stack) || null });
   }
 };
+
+// controllers/salesSyncController.js
+
+// ... todo tu código existente ...
+
+/**
+ * 🔍 DIAGNÓSTICO: Ver datos crudos de MaxiRest
+ * GET /api/businesses/:id/sync-sales/diagnostic-raw?from=YYYY-MM-DD&to=YYYY-MM-DD
+ */
+exports.diagnosticRaw = async (req, res) => {
+  try {
+    const biz = req.business;
+    const from = req.query.from || '2025-12-01';
+    const to = req.query.to || '2025-12-02';
+
+    console.log('\n========================================');
+    console.log('=== DIAGNÓSTICO DE VENTAS CRUDAS ===');
+    console.log('========================================');
+    console.log('businessId:', biz.id);
+    console.log('from:', from);
+    console.log('to:', to);
+    console.log('----------------------------------------\n');
+
+    // Traer datos crudos de MaxiRest
+    const raw = await fetchSalesRanged({ 
+      businessId: biz.id, 
+      from, 
+      to, 
+      req 
+    });
+
+    console.log('=== CANTIDAD DE ITEMS ===');
+    console.log('Total facturas/ordenes:', raw.length);
+
+    if (raw.length > 0) {
+      console.log('\n=== PRIMERA FACTURA/ORDEN (estructura completa) ===');
+      console.log(JSON.stringify(raw[0], null, 2));
+
+      if (raw[1]) {
+        console.log('\n=== SEGUNDA FACTURA/ORDEN ===');
+        console.log(JSON.stringify(raw[1], null, 2));
+      }
+
+      if (raw[2]) {
+        console.log('\n=== TERCERA FACTURA/ORDEN ===');
+        console.log(JSON.stringify(raw[2], null, 2));
+      }
+    }
+
+    console.log('\n========================================\n');
+
+    // Respuesta HTTP para ver en Postman/navegador
+    res.json({
+      success: true,
+      business_id: biz.id,
+      from,
+      to,
+      total: raw.length,
+      muestra: {
+        primera: raw[0] || null,
+        segunda: raw[1] || null,
+        tercera: raw[2] || null
+      },
+      // Solo las primeras 5 completas para no saturar
+      primeras_5: raw.slice(0, 5)
+    });
+
+  } catch (error) {
+    console.error('❌ Error en diagnóstico:', error);
+    res.status(error.status || 500).json({ 
+      success: false,
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+};
+
+module.exports = {
+  maxiPing: exports.maxiPing,
+  syncWindow: exports.syncWindow,
+  backfillOnce: exports.backfillOnce,
+  dailyAuto: exports.dailyAuto,
+  rebuildAggregates: exports.rebuildAggregates,
+  syncSalesForBusiness: exports.syncSalesForBusiness,
+  reconcileAndRebuild: exports.reconcileAndRebuild,
+  listDailyItems: exports.listDailyItems,
+  exportSalesCsv: exports.exportSalesCsv,
+  diagnosticRaw: exports.diagnosticRaw, // 👈 AGREGAR ESTA LÍNEA
+};

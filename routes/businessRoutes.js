@@ -147,6 +147,8 @@ router.get(
 router.get('/:id/maxi-sales-probe', ensureFn('sales.maxiSalesProbe', sales.maxiSalesProbe));
 router.get('/:id/maxi-sales-probe-v2', ensureFn('sales.maxiSalesProbeV2', sales.maxiSalesProbeV2));
 
+router.get('/:id/sync-sales/diagnostic-raw', ensureFn('sales.diagnosticRaw', sales.diagnosticRaw));
+
 /* ───────── Ventas V2 (estables) ───────── */
 router.post('/:id/sync-sales/window', ensureFn('sales.syncWindow', sales.syncWindow));
 router.post('/:id/sync-sales/backfill-once', ensureFn('sales.backfillOnce', sales.backfillOnce));

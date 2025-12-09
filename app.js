@@ -39,6 +39,8 @@ const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') 
 // CORS unificado con preflight cacheado
 const corsWithCache = require('./middleware/cors');
 
+const diagnosticRoutes = require('./routes/diagnosticRoutes');
+
 const app = express();
 
 /* ----------- básicos ----------- */
@@ -47,6 +49,8 @@ app.disable('x-powered-by');
 
 /* ----------- CORS (único, arriba de TODO) ----------- */
 app.use(corsWithCache);
+
+app.use('/api/diagnostic', diagnosticRoutes);
 
 /* ----------- logging simple por request ----------- */
 app.use((req, res, next) => {
