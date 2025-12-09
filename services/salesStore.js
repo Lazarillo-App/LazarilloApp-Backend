@@ -162,6 +162,8 @@ function agruparPorDiaYArticulo(rawSales) {
   - fullinvoicebydate: { numero, total, cabecera{ fecha }, items[] { cod_art, nombre_art, cantidad, precio, total } }
   - invoicebydate:     { order{ orderData{ orderId, orderDate, totalSales }, orderItems:[{ orderItem{ cod_art, title, quantity, productPrice, totalPrice } }] } }
 */
+// services/salesStore.js
+
 function normalizeInvoices(businessId, rawDocs) {
   const sales = [];
   const items = [];
@@ -170,27 +172,72 @@ function normalizeInvoices(businessId, rawDocs) {
   const pushSale = (external_id, occurred_at, total) => {
     const s = { business_id: businessId, external_id, occurred_at, total: toNum(total) };
     sales.push(s);
-    touchedDays.add(s.occurred_at.toISOString().slice(0, 10)); // YYYY-MM-DD
+    touchedDays.add(s.occurred_at.toISOString().slice(0, 10));
     return s;
   };
 
   const pushItem = (sale_idx, line_pos, data) => {
-    // data: { article_id?, sku?, article_name, qty, unit_price, line_total }
     items.push({
       business_id: businessId,
       sale_idx,
       line_pos,
       article_id: data.article_id ?? null,
       sku: data.sku ?? null,
-      name: data.article_name || null, // guardamos el nombre observado
+      name: data.article_name || null,
       qty: toNum(data.qty),
       unit_price: toNum(data.unit_price),
-      line_total: toNum(data.line_total),
+      amount: toNum(data.line_total),    // 🎯 Prioridad a totalPrice
+      total: toNum(data.line_total),     // 🎯 Mismo valor
     });
   };
 
   (rawDocs || []).forEach((doc) => {
-    // ───────── fullinvoicebydate ─────────
+    // ───────── invoicebydate (órdenes) ─────────
+    const ord = doc?.order;
+    if (ord?.orderData) {
+      const od = ord.orderData;
+      const oid = od.orderId ? String(od.orderId) : null;
+      const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
+      const total = toNum(od.totalSales);
+      
+      if (!occurred) return;
+
+      const sale_idx = sales.length;
+      pushSale(oid, occurred, total);
+
+      const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
+      
+      arr.forEach((wrap, i) => {
+        const oi = wrap?.orderItem || wrap || {};
+        
+        const title = oi.title || oi.nombre_art || 'Item';
+        const qty = toNum(oi.quantity);
+        
+        // 🎯 CORRECCIÓN CRÍTICA: Usar totalPrice directamente
+        const totalPrice = toNum(oi.totalPrice);
+        const productPrice = toNum(oi.productPrice);
+        
+        // 🎯 Calcular unit_price correctamente
+        const unit_price = (qty > 0 && totalPrice > 0) 
+          ? (totalPrice / qty) 
+          : productPrice;
+
+        // 🎯 NO extraemos código porque no existe en esta respuesta
+        // En su lugar, usamos el título para mapping posterior
+        
+        pushItem(sale_idx, i + 1, {
+          sku: null,                    // No hay código
+          article_name: title,          // Usamos título
+          qty,
+          unit_price,                   // Ahora sí calculado
+          line_total: totalPrice,       // Directo de MaxiRest
+        });
+      });
+      return;
+    }
+
+    // ───────── fullinvoicebydate (facturas) ─────────
+    // (mantener el código existente por si usás este endpoint)
     if (doc && doc.numero && (doc.cabecera || doc.items)) {
       const external = String(doc.numero);
       const occurred = parseYMDorDMYtoUTC(doc.cabecera?.fecha || doc.fecha);
@@ -214,39 +261,6 @@ function normalizeInvoices(businessId, rawDocs) {
           qty: cantidad,
           unit_price: precio,
           line_total: lineTotal,
-        });
-      });
-      return;
-    }
-
-    // ───────── invoicebydate (ordenes) ─────────
-    const ord = doc?.order;
-    if (ord?.orderData) {
-      const od = ord.orderData;
-      const oid = od.orderId ? String(od.orderId) : null;
-      const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
-      const total = toNum(od.totalSales);
-      if (!occurred) return;
-
-      const sale_idx = sales.length;
-      pushSale(oid, occurred, total);
-
-      const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
-      arr.forEach((wrap, i) => {
-        const oi = wrap?.orderItem || wrap || {};
-        const title = oi.title || oi.nombre_art || 'Item';
-        const qty = toNum(oi.quantity);
-        const price = toNum(oi.productPrice);
-        const lineTot = toNum(oi.totalPrice) || (qty * price);
-
-        const { externalCode } = extractCode(oi);
-
-        pushItem(sale_idx, i + 1, {
-          sku: externalCode,
-          article_name: title,
-          qty,
-          unit_price: price,
-          line_total: lineTot,
         });
       });
       return;
