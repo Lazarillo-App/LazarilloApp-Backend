@@ -359,33 +359,34 @@ async function upsertSalesBatch(businessId, rawSales, clientOpt) {
         const saleId = saleIdByIdx[it.sale_idx];
         if (!saleId) continue;
 
-        // usamos line_pos que arma normalizeInvoices; si por algún motivo viene null, usamos 1
         const linePos = Number.isFinite(it.line_pos) ? it.line_pos : 1;
 
+        // 🎯 AGREGAMOS unit_price al INSERT
         values.push(
-          `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
+          `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
         );
 
         params.push(
           saleId,                   // sale_id
-          linePos,                  // line_pos  👈 NUEVO
+          linePos,                  // line_pos
           it.article_id ?? null,    // article_id
           it.sku || null,           // sku
           it.name || null,          // name
           toNum(it.qty),            // qty
-          toNum(it.line_total),     // amount
-          toNum(it.line_total)      // total (compatibilidad)
+          toNum(it.unit_price),     // unit_price  👈 AGREGADO
+          toNum(it.amount),         // amount
+          toNum(it.total)           // total
         );
       }
 
       if (values.length > 0) {
         await client.query(
           `
-          INSERT INTO app_sales_items
-            (sale_id, line_pos, article_id, sku, name, qty, amount, total)
-          VALUES
-            ${values.join(', ')}
-          `,
+      INSERT INTO app_sales_items
+        (sale_id, line_pos, article_id, sku, name, qty, unit_price, amount, total)
+      VALUES
+        ${values.join(', ')}
+      `,
           params
         );
       }
