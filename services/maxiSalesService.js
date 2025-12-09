@@ -77,35 +77,47 @@ async function getBearer(businessId, req) {
 }
 
 /* ───────── fetch invoicebydate ───────── */
+/* ───────── fetch invoicebydate ───────── */
 async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
   const url = `${MAXI_BASE}${STATS_PATH}?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
 
   for (let i=0;i<3;i++){
     const r = await fetchNative(url, { headers: { Authorization: `Bearer ${bearer}` } });
     const txt = await r.text().catch(()=> '');
-    
-    console.log('\n🔍 DEBUG fetchInvoiceByDate:');
-    console.log('URL:', url);
-    console.log('Status:', r.status);
-    console.log('Response (primeros 500 chars):', txt.slice(0, 500));
-    
     let j; try { j = JSON.parse(txt); } catch {}
     const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
 
     if (ok) {
-      // 🆕 DEBUG: Ver qué estructura tiene
-      console.log('Parsed JSON keys:', Object.keys(j || {}));
-      console.log('Content type:', Array.isArray(j?.content) ? 'Array' : typeof j?.content);
+      // 🎯 CORREGIDO: Maneja doble anidación
+      // Casos posibles:
+      // 1) { content: { content: [órdenes] } }       ← MaxiRest típico
+      // 2) { content: [órdenes] }                    ← Alternativo
+      // 3) [órdenes]                                 ← Directo
       
-      const result = Array.isArray(j?.content) ? j.content : (Array.isArray(j) ? j : []);
-      console.log('Returning array length:', result.length);
+      const level1 = j?.content;
+      const level2 = level1?.content;
       
-      return result;
-    }
-
-    if (ok) {
-      // 🎯 invoicebydate devuelve: { content: [ordenes] } o directamente [ordenes]
-      return Array.isArray(j?.content) ? j.content : (Array.isArray(j) ? j : []);
+      // Si hay doble anidación, usa el segundo nivel
+      if (Array.isArray(level2)) {
+        console.log(`✅ Maxi devolvió ${level2.length} órdenes (doble anidación)`);
+        return level2;
+      }
+      
+      // Si hay un solo nivel, úsalo
+      if (Array.isArray(level1)) {
+        console.log(`✅ Maxi devolvió ${level1.length} órdenes (single nivel)`);
+        return level1;
+      }
+      
+      // Si es array directo
+      if (Array.isArray(j)) {
+        console.log(`✅ Maxi devolvió ${j.length} órdenes (directo)`);
+        return j;
+      }
+      
+      // No hay órdenes
+      console.warn('⚠️ Maxi no devolvió órdenes en ningún formato conocido');
+      return [];
     }
 
     if ([429,502,503].includes(r.status)) {
