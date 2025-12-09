@@ -5,17 +5,15 @@
 const { getCreds } = require('../services/maxiCredsService');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 
-// Usa fetch nativo (Node 18+) y cae a node-fetch si hace falta
 const fetchNative =
   (typeof globalThis.fetch === 'function')
     ? ((...args) => globalThis.fetch(...args))
     : require('node-fetch');
 
 const MAXI_BASE  = (process.env.MAXI_BASE_URL  || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/,'');
-const STATS_BASE = (process.env.MAXI_STATS_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/,'');
 
-// 🆕 path configurable: por defecto usamos fullinvoicebydate
-const STATS_INVOICE_PATH = (process.env.MAXI_INVOICE_PATH || '/estadisticas/fullinvoicebydate').replace(/\/+$/,'');
+// 🎯 SIMPLIFICADO: solo invoicebydate
+const STATS_PATH = '/estadisticas/invoicebydate';
 
 const CONC = Math.max(1, Number(process.env.MAXI_FETCH_CONCURRENCY || 3));
 
@@ -28,7 +26,7 @@ function addDaysUTC(d, n){ return new Date(d.getTime() + n * 86400000); }
 /* ───────── bearer cache ───────── */
 const tokenCache = new Map();
 
-/* ✅ LOGIN CORRECTO: sin Authorization; POST con email/pass/cod_cli */
+/* ✅ LOGIN CORRECTO */
 async function loginMaxi(email, pass, codcli) {
   const url = `${MAXI_BASE}/login`;
   const r = await fetchNative(url, {
@@ -50,13 +48,6 @@ async function loginMaxi(email, pass, codcli) {
   return j.content.tokenAccess;
 }
 
-/**
- * getBearer(businessId, req)
- * Prioriza:
- * 1) X-Maxi-Token
- * 2) Cache local (9 min)
- * 3) Creds DB (email/codcli/pass|pass_enc)
- */
 async function getBearer(businessId, req) {
   const hdrTok = req?.headers?.['x-maxi-token'];
   if (hdrTok && String(hdrTok).trim()) {
@@ -85,9 +76,9 @@ async function getBearer(businessId, req) {
   return token;
 }
 
-/* ───────── low-level fetch (invoicebydate) ───────── */
+/* ───────── fetch invoicebydate ───────── */
 async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
-  const url = `${STATS_BASE}${STATS_INVOICE_PATH}?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
+  const url = `${MAXI_BASE}${STATS_PATH}?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
 
   for (let i=0;i<3;i++){
     const r = await fetchNative(url, { headers: { Authorization: `Bearer ${bearer}` } });
@@ -96,9 +87,8 @@ async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
     const ok = r.ok && (!j?.resultCode || j?.resultCode === 'SUCCESS');
 
     if (ok) {
-      return (j?.content?.content) ? j.content.content
-           : (j?.content)          ? j.content
-           : j ?? {};
+      // 🎯 invoicebydate devuelve: { content: [ordenes] } o directamente [ordenes]
+      return Array.isArray(j?.content) ? j.content : (Array.isArray(j) ? j : []);
     }
 
     if ([429,502,503].includes(r.status)) {
@@ -120,7 +110,7 @@ async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
   const e = new Error('Maxi retries exhausted'); e.status = 502; throw e;
 }
 
-/* ───────── ventanas ───────── */
+/* ───────── ventanas (7d con fallback a 1d si falla) ───────── */
 function buildWindows(fromDate, toDate, winDays = 7) {
   const coerceUTC00 = (v) => {
     if (v == null) return null;
@@ -152,60 +142,7 @@ function buildWindows(fromDate, toDate, winDays = 7) {
   return out;
 }
 
-/* ───────── extractor ───────── */
-function extractFacturas(payload) {
-  if (!payload) return [];
-
-  // fullinvoicebydate variantes
-  const content = payload?.content ?? payload;
-  const inner   = content?.content ?? content;
-
-  // { content: { content: { facturas:[{ factura }, ...] } } }
-  if (Array.isArray(inner?.facturas)) {
-    return inner.facturas.filter(Boolean);
-  }
-
-  // { facturas:[{ factura }, ...] }
-  if (Array.isArray(payload?.facturas)) {
-    return payload.facturas.filter(Boolean);
-  }
-
-  // 🆕 Caso: facturas es un objeto con arrays anidados (por fecha, por algo)
-  const collectNestedFacturas = (facturasObj) => {
-    if (!facturasObj || typeof facturasObj !== 'object') return [];
-    const nested = Object.values(facturasObj)
-      .filter((v) => Array.isArray(v) && v.length > 0);
-    return nested.length ? nested.flat().filter(Boolean) : [];
-  };
-
-  const nestedFromInner   = collectNestedFacturas(inner?.facturas);
-  if (nestedFromInner.length) return nestedFromInner;
-
-  const nestedFromPayload = collectNestedFacturas(payload?.facturas);
-  if (nestedFromPayload.length) return nestedFromPayload;
-
-  // invoicebydate: array con órdenes
-  const arr = Array.isArray(inner)
-    ? inner
-    : (Array.isArray(payload) ? payload : null);
-
-  if (arr && arr.length) {
-    // Si tiene order/orderData, normalizamos
-    if (arr.some((x) => x?.order?.orderData || x?.orderData)) {
-      return arr.map((x) => {
-        if (x?.order?.orderData) return x;
-        if (x?.orderData)        return { order: x };
-        return x;
-      }).filter(Boolean);
-    }
-    return arr.filter(Boolean);
-  }
-
-  if (Array.isArray(content)) return content.filter(Boolean);
-  return [];
-}
-
-/* ───────── fetch 7d→1d con invoicebydate ───────── */
+/* ───────── fetch 7d→1d con fallback ───────── */
 async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
   const windows7 = buildWindows(fromDate, toDate, 7);
 
@@ -228,7 +165,10 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
 
   const outPayloads = [];
   for (let i=0;i<windows7.length;i++){
-    if (!errors[i]) { outPayloads.push(results[i]); continue; }
+    if (!errors[i]) { 
+      outPayloads.push(...results[i]); // 🎯 flatten directo
+      continue; 
+    }
     const err = errors[i];
     if ((err?.status || 0) >= 500) {
       const [wa, wb] = windows7[i];
@@ -237,8 +177,8 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
       const days = buildWindows(a, b, 1);
       for (const [da, db] of days) {
         try {
-          const dayPayload = await fetchInvoiceByDate(da, db, bearer);
-          outPayloads.push(dayPayload);
+          const dayOrders = await fetchInvoiceByDate(da, db, bearer);
+          outPayloads.push(...dayOrders); // 🎯 flatten
         } catch (e2) {
           console.warn('[maxi fallback] falló día', { da, db, status: e2?.status, info: e2?._maxi });
         }
@@ -247,7 +187,7 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
       throw err;
     }
   }
-  return outPayloads;
+  return outPayloads; // 🎯 ya es array plano de órdenes
 }
 
 /* ───────── API pública ───────── */
@@ -261,31 +201,17 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   const toClamp = Td > AYER ? AYER : Td;
 
   const bearer = await getBearer(businessId, req);
-  const payloads = await fetchRangeWithFallback(Fd, toClamp, bearer, CONC);
-
-  const facturas = [];
-  for (const p of (payloads || [])) {
-    let arr = extractFacturas(p);
-    if (!Array.isArray(arr) || !arr.length) continue;
-
-    // fullinvoicebydate: [{ factura }, ...] → extraer factura
-    if (arr[0] && typeof arr[0] === 'object' && Object.prototype.hasOwnProperty.call(arr[0], 'factura')) {
-      arr = arr.map(x => x?.factura || x).filter(Boolean);
-    }
-    // invoicebydate: devolver órdenes tal cual
-    if (arr.length) facturas.push(...arr);
-  }
-  return facturas;
+  
+  // 🎯 Retorna array plano de órdenes
+  return await fetchRangeWithFallback(Fd, toClamp, bearer, CONC);
 }
 
 module.exports = {
   MAXI_BASE,
-  STATS_BASE,
   at00UTC,
   addDaysUTC,
   getBearer,
   fetchInvoiceByDate,
   buildWindows,
-  extractFacturas,
   fetchSalesRanged,
 };
