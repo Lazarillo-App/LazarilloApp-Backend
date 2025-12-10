@@ -197,7 +197,7 @@ function normalizeInvoices(businessId, rawDocs) {
     const ord = doc?.order;
     if (ord?.orderData) {
       const od = ord.orderData;
-      const oid = od.orderId ? String(od.orderId) : null;
+      const oid = od.orderId ? String(od.orderId).trim() : null;  // 👈 .trim() agregado
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
       const total = toNum(od.totalSales);
 
@@ -206,13 +206,12 @@ function normalizeInvoices(businessId, rawDocs) {
       // 🆕 DEDUPLICACIÓN: Si ya procesamos esta venta, saltear
       if (oid && seenIds.has(oid)) {
         console.log(`⚠️ DUPLICADO DETECTADO: ${oid} - IGNORANDO`);
-        return;
+        return;  // Sale del forEach actual, no procesa este doc
       }
       if (oid) seenIds.add(oid);
 
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
-
 
       const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
 
@@ -238,15 +237,10 @@ function normalizeInvoices(businessId, rawDocs) {
 
       arr.forEach((wrap, i) => {
         const oi = wrap?.orderItem || wrap || {};
-
         const title = oi.title || oi.nombre_art || 'Item';
         const qty = toNum(oi.quantity);
-
-        // 🎯 CORRECCIÓN CRÍTICA: Usar totalPrice directamente
         const totalPrice = toNum(oi.totalPrice);
         const productPrice = toNum(oi.productPrice);
-
-        // 🎯 Calcular unit_price correctamente
         const unit_price = (qty > 0 && totalPrice > 0)
           ? (totalPrice / qty)
           : productPrice;
@@ -257,7 +251,7 @@ function normalizeInvoices(businessId, rawDocs) {
           totalPrice,
           productPrice,
           unit_price,
-        }); // 👈 AGREGAR ESTE LOG
+        });
 
         pushItem(sale_idx, i + 1, {
           sku: null,
