@@ -188,8 +188,8 @@ function normalizeInvoices(businessId, rawDocs) {
       name: data.article_name || null,
       qty: toNum(data.qty),
       unit_price: toNum(data.unit_price),
-      amount: toNum(data.line_total),    // 🎯 Prioridad a totalPrice
-      total: toNum(data.line_total),     // 🎯 Mismo valor
+      amount: toNum(data.line_total),
+      total: toNum(data.line_total),
     });
   };
 
@@ -201,14 +201,18 @@ function normalizeInvoices(businessId, rawDocs) {
       const oid = od.orderId ? String(od.orderId).trim() : null;
       console.log('🔍 Procesando venta:', oid, '| Ya vista?', seenIds.has(oid));
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
-      const total = toNum(od.totalSales);
+
+      // 🎯 CAMBIO PRINCIPAL: Calcular total desde orderItems en lugar de orderData.totalSales
+      const total = (ord.orderItems || []).reduce((sum, oi) => {
+        return sum + toNum(oi?.orderItem?.totalPrice || 0);
+      }, 0);
 
       if (!occurred) return;
 
       // 🆕 DEDUPLICACIÓN: Si ya procesamos esta venta, saltear
       if (oid && seenIds.has(oid)) {
         console.log(`⚠️ DUPLICADO DETECTADO: ${oid} - IGNORANDO`);
-        return;  // Sale del forEach actual, no procesa este doc
+        return;
       }
       console.log('➕ Agregando', oid, 'al Set');
       if (oid) seenIds.add(oid);
@@ -218,11 +222,13 @@ function normalizeInvoices(businessId, rawDocs) {
 
       const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
 
+      // 🔍 DEBUG para venta problemática (puede removerse después)
       if (oid === '0001-00002126') {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔍 DEBUG VENTA PROBLEMÁTICA:', oid);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📦 Total en orderData.totalSales:', total);
+        console.log('📦 Total calculado desde items:', total);
+        console.log('📦 Total original (orderData.totalSales):', toNum(od.totalSales));
         console.log('📋 Cantidad de orderItems:', arr.length);
         console.log('\n🧾 orderItems completo:');
         arr.forEach((wrap, i) => {
@@ -233,24 +239,21 @@ function normalizeInvoices(businessId, rawDocs) {
           console.log('    productPrice:', oi.productPrice);
           console.log('    totalPrice:', oi.totalPrice);
         });
-        console.log('\n📄 Documento completo (RAW):');
-        console.log(JSON.stringify(doc, null, 2));
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
       }
 
-      const orderItemsTotal = (ord.orderItems || []).reduce((sum, oi) => {
-        return sum + toNum(oi?.orderItem?.totalPrice || 0);
-      }, 0);
-
+      // 🔍 DIAGNÓSTICO (puede removerse después de confirmar que funciona)
+      const orderItemsTotal = total; // Ya lo calculamos arriba
       const menuItemsTotal = (ord.menuItems || []).reduce((sum, mi) => {
         return sum + toNum(mi?.menuItem?.productPrice || 0);
       }, 0);
 
       console.log('🧮 ANÁLISIS DE TOTALES:');
-      console.log(`   orderData.totalSales: ${total}`);
+      console.log(`   Total calculado (usado): ${total}`);
+      console.log(`   orderData.totalSales (ignorado): ${toNum(od.totalSales)}`);
       console.log(`   Suma de orderItems.totalPrice: ${orderItemsTotal}`);
       console.log(`   Suma de menuItems.productPrice: ${menuItemsTotal}`);
-      console.log(`   ¿Diferencia?: ${total !== orderItemsTotal ? 'SÍ ⚠️' : 'NO ✅'}`);
+      console.log(`   ✅ Sale.total = SUM(items) siempre`);
       console.log('');
 
       arr.forEach((wrap, i) => {
@@ -283,7 +286,6 @@ function normalizeInvoices(businessId, rawDocs) {
     }
 
     // ───────── fullinvoicebydate (facturas) ─────────
-    // (mantener el código existente por si usás este endpoint)
     if (doc && doc.numero && (doc.cabecera || doc.items)) {
       const external = String(doc.numero);
       const occurred = parseYMDorDMYtoUTC(doc.cabecera?.fecha || doc.fecha);
