@@ -514,7 +514,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           si.name AS articulo_nombre,
           si.sku AS articulo_codigo,
           si.qty AS cantidad,
-          si.unit_price AS precio_unitario,
+          (si.unit_price / 1000.0) AS precio_unitario,
           si.amount AS subtotal,
           
           si.article_id AS articulo_id,
