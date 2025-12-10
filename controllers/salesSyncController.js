@@ -469,8 +469,8 @@ CROSS JOIN LATERAL (
 };
 
 // ============================================================================
-// FUNCIÓN CORREGIDA: exportSalesCsv
-// Exporta ventas INDIVIDUALES con sus items (no resumen agregado)
+// VERSIÓN FINAL: exportSalesCsv SIN DISCOUNT
+// Para usar en: controllers/salesSyncController.js
 // ============================================================================
 
 function csvEscape(val) {
@@ -482,12 +482,6 @@ function csvEscape(val) {
   return s;
 }
 
-/**
- * GET /api/businesses/:id/sales/export-csv?from=YYYY-MM-DD&to=YYYY-MM-DD
- * 
- * OPCIÓN A: Ventas individuales con items (detallado)
- * OPCIÓN B: Resumen semanal por artículo (agregado) - usar &mode=summary
- */
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
   try {
     const businessId = Number(req.params.id);
@@ -502,6 +496,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       });
     }
 
+    const pool = require('../config/db');
+
     // ========================================
     // MODO DETALLADO (ventas individuales)
     // ========================================
@@ -509,12 +505,10 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       const sql = `
         SELECT
           s.external_id AS numero_venta,
-          s.occurred_at::timestamp AS fecha_hora,
           s.occurred_at::date AS fecha,
-          EXTRACT(HOUR FROM s.occurred_at) || ':' || 
+          EXTRACT(HOUR FROM s.occurred_at)::text || ':' || 
             LPAD(EXTRACT(MINUTE FROM s.occurred_at)::text, 2, '0') AS hora,
           s.total AS total_venta,
-          s.discount AS descuento,
           
           si.line_pos AS linea,
           si.name AS articulo_nombre,
@@ -523,14 +517,15 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           si.unit_price AS precio_unitario,
           si.amount AS subtotal,
           
-          a.id AS articulo_id,
+          si.article_id AS articulo_id,
           m.categoria AS rubro,
           m.subrubro AS subrubro
           
         FROM app_sales s
         JOIN app_sales_items si ON si.sale_id = s.id
-        LEFT JOIN app_articles a ON a.id = si.article_id AND a.business_id = s.business_id
-        LEFT JOIN maxi_article_map m ON m.article_id = si.article_id AND m.business_id = s.business_id
+        LEFT JOIN maxi_article_map m 
+          ON m.article_id = si.article_id 
+          AND m.business_id = s.business_id
         
         WHERE s.business_id = $1
           AND s.occurred_at::date BETWEEN $2::date AND $3::date
@@ -555,7 +550,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         'fecha',
         'hora',
         'total_venta',
-        'descuento',
         'linea',
         'articulo_nombre',
         'articulo_codigo',
@@ -570,12 +564,15 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
       for (const r of rows) {
         try {
+          const fecha = r.fecha instanceof Date 
+            ? r.fecha.toISOString().slice(0, 10)
+            : String(r.fecha || '').slice(0, 10);
+
           const line = [
             csvEscape(r.numero_venta),
-            csvEscape(r.fecha?.toISOString().slice(0, 10) || ''),
+            csvEscape(fecha),
             csvEscape(r.hora),
             csvEscape(r.total_venta || 0),
-            csvEscape(r.descuento || 0),
             csvEscape(r.linea),
             csvEscape(r.articulo_nombre),
             csvEscape(r.articulo_codigo),
@@ -626,14 +623,16 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           m.subrubro AS subrubro_nombre,
           sdi2.article_id AS id_articulo_interno,
           m.articulo_id AS id_articulo_maxi,
-          COALESCE(a.name, '#' || sdi2.article_id::text) AS nombre_articulo,
+          COALESCE(
+            NULLIF(TRIM(m.nombre), ''),
+            '#' || sdi2.article_id::text
+          ) AS nombre_articulo,
           sdi2.unidades AS unidades,
           sdi2.venta AS venta
         FROM sdi2
-        LEFT JOIN app_articles a 
-          ON a.id = sdi2.article_id AND a.business_id = sdi2.business_id
         LEFT JOIN maxi_article_map m 
-          ON m.article_id = sdi2.article_id AND m.business_id = sdi2.business_id
+          ON m.article_id = sdi2.article_id 
+          AND m.business_id = sdi2.business_id
         ORDER BY sdi2.week_start ASC, 
                  rubro_nombre NULLS LAST, 
                  subrubro_nombre NULLS LAST, 
@@ -694,10 +693,11 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     });
 
   } catch (e) {
-    console.error('[exportSalesCsv] error:', e);
+    console.error('[exportSalesCsv] error completo:', e);
     res.status(500).json({ 
       error: 'Error exportando CSV', 
-      detail: e?.message || String(e) 
+      detail: e?.message || String(e),
+      stack: process.env.NODE_ENV === 'development' ? e.stack : undefined
     });
   }
 };
