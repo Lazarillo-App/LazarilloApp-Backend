@@ -168,6 +168,7 @@ function normalizeInvoices(businessId, rawDocs) {
   const sales = [];
   const items = [];
   const touchedDays = new Set();
+  const seenIds = new Set();
 
   const pushSale = (external_id, occurred_at, total) => {
     const s = { business_id: businessId, external_id, occurred_at, total: toNum(total) };
@@ -202,10 +203,17 @@ function normalizeInvoices(businessId, rawDocs) {
 
       if (!occurred) return;
 
+      // 🆕 DEDUPLICACIÓN: Si ya procesamos esta venta, saltear
+      if (oid && seenIds.has(oid)) {
+        console.log(`⚠️ DUPLICADO DETECTADO: ${oid} - IGNORANDO`);
+        return;
+      }
+      if (oid) seenIds.add(oid);
+
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
 
-      
+
       const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
 
       if (oid === '0001-00002126') {
@@ -625,4 +633,3 @@ module.exports = {
   upsertDailyAggregates,
   reconcileSalesMappings,
 };
-//simplificar este y salessyncpolicy.js
