@@ -221,28 +221,7 @@ function normalizeInvoices(businessId, rawDocs) {
       pushSale(oid, occurred, total);
 
       const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
-
-      // 🔍 DEBUG para venta problemática (puede removerse después)
-      if (oid === '0001-00002126') {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🔍 DEBUG VENTA PROBLEMÁTICA:', oid);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📦 Total calculado desde items:', total);
-        console.log('📦 Total original (orderData.totalSales):', toNum(od.totalSales));
-        console.log('📋 Cantidad de orderItems:', arr.length);
-        console.log('\n🧾 orderItems completo:');
-        arr.forEach((wrap, i) => {
-          const oi = wrap?.orderItem || wrap || {};
-          console.log(`\n  Item ${i + 1}:`);
-          console.log('    title:', oi.title);
-          console.log('    quantity:', oi.quantity);
-          console.log('    productPrice:', oi.productPrice);
-          console.log('    totalPrice:', oi.totalPrice);
-        });
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-      }
-
-      // 🔍 DIAGNÓSTICO (puede removerse después de confirmar que funciona)
+    
       const orderItemsTotal = total; // Ya lo calculamos arriba
       const menuItemsTotal = (ord.menuItems || []).reduce((sum, mi) => {
         return sum + toNum(mi?.menuItem?.productPrice || 0);

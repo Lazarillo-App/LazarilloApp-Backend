@@ -468,7 +468,11 @@ CROSS JOIN LATERAL (
   }
 };
 
-// exportSalesCsv - versión corregida (usa a.name en lugar de a.nombre)
+// ============================================================================
+// FUNCIÓN CORREGIDA: exportSalesCsv
+// Exporta ventas INDIVIDUALES con sus items (no resumen agregado)
+// ============================================================================
+
 function csvEscape(val) {
   if (val == null) return '';
   const s = String(val);
@@ -478,130 +482,225 @@ function csvEscape(val) {
   return s;
 }
 
+/**
+ * GET /api/businesses/:id/sales/export-csv?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * 
+ * OPCIÓN A: Ventas individuales con items (detallado)
+ * OPCIÓN B: Resumen semanal por artículo (agregado) - usar &mode=summary
+ */
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
   try {
     const businessId = Number(req.params.id);
-    const { from, to } = req.query;
+    const { from, to, mode = 'detailed' } = req.query;
 
     if (!Number.isFinite(businessId)) {
       return res.status(400).json({ error: 'businessId inválido' });
     }
     if (!from || !to) {
-      return res
-        .status(400)
-        .json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
+      return res.status(400).json({ 
+        error: 'from y to son obligatorios (YYYY-MM-DD)' 
+      });
     }
 
-    const sql = `
-WITH
-  -- totals por semana (day -> week range)
-  sdi2 AS (
-    SELECT
-      sdi.business_id,
-      date_trunc('week', sdi.day)::date AS week_start,
-      (date_trunc('week', sdi.day)::date + 6)::date AS week_end,
-      sdi.article_id,
-      SUM(sdi.qty)::numeric AS unidades,
-      SUM(sdi.amount)::numeric AS venta
-    FROM sales_daily_items sdi
-    WHERE sdi.business_id = $1
-      AND sdi.day::date BETWEEN $2::date AND $3::date
-    GROUP BY sdi.business_id, date_trunc('week', sdi.day)::date, (date_trunc('week', sdi.day)::date + 6)::date, sdi.article_id
-  )
+    // ========================================
+    // MODO DETALLADO (ventas individuales)
+    // ========================================
+    if (mode === 'detailed') {
+      const sql = `
+        SELECT
+          s.external_id AS numero_venta,
+          s.occurred_at::timestamp AS fecha_hora,
+          s.occurred_at::date AS fecha,
+          EXTRACT(HOUR FROM s.occurred_at) || ':' || 
+            LPAD(EXTRACT(MINUTE FROM s.occurred_at)::text, 2, '0') AS hora,
+          s.total AS total_venta,
+          s.discount AS descuento,
+          
+          si.line_pos AS linea,
+          si.name AS articulo_nombre,
+          si.sku AS articulo_codigo,
+          si.qty AS cantidad,
+          si.unit_price AS precio_unitario,
+          si.amount AS subtotal,
+          
+          a.id AS articulo_id,
+          m.categoria AS rubro,
+          m.subrubro AS subrubro
+          
+        FROM app_sales s
+        JOIN app_sales_items si ON si.sale_id = s.id
+        LEFT JOIN app_articles a ON a.id = si.article_id AND a.business_id = s.business_id
+        LEFT JOIN maxi_article_map m ON m.article_id = si.article_id AND m.business_id = s.business_id
+        
+        WHERE s.business_id = $1
+          AND s.occurred_at::date BETWEEN $2::date AND $3::date
+          
+        ORDER BY s.occurred_at, s.external_id, si.line_pos;
+      `;
 
-SELECT
-  sdi2.business_id,
-  to_char(sdi2.week_start, 'YYYY-MM-DD') || ' a ' || to_char(sdi2.week_end, 'YYYY-MM-DD') AS fecha_semana,
-  m.categoria AS rubro_nombre,
-  m.subrubro AS subrubro_nombre,
-  sdi2.article_id AS id_articulo_interno,
-  m.articulo_id AS id_articulo_maxi,
-  NULLIF(TRIM(COALESCE( (a.props->>'codigo'), (a.props->>'codigo_maxi'), (a.props->>'articulo_codigo') )), '') AS codigo_articulo,
-  COALESCE(
-    NULLIF(TRIM(COALESCE( (a.props->>'title'), a.name, (a.props->>'descripcion'), (a.props->>'descripcion_corta'), (a.props->>'descrip'))), ''),
-    ('#' || COALESCE(sdi2.article_id::text, ''))
-  ) AS nombre_articulo,
-  sdi2.unidades AS unidades,
-  sdi2.venta AS venta
-FROM sdi2
-LEFT JOIN app_articles a ON a.id = sdi2.article_id AND a.business_id = sdi2.business_id
-LEFT JOIN maxi_article_map m ON m.article_id = sdi2.article_id AND m.business_id = sdi2.business_id
-ORDER BY sdi2.week_start ASC, rubro_nombre NULLS LAST, subrubro_nombre NULLS LAST, nombre_articulo ASC;
-`;
+      const { rows } = await pool.query(sql, [businessId, from, to]);
 
-    // Ejecutar SQL
-    const { rows } = await pool.query(sql, [businessId, from, to]);
+      // Headers CSV
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="ventas_detalladas_${businessId}_${from}_${to}.csv"`
+      );
 
-    // Headers CSV
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="ventas_semanales_${businessId}_${from}_${to}.csv"`
-    );
+      // BOM UTF-8 para Excel
+      res.write('\uFEFF');
 
-    // BOM UTF-8 para Excel
-    res.write('\uFEFF');
+      const headers = [
+        'numero_venta',
+        'fecha',
+        'hora',
+        'total_venta',
+        'descuento',
+        'linea',
+        'articulo_nombre',
+        'articulo_codigo',
+        'cantidad',
+        'precio_unitario',
+        'subtotal',
+        'articulo_id',
+        'rubro',
+        'subrubro'
+      ];
+      res.write(headers.join(';') + '\n');
 
-    const headers = [
-      'business_id',
-      'fecha_semana',
-      'rubro',
-      'subrubro',
-      'id_articulo_interno',
-      'id_articulo_maxi',
-      'codigo_articulo',
-      'nombre_articulo',
-      'unidades',
-      'venta',
-    ];
-    res.write(headers.join(';') + '\n');
+      for (const r of rows) {
+        try {
+          const line = [
+            csvEscape(r.numero_venta),
+            csvEscape(r.fecha?.toISOString().slice(0, 10) || ''),
+            csvEscape(r.hora),
+            csvEscape(r.total_venta || 0),
+            csvEscape(r.descuento || 0),
+            csvEscape(r.linea),
+            csvEscape(r.articulo_nombre),
+            csvEscape(r.articulo_codigo),
+            csvEscape(r.cantidad || 0),
+            csvEscape(r.precio_unitario || 0),
+            csvEscape(r.subtotal || 0),
+            csvEscape(r.articulo_id),
+            csvEscape(r.rubro),
+            csvEscape(r.subrubro)
+          ].join(';');
 
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      try {
-        const business_id = ('business_id' in r) ? r.business_id : '';
-        const fecha_semana = r.fecha_semana || '';
-        const rubro_nombre = r.rubro_nombre || '';
-        const subrubro_nombre = r.subrubro_nombre || '';
-        // dejamos id internos tal cual vienen (pueden ser null)
-        const id_articulo_interno = (r.id_articulo_interno == null) ? '' : r.id_articulo_interno;
-        const id_articulo_maxi = (r.id_articulo_maxi == null) ? '' : r.id_articulo_maxi;
-        const codigo_articulo = r.codigo_articulo || '';
-        const nombre_articulo = r.nombre_articulo || '';
-        const unidades = (r.unidades == null) ? 0 : r.unidades;
-        const venta = (r.venta == null) ? 0 : r.venta;
-
-        const line = [
-          csvEscape(business_id),
-          csvEscape(fecha_semana),
-          csvEscape(rubro_nombre),
-          csvEscape(subrubro_nombre),
-          csvEscape(id_articulo_interno),
-          csvEscape(id_articulo_maxi),
-          csvEscape(codigo_articulo),
-          csvEscape(nombre_articulo),
-          csvEscape(unidades),
-          csvEscape(venta),
-        ].join(';');
-
-        res.write(line + '\n');
-      } catch (rowErr) {
-        console.error('[exportSalesCsv] error serializando fila index=%d row=%O err=%O', i, rows[i], rowErr);
-        // marcador en CSV para fila con error (no rompe todo)
-        res.write(csvEscape(businessId) + ';' + csvEscape('ERROR_SERIALIZING_ROW') + '\n');
+          res.write(line + '\n');
+        } catch (rowErr) {
+          console.error('[exportSalesCsv] error fila:', rowErr);
+          res.write(csvEscape(businessId) + ';ERROR_SERIALIZING_ROW\n');
+        }
       }
+
+      return res.end();
     }
 
-    res.end();
+    // ========================================
+    // MODO RESUMEN (agregado semanal)
+    // ========================================
+    if (mode === 'summary') {
+      const sql = `
+        WITH sdi2 AS (
+          SELECT
+            sdi.business_id,
+            date_trunc('week', sdi.day)::date AS week_start,
+            (date_trunc('week', sdi.day)::date + 6)::date AS week_end,
+            sdi.article_id,
+            SUM(sdi.qty)::numeric AS unidades,
+            SUM(sdi.amount)::numeric AS venta
+          FROM sales_daily_items sdi
+          WHERE sdi.business_id = $1
+            AND sdi.day::date BETWEEN $2::date AND $3::date
+          GROUP BY sdi.business_id, 
+                   date_trunc('week', sdi.day)::date, 
+                   (date_trunc('week', sdi.day)::date + 6)::date, 
+                   sdi.article_id
+        )
+        SELECT
+          sdi2.business_id,
+          to_char(sdi2.week_start, 'YYYY-MM-DD') || ' a ' || 
+            to_char(sdi2.week_end, 'YYYY-MM-DD') AS fecha_semana,
+          m.categoria AS rubro_nombre,
+          m.subrubro AS subrubro_nombre,
+          sdi2.article_id AS id_articulo_interno,
+          m.articulo_id AS id_articulo_maxi,
+          COALESCE(a.name, '#' || sdi2.article_id::text) AS nombre_articulo,
+          sdi2.unidades AS unidades,
+          sdi2.venta AS venta
+        FROM sdi2
+        LEFT JOIN app_articles a 
+          ON a.id = sdi2.article_id AND a.business_id = sdi2.business_id
+        LEFT JOIN maxi_article_map m 
+          ON m.article_id = sdi2.article_id AND m.business_id = sdi2.business_id
+        ORDER BY sdi2.week_start ASC, 
+                 rubro_nombre NULLS LAST, 
+                 subrubro_nombre NULLS LAST, 
+                 nombre_articulo ASC;
+      `;
+
+      const { rows } = await pool.query(sql, [businessId, from, to]);
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="ventas_semanales_${businessId}_${from}_${to}.csv"`
+      );
+
+      res.write('\uFEFF');
+
+      const headers = [
+        'business_id',
+        'fecha_semana',
+        'rubro',
+        'subrubro',
+        'id_articulo_interno',
+        'id_articulo_maxi',
+        'nombre_articulo',
+        'unidades',
+        'venta'
+      ];
+      res.write(headers.join(';') + '\n');
+
+      for (const r of rows) {
+        try {
+          const line = [
+            csvEscape(r.business_id),
+            csvEscape(r.fecha_semana),
+            csvEscape(r.rubro_nombre),
+            csvEscape(r.subrubro_nombre),
+            csvEscape(r.id_articulo_interno),
+            csvEscape(r.id_articulo_maxi),
+            csvEscape(r.nombre_articulo),
+            csvEscape(r.unidades || 0),
+            csvEscape(r.venta || 0)
+          ].join(';');
+
+          res.write(line + '\n');
+        } catch (rowErr) {
+          console.error('[exportSalesCsv] error fila:', rowErr);
+          res.write(csvEscape(businessId) + ';ERROR_SERIALIZING_ROW\n');
+        }
+      }
+
+      return res.end();
+    }
+
+    // Modo inválido
+    return res.status(400).json({ 
+      error: 'invalid_mode', 
+      hint: 'use mode=detailed or mode=summary' 
+    });
+
   } catch (e) {
-    console.error('[salesExportController] error exportando CSV - message:', e && e.message, 'stack:', e && e.stack);
-    res.status(500).json({ error: 'Error exportando CSV', detail: (e && e.message) || String(e), stack: (e && e.stack) || null });
+    console.error('[exportSalesCsv] error:', e);
+    res.status(500).json({ 
+      error: 'Error exportando CSV', 
+      detail: e?.message || String(e) 
+    });
   }
 };
-
-// controllers/salesSyncController.js
-
-// ... todo tu código existente ...
 
 /**
  * 🔍 DIAGNÓSTICO: Ver datos crudos de MaxiRest
