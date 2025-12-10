@@ -198,7 +198,7 @@ function normalizeInvoices(businessId, rawDocs) {
     const ord = doc?.order;
     if (ord?.orderData) {
       const od = ord.orderData;
-      const oid = od.orderId ? String(od.orderId).trim() : null;  
+      const oid = od.orderId ? String(od.orderId).trim() : null;
       console.log('🔍 Procesando venta:', oid, '| Ya vista?', seenIds.has(oid));
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
       const total = toNum(od.totalSales);
@@ -237,6 +237,21 @@ function normalizeInvoices(businessId, rawDocs) {
         console.log(JSON.stringify(doc, null, 2));
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
       }
+
+      const orderItemsTotal = (ord.orderItems || []).reduce((sum, oi) => {
+        return sum + toNum(oi?.orderItem?.totalPrice || 0);
+      }, 0);
+
+      const menuItemsTotal = (ord.menuItems || []).reduce((sum, mi) => {
+        return sum + toNum(mi?.menuItem?.productPrice || 0);
+      }, 0);
+
+      console.log('🧮 ANÁLISIS DE TOTALES:');
+      console.log(`   orderData.totalSales: ${total}`);
+      console.log(`   Suma de orderItems.totalPrice: ${orderItemsTotal}`);
+      console.log(`   Suma de menuItems.productPrice: ${menuItemsTotal}`);
+      console.log(`   ¿Diferencia?: ${total !== orderItemsTotal ? 'SÍ ⚠️' : 'NO ✅'}`);
+      console.log('');
 
       arr.forEach((wrap, i) => {
         const oi = wrap?.orderItem || wrap || {};
