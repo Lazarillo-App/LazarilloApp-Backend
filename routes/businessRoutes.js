@@ -103,12 +103,6 @@ router.post('/', ensureFn('businesses.create', businesses.create));
 router.get('/active', ensureFn('businesses.getActive', businesses.getActive));
 router.patch('/active', ensureFn('businesses.setActive', businesses.setActive));
 
-/* Por :id */
-router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOne));
-router.patch('/:id', ensureFn('businesses.update', businesses.update));
-router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
-router.post('/:id/select', ensureFn('businesses.select', businesses.select));
-
 /* ───────── Maxi credenciales / estado ───────── */
 router.get('/:id/maxi-status', ensureFn('businesses.maxiStatus', businesses.maxiStatus));
 router.post('/:id/maxi-credentials', ensureFn('businesses.maxiSave', businesses.maxiSave));
@@ -260,5 +254,11 @@ router.post('/:id/onboard', async (req, res, next) => {
     next(err);
   }
 });
+
+/* Por :id */
+router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOne));
+router.patch('/:id', ensureFn('businesses.update', businesses.update));
+router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
+router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 
 module.exports = router;
