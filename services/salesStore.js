@@ -165,6 +165,7 @@ function agruparPorDiaYArticulo(rawSales) {
 // services/salesStore.js
 
 function normalizeInvoices(businessId, rawDocs) {
+  console.log('🔍 normalizeInvoices iniciando - versión CON deduplicación');
   const sales = [];
   const items = [];
   const touchedDays = new Set();
@@ -197,7 +198,8 @@ function normalizeInvoices(businessId, rawDocs) {
     const ord = doc?.order;
     if (ord?.orderData) {
       const od = ord.orderData;
-      const oid = od.orderId ? String(od.orderId).trim() : null;  // 👈 .trim() agregado
+      const oid = od.orderId ? String(od.orderId).trim() : null;  
+      console.log('🔍 Procesando venta:', oid, '| Ya vista?', seenIds.has(oid));
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
       const total = toNum(od.totalSales);
 
@@ -208,6 +210,7 @@ function normalizeInvoices(businessId, rawDocs) {
         console.log(`⚠️ DUPLICADO DETECTADO: ${oid} - IGNORANDO`);
         return;  // Sale del forEach actual, no procesa este doc
       }
+      console.log('➕ Agregando', oid, 'al Set');
       if (oid) seenIds.add(oid);
 
       const sale_idx = sales.length;
