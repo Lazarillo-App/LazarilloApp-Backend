@@ -125,10 +125,6 @@ router.get(
 );
 
 /* ───────── Ventas legacy lectura (serie por artículo) ───────── */
-router.get(
-  '/:id/sales/summary',
-  ensureFn('sales.listDailyItems', sales.listDailyItems)  // ← Usar el mismo handler que /items
-);
 
 router.get(
   '/:id/sales/:articuloId',
