@@ -214,7 +214,6 @@ function normalizeInvoices(businessId, rawDocs) {
       // 🎯 Agrupar items por título para sumar cantidades
       const itemsByTitle = new Map();
 
-      // 1️⃣ Procesar orderItems (respetando quantity)
       const orderItems = Array.isArray(ord.orderItems) ? ord.orderItems : [];
       for (const wrap of orderItems) {
         const oi = wrap?.orderItem || wrap || {};
@@ -223,8 +222,7 @@ function normalizeInvoices(businessId, rawDocs) {
         if (!title) continue;
 
         const qty = Number(oi.quantity ?? oi.qty ?? 1);
-        const totalPrice = toNum(oi.totalPrice);
-        const productPrice = toNum(oi.productPrice);
+        const totalPrice = toNum(oi.totalPrice); // ← Ya viene multiplicado qty * precio
 
         const key = title.toLowerCase();
 
@@ -233,16 +231,15 @@ function normalizeInvoices(businessId, rawDocs) {
             title,
             qty: 0,
             totalPrice: 0,
-            productPrice,
           });
         }
 
         const item = itemsByTitle.get(key);
-        item.qty += qty;  // ← Sumar quantity
-        item.totalPrice += totalPrice;
+        item.qty += qty;
+        item.totalPrice += totalPrice; // ← Sumar el total (no qty * precio)
       }
 
-      // 2️⃣ Procesar menuItems (SIEMPRE qty=1 cada uno)
+      // 2️⃣ Procesar menuItems - calcular precio individual * 1
       const menuItems = Array.isArray(ord.menuItems) ? ord.menuItems : [];
       for (const wrap of menuItems) {
         const mi = wrap?.menuItem || wrap || {};
@@ -252,7 +249,7 @@ function normalizeInvoices(businessId, rawDocs) {
 
         const productPrice = toNum(mi.productPrice);
         const discount = toNum(mi.discount ?? 0);
-        const totalPrice = productPrice; // menuItem usa productPrice como total (discount es informativo)
+        const finalPrice = productPrice - discount; // ← Precio NETO para 1 unidad
 
         const key = title.toLowerCase();
 
@@ -261,13 +258,12 @@ function normalizeInvoices(businessId, rawDocs) {
             title,
             qty: 0,
             totalPrice: 0,
-            productPrice,
           });
         }
 
         const item = itemsByTitle.get(key);
-        item.qty += 1;  // ← menuItem SIEMPRE suma 1
-        item.totalPrice += totalPrice;
+        item.qty += 1;  // ← menuItem SIEMPRE es 1 unidad
+        item.totalPrice += finalPrice; // ← Sumar precio de 1 unidad
       }
 
       // 🎯 Calcular total desde items agrupados
@@ -289,7 +285,7 @@ function normalizeInvoices(businessId, rawDocs) {
       itemsArray.forEach((it, i) => {
         const unit_price = (it.qty > 0 && it.totalPrice > 0)
           ? (it.totalPrice / it.qty)
-          : it.productPrice;
+          : 0;
 
         console.log(`📦 ${it.title}: qty=${it.qty} | total=$${it.totalPrice.toFixed(2)} | unit=$${unit_price.toFixed(2)}`);
 
