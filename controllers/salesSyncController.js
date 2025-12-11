@@ -414,7 +414,13 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           si.name AS articulo_nombre,
           si.sku AS articulo_codigo,
           si.qty AS cantidad,
-          (si.unit_price / 1000.0) AS precio_unitario,
+          
+          -- ✅ CALCULAR PRECIO UNITARIO: amount / qty
+          CASE 
+            WHEN si.qty > 0 THEN ROUND((si.amount / si.qty)::numeric, 2)
+            ELSE 0
+          END AS precio_unitario,
+          
           si.amount AS subtotal,
           
           si.article_id AS articulo_id,
@@ -468,17 +474,20 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
             ? r.fecha.toISOString().slice(0, 10)
             : String(r.fecha || '').slice(0, 10);
 
+          // ✅ Formatear precio_unitario sin notación científica
+          const precioUnitario = Number(r.precio_unitario || 0).toFixed(2);
+
           const line = [
             csvEscape(r.numero_venta),
             csvEscape(fecha),
             csvEscape(r.hora),
-            csvEscape(r.total_venta || 0),
+            csvEscape(Number(r.total_venta || 0).toFixed(2)),
             csvEscape(r.linea),
             csvEscape(r.articulo_nombre),
             csvEscape(r.articulo_codigo),
-            csvEscape(r.cantidad || 0),
-            csvEscape(r.precio_unitario || 0),
-            csvEscape(r.subtotal || 0),
+            csvEscape(Number(r.cantidad || 0).toFixed(3)),
+            csvEscape(precioUnitario),  // ← Usar el formateado
+            csvEscape(Number(r.subtotal || 0).toFixed(2)),
             csvEscape(r.articulo_id),
             csvEscape(r.rubro),
             csvEscape(r.subrubro)
@@ -506,7 +515,14 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
             (date_trunc('week', sdi.day)::date + 6)::date AS week_end,
             sdi.article_id,
             SUM(sdi.qty)::numeric AS unidades,
-            SUM(sdi.amount)::numeric AS venta
+            SUM(sdi.amount)::numeric AS venta,
+            
+            -- ✅ Calcular precio promedio
+            CASE 
+              WHEN SUM(sdi.qty) > 0 THEN ROUND((SUM(sdi.amount) / SUM(sdi.qty))::numeric, 2)
+              ELSE 0
+            END AS precio_promedio
+            
           FROM sales_daily_items sdi
           WHERE sdi.business_id = $1
             AND sdi.day::date BETWEEN $2::date AND $3::date
@@ -528,7 +544,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
             '#' || sdi2.article_id::text
           ) AS nombre_articulo,
           sdi2.unidades AS unidades,
-          sdi2.venta AS venta
+          sdi2.venta AS venta,
+          sdi2.precio_promedio AS precio_promedio
         FROM sdi2
         LEFT JOIN maxi_article_map m 
           ON m.article_id = sdi2.article_id 
@@ -558,7 +575,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         'id_articulo_maxi',
         'nombre_articulo',
         'unidades',
-        'venta'
+        'venta',
+        'precio_promedio'
       ];
       res.write(headers.join(';') + '\n');
 
@@ -572,8 +590,9 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
             csvEscape(r.id_articulo_interno),
             csvEscape(r.id_articulo_maxi),
             csvEscape(r.nombre_articulo),
-            csvEscape(r.unidades || 0),
-            csvEscape(r.venta || 0)
+            csvEscape(Number(r.unidades || 0).toFixed(3)),
+            csvEscape(Number(r.venta || 0).toFixed(2)),
+            csvEscape(Number(r.precio_promedio || 0).toFixed(2))
           ].join(';');
 
           res.write(line + '\n');
