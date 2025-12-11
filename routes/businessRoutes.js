@@ -127,14 +127,13 @@ router.get(
 /* ───────── Ventas legacy lectura (serie por artículo) ───────── */
 router.get(
   '/:id/sales/summary',
-  cacheJson(300),
-  ensureFn('salesSummaryFromDB', salesSummaryFromDB)
+  ensureFn('sales.listDailyItems', sales.listDailyItems)  // ← Usar el mismo handler que /items
 );
 
 router.get(
   '/:id/sales/:articuloId',
   cacheJson(300),
-  ensureFn('salesSeriesFromDB', salesSeriesFromDB)
+  ensureFn('salesSeriesFromDB', salesSeriesFromDB)  // ← Esta déjala igual (es para series)
 );
 
 /* ───────── Ventas: probes (diagnóstico) ───────── */
