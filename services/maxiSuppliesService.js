@@ -3,7 +3,6 @@
 
 const { STATS_BASE, getBearer } = require('./maxiSalesService');
 
-// ----- Parche: normalizar STATS base local y dar mensaje claro si falta -----
 const STATS = (() => {
   // preferimos la STATS_BASE exportada si existe
   const candidates = [
@@ -12,6 +11,7 @@ const STATS = (() => {
     process.env.MAXI_STATS_BASE,
     process.env.MAXI_BASE,
     process.env.MAXI_URL,
+    process.env.MAXI_BASE_URL, // <- agregamos tu variable .env real
     process.env.MAXI_API,
   ];
 
@@ -24,10 +24,7 @@ const STATS = (() => {
 })();
 
 if (!STATS) {
-  // log claro para que lo veas en Render / consola
-  console.error('[maxiSuppliesService] FATAL: STATS base NOT configured. Revisar env: STATS_BASE / MAXI_BASE / MAXI_URL');
-  // No throw aquí para no romper import time si preferís, pero si querés que falle rápido:
-  // throw new Error('Server misconfigured: missing Maxi stats base URL (STATS_BASE/MAXI_BASE)');
+  console.error('[maxiSuppliesService] FATAL: STATS base NOT configured. Revisar env: STATS_BASE / MAXI_BASE / MAXI_BASE_URL');
 }
 
 // usa fetch nativo o node-fetch como en maxiSalesService
