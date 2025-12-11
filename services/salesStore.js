@@ -195,6 +195,7 @@ function normalizeInvoices(businessId, rawDocs) {
 
   (rawDocs || []).forEach((doc) => {
     // ───────── invoicebydate (órdenes) ─────────
+    // ───────── invoicebydate (órdenes) ─────────
     const ord = doc?.order;
     if (ord?.orderData) {
       const od = ord.orderData;
@@ -202,65 +203,91 @@ function normalizeInvoices(businessId, rawDocs) {
       console.log('🔍 Procesando venta:', oid, '| Ya vista?', seenIds.has(oid));
       const occurred = parseYMDorDMYtoUTC(od.orderDate || od.date);
 
-      // 🎯 CAMBIO PRINCIPAL: Calcular total desde orderItems en lugar de orderData.totalSales
-      const total = (ord.orderItems || []).reduce((sum, oi) => {
-        return sum + toNum(oi?.orderItem?.totalPrice || 0);
-      }, 0);
-
       if (!occurred) return;
 
-      // 🆕 DEDUPLICACIÓN: Si ya procesamos esta venta, saltear
+      // 🆕 DEDUPLICACIÓN
       if (oid && seenIds.has(oid)) {
         console.log(`⚠️ DUPLICADO DETECTADO: ${oid} - IGNORANDO`);
         return;
       }
-      console.log('➕ Agregando', oid, 'al Set');
       if (oid) seenIds.add(oid);
+
+      // 🎯 NUEVO: Procesar AMBOS tipos de items
+      const allItems = [];
+
+      // 1️⃣ Procesar orderItems (tienen quantity explícita)
+      const orderItems = Array.isArray(ord.orderItems) ? ord.orderItems : [];
+      for (const wrap of orderItems) {
+        const oi = wrap?.orderItem || wrap || {};
+
+        allItems.push({
+          title: oi.title || oi.nombre_art || 'Item',
+          qty: toNum(oi.quantity || 1), // ← quantity puede faltar, default 1
+          totalPrice: toNum(oi.totalPrice),
+          productPrice: toNum(oi.productPrice),
+          type: 'order',
+        });
+      }
+
+      // 2️⃣ Procesar menuItems (SIEMPRE cantidad 1)
+      const menuItems = Array.isArray(ord.menuItems) ? ord.menuItems : [];
+      for (const wrap of menuItems) {
+        const mi = wrap?.menuItem || wrap || {};
+
+        // ✅ Solo agregar si NO está ya en orderItems (evitar duplicados por título)
+        const exists = allItems.some(
+          x => x.title && mi.title &&
+            x.title.toLowerCase().trim() === mi.title.toLowerCase().trim()
+        );
+
+        if (!exists) {
+          allItems.push({
+            title: mi.title || 'Menu Item',
+            qty: 1, // ← menuItems SIEMPRE son 1
+            totalPrice: toNum(mi.productPrice), // menuItems usan productPrice como total
+            productPrice: toNum(mi.productPrice),
+            type: 'menu',
+          });
+        }
+      }
+
+      // 🎯 Calcular total desde TODOS los items procesados
+      const total = allItems.reduce((sum, it) => sum + it.totalPrice, 0);
+
+      console.log('🧮 ANÁLISIS DE ITEMS:');
+      console.log(`   orderItems: ${orderItems.length}`);
+      console.log(`   menuItems: ${menuItems.length}`);
+      console.log(`   Items procesados (sin duplicados): ${allItems.length}`);
+      console.log(`   Total calculado: ${total}`);
+      console.log('');
 
       const sale_idx = sales.length;
       pushSale(oid, occurred, total);
 
-      const arr = Array.isArray(ord.orderItems) ? ord.orderItems : [];
-    
-      const orderItemsTotal = total; // Ya lo calculamos arriba
-      const menuItemsTotal = (ord.menuItems || []).reduce((sum, mi) => {
-        return sum + toNum(mi?.menuItem?.productPrice || 0);
-      }, 0);
-
-      console.log('🧮 ANÁLISIS DE TOTALES:');
-      console.log(`   Total calculado (usado): ${total}`);
-      console.log(`   orderData.totalSales (ignorado): ${toNum(od.totalSales)}`);
-      console.log(`   Suma de orderItems.totalPrice: ${orderItemsTotal}`);
-      console.log(`   Suma de menuItems.productPrice: ${menuItemsTotal}`);
-      console.log(`   ✅ Sale.total = SUM(items) siempre`);
-      console.log('');
-
-      arr.forEach((wrap, i) => {
-        const oi = wrap?.orderItem || wrap || {};
-        const title = oi.title || oi.nombre_art || 'Item';
-        const qty = toNum(oi.quantity);
-        const totalPrice = toNum(oi.totalPrice);
-        const productPrice = toNum(oi.productPrice);
+      // 🎯 Insertar TODOS los items (order + menu)
+      allItems.forEach((it, i) => {
+        const qty = it.qty;
+        const totalPrice = it.totalPrice;
         const unit_price = (qty > 0 && totalPrice > 0)
           ? (totalPrice / qty)
-          : productPrice;
+          : it.productPrice;
 
-        console.log('🔍 DEBUG pushItem:', {
-          title,
+        console.log(`📦 Item ${i + 1} (${it.type}):`, {
+          title: it.title,
           qty,
           totalPrice,
-          productPrice,
           unit_price,
         });
 
         pushItem(sale_idx, i + 1, {
           sku: null,
-          article_name: title,
+          article_name: it.title,
           qty,
           unit_price,
           line_total: totalPrice,
         });
       });
+
       return;
     }
 

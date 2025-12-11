@@ -102,6 +102,7 @@ app.use('/api/branches',              branchesRoutes);
 // histórico: rutas bajo :businessId
 app.use('/api/businesses',            require('./routes/businessRoutes')); // ya cubierto por guard global
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
+app.use('/api/businesses', businessRoutes);
 
 /* util debug */
 app.get('/api/_debug/whoami', authRequired, (req, res) => {
