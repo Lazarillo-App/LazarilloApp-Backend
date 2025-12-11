@@ -3,6 +3,33 @@
 
 const { STATS_BASE, getBearer } = require('./maxiSalesService');
 
+// ----- Parche: normalizar STATS base local y dar mensaje claro si falta -----
+const STATS = (() => {
+  // preferimos la STATS_BASE exportada si existe
+  const candidates = [
+    STATS_BASE,
+    process.env.STATS_BASE,
+    process.env.MAXI_STATS_BASE,
+    process.env.MAXI_BASE,
+    process.env.MAXI_URL,
+    process.env.MAXI_API,
+  ];
+
+  for (const c of candidates) {
+    if (c && String(c).trim()) {
+      return String(c).replace(/\/$/, ''); // quitar slash final
+    }
+  }
+  return null;
+})();
+
+if (!STATS) {
+  // log claro para que lo veas en Render / consola
+  console.error('[maxiSuppliesService] FATAL: STATS base NOT configured. Revisar env: STATS_BASE / MAXI_BASE / MAXI_URL');
+  // No throw aquí para no romper import time si preferís, pero si querés que falle rápido:
+  // throw new Error('Server misconfigured: missing Maxi stats base URL (STATS_BASE/MAXI_BASE)');
+}
+
 // usa fetch nativo o node-fetch como en maxiSalesService
 const fetchNative =
   (typeof globalThis.fetch === 'function')
@@ -38,7 +65,7 @@ async function fetchMaxiInsumos({ businessId, req }) {
   }
 
   const bearer = await getBearer(businessId, req);
-  const url = `${STATS_BASE}/estadisticasmaster/insumos`;
+  const url = `${STATS}/estadisticasmaster/insumos`;
 
   console.log('[maxiSupplies] GET', url);
 
@@ -119,7 +146,7 @@ async function fetchMaxiInsumosRubros({ businessId, req }) {
   }
 
   const bearer = await getBearer(businessId, req);
-  const url = `${STATS_BASE}/estadisticasmaster/rubrodeinsumos`;
+  const url = `${STATS}/estadisticasmaster/rubrodeinsumos`;
 
   console.log('[maxiSupplies] GET', url);
 
