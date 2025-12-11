@@ -271,6 +271,10 @@ exports.reconcileAndRebuild = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+// ============================================================================
+// FIX: listDailyItems con doble JOIN (maxi_articles + app_articles)
+// ============================================================================
+
 exports.listDailyItems = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -292,28 +296,34 @@ exports.listDailyItems = async (req, res, next) => {
     const params = [biz.id, from, to];
     let whereClause = '';
 
-    // Filtro por article_id específico
     if (articleId) {
       params.push(Number(articleId));
       whereClause = `AND sdi.article_id = $${params.length}`;
     }
 
-    // ✅ QUERY MÁS SIMPLE: solo sales_daily_items + maxi_articles
+    // ✅ QUERY CON DOBLE JOIN: busca en maxi_articles Y app_articles
     const sql = `
       SELECT
         sdi.day::date AS day,
         sdi.article_id,
-        COALESCE(ma.nombre, '#' || sdi.article_id::text) AS title,
+        COALESCE(
+          NULLIF(TRIM(ma.nombre), ''),
+          NULLIF(TRIM(aa.name), ''),
+          '#' || sdi.article_id::text
+        ) AS title,
         SUM(sdi.qty)::numeric AS qty,
         SUM(sdi.amount)::numeric AS amount
       FROM sales_daily_items sdi
       LEFT JOIN maxi_articles ma
         ON ma.business_id = sdi.business_id 
         AND ma.articulo_id = sdi.article_id
+      LEFT JOIN app_articles aa
+        ON aa.business_id = sdi.business_id
+        AND aa.id = sdi.article_id
       WHERE sdi.business_id = $1
         AND sdi.day BETWEEN $2::date AND $3::date
         ${whereClause}
-      GROUP BY sdi.day::date, sdi.article_id, ma.nombre
+      GROUP BY sdi.day::date, sdi.article_id, ma.nombre, aa.name
       ORDER BY sdi.day DESC, sdi.article_id
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
