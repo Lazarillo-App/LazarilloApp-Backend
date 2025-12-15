@@ -400,6 +400,151 @@ async function remove(req, res) {
   }
 }
 
+async function getExclusions(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
+
+  try {
+    // Verificar que el grupo existe y pertenece al negocio
+    const { rowCount: groupCount } = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [id, bizId]
+    );
+    if (!groupCount) return sendError(res, 404, 'not_found');
+
+    // Obtener exclusiones
+    const { rows } = await pool.query(
+      `
+      SELECT id, scope, ref_id
+      FROM insumo_group_exclusions
+      WHERE group_id = $1
+      ORDER BY created_at DESC
+      `,
+      [id]
+    );
+
+    return res.json({ ok: true, data: rows });
+  } catch (err) {
+    console.error('[insumoGroups] getExclusions error:', err);
+    return sendError(res, 500, 'Error al obtener exclusiones');
+  }
+}
+
+/**
+ * POST /api/insumos/groups/:id/exclusions
+ * Agregar exclusiones (quitar insumos del TODO)
+ * Body: { exclusions: [{ scope: 'insumo', ref_id: 123 }, ...] }
+ */
+async function addExclusions(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
+
+  const { exclusions } = req.body;
+  if (!Array.isArray(exclusions) || !exclusions.length) {
+    return sendError(res, 400, 'exclusions debe ser un array no vacío');
+  }
+
+  try {
+    // Verificar que el grupo existe
+    const { rowCount: groupCount } = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [id, bizId]
+    );
+    if (!groupCount) return sendError(res, 404, 'not_found');
+
+    // Preparar valores para INSERT
+    const values = [];
+    const placeholders = [];
+    
+    exclusions.forEach((e, idx) => {
+      const scope = e.scope || 'insumo';
+      const refId = Number(e.ref_id);
+      
+      if (!Number.isFinite(refId)) return; // skip inválidos
+      
+      const base = idx * 3;
+      values.push(id, scope, refId);
+      placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
+    });
+
+    if (!placeholders.length) {
+      return sendError(res, 400, 'No hay exclusiones válidas para agregar');
+    }
+
+    // Insertar (ignorar duplicados)
+    await pool.query(
+      `
+      INSERT INTO insumo_group_exclusions (group_id, scope, ref_id)
+      VALUES ${placeholders.join(', ')}
+      ON CONFLICT (group_id, scope, ref_id) DO NOTHING
+      `,
+      values
+    );
+
+    return res.json({ ok: true, count: placeholders.length });
+  } catch (err) {
+    console.error('[insumoGroups] addExclusions error:', err);
+    return sendError(res, 500, 'Error al agregar exclusiones');
+  }
+}
+
+/**
+ * DELETE /api/insumos/groups/:id/exclusions
+ * Quitar exclusiones (volver a agregar al TODO)
+ * Body: { ids: [123, 456, ...], scope: 'insumo' }
+ */
+async function removeExclusions(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
+
+  const { ids, scope = 'insumo' } = req.body;
+  if (!Array.isArray(ids) || !ids.length) {
+    return sendError(res, 400, 'ids debe ser un array no vacío');
+  }
+
+  try {
+    // Verificar que el grupo existe
+    const { rowCount: groupCount } = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [id, bizId]
+    );
+    if (!groupCount) return sendError(res, 404, 'not_found');
+
+    // Preparar placeholders para WHERE IN
+    const refIds = ids.map(Number).filter(Number.isFinite);
+    if (!refIds.length) {
+      return sendError(res, 400, 'No hay IDs válidos para eliminar');
+    }
+
+    const placeholders = refIds.map((_, idx) => `$${idx + 3}`).join(', ');
+    
+    // Eliminar exclusiones
+    const { rowCount } = await pool.query(
+      `
+      DELETE FROM insumo_group_exclusions
+      WHERE group_id = $1
+        AND scope = $2
+        AND ref_id IN (${placeholders})
+      `,
+      [id, scope, ...refIds]
+    );
+
+    return res.json({ ok: true, deleted: rowCount });
+  } catch (err) {
+    console.error('[insumoGroups] removeExclusions error:', err);
+    return sendError(res, 500, 'Error al quitar exclusiones');
+  }
+}
+
 module.exports = {
   list,         
   getOne,        
@@ -408,5 +553,8 @@ module.exports = {
   replaceItems,  
   addItem,       
   removeItem,    
-  remove,       
+  remove,    
+  getExclusions,
+  addExclusions,
+  removeExclusions,   
 };

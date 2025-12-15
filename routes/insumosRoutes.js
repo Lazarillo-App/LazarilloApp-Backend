@@ -69,4 +69,14 @@ router.post('/groups/:id/items', groupsCtrl.addItem);
 // DELETE /api/insumos/groups/:id
 router.delete('/groups/:id', groupsCtrl.remove);
 
+/* ================== EXCLUSIONES (TODO System) ================== */
+// GET    /api/insumos/groups/:id/exclusions
+router.get('/groups/:id/exclusions', groupsCtrl.getExclusions);
+
+// POST   /api/insumos/groups/:id/exclusions
+router.post('/groups/:id/exclusions', groupsCtrl.addExclusions);
+
+// DELETE /api/insumos/groups/:id/exclusions
+router.delete('/groups/:id/exclusions', groupsCtrl.removeExclusions);
+
 module.exports = router;

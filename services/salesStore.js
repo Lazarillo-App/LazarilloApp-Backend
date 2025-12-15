@@ -164,6 +164,8 @@ function agruparPorDiaYArticulo(rawSales) {
 */
 // services/salesStore.js
 
+// VERSIÓN CORREGIDA - Solo usa orderItems, menuItems es metadata
+
 function normalizeInvoices(businessId, rawDocs) {
   console.log('🔍 normalizeInvoices iniciando - versión CON deduplicación');
   const sales = [];
@@ -214,6 +216,7 @@ function normalizeInvoices(businessId, rawDocs) {
       // 🎯 Agrupar items por título para sumar cantidades
       const itemsByTitle = new Map();
 
+      // ✅ SOLO procesar orderItems (tiene la info REAL de venta)
       const orderItems = Array.isArray(ord.orderItems) ? ord.orderItems : [];
       for (const wrap of orderItems) {
         const oi = wrap?.orderItem || wrap || {};
@@ -222,7 +225,7 @@ function normalizeInvoices(businessId, rawDocs) {
         if (!title) continue;
 
         const qty = Number(oi.quantity ?? oi.qty ?? 1);
-        const totalPrice = toNum(oi.totalPrice); // ← Ya viene multiplicado qty * precio
+        const totalPrice = toNum(oi.totalPrice);
 
         const key = title.toLowerCase();
 
@@ -236,50 +239,28 @@ function normalizeInvoices(businessId, rawDocs) {
 
         const item = itemsByTitle.get(key);
         item.qty += qty;
-        item.totalPrice += totalPrice; // ← Sumar el total (no qty * precio)
+        item.totalPrice += totalPrice;
       }
 
-      // 2️⃣ Procesar menuItems - calcular precio individual * 1
-      const menuItems = Array.isArray(ord.menuItems) ? ord.menuItems : [];
-      for (const wrap of menuItems) {
-        const mi = wrap?.menuItem || wrap || {};
-        const title = (mi.title || '').trim();
-
-        if (!title) continue;
-
-        const productPrice = toNum(mi.productPrice);
-        const discount = toNum(mi.discount ?? 0);
-        const finalPrice = productPrice - discount; // ← Precio NETO para 1 unidad
-
-        const key = title.toLowerCase();
-
-        if (!itemsByTitle.has(key)) {
-          itemsByTitle.set(key, {
-            title,
-            qty: 0,
-            totalPrice: 0,
-          });
-        }
-
-        const item = itemsByTitle.get(key);
-        item.qty += 1;  // ← menuItem SIEMPRE es 1 unidad
-        item.totalPrice += finalPrice; // ← Sumar precio de 1 unidad
-      }
-
+      // ❌ NO procesar menuItems - es solo metadata
+      // menuItems contiene precio de lista y descuentos, pero NO son items adicionales
+      
       // 🎯 Calcular total desde items agrupados
       const itemsArray = Array.from(itemsByTitle.values());
       const total = itemsArray.reduce((sum, it) => sum + it.totalPrice, 0);
 
+      // Obtener también el total de Maxi para comparar
+      const maxiTotal = toNum(od.totalSales);
+
       console.log('🧮 TICKET:', oid);
       console.log(`   orderItems originales: ${orderItems.length}`);
-      console.log(`   menuItems originales: ${menuItems.length}`);
       console.log(`   Items únicos agrupados: ${itemsArray.length}`);
       console.log(`   Total calculado: ${total.toFixed(2)}`);
-      console.log(`   Total Maxi (totalSales): ${toNum(od.totalSales).toFixed(2)}`);
-      console.log(`   Diferencia: ${(total - toNum(od.totalSales)).toFixed(2)}`);
+      console.log(`   Total Maxi (totalSales): ${maxiTotal.toFixed(2)}`);
+      console.log(`   Diferencia: ${(total - maxiTotal).toFixed(2)}`);
 
       const sale_idx = sales.length;
-      pushSale(oid, occurred, total);
+      pushSale(oid, occurred, maxiTotal); // ← Usar total de Maxi como fuente de verdad
 
       // Insertar items agrupados
       itemsArray.forEach((it, i) => {
