@@ -1,5 +1,6 @@
 // controllers/insumosController.js
 const pool = require('../config/db');
+const db = require('../config/db');
 const { parse } = require('csv-parse/sync');
 const getBusinessId = require('../utils/getBusinessId'); // ✅ ÚNICO punto de verdad
 const {
