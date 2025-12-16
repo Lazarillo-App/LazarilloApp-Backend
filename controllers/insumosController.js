@@ -1,6 +1,5 @@
 // controllers/insumosController.js
 const pool = require('../config/db');
-const db = require('../config/db');
 const { parse } = require('csv-parse/sync');
 const getBusinessId = require('../utils/getBusinessId'); // ✅ ÚNICO punto de verdad
 const {
@@ -553,12 +552,13 @@ exports.addItemToGroup = async (req, res) => {
   }
 
   try {
-    // Verificar que el grupo existe
-    const grupo = await db('insumo_groups')
-      .where({ id: groupId, business_id: businessId })
-      .first();
+    // ✅ Usar pool, NO db()
+    const grupoRes = await pool.query(
+      'SELECT id FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [groupId, businessId]
+    );
 
-    if (!grupo) {
+    if (!grupoRes.rows.length) {
       return res.status(404).json({ 
         ok: false, 
         error: 'Grupo no encontrado' 
@@ -567,14 +567,12 @@ exports.addItemToGroup = async (req, res) => {
 
     console.log(`📦 [addItemToGroup] Agregando insumo ${insumoId} al grupo ${groupId}`);
 
-    // Insertar (ignorar si ya existe)
-    await db('insumo_group_items')
-      .insert({
-        group_id: Number(groupId),
-        insumo_id: Number(insumoId),
-      })
-      .onConflict(['group_id', 'insumo_id'])
-      .ignore();
+    await pool.query(
+      `INSERT INTO insumo_group_items (group_id, insumo_id)
+       VALUES ($1, $2)
+       ON CONFLICT (group_id, insumo_id) DO NOTHING`,
+      [Number(groupId), Number(insumoId)]
+    );
 
     console.log(`✅ [addItemToGroup] Insumo agregado`);
 
@@ -589,7 +587,7 @@ exports.addItemToGroup = async (req, res) => {
       error: err.message || 'Error al agregar insumo'
     });
   }
-}
+};
 
 /**
  * 🆕 Agregar MÚLTIPLES insumos a un grupo (BULK)
@@ -599,6 +597,8 @@ exports.addMultipleItemsToGroup = async (req, res) => {
   const { insumoIds } = req.body;
   const businessId = getBusinessId(req);
 
+  console.log(`📦 [addMultipleItemsToGroup] Recibido:`, { groupId, insumoIdsCount: insumoIds?.length });
+
   if (!Array.isArray(insumoIds) || insumoIds.length === 0) {
     return res.status(400).json({ 
       ok: false, 
@@ -606,48 +606,65 @@ exports.addMultipleItemsToGroup = async (req, res) => {
     });
   }
 
-  try {
-    // Verificar que el grupo existe
-    const grupo = await db('insumo_groups')
-      .where({ id: groupId, business_id: businessId })
-      .first();
+  const client = await pool.connect();
 
-    if (!grupo) {
+  try {
+    // ✅ Verificar grupo dentro de la transacción
+    const grupoRes = await client.query(
+      'SELECT id FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [groupId, businessId]
+    );
+
+    if (!grupoRes.rows.length) {
       return res.status(404).json({ 
         ok: false, 
         error: 'Grupo no encontrado' 
       });
     }
 
-    console.log(`📦 [addMultipleItemsToGroup] Agregando ${insumoIds.length} insumos al grupo ${groupId}`);
+    console.log(`📦 [addMultipleItemsToGroup] Grupo verificado, insertando ${insumoIds.length} items...`);
 
-    // Preparar datos para inserción
-    const items = insumoIds.map(insumoId => ({
-      group_id: Number(groupId),
-      insumo_id: Number(insumoId),
-    }));
+    await client.query('BEGIN');
 
-    // Insertar en batch, ignorando duplicados
-    const inserted = await db('insumo_group_items')
-      .insert(items)
-      .onConflict(['group_id', 'insumo_id'])
-      .ignore();
+    // ✅ Preparar VALUES dinámicos: ($1,$2), ($3,$4), ...
+    const values = insumoIds.map((_, idx) => {
+      const groupIdx = idx * 2 + 1;
+      const insumoIdx = idx * 2 + 2;
+      return `($${groupIdx}, $${insumoIdx})`;
+    }).join(', ');
 
-    console.log(`✅ [addMultipleItemsToGroup] Insertados: ${inserted?.length || insumoIds.length}`);
+    // ✅ Preparar params: [groupId, insumoId1, groupId, insumoId2, ...]
+    const params = insumoIds.flatMap(id => [Number(groupId), Number(id)]);
+
+    // ✅ Insertar en batch
+    const result = await client.query(
+      `INSERT INTO insumo_group_items (group_id, insumo_id)
+       VALUES ${values}
+       ON CONFLICT (group_id, insumo_id) DO NOTHING
+       RETURNING *`,
+      params
+    );
+
+    await client.query('COMMIT');
+
+    console.log(`✅ [addMultipleItemsToGroup] Insertados: ${result.rowCount} de ${insumoIds.length}`);
 
     res.json({ 
       ok: true, 
-      added: insumoIds.length,
-      message: `${insumoIds.length} insumos agregados correctamente`
+      added: result.rowCount,
+      message: `${result.rowCount} insumos agregados correctamente`
     });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('[addMultipleItemsToGroup] Error:', err);
     res.status(500).json({ 
       ok: false, 
       error: err.message || 'Error al agregar insumos en bulk'
     });
+  } finally {
+    client.release();
   }
-}
+};
 
 /**
  * ✅ Quitar un insumo de un grupo
@@ -657,12 +674,13 @@ exports.removeItemFromGroup = async (req, res) => {
   const businessId = getBusinessId(req);
 
   try {
-    // Verificar que el grupo existe
-    const grupo = await db('insumo_groups')
-      .where({ id: groupId, business_id: businessId })
-      .first();
+    // ✅ Verificar grupo
+    const grupoRes = await pool.query(
+      'SELECT id FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [groupId, businessId]
+    );
 
-    if (!grupo) {
+    if (!grupoRes.rows.length) {
       return res.status(404).json({ 
         ok: false, 
         error: 'Grupo no encontrado' 
@@ -671,14 +689,13 @@ exports.removeItemFromGroup = async (req, res) => {
 
     console.log(`🗑️ [removeItemFromGroup] Quitando insumo ${insumoId} del grupo ${groupId}`);
 
-    const deleted = await db('insumo_group_items')
-      .where({
-        group_id: Number(groupId),
-        insumo_id: Number(insumoId),
-      })
-      .del();
+    const result = await pool.query(
+      `DELETE FROM insumo_group_items
+       WHERE group_id = $1 AND insumo_id = $2`,
+      [Number(groupId), Number(insumoId)]
+    );
 
-    if (deleted === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ 
         ok: false, 
         error: 'Item no encontrado en el grupo' 
@@ -698,4 +715,4 @@ exports.removeItemFromGroup = async (req, res) => {
       error: err.message || 'Error al quitar insumo'
     });
   }
-}
+};
