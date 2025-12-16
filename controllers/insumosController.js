@@ -1,7 +1,7 @@
 // controllers/insumosController.js
 const pool = require('../config/db');
 const { parse } = require('csv-parse/sync');
-
+const getBusinessId = require('../utils/getBusinessId'); // ✅ ÚNICO punto de verdad
 const {
   fetchMaxiInsumos,
   normalizarInsumosMaxi,
@@ -9,31 +9,17 @@ const {
   normalizarInsumosRubros,
 } = require('../services/maxiSuppliesService');
 
-const { upsertFromMaxi } = require('../repos/insumosRepo');   // 👈 ESTE ES EL BUENO
+const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 
+// ✅ Helpers seguros
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
+// ✅ Whitelist para ORDER BY (evita SQL injection)
+const ALLOWED_ORDER_BY = ['nombre', 'codigo_maxi', 'rubro', 'unidad_med', 'precio_ref', 'created_at'];
+
 if (process.env.NODE_ENV !== 'production') {
-  console.log('💡 insumosController.js cargado (modo limpio)');
-}
-
-function getBusinessIdFromReq(req) {
-  const hdr =
-    req.header('X-Business-Id') ||
-    req.headers['x-business-id'] ||
-    req.query.businessId;
-
-  if (hdr) {
-    const n = Number(hdr);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-
-  if (req.business?.id) return Number(req.business.id);
-  if (req.user?.active_business_id)
-    return Number(req.user.active_business_id);
-
-  return null;
+  console.log('💡 insumosController.js cargado');
 }
 
 // ===================== LISTAR / CRUD BÁSICO =====================
@@ -53,15 +39,13 @@ exports.listar = async (req, res) => {
       sinAgrupacion,
     } = req.query;
 
+    const businessId = getBusinessId(req); // ✅ función única
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
     const where = [];
     const params = [];
-
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'Negocio activo requerido' });
-    }
 
     params.push(businessId);
     where.push(`business_id = $${params.length}`);
@@ -133,13 +117,17 @@ exports.listar = async (req, res) => {
     const hardLimit = Math.min(Math.max(Number(limit), 1), 500);
     const offset = (Number(page) - 1) * hardLimit;
 
+    // ✅ ORDER BY seguro
+    const safeOrderBy = ALLOWED_ORDER_BY.includes(orderBy) ? orderBy : 'nombre';
+    const safeOrder = order === 'DESC' ? 'DESC' : 'ASC';
+
     const [dataRes, countRes] = await Promise.all([
       pool.query(
         `
         SELECT *
         FROM insumos
         ${whereSql}
-        ORDER BY ${orderBy} ${order}
+        ORDER BY ${safeOrderBy} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}
       `,
@@ -161,26 +149,24 @@ exports.listar = async (req, res) => {
       },
     });
   } catch (e) {
+    console.error('listar error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
 
 exports.crearManual = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId)
-      return res
-        .status(400)
-        .json({ ok: false, error: 'Negocio activo requerido' });
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
 
     const b = req.body || {};
-    if (!b.nombre?.trim())
-      return res
-        .status(400)
-        .json({ ok: false, error: 'Nombre requerido' });
+    if (!b.nombre?.trim()) {
+      return res.status(400).json({ ok: false, error: 'Nombre requerido' });
+    }
 
-    const estado =
-      b.estado === 'discontinuado' ? 'discontinuado' : 'activo';
+    const estado = b.estado === 'discontinuado' ? 'discontinuado' : 'activo';
 
     const { rows } = await pool.query(
       `
@@ -213,6 +199,7 @@ exports.crearManual = async (req, res) => {
 
     res.status(201).json({ ok: true, data: rows[0] });
   } catch (e) {
+    console.error('crearManual error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
@@ -220,6 +207,11 @@ exports.crearManual = async (req, res) => {
 exports.actualizar = async (req, res) => {
   try {
     const { id } = req.params;
+    const businessId = getBusinessId(req); // ✅ obligatorio
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
     const b = req.body || {};
     const sets = [];
     const vals = [];
@@ -234,28 +226,30 @@ exports.actualizar = async (req, res) => {
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
     if (b.rubro !== undefined) push('rubro', b.rubro);
     if (b.estado !== undefined) push('estado', b.estado);
+    if (b.nota !== undefined) push('nota', b.nota);
 
     if (!sets.length) return res.json({ ok: true });
 
-    vals.push(id);
+    vals.push(id, businessId); // ✅ CLAVE: validar negocio
 
     const { rows } = await pool.query(
       `
       UPDATE insumos
       SET ${sets.join(', ')}, updated_at = NOW()
-      WHERE id = $${vals.length}
+      WHERE id = $${vals.length - 1}
+        AND business_id = $${vals.length}
       RETURNING *
     `,
       vals
     );
 
-    if (!rows.length)
-      return res
-        .status(404)
-        .json({ ok: false, error: 'Insumo no encontrado' });
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
 
     res.json({ ok: true, data: rows[0] });
   } catch (e) {
+    console.error('actualizar error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
@@ -263,23 +257,27 @@ exports.actualizar = async (req, res) => {
 exports.eliminar = async (req, res) => {
   try {
     const { id } = req.params;
+    const businessId = getBusinessId(req); // ✅ obligatorio
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
 
     const r = await pool.query(
       `
       UPDATE insumos
       SET estado = 'discontinuado', updated_at = NOW()
-      WHERE id = $1
+      WHERE id = $1 AND business_id = $2
     `,
-      [id]
+      [id, businessId]
     );
 
-    if (!r.rowCount)
-      return res
-        .status(404)
-        .json({ ok: false, error: 'Insumo no encontrado' });
+    if (!r.rowCount) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
 
     res.json({ ok: true });
   } catch (e) {
+    console.error('eliminar error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
@@ -287,43 +285,49 @@ exports.eliminar = async (req, res) => {
 // ===================== BULK (JSON/CSV) =====================
 exports.bulkUpsert = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
+    const businessId = getBusinessId(req);
     if (!businessId) {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
     const items = Array.isArray(req.body) ? req.body : [];
-    if (!items.length) return res.status(400).json({ ok: false, error: 'Body debe ser un array de insumos' });
+    if (!items.length) {
+      return res.status(400).json({ ok: false, error: 'Body debe ser un array de insumos' });
+    }
 
     const client = await pool.connect();
     let inserted = 0, updated = 0, skipped = 0;
 
     try {
       await client.query('BEGIN');
-      for (const it of items) {
+      
+      for (const it of items) { // ✅ ahora es "it", no "b"
         const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
-        if (!codigo || String(codigo).trim() === '') { skipped++; continue; }
+        if (!codigo || String(codigo).trim() === '') {
+          skipped++;
+          continue;
+        }
 
         const nombre = (it.nombre ?? '').trim();
         const unidad_med = it.unidadMed ?? it.unidad_med ?? null;
-        const precio_ref = (it.precioRef ?? it.precio_ref ?? null);
+        const precio_ref = it.precioRef ?? it.precio_ref ?? null;
+        const rubro = it.rubro ?? null;
         const origen = it.origen ?? 'manual';
-        const estado =
-          b.estado === 'discontinuado' ? 'discontinuado' : 'activo';
+        const estado = it.estado === 'discontinuado' ? 'discontinuado' : 'activo'; // ✅ ahora usa "it"
 
         const r = await client.query(
           `INSERT INTO insumos
-   (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado)
-   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-   ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
-     nombre = EXCLUDED.nombre,
-     unidad_med = EXCLUDED.unidad_med,
-     precio_ref = EXCLUDED.precio_ref,
-     rubro = EXCLUDED.rubro,
-     origen = EXCLUDED.origen,
-     estado = EXCLUDED.estado,
-     updated_at = NOW()
-   RETURNING (xmax = 0) AS inserted`,
+           (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
+             nombre = EXCLUDED.nombre,
+             unidad_med = EXCLUDED.unidad_med,
+             precio_ref = EXCLUDED.precio_ref,
+             rubro = EXCLUDED.rubro,
+             origen = EXCLUDED.origen,
+             estado = EXCLUDED.estado,
+             updated_at = NOW()
+           RETURNING (xmax = 0) AS inserted`,
           [
             businessId,
             String(codigo),
@@ -335,16 +339,28 @@ exports.bulkUpsert = async (req, res) => {
             estado,
           ]
         );
-        if (r.rows?.[0]?.inserted) inserted++; else updated++;
+        
+        if (r.rows?.[0]?.inserted) inserted++;
+        else updated++;
       }
+      
       await client.query('COMMIT');
     } catch (e) {
-      await client.query('ROLLBACK'); throw e;
+      await client.query('ROLLBACK');
+      throw e;
     } finally {
       client.release();
     }
 
-    return res.json({ ok: true, summary: { inserted, updated, skipped, total: inserted + updated + skipped } });
+    return res.json({
+      ok: true,
+      summary: {
+        inserted,
+        updated,
+        skipped,
+        total: inserted + updated + skipped
+      }
+    });
   } catch (e) {
     console.error('bulkUpsert error:', e.message);
     return res.status(500).json({ ok: false, error: e.message });
@@ -353,11 +369,17 @@ exports.bulkUpsert = async (req, res) => {
 
 exports.bulkUpsertCSV = async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok: false, error: 'Subí un CSV en el campo "file"' });
-    const text = req.file.buffer.toString('utf8');
-    const rows = parse(text, { columns: true, skip_empty_lines: true, trim: true });
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: 'Subí un CSV en el campo "file"' });
+    }
 
-    // Normalizamos columnas comunes y reusamos bulkUpsert
+    const text = req.file.buffer.toString('utf8');
+    const rows = parse(text, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true
+    });
+
     req.body = rows.map(r => ({
       codigoMaxi: r.codigoMaxi ?? r.codigo_maxi ?? r.codigo,
       nombre: r.nombre ?? '',
@@ -365,7 +387,9 @@ exports.bulkUpsertCSV = async (req, res) => {
       precioRef: r.precioRef ?? r.precio_ref ?? null,
       rubro: r.rubro ?? null,
       origen: r.origen ?? 'csv',
-      activo: (String(r.activo ?? 'true').toLowerCase() !== 'false')
+      estado: String(r.estado ?? r.activo ?? 'activo').toLowerCase() === 'discontinuado' 
+        ? 'discontinuado' 
+        : 'activo'
     }));
 
     return exports.bulkUpsert(req, res);
@@ -381,32 +405,31 @@ exports.__cleanupNullInsumos = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // 1) Borra SOLO filas sin nombre (dato claramente inválido).
     const r1 = await client.query(`
       DELETE FROM insumos
       WHERE nombre IS NULL OR TRIM(COALESCE(nombre, '')) = ''
     `);
 
-    // 2) Normaliza espacios
     const r2 = await client.query(`
       UPDATE insumos
-         SET nombre = NULLIF(TRIM(nombre), ''),
-             unidad_med = NULLIF(TRIM(unidad_med), ''),
-             updated_at = NOW()
-       WHERE (nombre IS NOT NULL AND nombre <> TRIM(nombre))
-          OR (unidad_med IS NOT NULL AND unidad_med <> TRIM(unidad_med))
+      SET nombre = NULLIF(TRIM(nombre), ''),
+          unidad_med = NULLIF(TRIM(unidad_med), ''),
+          updated_at = NOW()
+      WHERE (nombre IS NOT NULL AND nombre <> TRIM(nombre))
+         OR (unidad_med IS NOT NULL AND unidad_med <> TRIM(unidad_med))
     `);
 
-    // 3) Colapsa duplicados por codigo_maxi conservando el más antiguo (id menor)
     const r3 = await client.query(`
       DELETE FROM insumos a
       USING insumos b
       WHERE a.id > b.id
         AND a.codigo_maxi IS NOT NULL
         AND a.codigo_maxi = b.codigo_maxi
+        AND a.business_id = b.business_id
     `);
 
     await client.query('COMMIT');
+    
     return res.json({
       ok: true,
       removed_without_name: r1.rowCount,
@@ -422,27 +445,20 @@ exports.__cleanupNullInsumos = async (req, res) => {
   }
 };
 
-/**
- * Lista insumos desde maxi_supplies para el negocio activo.
- * Esto NO toca la tabla insumos manual; es el espejo directo de Maxi.
- */
-/**
- * Lista insumos cargados desde Maxi para el negocio activo,
- * leyendo directamente la tabla `insumos` (origen = 'maxi').
- */
+// ===================== MAXI SYNC =====================
 exports.listarMaxi = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
+    const businessId = getBusinessId(req);
     if (!businessId) {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
     const { rows } = await pool.query(
       `SELECT *
-         FROM insumos
-        WHERE business_id = $1
-          AND origen = 'maxi'
-        ORDER BY nombre ASC`,
+       FROM insumos
+       WHERE business_id = $1
+         AND origen = 'maxi'
+       ORDER BY nombre ASC`,
       [businessId]
     );
 
@@ -453,17 +469,16 @@ exports.listarMaxi = async (req, res) => {
     });
   } catch (e) {
     console.error('listarMaxi error:', e);
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
 exports.syncFromMaxi = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
-    if (!businessId)
-      return res
-        .status(400)
-        .json({ ok: false, error: 'Negocio activo requerido' });
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
 
     const raw = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
@@ -471,17 +486,14 @@ exports.syncFromMaxi = async (req, res) => {
 
     res.json({ ok: true, ...summary });
   } catch (e) {
+    console.error('syncFromMaxi error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
 
-/**
- * Lista rubros de insumos desde tabla insumo_rubros
- * para el negocio activo.
- */
 exports.listarRubrosMaxi = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
+    const businessId = getBusinessId(req);
     if (!businessId) {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
@@ -490,16 +502,13 @@ exports.listarRubrosMaxi = async (req, res) => {
     return res.json({ ok: true, business_id: businessId, items });
   } catch (e) {
     console.error('listarRubrosMaxi error:', e);
-    return res.status(500).json({ ok: false, error: e.message || 'internal' });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
-/**
- * Sincroniza rubros de insumos desde Maxi → insumo_rubros.
- */
 exports.syncRubrosFromMaxi = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);
+    const businessId = getBusinessId(req);
     if (!businessId) {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
@@ -518,16 +527,14 @@ exports.syncRubrosFromMaxi = async (req, res) => {
   } catch (e) {
     console.error('syncRubrosFromMaxi error:', e);
     const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'internal_error' });
+    return res.status(status).json({ ok: false, error: e.message });
   }
 };
 
-// ===================== (OPCIONAL) SYNC DESDE COMPRAS =====================
-// Dejalo activado sólo si realmente lo vas a usar ahora.
-// Para desactivarlo sin borrar, usa la flag de entorno: ENABLE_SYNC_COMPRAS=false
+// ===================== SYNC COMPRAS (opcional) =====================
 exports.syncDesdeCompras = async (req, res) => {
   if (String(process.env.ENABLE_SYNC_COMPRAS || 'false').toLowerCase() !== 'true') {
     return res.status(503).json({ ok: false, error: 'syncDesdeCompras deshabilitado' });
   }
-  return res.status(501).json({ ok: false, error: 'No implementado en modo limpio' });
+  return res.status(501).json({ ok: false, error: 'No implementado' });
 };

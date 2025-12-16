@@ -1,32 +1,6 @@
 /* eslint-disable no-console */
 const pool = require('../config/db');
-
-/* =============== OBTENER BUSINESS =============== */
-function getBusinessId(req) {
-  const hdr =
-    req.header('X-Business-Id') ||
-    req.header('X-Business') ||
-    req.headers['x-business-id'] ||
-    req.headers['x-business'] ||
-    req.query.businessId;
-
-  if (hdr != null && hdr !== '') {
-    const n = Number(hdr);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-
-  if (req.business && req.business.id) {
-    const n = Number(req.business.id);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-
-  if (req.user && req.user.active_business_id) {
-    const n = Number(req.user.active_business_id);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-
-  return null;
-}
+const getBusinessId = require('../utils/getBusinessId'); // ✅ función única
 
 /* =============== helpers básicos =============== */
 function sendError(res, status, message) {
@@ -34,10 +8,6 @@ function sendError(res, status, message) {
 }
 
 /* =============== LISTAR GRUPOS =============== */
-/**
- * GET /api/insumos/groups
- * Devuelve todas las agrupaciones del negocio, con los insumos de cada una en `items`
- */
 async function list(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) {
@@ -92,10 +62,6 @@ async function list(req, res) {
 }
 
 /* =============== OBTENER UNO =============== */
-/**
- * GET /api/insumos/groups/:id
- * Devuelve una agrupación con sus insumos completos en `items`
- */
 async function getOne(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -152,7 +118,6 @@ async function getOne(req, res) {
 }
 
 /* =============== CREAR GRUPO =============== */
-// POST /api/insumos/groups
 async function create(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -177,7 +142,6 @@ async function create(req, res) {
   } catch (err) {
     console.error('[insumoGroups] create error:', err);
 
-    // UNIQUE: mismo nombre en el mismo negocio
     if (err.code === '23505') {
       return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
     }
@@ -187,7 +151,6 @@ async function create(req, res) {
 }
 
 /* =============== ACTUALIZAR GRUPO =============== */
-// PUT /api/insumos/groups/:id
 async function update(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -248,8 +211,6 @@ async function update(req, res) {
 }
 
 /* =============== REEMPLAZAR ITEMS (bulk) =============== */
-// PUT /api/insumos/groups/:id/items
-// body: { insumoIds: number[] }
 async function replaceItems(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -262,7 +223,6 @@ async function replaceItems(req, res) {
     .filter((n) => Number.isFinite(n));
 
   try {
-    // chequear que el grupo pertenece al negocio
     const { rowCount: groupCount } = await pool.query(
       'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
       [id, bizId]
@@ -271,12 +231,8 @@ async function replaceItems(req, res) {
 
     await pool.query('BEGIN');
 
-    // limpiar items previos
-    await pool.query('DELETE FROM insumo_group_items WHERE group_id = $1', [
-      id,
-    ]);
+    await pool.query('DELETE FROM insumo_group_items WHERE group_id = $1', [id]);
 
-    // insertar nuevos (si hay)
     if (insumoIds.length) {
       const values = [];
       const placeholders = [];
@@ -307,8 +263,6 @@ async function replaceItems(req, res) {
 }
 
 /* =============== AGREGAR UN ITEM =============== */
-// POST /api/insumos/groups/:id/items
-// body: { insumoId }
 async function addItem(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -321,14 +275,12 @@ async function addItem(req, res) {
   }
 
   try {
-    // validar que el grupo sea del negocio
     const { rowCount: groupCount } = await pool.query(
       'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
       [groupId, bizId]
     );
     if (!groupCount) return sendError(res, 404, 'not_found');
 
-    // opcional: validar que el insumo también pertenezca al negocio
     await pool.query(
       `
       INSERT INTO insumo_group_items (group_id, insumo_id)
@@ -346,7 +298,6 @@ async function addItem(req, res) {
 }
 
 /* =============== QUITAR UN ITEM =============== */
-// DELETE /api/insumos/groups/:id/items/:insumoId
 async function removeItem(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -359,7 +310,6 @@ async function removeItem(req, res) {
   }
 
   try {
-    // validar que el grupo sea del negocio
     const { rowCount: groupCount } = await pool.query(
       'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
       [groupId, bizId]
@@ -379,7 +329,6 @@ async function removeItem(req, res) {
 }
 
 /* =============== ELIMINAR GRUPO =============== */
-// DELETE /api/insumos/groups/:id
 async function remove(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -400,6 +349,7 @@ async function remove(req, res) {
   }
 }
 
+/* =============== EXCLUSIONES =============== */
 async function getExclusions(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -408,14 +358,12 @@ async function getExclusions(req, res) {
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   try {
-    // Verificar que el grupo existe y pertenece al negocio
     const { rowCount: groupCount } = await pool.query(
       'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
       [id, bizId]
     );
     if (!groupCount) return sendError(res, 404, 'not_found');
 
-    // Obtener exclusiones
     const { rows } = await pool.query(
       `
       SELECT id, scope, ref_id
@@ -433,11 +381,6 @@ async function getExclusions(req, res) {
   }
 }
 
-/**
- * POST /api/insumos/groups/:id/exclusions
- * Agregar exclusiones (quitar insumos del TODO)
- * Body: { exclusions: [{ scope: 'insumo', ref_id: 123 }, ...] }
- */
 async function addExclusions(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -451,23 +394,21 @@ async function addExclusions(req, res) {
   }
 
   try {
-    // Verificar que el grupo existe
     const { rowCount: groupCount } = await pool.query(
       'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
       [id, bizId]
     );
     if (!groupCount) return sendError(res, 404, 'not_found');
 
-    // Preparar valores para INSERT
     const values = [];
     const placeholders = [];
-    
+
     exclusions.forEach((e, idx) => {
       const scope = e.scope || 'insumo';
       const refId = Number(e.ref_id);
-      
-      if (!Number.isFinite(refId)) return; // skip inválidos
-      
+
+      if (!Number.isFinite(refId)) return;
+
       const base = idx * 3;
       values.push(id, scope, refId);
       placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
@@ -477,7 +418,6 @@ async function addExclusions(req, res) {
       return sendError(res, 400, 'No hay exclusiones válidas para agregar');
     }
 
-    // Insertar (ignorar duplicados)
     await pool.query(
       `
       INSERT INTO insumo_group_exclusions (group_id, scope, ref_id)
@@ -494,11 +434,6 @@ async function addExclusions(req, res) {
   }
 }
 
-/**
- * DELETE /api/insumos/groups/:id/exclusions
- * Quitar exclusiones (volver a agregar al TODO)
- * Body: { ids: [123, 456, ...], scope: 'insumo' }
- */
 async function removeExclusions(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -512,22 +447,19 @@ async function removeExclusions(req, res) {
   }
 
   try {
-    // Verificar que el grupo existe
     const { rowCount: groupCount } = await pool.query(
       'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
       [id, bizId]
     );
     if (!groupCount) return sendError(res, 404, 'not_found');
 
-    // Preparar placeholders para WHERE IN
     const refIds = ids.map(Number).filter(Number.isFinite);
     if (!refIds.length) {
       return sendError(res, 400, 'No hay IDs válidos para eliminar');
     }
 
     const placeholders = refIds.map((_, idx) => `$${idx + 3}`).join(', ');
-    
-    // Eliminar exclusiones
+
     const { rowCount } = await pool.query(
       `
       DELETE FROM insumo_group_exclusions
@@ -546,15 +478,15 @@ async function removeExclusions(req, res) {
 }
 
 module.exports = {
-  list,         
-  getOne,        
-  create,        
-  update,       
-  replaceItems,  
-  addItem,       
-  removeItem,    
-  remove,    
+  list,
+  getOne,
+  create,
+  update,
+  replaceItems,
+  addItem,
+  removeItem,
+  remove,
   getExclusions,
   addExclusions,
-  removeExclusions,   
+  removeExclusions,
 };
