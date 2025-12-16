@@ -30,7 +30,6 @@ const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes       = require('./routes/ventasRoutes'); 
 const insumosRoutes      = require('./routes/insumosRoutes');
 const branchesRoutes     = require('./routes/branchRoutes');
-const agrupInsumosRoutes = require('./routes/agrupacionesInsumosRoutes');
 
 // (Opcional) probe directo a Maxi en dev
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
@@ -94,7 +93,6 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 app.use('/api', authRequired, loadActiveBusiness);
 
 // módulos con negocio
-app.use('/api/agrupaciones-insumos', agrupInsumosRoutes);
 app.use('/api/insumos',               insumosRoutes);
 app.use('/api/ventas',                ventasRoutes);
 app.use('/api/branches',              branchesRoutes);

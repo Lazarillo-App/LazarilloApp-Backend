@@ -19,31 +19,20 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 function getBusinessIdFromReq(req) {
-  // 1) HEADER / QUERY → SIEMPRE PRIORIDAD
   const hdr =
     req.header('X-Business-Id') ||
-    req.header('X-Business') ||
     req.headers['x-business-id'] ||
-    req.headers['x-business'] ||
     req.query.businessId;
 
-  if (hdr != null && hdr !== '') {
+  if (hdr) {
     const n = Number(hdr);
     if (Number.isFinite(n) && n > 0) return n;
   }
 
-  // 2) CONTEXTO DEL REQUEST (middleware / token)
-  if (req.business && req.business.id) {
-    const n = Number(req.business.id);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
+  if (req.business?.id) return Number(req.business.id);
+  if (req.user?.active_business_id)
+    return Number(req.user.active_business_id);
 
-  if (req.user && req.user.active_business_id) {
-    const n = Number(req.user.active_business_id);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-
-  // 3) Nada encontrado
   return null;
 }
 
@@ -57,23 +46,26 @@ exports.listar = async (req, res) => {
       rubro,
       unidadMed,
       origen,
-      activo = 'true',
       orderBy = 'nombre',
       order = 'ASC',
-      elaborados,        // 👈 NUEVO: 'true' | 'false' | undefined
+      elaborados,
+      estado,
+      sinAgrupacion,
     } = req.query;
 
     const where = [];
     const params = [];
 
-    // 🔹 Negocio activo (multi-tenant)
     const businessId = getBusinessIdFromReq(req);
-    if (businessId) {
-      params.push(businessId);
-      where.push(`business_id = $${params.length}`);
+    if (!businessId) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    // 🔍 búsqueda por nombre / código
+    params.push(businessId);
+    where.push(`business_id = $${params.length}`);
+
     if (search) {
       params.push(`%${search}%`, `%${search}%`);
       where.push(
@@ -81,9 +73,8 @@ exports.listar = async (req, res) => {
       );
     }
 
-    // 🔹 filtro por rubro (código Maxi guardado como texto)
     if (rubro) {
-      params.push(String(rubro));        // 👈 aseguramos comparar como texto
+      params.push(String(rubro));
       where.push(`rubro = $${params.length}`);
     }
 
@@ -91,18 +82,29 @@ exports.listar = async (req, res) => {
       params.push(unidadMed);
       where.push(`unidad_med = $${params.length}`);
     }
+
     if (origen) {
       params.push(origen);
       where.push(`origen = $${params.length}`);
     }
-    if (activo !== 'all') {
-      params.push(activo === 'true');
-      where.push(`activo = $${params.length}`);
+
+    if (estado && estado !== 'all') {
+      params.push(estado);
+      where.push(`estado = $${params.length}`);
     }
 
-    // 🔹 filtro por elaborados / no elaborados usando insumo_rubros
-    //   - elaborados = 'true'  → solo rubros con es_elaborador = true
-    //   - elaborados = 'false' → rubros donde NO es_elaborador o sin rubro
+    if (sinAgrupacion === 'true') {
+      where.push(`
+        NOT EXISTS (
+          SELECT 1
+          FROM insumo_group_items gi
+          JOIN insumo_groups g ON g.id = gi.group_id
+          WHERE gi.insumo_id = insumos.id
+            AND g.business_id = insumos.business_id
+        )
+      `);
+    }
+
     if (elaborados === 'true') {
       where.push(`
         EXISTS (
@@ -110,49 +112,37 @@ exports.listar = async (req, res) => {
           FROM insumo_rubros ir
           WHERE ir.business_id = insumos.business_id
             AND ir.codigo::text = insumos.rubro
-            AND ir.es_elaborador = TRUE
+            AND ir.es_elaborador = true
         )
       `);
-    } else if (elaborados === 'false') {
+    }
+
+    if (elaborados === 'false') {
       where.push(`
         NOT EXISTS (
           SELECT 1
           FROM insumo_rubros ir
           WHERE ir.business_id = insumos.business_id
             AND ir.codigo::text = insumos.rubro
-            AND ir.es_elaborador = TRUE
+            AND ir.es_elaborador = true
         )
       `);
     }
 
-    const rawLimit = Number(limit) || 50;
-    const hardLimit = Math.min(Math.max(rawLimit, 1), 500); // 🔒 cap ≤ 500
-    const currentPage = Math.max(Number(page) || 1, 1);
-    const offset = (currentPage - 1) * hardLimit;
-
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-
-    const validOrderByWhitelist = [
-      'nombre',
-      'codigo_maxi',
-      'unidad_med',
-      'precio_ref',
-      'created_at',
-      'updated_at',
-    ];
-    const validOrderBy = validOrderByWhitelist.includes(orderBy)
-      ? orderBy
-      : 'nombre';
-    const validOrder =
-      String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const hardLimit = Math.min(Math.max(Number(limit), 1), 500);
+    const offset = (Number(page) - 1) * hardLimit;
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
-        `SELECT *
-         FROM insumos
-         ${whereSql}
-         ORDER BY ${validOrderBy} ${validOrder}
-         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        `
+        SELECT *
+        FROM insumos
+        ${whereSql}
+        ORDER BY ${orderBy} ${order}
+        LIMIT $${params.length + 1}
+        OFFSET $${params.length + 2}
+      `,
         [...params, hardLimit, offset]
       ),
       pool.query(
@@ -161,19 +151,16 @@ exports.listar = async (req, res) => {
       ),
     ]);
 
-    const total = countRes.rows[0].total;
     res.json({
       ok: true,
       data: dataRes.rows,
       pagination: {
-        page: currentPage,
+        page: Number(page),
         limit: hardLimit,
-        total,
-        pages: Math.max(Math.ceil(total / hardLimit), 1),
+        total: countRes.rows[0].total,
       },
     });
   } catch (e) {
-    console.error(e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
@@ -181,86 +168,94 @@ exports.listar = async (req, res) => {
 exports.crearManual = async (req, res) => {
   try {
     const businessId = getBusinessIdFromReq(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
+    if (!businessId)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Negocio activo requerido' });
 
     const b = req.body || {};
+    if (!b.nombre?.trim())
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Nombre requerido' });
 
-    // 🔒 exigir nombre válido
-    if (!b.nombre || !String(b.nombre).trim()) {
-      return res.status(400).json({ ok: false, error: 'Nombre requerido' });
-    }
+    const estado =
+      b.estado === 'discontinuado' ? 'discontinuado' : 'activo';
 
     const { rows } = await pool.query(
-      `INSERT INTO insumos
-        (business_id,
-         codigo_maxi, nombre, unidad_med, precio_ref, rubro,
-         envase, vencimiento, resumen, cant_ingredientes,
-         agrupacion_base, costo_ref, nota, origen, activo)
-       VALUES
-        ($1,
-         $2,$3,$4,$5,$6,
-         $7,$8,$9,$10,
-         $11,$12,$13,$14,$15)
-       RETURNING *`,
+      `
+      INSERT INTO insumos
+      (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
+       envase, vencimiento, resumen, cant_ingredientes,
+       agrupacion_base, costo_ref, nota, origen, estado)
+      VALUES
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      RETURNING *
+    `,
       [
         businessId,
-        b.codigoMaxi || null,
-        b.nombre || '',
-        b.unidadMed || null,
+        b.codigoMaxi ?? null,
+        b.nombre.trim(),
+        b.unidadMed ?? null,
         num(b.precioRef),
         b.rubro ?? null,
         b.envase ?? null,
         b.vencimiento ?? null,
         b.resumen ?? null,
         b.cantIngredientes ?? null,
-        b.agrupacionBase || null,
+        b.agrupacionBase ?? null,
         num(b.costoRef),
-        b.nota || null,
-        b.origen || 'manual',
-        b.activo ?? true,
+        b.nota ?? null,
+        b.origen ?? 'manual',
+        estado,
       ]
     );
 
     res.status(201).json({ ok: true, data: rows[0] });
   } catch (e) {
-    console.error('crearManual error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
 
 exports.actualizar = async (req, res) => {
   try {
-    const { id } = req.params, b = req.body || {};
-    const sets = [], vals = [];
-    const push = (c, v) => { vals.push(v); sets.push(`${c}=$${vals.length}`); };
+    const { id } = req.params;
+    const b = req.body || {};
+    const sets = [];
+    const vals = [];
+
+    const push = (c, v) => {
+      vals.push(v);
+      sets.push(`${c} = $${vals.length}`);
+    };
 
     if (b.nombre !== undefined) push('nombre', b.nombre);
     if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
     if (b.rubro !== undefined) push('rubro', b.rubro);
-    if (b.envase !== undefined) push('envase', b.envase);
-    if (b.vencimiento !== undefined) push('vencimiento', b.vencimiento);
-    if (b.resumen !== undefined) push('resumen', b.resumen);
-    if (b.cantIngredientes !== undefined) push('cant_ingredientes', b.cantIngredientes);
-    if (b.agrupacionBase !== undefined) push('agrupacion_base', b.agrupacionBase);
-    if (b.costoRef !== undefined) push('costo_ref', num(b.costoRef));
-    if (b.nota !== undefined) push('nota', b.nota);
-    if (b.activo !== undefined) push('activo', b.activo);
+    if (b.estado !== undefined) push('estado', b.estado);
 
-    if (!sets.length) return res.json({ ok: true, data: null });
+    if (!sets.length) return res.json({ ok: true });
 
     vals.push(id);
+
     const { rows } = await pool.query(
-      `UPDATE insumos SET ${sets.join(', ')}, updated_at=NOW()
-       WHERE id=$${vals.length} RETURNING *`,
+      `
+      UPDATE insumos
+      SET ${sets.join(', ')}, updated_at = NOW()
+      WHERE id = $${vals.length}
+      RETURNING *
+    `,
       vals
     );
-    if (!rows.length) return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+
+    if (!rows.length)
+      return res
+        .status(404)
+        .json({ ok: false, error: 'Insumo no encontrado' });
+
     res.json({ ok: true, data: rows[0] });
   } catch (e) {
-    console.error(e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
@@ -268,14 +263,23 @@ exports.actualizar = async (req, res) => {
 exports.eliminar = async (req, res) => {
   try {
     const { id } = req.params;
+
     const r = await pool.query(
-      `UPDATE insumos SET activo=FALSE, updated_at=NOW() WHERE id=$1`,
+      `
+      UPDATE insumos
+      SET estado = 'discontinuado', updated_at = NOW()
+      WHERE id = $1
+    `,
       [id]
     );
-    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+
+    if (!r.rowCount)
+      return res
+        .status(404)
+        .json({ ok: false, error: 'Insumo no encontrado' });
+
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
@@ -285,11 +289,11 @@ exports.bulkUpsert = async (req, res) => {
   try {
     const businessId = getBusinessIdFromReq(req);
     if (!businessId) {
-      return res.status(400).json({ ok:false, error:'Negocio activo requerido' });
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
     const items = Array.isArray(req.body) ? req.body : [];
-    if (!items.length) return res.status(400).json({ ok:false, error:'Body debe ser un array de insumos' });
+    if (!items.length) return res.status(400).json({ ok: false, error: 'Body debe ser un array de insumos' });
 
     const client = await pool.connect();
     let inserted = 0, updated = 0, skipped = 0;
@@ -300,34 +304,35 @@ exports.bulkUpsert = async (req, res) => {
         const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
         if (!codigo || String(codigo).trim() === '') { skipped++; continue; }
 
-        const nombre     = (it.nombre ?? '').trim();
+        const nombre = (it.nombre ?? '').trim();
         const unidad_med = it.unidadMed ?? it.unidad_med ?? null;
         const precio_ref = (it.precioRef ?? it.precio_ref ?? null);
-        const origen     = it.origen ?? 'manual';
-        const activo     = typeof it.activo === 'boolean' ? it.activo : true;
-        const rubro      = it.rubro ?? null;
+        const origen = it.origen ?? 'manual';
+        const estado =
+          b.estado === 'discontinuado' ? 'discontinuado' : 'activo';
 
         const r = await client.query(
-          `INSERT INTO insumos (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, activo)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
-             nombre=EXCLUDED.nombre,
-             unidad_med=EXCLUDED.unidad_med,
-             precio_ref=EXCLUDED.precio_ref,
-             rubro=EXCLUDED.rubro,
-             origen=EXCLUDED.origen,
-             activo=EXCLUDED.activo,
-             updated_at=NOW()
-           RETURNING (xmax = 0) AS inserted`,
+          `INSERT INTO insumos
+   (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+   ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
+     nombre = EXCLUDED.nombre,
+     unidad_med = EXCLUDED.unidad_med,
+     precio_ref = EXCLUDED.precio_ref,
+     rubro = EXCLUDED.rubro,
+     origen = EXCLUDED.origen,
+     estado = EXCLUDED.estado,
+     updated_at = NOW()
+   RETURNING (xmax = 0) AS inserted`,
           [
             businessId,
             String(codigo),
             nombre,
             unidad_med,
-            (precio_ref == null ? null : Number(precio_ref)),
+            precio_ref == null ? null : Number(precio_ref),
             rubro,
             origen,
-            activo
+            estado,
           ]
         );
         if (r.rows?.[0]?.inserted) inserted++; else updated++;
@@ -339,10 +344,10 @@ exports.bulkUpsert = async (req, res) => {
       client.release();
     }
 
-    return res.json({ ok:true, summary:{ inserted, updated, skipped, total: inserted+updated+skipped } });
+    return res.json({ ok: true, summary: { inserted, updated, skipped, total: inserted + updated + skipped } });
   } catch (e) {
     console.error('bulkUpsert error:', e.message);
-    return res.status(500).json({ ok:false, error:e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
@@ -454,32 +459,19 @@ exports.listarMaxi = async (req, res) => {
 
 exports.syncFromMaxi = async (req, res) => {
   try {
-    const businessId = getBusinessIdFromReq(req);   
-
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
+    const businessId = getBusinessIdFromReq(req);
+    if (!businessId)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Negocio activo requerido' });
 
     const raw = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
-
-    // 👇 CLAVE: le pasamos el businessId al repo
     const summary = await upsertFromMaxi(businessId, norm);
 
-    return res.json({
-      ok: true,
-      business_id: businessId,
-      received: raw.length,
-      normalized: norm.length,
-      synced: summary.total,
-      inserted: summary.inserted,
-      updated: summary.updated,
-      skipped: summary.skipped,
-    });
+    res.json({ ok: true, ...summary });
   } catch (e) {
-    console.error('syncFromMaxi error:', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message || 'internal_error' });
+    res.status(500).json({ ok: false, error: e.message });
   }
 };
 
