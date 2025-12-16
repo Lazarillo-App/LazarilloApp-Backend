@@ -114,7 +114,7 @@ exports.listar = async (req, res) => {
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const hardLimit = Math.min(Math.max(Number(limit), 1), 500);
+    const hardLimit = Math.min(Math.max(Number(limit), 1), 10000);
     const offset = (Number(page) - 1) * hardLimit;
 
     // ✅ ORDER BY seguro
@@ -538,3 +538,39 @@ exports.syncDesdeCompras = async (req, res) => {
   }
   return res.status(501).json({ ok: false, error: 'No implementado' });
 };
+
+exports.addMultipleItemsToGroup = async (req, res) => {
+  const { groupId } = req.params;
+  const { insumoIds } = req.body; // Array de IDs
+  const businessId = getBusinessId(req);
+
+  if (!Array.isArray(insumoIds) || insumoIds.length === 0) {
+    return res.status(400).json({ ok: false, error: 'Se requiere un array de insumoIds' });
+  }
+
+  try {
+    const grupo = await db('insumo_groups')
+      .where({ id: groupId, business_id: businessId })
+      .first();
+
+    if (!grupo) {
+      return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
+    }
+
+    // Insertar en batch
+    const items = insumoIds.map(insumoId => ({
+      group_id: groupId,
+      insumo_id: insumoId,
+    }));
+
+    await db('insumo_group_items')
+      .insert(items)
+      .onConflict(['group_id', 'insumo_id'])
+      .ignore(); // Ignorar duplicados
+
+    res.json({ ok: true, added: items.length });
+  } catch (err) {
+    console.error('[addMultipleItemsToGroup] Error:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}

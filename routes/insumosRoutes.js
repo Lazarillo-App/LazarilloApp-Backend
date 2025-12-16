@@ -69,6 +69,9 @@ router.post('/groups/:id/items', groupsCtrl.addItem);
 // DELETE /api/insumos/groups/:id
 router.delete('/groups/:id', groupsCtrl.remove);
 
+// backend/routes/insumos.js
+router.post('/groups/:groupId/items/bulk', ctrl.addMultipleItemsToGroup);
+
 /* ================== EXCLUSIONES (TODO System) ================== */
 // GET    /api/insumos/groups/:id/exclusions
 router.get('/groups/:id/exclusions', groupsCtrl.getExclusions);
