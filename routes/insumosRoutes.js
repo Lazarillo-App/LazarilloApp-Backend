@@ -70,7 +70,9 @@ router.post('/groups/:id/items', groupsCtrl.addItem);
 router.delete('/groups/:id', groupsCtrl.remove);
 
 // backend/routes/insumos.js
-router.post('/groups/:groupId/items/bulk', ctrl.addMultipleItemsToGroup);
+router.post('/groups/:groupId/items/bulk', ctrl.addMultipleItemsToGroup);  
+router.post('/groups/:groupId/items', ctrl.addItemToGroup);               
+router.delete('/groups/:groupId/items/:insumoId', ctrl.removeItemFromGroup);
 
 /* ================== EXCLUSIONES (TODO System) ================== */
 // GET    /api/insumos/groups/:id/exclusions

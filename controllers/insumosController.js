@@ -539,38 +539,162 @@ exports.syncDesdeCompras = async (req, res) => {
   return res.status(501).json({ ok: false, error: 'No implementado' });
 };
 
-exports.addMultipleItemsToGroup = async (req, res) => {
+exports.addItemToGroup = async (req, res) => {
   const { groupId } = req.params;
-  const { insumoIds } = req.body; // Array de IDs
+  const { insumoId } = req.body;
   const businessId = getBusinessId(req);
 
-  if (!Array.isArray(insumoIds) || insumoIds.length === 0) {
-    return res.status(400).json({ ok: false, error: 'Se requiere un array de insumoIds' });
+  if (!insumoId) {
+    return res.status(400).json({ 
+      ok: false, 
+      error: 'Se requiere insumoId' 
+    });
   }
 
   try {
+    // Verificar que el grupo existe
     const grupo = await db('insumo_groups')
       .where({ id: groupId, business_id: businessId })
       .first();
 
     if (!grupo) {
-      return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'Grupo no encontrado' 
+      });
     }
 
-    // Insertar en batch
+    console.log(`📦 [addItemToGroup] Agregando insumo ${insumoId} al grupo ${groupId}`);
+
+    // Insertar (ignorar si ya existe)
+    await db('insumo_group_items')
+      .insert({
+        group_id: Number(groupId),
+        insumo_id: Number(insumoId),
+      })
+      .onConflict(['group_id', 'insumo_id'])
+      .ignore();
+
+    console.log(`✅ [addItemToGroup] Insumo agregado`);
+
+    res.json({ 
+      ok: true, 
+      message: 'Insumo agregado al grupo' 
+    });
+  } catch (err) {
+    console.error('[addItemToGroup] Error:', err);
+    res.status(500).json({ 
+      ok: false, 
+      error: err.message || 'Error al agregar insumo'
+    });
+  }
+}
+
+/**
+ * 🆕 Agregar MÚLTIPLES insumos a un grupo (BULK)
+ */
+exports.addMultipleItemsToGroup = async (req, res) => {
+  const { groupId } = req.params;
+  const { insumoIds } = req.body;
+  const businessId = getBusinessId(req);
+
+  if (!Array.isArray(insumoIds) || insumoIds.length === 0) {
+    return res.status(400).json({ 
+      ok: false, 
+      error: 'Se requiere un array de insumoIds' 
+    });
+  }
+
+  try {
+    // Verificar que el grupo existe
+    const grupo = await db('insumo_groups')
+      .where({ id: groupId, business_id: businessId })
+      .first();
+
+    if (!grupo) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'Grupo no encontrado' 
+      });
+    }
+
+    console.log(`📦 [addMultipleItemsToGroup] Agregando ${insumoIds.length} insumos al grupo ${groupId}`);
+
+    // Preparar datos para inserción
     const items = insumoIds.map(insumoId => ({
-      group_id: groupId,
-      insumo_id: insumoId,
+      group_id: Number(groupId),
+      insumo_id: Number(insumoId),
     }));
 
-    await db('insumo_group_items')
+    // Insertar en batch, ignorando duplicados
+    const inserted = await db('insumo_group_items')
       .insert(items)
       .onConflict(['group_id', 'insumo_id'])
-      .ignore(); // Ignorar duplicados
+      .ignore();
 
-    res.json({ ok: true, added: items.length });
+    console.log(`✅ [addMultipleItemsToGroup] Insertados: ${inserted?.length || insumoIds.length}`);
+
+    res.json({ 
+      ok: true, 
+      added: insumoIds.length,
+      message: `${insumoIds.length} insumos agregados correctamente`
+    });
   } catch (err) {
     console.error('[addMultipleItemsToGroup] Error:', err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ 
+      ok: false, 
+      error: err.message || 'Error al agregar insumos en bulk'
+    });
+  }
+}
+
+/**
+ * ✅ Quitar un insumo de un grupo
+ */
+exports.removeItemFromGroup = async (req, res) => {
+  const { groupId, insumoId } = req.params;
+  const businessId = getBusinessId(req);
+
+  try {
+    // Verificar que el grupo existe
+    const grupo = await db('insumo_groups')
+      .where({ id: groupId, business_id: businessId })
+      .first();
+
+    if (!grupo) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'Grupo no encontrado' 
+      });
+    }
+
+    console.log(`🗑️ [removeItemFromGroup] Quitando insumo ${insumoId} del grupo ${groupId}`);
+
+    const deleted = await db('insumo_group_items')
+      .where({
+        group_id: Number(groupId),
+        insumo_id: Number(insumoId),
+      })
+      .del();
+
+    if (deleted === 0) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'Item no encontrado en el grupo' 
+      });
+    }
+
+    console.log(`✅ [removeItemFromGroup] Insumo quitado`);
+
+    res.json({ 
+      ok: true, 
+      message: 'Insumo quitado del grupo' 
+    });
+  } catch (err) {
+    console.error('[removeItemFromGroup] Error:', err);
+    res.status(500).json({ 
+      ok: false, 
+      error: err.message || 'Error al quitar insumo'
+    });
   }
 }
