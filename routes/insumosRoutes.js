@@ -34,6 +34,9 @@ router.post('/groups', groupsCtrl.create);
 router.put('/groups/:id', groupsCtrl.update);
 router.delete('/groups/:id', groupsCtrl.remove);
 
+// 🆕 CREATE OR MOVE (debe ir ANTES de rutas con :id)
+router.post('/groups/create-or-move', groupsCtrl.createOrMove);
+
 // ⚠️ ESTAS RUTAS ENTRAN EN CONFLICTO - Comentá las del groupsCtrl
 // router.put('/groups/:id/items', groupsCtrl.replaceItems);   // ❌ Conflicto con bulk
 // router.post('/groups/:id/items', groupsCtrl.addItem);       // ❌ Conflicto con individual

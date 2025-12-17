@@ -477,6 +477,99 @@ async function removeExclusions(req, res) {
   }
 }
 
+/* =============== CREATE OR MOVE (como Artículos) =============== */
+async function createOrMove(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const nombre = String(req.body?.nombre || '').trim();
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0);
+
+  if (!nombre || !ids.length) {
+    return sendError(res, 400, 'Nombre e IDs son obligatorios');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1️⃣ Crear o encontrar la agrupación destino
+    let destRow;
+    {
+      const r = await client.query(
+        `
+        SELECT id, nombre
+        FROM insumo_groups
+        WHERE business_id = $1 AND nombre = $2
+        FOR UPDATE
+        `,
+        [bizId, nombre]
+      );
+
+      if (r.rows.length) {
+        destRow = r.rows[0];
+      } else {
+        const r2 = await client.query(
+          `
+          INSERT INTO insumo_groups (business_id, nombre)
+          VALUES ($1, $2)
+          RETURNING id, nombre
+          `,
+          [bizId, nombre]
+        );
+        destRow = r2.rows[0];
+      }
+    }
+
+    const destId = Number(destRow.id);
+
+    // 2️⃣ Quitar insumos de TODAS las otras agrupaciones
+    await client.query(
+      `
+      DELETE FROM insumo_group_items
+      WHERE group_id IN (
+        SELECT id FROM insumo_groups WHERE business_id = $1 AND id != $2
+      )
+      AND insumo_id = ANY($3::int[])
+      `,
+      [bizId, destId, ids]
+    );
+
+    // 3️⃣ Agregar insumos a la agrupación destino (sin duplicar)
+    const values = [];
+    const placeholders = [];
+    ids.forEach((insumoId, i) => {
+      values.push(destId, insumoId);
+      const p1 = 2 * i + 1;
+      const p2 = 2 * i + 2;
+      placeholders.push(`($${p1}, $${p2})`);
+    });
+
+    await client.query(
+      `
+      INSERT INTO insumo_group_items (group_id, insumo_id)
+      VALUES ${placeholders.join(', ')}
+      ON CONFLICT (group_id, insumo_id) DO NOTHING
+      `,
+      values
+    );
+
+    await client.query('COMMIT');
+
+    console.log(`✅ [createOrMove] Agrupación "${nombre}" (ID: ${destId}) con ${ids.length} insumos`);
+
+    return res.json({ ok: true, id: destId, nombre, moved: ids.length });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[insumoGroups] createOrMove error:', err);
+    return sendError(res, 500, 'Error al crear/mover agrupación');
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   list,
   getOne,
@@ -489,4 +582,5 @@ module.exports = {
   getExclusions,
   addExclusions,
   removeExclusions,
+  createOrMove,
 };
