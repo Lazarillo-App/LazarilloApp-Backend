@@ -78,15 +78,13 @@ exports.saveViewPref = async (req, res, next) => {
    POST /api/businesses/:id/fav-group
    ========================================================= */
 
-/**
- * GET /api/businesses/:id/fav-group
- * Devuelve la agrupación favorita del usuario en ese negocio
- * resp: { ok: true, favoriteGroupId: number | null }
- */
+// controllers/viewPrefsController.js
+
 exports.getFavoriteGroup = async (req, res, next) => {
   try {
     const biz = req.business;
     const user = req.user;
+    const scope = req.query.scope || 'articulo';  // 🆕 Leer scope del query
 
     if (!biz?.id || !user?.id) {
       return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
@@ -95,28 +93,24 @@ exports.getFavoriteGroup = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT agrupacion_id
        FROM app_user_group_favs
-       WHERE business_id = $1 AND user_id = $2
+       WHERE business_id = $1 AND user_id = $2 AND scope = $3
        LIMIT 1`,
-      [biz.id, user.id]
+      [biz.id, user.id, scope]  // 🆕 Agregar scope
     );
 
     const favoriteGroupId = rows.length ? Number(rows[0].agrupacion_id) : null;
-    res.json({ ok: true, favoriteGroupId });
+    res.json({ ok: true, favoriteGroupId, scope });
   } catch (e) {
     console.error('getFavoriteGroup error:', e);
     next(e);
   }
 };
 
-/**
- * POST /api/businesses/:id/fav-group
- * body: { agrupacionId }  (o null para quitar favorito)
- */
 exports.saveFavoriteGroup = async (req, res, next) => {
   try {
     const biz = req.business;
     const user = req.user;
-    const { agrupacionId } = req.body || {};
+    const { agrupacionId, scope = 'articulo' } = req.body || {};  // 🆕 Leer scope del body
 
     if (!biz?.id || !user?.id) {
       return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
@@ -124,31 +118,26 @@ exports.saveFavoriteGroup = async (req, res, next) => {
 
     const groupIdNum = Number(agrupacionId);
 
-    // 👉 Si viene vacío / null, quitamos favorito
     if (!Number.isFinite(groupIdNum)) {
       await pool.query(
         `DELETE FROM app_user_group_favs
-         WHERE user_id = $1 AND business_id = $2`,
-        [user.id, biz.id]
+         WHERE user_id = $1 AND business_id = $2 AND scope = $3`,
+        [user.id, biz.id, scope]  // 🆕 Agregar scope
       );
-      return res.json({ ok: true, favoriteGroupId: null });
+      return res.json({ ok: true, favoriteGroupId: null, scope });
     }
 
-    // 👉 Guardar/actualizar favorito
     await pool.query(
-      `INSERT INTO app_user_group_favs (user_id, business_id, agrupacion_id, updated_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (user_id, business_id)
-       DO UPDATE SET
-         agrupacion_id = EXCLUDED.agrupacion_id,
-         updated_at    = NOW()`,
-      [user.id, biz.id, groupIdNum]
+      `INSERT INTO app_user_group_favs (user_id, business_id, agrupacion_id, scope, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id, business_id, scope)
+       DO UPDATE SET agrupacion_id = EXCLUDED.agrupacion_id, updated_at = NOW()`,
+      [user.id, biz.id, groupIdNum, scope]  // 🆕 Agregar scope
     );
 
-    res.json({ ok: true, favoriteGroupId: groupIdNum });
+    res.json({ ok: true, favoriteGroupId: groupIdNum, scope });
   } catch (e) {
     console.error('saveFavoriteGroup error:', e);
     next(e);
   }
 };
-
