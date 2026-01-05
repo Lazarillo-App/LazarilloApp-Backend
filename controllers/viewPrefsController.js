@@ -110,29 +110,49 @@ exports.saveFavoriteGroup = async (req, res, next) => {
   try {
     const biz = req.business;
     const user = req.user;
-    const { agrupacionId, scope = 'articulo' } = req.body || {};  // 🆕 Leer scope del body
+    const { agrupacionId, scope = 'articulo' } = req.body || {};
 
     if (!biz?.id || !user?.id) {
       return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
     }
 
+    // ✅ Validar scope
+    if (!['articulo', 'insumo'].includes(scope)) {
+      return res.status(400).json({ ok: false, error: 'invalid_scope' });
+    }
+
     const groupIdNum = Number(agrupacionId);
 
+    // Si es null/undefined → borrar favorita
     if (!Number.isFinite(groupIdNum)) {
       await pool.query(
         `DELETE FROM app_user_group_favs
          WHERE user_id = $1 AND business_id = $2 AND scope = $3`,
-        [user.id, biz.id, scope]  // 🆕 Agregar scope
+        [user.id, biz.id, scope]
       );
       return res.json({ ok: true, favoriteGroupId: null, scope });
     }
 
+    // 🆕 Validar que el grupo existe según el scope
+    const tableName = scope === 'articulo' ? 'agrupaciones' : 'insumo_groups';
+    const checkQuery = `SELECT id FROM ${tableName} WHERE id = $1 AND business_id = $2 LIMIT 1`;
+    const { rows: checkRows } = await pool.query(checkQuery, [groupIdNum, biz.id]);
+
+    if (!checkRows.length) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'group_not_found',
+        message: `No se encontró ${scope === 'articulo' ? 'agrupación' : 'grupo'} con id ${groupIdNum}`
+      });
+    }
+
+    // ✅ Guardar favorita
     await pool.query(
       `INSERT INTO app_user_group_favs (user_id, business_id, agrupacion_id, scope, updated_at)
        VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (user_id, business_id, scope)
        DO UPDATE SET agrupacion_id = EXCLUDED.agrupacion_id, updated_at = NOW()`,
-      [user.id, biz.id, groupIdNum, scope]  // 🆕 Agregar scope
+      [user.id, biz.id, groupIdNum, scope]
     );
 
     res.json({ ok: true, favoriteGroupId: groupIdNum, scope });
