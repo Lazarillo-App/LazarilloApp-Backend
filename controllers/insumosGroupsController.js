@@ -1,4 +1,5 @@
 /* eslint-disable no-console */
+
 const pool = require('../config/db');
 const getBusinessId = require('../utils/getBusinessId');
 
