@@ -10,7 +10,7 @@ function sendError(res, status, message) {
 
 /* =============== LISTAR GRUPOS =============== */
 async function list(req, res) {
-  console.log('🚀🚀🚀 [NUEVA VERSION] insumoGroups.list called 🚀🚀🚀'); 
+  console.log('🚀🚀🚀 [NUEVA VERSION] insumoGroups.list called 🚀🚀🚀');
   const bizId = getBusinessId(req);
   if (!bizId) {
     return sendError(res, 400, 'business_id requerido');
@@ -59,13 +59,16 @@ async function list(req, res) {
       [bizId]
     );
 
-    // 🔍 Log para debug
     console.log('📋 [insumoGroups.list] Grupos:', rows.length);
     if (rows.length > 0) {
-      console.log('📋 [insumoGroups.list] Primer grupo:', {
-        id: rows[0].id,
-        nombre: rows[0].nombre,
-        itemsCount: rows[0].items?.length || 0
+      // 🆕 MOSTRAR TODOS LOS GRUPOS
+      rows.forEach((g, idx) => {
+        console.log(`📋 [insumoGroups.list] Grupo ${idx + 1}/${rows.length}:`, {
+          id: g.id,
+          nombre: g.nombre,
+          itemsCount: g.items?.length || 0,
+          firstItem: g.items?.[0]
+        });
       });
     }
 
@@ -270,7 +273,7 @@ async function replaceItems(req, res) {
     return res.json({ ok: true });
   } catch (err) {
     console.error('[insumoGroups] replaceItems error:', err);
-    await pool.query('ROLLBACK').catch(() => {});
+    await pool.query('ROLLBACK').catch(() => { });
     return sendError(res, 500, 'Error al actualizar items de la agrupación');
   }
 }
