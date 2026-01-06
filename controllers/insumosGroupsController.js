@@ -10,6 +10,7 @@ function sendError(res, status, message) {
 
 /* =============== LISTAR GRUPOS =============== */
 async function list(req, res) {
+  console.log('🚀🚀🚀 [NUEVA VERSION] insumoGroups.list called 🚀🚀🚀'); 
   const bizId = getBusinessId(req);
   if (!bizId) {
     return sendError(res, 400, 'business_id requerido');
