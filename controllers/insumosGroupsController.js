@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 const pool = require('../config/db');
-const getBusinessId = require('../utils/getBusinessId'); // ✅ función única
+const getBusinessId = require('../utils/getBusinessId');
 
 /* =============== helpers básicos =============== */
 function sendError(res, status, message) {
@@ -15,6 +15,7 @@ async function list(req, res) {
   }
 
   try {
+    // 🔧 Query simplificado sin filtro de business_id en insumos
     const { rows } = await pool.query(
       `
       SELECT 
@@ -27,11 +28,14 @@ async function list(req, res) {
         g.updated_at,
         COALESCE(
           json_agg(
-            CASE
-              WHEN i.id IS NOT NULL THEN row_to_json(i)
-              ELSE NULL
-            END
-          ) FILTER (WHERE i.id IS NOT NULL),
+            json_build_object(
+              'insumo_id', gi.insumo_id,
+              'id', i.id,
+              'nombre', i.nombre,
+              'codigo_maxi', i.codigo_maxi,
+              'unidad_med', i.unidad_med
+            )
+          ) FILTER (WHERE gi.insumo_id IS NOT NULL),
           '[]'::json
         ) AS items
       FROM insumo_groups g
@@ -39,7 +43,6 @@ async function list(req, res) {
         ON gi.group_id = g.id
       LEFT JOIN insumos i
         ON i.id = gi.insumo_id
-       AND i.business_id = g.business_id
       WHERE g.business_id = $1
       GROUP BY 
         g.id,
@@ -53,6 +56,16 @@ async function list(req, res) {
       `,
       [bizId]
     );
+
+    // 🔍 Log para debug
+    console.log('📋 [insumoGroups.list] Grupos:', rows.length);
+    if (rows.length > 0) {
+      console.log('📋 [insumoGroups.list] Primer grupo:', {
+        id: rows[0].id,
+        nombre: rows[0].nombre,
+        itemsCount: rows[0].items?.length || 0
+      });
+    }
 
     return res.json({ ok: true, data: rows });
   } catch (err) {
@@ -82,11 +95,12 @@ async function getOne(req, res) {
         g.updated_at,
         COALESCE(
           json_agg(
-            CASE
-              WHEN i.id IS NOT NULL THEN row_to_json(i)
-              ELSE NULL
-            END
-          ) FILTER (WHERE i.id IS NOT NULL),
+            json_build_object(
+              'insumo_id', gi.insumo_id,
+              'id', i.id,
+              'nombre', i.nombre
+            )
+          ) FILTER (WHERE gi.insumo_id IS NOT NULL),
           '[]'::json
         ) AS items
       FROM insumo_groups g
@@ -94,7 +108,6 @@ async function getOne(req, res) {
         ON gi.group_id = g.id
       LEFT JOIN insumos i
         ON i.id = gi.insumo_id
-       AND i.business_id = g.business_id
       WHERE g.business_id = $1
         AND g.id = $2
       GROUP BY 
@@ -117,7 +130,7 @@ async function getOne(req, res) {
   }
 }
 
-/* =============== CREAR GRUPO =============== */
+/* =============== RESTO DEL CÓDIGO (sin cambios) =============== */
 async function create(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -150,7 +163,6 @@ async function create(req, res) {
   }
 }
 
-/* =============== ACTUALIZAR GRUPO =============== */
 async function update(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -210,7 +222,6 @@ async function update(req, res) {
   }
 }
 
-/* =============== REEMPLAZAR ITEMS (bulk) =============== */
 async function replaceItems(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -262,7 +273,6 @@ async function replaceItems(req, res) {
   }
 }
 
-/* =============== AGREGAR UN ITEM =============== */
 async function addItem(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -297,7 +307,6 @@ async function addItem(req, res) {
   }
 }
 
-/* =============== QUITAR UN ITEM =============== */
 async function removeItem(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -328,7 +337,6 @@ async function removeItem(req, res) {
   }
 }
 
-/* =============== ELIMINAR GRUPO =============== */
 async function remove(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -349,7 +357,6 @@ async function remove(req, res) {
   }
 }
 
-/* =============== EXCLUSIONES =============== */
 async function getExclusions(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -477,7 +484,6 @@ async function removeExclusions(req, res) {
   }
 }
 
-/* =============== CREATE OR MOVE (como Artículos) =============== */
 async function createOrMove(req, res) {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -495,7 +501,6 @@ async function createOrMove(req, res) {
   try {
     await client.query('BEGIN');
 
-    // 1️⃣ Crear o encontrar la agrupación destino
     let destRow;
     {
       const r = await client.query(
@@ -525,7 +530,6 @@ async function createOrMove(req, res) {
 
     const destId = Number(destRow.id);
 
-    // 2️⃣ Quitar insumos de TODAS las otras agrupaciones
     await client.query(
       `
       DELETE FROM insumo_group_items
@@ -537,7 +541,6 @@ async function createOrMove(req, res) {
       [bizId, destId, ids]
     );
 
-    // 3️⃣ Agregar insumos a la agrupación destino (sin duplicar)
     const values = [];
     const placeholders = [];
     ids.forEach((insumoId, i) => {
