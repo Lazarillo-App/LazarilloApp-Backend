@@ -96,7 +96,6 @@ async function fetchMaxiInsumos({ businessId, req }) {
   }
 
   const insumos = extractInsumosPayload(j);
-  console.log('[maxiSupplies] Insumos recibidos:', Array.isArray(insumos) ? insumos.length : 0);
 
   return Array.isArray(insumos) ? insumos : [];
 }
@@ -145,8 +144,6 @@ async function fetchMaxiInsumosRubros({ businessId, req }) {
   const bearer = await getBearer(businessId, req);
   const url = `${STATS}/estadisticasmaster/rubrodeinsumos`;
 
-  console.log('[maxiSupplies] GET', url);
-
   const r = await fetchNative(url, {
     method: 'GET',
     headers: {
@@ -177,7 +174,6 @@ async function fetchMaxiInsumosRubros({ businessId, req }) {
   }
 
   const rubros = extractInsumosRubrosPayload(j);
-  console.log('[maxiSupplies] Rubros de insumos recibidos:', Array.isArray(rubros) ? rubros.length : 0);
 
   return Array.isArray(rubros) ? rubros : [];
 }

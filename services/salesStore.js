@@ -252,13 +252,6 @@ function normalizeInvoices(businessId, rawDocs) {
       // Obtener también el total de Maxi para comparar
       const maxiTotal = toNum(od.totalSales);
 
-      console.log('🧮 TICKET:', oid);
-      console.log(`   orderItems originales: ${orderItems.length}`);
-      console.log(`   Items únicos agrupados: ${itemsArray.length}`);
-      console.log(`   Total calculado: ${total.toFixed(2)}`);
-      console.log(`   Total Maxi (totalSales): ${maxiTotal.toFixed(2)}`);
-      console.log(`   Diferencia: ${(total - maxiTotal).toFixed(2)}`);
-
       const sale_idx = sales.length;
       pushSale(oid, occurred, maxiTotal); // ← Usar total de Maxi como fuente de verdad
 
@@ -267,8 +260,6 @@ function normalizeInvoices(businessId, rawDocs) {
         const unit_price = (it.qty > 0 && it.totalPrice > 0)
           ? (it.totalPrice / it.qty)
           : 0;
-
-        console.log(`📦 ${it.title}: qty=${it.qty} | total=$${it.totalPrice.toFixed(2)} | unit=$${unit_price.toFixed(2)}`);
 
         pushItem(sale_idx, i + 1, {
           sku: null,
