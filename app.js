@@ -29,7 +29,7 @@ const insumosRoutes      = require('./routes/insumosRoutes');
 const branchesRoutes     = require('./routes/branchRoutes');
 const notificationsRouter = require('./routes/notificationsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
-const salesImportRoutes = require('./routes/salesImportRoutes'); // 🆕
+const salesImportRoutes = require('./routes/salesImportRoutes');
 
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
@@ -57,14 +57,22 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ----------- 🆕 RUTAS DE UPLOAD (ANTES de body parsers) ----------- */
-// Estas rutas usan multer para manejar multipart/form-data
-// NO deben pasar por express.json() o express.urlencoded()
-app.use('/api/businesses/:businessId/sales/import-csv', authRequired, loadActiveBusiness, salesImportRoutes);
+/* ----------- parsers condicionales + logger HTTP ----------- */
+// 🆕 Skip body parser para rutas de upload (multipart/form-data)
+app.use((req, res, next) => {
+  if (req.path.endsWith('/import-csv') && req.method === 'POST') {
+    return next(); // Skip JSON parser para uploads
+  }
+  express.json({ limit: '50mb' })(req, res, next);
+});
 
-/* ----------- parsers + logger HTTP ----------- */
-app.use(express.json({ limit: '50mb' }));     
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use((req, res, next) => {
+  if (req.path.endsWith('/import-csv') && req.method === 'POST') {
+    return next(); // Skip urlencoded parser para uploads
+  }
+  express.urlencoded({ extended: true, limit: '50mb' })(req, res, next);
+});
+
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
 /* ----------- uploads públicos ----------- */
@@ -107,7 +115,7 @@ app.use('/api/businesses',            require('./routes/businessRoutes'));
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 app.use('/api/businesses', businessRoutes);
 
-// 🆕 Otras rutas de importación (listado de imports, detalles)
+// 🆕 Importación CSV (con auth ya aplicado por guard global)
 app.use('/api/businesses', salesImportRoutes);
 
 /* util debug */
