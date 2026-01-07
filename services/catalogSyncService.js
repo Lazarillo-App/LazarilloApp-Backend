@@ -15,6 +15,7 @@ function extractPrices(node, listmode) {
 }
 
 const norm = s => String(s || '').trim();
+
 const isEmpty = s => norm(s) === '' || /^sin\s+(cat|categ|subrubro)/i.test(norm(s)) || /^-+$/.test(norm(s));
 
 async function ensureTaxonomyIds(client, pairs) {

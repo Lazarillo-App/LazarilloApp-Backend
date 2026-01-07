@@ -27,8 +27,9 @@ const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes       = require('./routes/ventasRoutes'); 
 const insumosRoutes      = require('./routes/insumosRoutes');
 const branchesRoutes     = require('./routes/branchRoutes');
-const notificationsRouter = require('./routes/notificationsRoutes'); // 🆕
+const notificationsRouter = require('./routes/notificationsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
+const salesImportRoutes = require('./routes/salesImportRoutes');
 
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
@@ -100,6 +101,9 @@ app.use('/api/branches',              branchesRoutes);
 app.use('/api/businesses',            require('./routes/businessRoutes'));
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 app.use('/api/businesses', businessRoutes);
+
+// 🆕 Importación CSV (con auth y business)
+app.use('/api/businesses', salesImportRoutes);
 
 /* util debug */
 app.get('/api/_debug/whoami', authRequired, (req, res) => {

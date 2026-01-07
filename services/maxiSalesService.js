@@ -77,7 +77,6 @@ async function getBearer(businessId, req) {
 }
 
 /* ───────── fetch invoicebydate ───────── */
-/* ───────── fetch invoicebydate ───────── */
 async function fetchInvoiceByDate(fromYMD, toYMD, bearer) {
   const url = `${MAXI_BASE}${STATS_PATH}?from=${encodeURIComponent(fromYMD)}&to=${encodeURIComponent(toYMD)}`;
 

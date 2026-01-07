@@ -1,2 +1,5 @@
 node_modules/
 .env
+# Uploads temporales
+uploads/csv-temp/*
+!uploads/csv-temp/.gitkeep
