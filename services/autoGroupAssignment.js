@@ -1,26 +1,12 @@
 // services/autoGroupAssignment.js
-const pool = require('../config/db');
 
-/**
- * Asigna automáticamente artículos nuevos a agrupaciones existentes
- * basándose en coincidencias de categoria/subrubro (rubro/subrubro en Maxi)
- * 
- * Lógica:
- * 1. Busca artículos que NO estén en ninguna agrupación
- * 2. Para cada artículo, busca agrupaciones que tengan otros artículos
- *    con el MISMO categoria+subrubro
- * 3. Lo asigna automáticamente a esa agrupación
- * 
- * @param {number} businessId - ID del negocio
- * @returns {Promise<{assigned: number, details: Array}>}
- */
 async function autoAssignNewArticles(businessId) {
   const client = await pool.connect();
   
   try {
     await client.query('BEGIN');
 
-    // 1️⃣ Obtener todos los artículos del negocio con su taxonomía
+    // 1️⃣ Artículos del negocio
     const { rows: allArticles } = await client.query(`
       SELECT 
         ma.articulo_id,
@@ -30,12 +16,9 @@ async function autoAssignNewArticles(businessId) {
       WHERE ma.business_id = $1
     `, [businessId]);
 
-    if (!allArticles.length) {
-      await client.query('COMMIT');
-      return { assigned: 0, details: [] };
-    }
+    console.log('📦 [auto-assign] Total artículos en maxi_articles:', allArticles.length);
 
-    // 2️⃣ Obtener artículos que YA están en agrupaciones (con su taxonomía)
+    // 2️⃣ Artículos ya asignados
     const { rows: assignedArticles } = await client.query(`
       SELECT DISTINCT
         jsonb_array_elements(ag.articulos)::jsonb->>'id' AS articulo_id_str,
@@ -53,12 +36,13 @@ async function autoAssignNewArticles(businessId) {
         AND LOWER(ag.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'discontinuados')
     `, [businessId]);
 
-    // 3️⃣ Crear mapas de asignación
+    console.log('✅ [auto-assign] Artículos ya asignados:', assignedArticles.length);
+
+    // 3️⃣ Crear mapa de taxonomía
     const assignedIds = new Set(
       assignedArticles.map(r => Number(r.articulo_id_str))
     );
 
-    // Mapa: "categoria|subrubro" -> agrupacion_id
     const taxonomyToGroup = new Map();
     for (const row of assignedArticles) {
       const key = `${row.categoria}|${row.subrubro}`;
@@ -70,19 +54,35 @@ async function autoAssignNewArticles(businessId) {
       }
     }
 
-    // 4️⃣ Encontrar artículos sin asignar
+    console.log('🗺️  [auto-assign] Mapa taxonomía -> grupo:', 
+      Array.from(taxonomyToGroup.entries()).map(([k, v]) => `"${k}" -> "${v.nombre}"`)
+    );
+
+    // 4️⃣ Artículos sin asignar
     const unassigned = allArticles.filter(a => {
       const id = Number(a.articulo_id);
       return !assignedIds.has(id);
     });
+
+    console.log('❓ [auto-assign] Sin asignar:', unassigned.length);
+    
+    if (unassigned.length > 0) {
+      console.log('📋 [auto-assign] Primeros 5 sin asignar:', 
+        unassigned.slice(0, 5).map(a => ({
+          id: a.articulo_id,
+          key: `${a.categoria}|${a.subrubro}`,
+          hasMatch: taxonomyToGroup.has(`${a.categoria}|${a.subrubro}`)
+        }))
+      );
+    }
 
     if (!unassigned.length) {
       await client.query('COMMIT');
       return { assigned: 0, details: [] };
     }
 
-    // 5️⃣ Agrupar artículos sin asignar por su posible agrupación
-    const toAssign = new Map(); // agrupacion_id -> [articulo_ids]
+    // 5️⃣ Agrupar por destino
+    const toAssign = new Map();
 
     for (const art of unassigned) {
       const key = `${art.categoria}|${art.subrubro}`;
@@ -99,7 +99,13 @@ async function autoAssignNewArticles(businessId) {
       }
     }
 
-    // 6️⃣ Aplicar las asignaciones
+    console.log('🎯 [auto-assign] A asignar:', 
+      Array.from(toAssign.entries()).map(([gid, data]) => 
+        `${data.ids.length} artículos -> "${data.nombre}" (${gid})`
+      )
+    );
+
+    // 6️⃣ Aplicar asignaciones
     const details = [];
     let totalAssigned = 0;
 
@@ -108,7 +114,6 @@ async function autoAssignNewArticles(businessId) {
       
       if (!ids.length) continue;
 
-      // Agregar los nuevos IDs al array existente de artículos
       await client.query(`
         UPDATE agrupaciones
         SET 
@@ -128,10 +133,12 @@ async function autoAssignNewArticles(businessId) {
         articulos: ids
       });
 
-      console.log(`[auto-assign] ${ids.length} artículos → "${nombre}" (grupo ${groupId})`);
+      console.log(`✨ [auto-assign] ${ids.length} artículos → "${nombre}" (grupo ${groupId})`);
     }
 
     await client.query('COMMIT');
+
+    console.log('🏁 [auto-assign] RESULTADO FINAL:', { totalAssigned, details });
 
     return {
       assigned: totalAssigned,
@@ -140,13 +147,9 @@ async function autoAssignNewArticles(businessId) {
 
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('[autoAssignNewArticles] error:', error);
+    console.error('❌ [auto-assign] ERROR:', error);
     throw error;
   } finally {
     client.release();
   }
 }
-
-module.exports = {
-  autoAssignNewArticles
-};
