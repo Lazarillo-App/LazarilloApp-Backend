@@ -4,12 +4,6 @@ const pool = require('../config/db');
 /**
  * Asigna automáticamente artículos nuevos a agrupaciones existentes
  * basándose en coincidencias de categoria/subrubro
- * 
- * LÓGICA:
- * 1. Busca artículos que NO están en ninguna agrupación
- * 2. Para cada uno, busca si HAY alguna agrupación que contenga
- *    otros artículos con la MISMA categoria+subrubro
- * 3. Lo asigna a esa agrupación (sin importar el nombre de la agrupación)
  */
 async function autoAssignNewArticles(businessId) {
   const client = await pool.connect();
@@ -29,27 +23,33 @@ async function autoAssignNewArticles(businessId) {
 
     console.log('📦 [auto-assign] Total artículos en maxi_articles:', allArticles.length);
 
-    // 2️⃣ Construir mapa: "categoria|subrubro" → agrupacion_id[]
-    // (puede haber MÚLTIPLES agrupaciones con la misma taxonomía)
+    // 2️⃣ Artículos ya asignados - CORREGIDO: usar WITH + LATERAL
     const { rows: assignedArticles } = await client.query(`
+      WITH article_ids AS (
+        SELECT 
+          ag.id AS agrupacion_id,
+          ag.nombre AS agrupacion_nombre,
+          (elem->>'id')::int AS articulo_id
+        FROM agrupaciones ag,
+        LATERAL jsonb_array_elements(ag.articulos) AS elem
+        WHERE ag.business_id = $1
+          AND LOWER(ag.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'discontinuados')
+      )
       SELECT DISTINCT
-        (jsonb_array_elements(ag.articulos)::jsonb->>'id')::int AS articulo_id,
+        ai.articulo_id,
         COALESCE(NULLIF(TRIM(ma.categoria), ''), '[PENDIENTE]') AS categoria,
         COALESCE(NULLIF(TRIM(ma.subrubro), ''), '[PENDIENTE]') AS subrubro,
-        ag.id AS agrupacion_id,
-        ag.nombre AS agrupacion_nombre
-      FROM agrupaciones ag
-      CROSS JOIN LATERAL jsonb_array_elements(ag.articulos) AS art
+        ai.agrupacion_id,
+        ai.agrupacion_nombre
+      FROM article_ids ai
       LEFT JOIN maxi_articles ma 
-        ON ma.business_id = ag.business_id 
-        AND ma.articulo_id = (jsonb_array_elements(ag.articulos)::jsonb->>'id')::int
-      WHERE ag.business_id = $1
-        AND LOWER(ag.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'discontinuados')
+        ON ma.business_id = $1 
+        AND ma.articulo_id = ai.articulo_id
     `, [businessId]);
 
-    console.log('✅ [auto-assign] Filas de artículos asignados:', assignedArticles.length);
+    console.log('✅ [auto-assign] Artículos ya asignados:', assignedArticles.length);
 
-    // 3️⃣ Crear mapas
+    // 3️⃣ Crear mapa de taxonomía
     const assignedIds = new Set(
       assignedArticles
         .map(r => Number(r.articulo_id))
@@ -101,7 +101,6 @@ async function autoAssignNewArticles(businessId) {
           const matchingGroups = taxonomyToGroups.get(key) || [];
           return {
             id: a.articulo_id,
-            nombre: a.nombre,
             key,
             hasMatch: matchingGroups.length > 0,
             targetGroups: matchingGroups.map(g => g.nombre)
