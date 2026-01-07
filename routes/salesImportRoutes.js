@@ -37,6 +37,14 @@ const upload = multer({
  * Importa archivo CSV/XLS/XLSX de ventas
  */
 router.post('/:businessId/sales/import-csv', upload.single('file'), async (req, res, next) => {
+  console.log('[CSV Import] Request recibido:', {
+    hasFile: !!req.file,
+    hasBody: !!req.body,
+    contentType: req.headers['content-type'],
+    businessId: req.params.businessId,
+    userId: req.user?.id
+  });
+
   try {
     // Verificar feature flag
     if (!CSV_SALES_IMPORT_ENABLED) {
@@ -54,6 +62,7 @@ router.post('/:businessId/sales/import-csv', upload.single('file'), async (req, 
     }
 
     if (!req.file) {
+      console.error('[CSV Import] No file received. Body:', req.body, 'Headers:', req.headers);
       return res.status(400).json({ 
         error: 'file_required',
         message: 'Debe adjuntar un archivo CSV, XLS o XLSX'

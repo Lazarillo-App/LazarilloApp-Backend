@@ -60,14 +60,16 @@ app.use((req, res, next) => {
 /* ----------- parsers condicionales + logger HTTP ----------- */
 // 🆕 Skip body parser para rutas de upload (multipart/form-data)
 app.use((req, res, next) => {
-  if (req.path.endsWith('/import-csv') && req.method === 'POST') {
+  if (req.path.includes('/import-csv') && req.method === 'POST') {
+    console.log('⏭️ [Body Parser] Skipping JSON parser para upload');
     return next(); // Skip JSON parser para uploads
   }
   express.json({ limit: '50mb' })(req, res, next);
 });
 
 app.use((req, res, next) => {
-  if (req.path.endsWith('/import-csv') && req.method === 'POST') {
+  if (req.path.includes('/import-csv') && req.method === 'POST') {
+    console.log('⏭️ [Body Parser] Skipping urlencoded parser para upload');
     return next(); // Skip urlencoded parser para uploads
   }
   express.urlencoded({ extended: true, limit: '50mb' })(req, res, next);
