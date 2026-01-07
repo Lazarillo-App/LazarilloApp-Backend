@@ -1,5 +1,10 @@
 // services/autoGroupAssignment.js
+const pool = require('../config/db'); // 🆕 FALTABA ESTO
 
+/**
+ * Asigna automáticamente artículos nuevos a agrupaciones existentes
+ * basándose en coincidencias de categoria/subrubro (rubro/subrubro en Maxi)
+ */
 async function autoAssignNewArticles(businessId) {
   const client = await pool.connect();
   
@@ -153,3 +158,7 @@ async function autoAssignNewArticles(businessId) {
     client.release();
   }
 }
+
+module.exports = {
+  autoAssignNewArticles
+};
