@@ -170,6 +170,51 @@ async function getUnreadCount(userId, businessId = null) {
     console.error('[notificationService] Error contando no leídas:', error);
     return 0;
   }
+};
+
+async function notifyAutoAssign({ businessId, userId, result }) {
+  if (!result || !result.assigned || result.assigned === 0) {
+    return null;
+  }
+
+  const { assigned, details = [] } = result;
+
+  // 🆕 Formatear con nombres de artículos
+  const groupsSummary = details.map(d => {
+    const articulos = d.articulos || [];
+    
+    // Limitar a 10 artículos por grupo para no saturar
+    const articulosAMostrar = articulos.slice(0, 10);
+    const hayMas = articulos.length > 10;
+    
+    const articulosList = articulosAMostrar
+      .map(a => `  - ${a.nombre || `#${a.id}`}`)
+      .join('\n');
+    
+    const masTexto = hayMas ? `  ... y ${articulos.length - 10} más` : '';
+    
+    return `• Grupo "${d.agrupacion_nombre}" (${d.articulos_agregados}):\n${articulosList}${masTexto ? '\n' + masTexto : ''}`;
+  }).join('\n\n');
+
+  const title = `${assigned} artículo${assigned > 1 ? 's' : ''} asignado${assigned > 1 ? 's' : ''} automáticamente`;
+  const message = `Los siguientes artículos fueron asignados:\n\n${groupsSummary}`;
+
+  return createSyncNotification({
+    businessId,
+    userId,
+    type: 'auto_assign',
+    title,
+    message,
+    metadata: {
+      total_assigned: assigned,
+      groups: details.map(d => ({
+        group_id: d.agrupacion_id,
+        group_name: d.agrupacion_nombre,
+        article_count: d.articulos_agregados,
+        articles: d.articulos // 🆕 Ahora incluye { id, nombre }
+      }))
+    }
+  });
 }
 
 module.exports = {

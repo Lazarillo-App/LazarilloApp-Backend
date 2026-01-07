@@ -152,6 +152,16 @@ async function autoAssignNewArticles(businessId) {
       
       if (!ids.length) continue;
 
+      // 🆕 Obtener nombres de los artículos antes de asignar
+      const { rows: articleNames } = await client.query(`
+        SELECT articulo_id, nombre
+        FROM maxi_articles
+        WHERE business_id = $1
+          AND articulo_id = ANY($2::int[])
+      `, [businessId, ids]);
+
+      const articlesMap = new Map(articleNames.map(a => [a.articulo_id, a.nombre]));
+
       await client.query(`
         UPDATE agrupaciones
         SET 
@@ -164,11 +174,16 @@ async function autoAssignNewArticles(businessId) {
       ]);
 
       totalAssigned += ids.length;
+      
+      // 🆕 Incluir nombres en details
       details.push({
         agrupacion_id: groupId,
         agrupacion_nombre: nombre,
         articulos_agregados: ids.length,
-        articulos: ids
+        articulos: ids.map(id => ({
+          id,
+          nombre: articlesMap.get(id) || `Artículo #${id}`
+        }))
       });
 
       console.log(`✨ [auto-assign] ${ids.length} artículos → "${nombre}" (grupo ${groupId})`);
@@ -181,7 +196,8 @@ async function autoAssignNewArticles(businessId) {
       gruposActualizados: details.length,
       details: details.map(d => ({
         grupo: d.agrupacion_nombre,
-        agregados: d.articulos_agregados
+        agregados: d.articulos_agregados,
+        articulos: d.articulos.map(a => a.nombre) // 🆕 Mostrar nombres en log
       }))
     });
 
