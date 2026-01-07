@@ -29,7 +29,7 @@ const insumosRoutes      = require('./routes/insumosRoutes');
 const branchesRoutes     = require('./routes/branchRoutes');
 const notificationsRouter = require('./routes/notificationsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
-const salesImportRoutes = require('./routes/salesImportRoutes');
+const salesImportRoutes = require('./routes/salesImportRoutes'); // 🆕
 
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
@@ -56,6 +56,11 @@ app.use((req, res, next) => {
   res.on('finish', () => console.log(`⬅️ [${id}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - t0}ms)`));
   next();
 });
+
+/* ----------- 🆕 RUTAS DE UPLOAD (ANTES de body parsers) ----------- */
+// Estas rutas usan multer para manejar multipart/form-data
+// NO deben pasar por express.json() o express.urlencoded()
+app.use('/api/businesses/:businessId/sales/import-csv', authRequired, loadActiveBusiness, salesImportRoutes);
 
 /* ----------- parsers + logger HTTP ----------- */
 app.use(express.json({ limit: '50mb' }));     
@@ -86,7 +91,7 @@ app.use('/admin', adminRebuildAgg);
 /* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
-// 🆕 NOTIFICACIONES (con auth)
+// NOTIFICACIONES (con auth)
 app.use('/api/notifications', authRequired, notificationsRouter);
 
 // Guard global de /api (después de /api/cron y /api/admin), antes del resto
@@ -102,7 +107,7 @@ app.use('/api/businesses',            require('./routes/businessRoutes'));
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 app.use('/api/businesses', businessRoutes);
 
-// 🆕 Importación CSV (con auth y business)
+// 🆕 Otras rutas de importación (listado de imports, detalles)
 app.use('/api/businesses', salesImportRoutes);
 
 /* util debug */
