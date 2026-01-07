@@ -40,7 +40,12 @@ const corsWithCache = require('./middleware/cors');
 
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 
+const notificationsRouter = require('./routes/notificationsRoutes');
+
 const app = express();
+
+/* ----------- notificaciones ----------- */
+app.use('/api/notifications', notificationsRouter);
 
 /* ----------- básicos ----------- */
 app.set('trust proxy', 1);

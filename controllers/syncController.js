@@ -2,6 +2,7 @@
 const pool = require('../config/db');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 const { autoAssignNewArticles } = require('../services/autoGroupAssignment');
+const { notifyAutoAssign } = require('../services/notificationService');
 
 // fetch nativo (Node 18+) o fallback a node-fetch
 const fetchNative =
@@ -251,6 +252,8 @@ async function upsertArticles({ client, businessId, items }) {
  */
 exports.syncNow = async (req, res) => {
   const biz = req.business;
+  const userId = req.user?.id; // 🆕 Capturamos el user_id
+  
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
   const { scope = 'articles', from, to } = req.body || {};
@@ -273,7 +276,7 @@ exports.syncNow = async (req, res) => {
     let upserted = 0;
     let mapped = 0;
     let cacheHash = null;
-    let autoAssigned = 0; // 🆕
+    let autoAssigned = 0;
 
     if (scope === 'articles' || scope === 'all') {
       const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
@@ -313,13 +316,22 @@ exports.syncNow = async (req, res) => {
 
       await client.query('COMMIT');
 
-      // 🆕 AUTO-ASIGNACIÓN POST-SYNC
+      // 🆕 AUTO-ASIGNACIÓN POST-SYNC + NOTIFICACIÓN
       try {
         const result = await autoAssignNewArticles(biz.id);
         autoAssigned = result.assigned;
-        
+
         if (autoAssigned > 0) {
           console.log(`[syncNow] Auto-asignados ${autoAssigned} artículos a agrupaciones existentes`);
+
+          // 🆕 CREAR NOTIFICACIÓN
+          if (userId) {
+            await notifyAutoAssign({
+              businessId: biz.id,
+              userId,
+              result
+            });
+          }
         }
       } catch (autoErr) {
         console.error('[syncNow] Error en auto-asignación (no crítico):', autoErr.message);
@@ -327,17 +339,18 @@ exports.syncNow = async (req, res) => {
       }
     }
 
-    return res.json({ 
-      ok: true, 
-      business_id: biz.id, 
-      scope: 'articles', 
-      from: f, 
-      to: t, 
-      upserted, 
-      mapped, 
+    return res.json({
+      ok: true,
+      business_id: biz.id,
+      scope: 'articles',
+      from: f,
+      to: t,
+      upserted,
+      mapped,
       cacheHash,
       auto_assigned: autoAssigned // 🆕
     });
+    
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     const msg = String(e?.message || '');
@@ -354,109 +367,109 @@ exports.syncNow = async (req, res) => {
   }
 };
 
-/**
- * GET /businesses/:id/articles (lista plana)
- */
-exports.listArticlesFromDB = async (req, res) => {
-  const biz = req.business;
-  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
-  const { rows } = await pool.query(`
+  /**
+   * GET /businesses/:id/articles (lista plana)
+   */
+  exports.listArticlesFromDB = async (req, res) => {
+    const biz = req.business;
+    if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+    const { rows } = await pool.query(`
     SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
     FROM public.maxi_articles
     WHERE business_id = $1
     ORDER BY categoria, subrubro, nombre
   `, [biz.id]);
-  res.json({ items: rows });
-};
+    res.json({ items: rows });
+  };
 
-/**
- * GET /businesses/:id/articles/tree (subrubro > categoría > artículos)
- */
-exports.listArticlesTreeFromDB = async (req, res) => {
-  const biz = req.business;
-  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
-  try {
-    const { rows } = await pool.query(`
+  /**
+   * GET /businesses/:id/articles/tree (subrubro > categoría > artículos)
+   */
+  exports.listArticlesTreeFromDB = async (req, res) => {
+    const biz = req.business;
+    if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+    try {
+      const { rows } = await pool.query(`
       SELECT articulo_id, nombre, categoria, subrubro, precio
       FROM public.maxi_articles
       WHERE business_id = $1
       ORDER BY subrubro, categoria, nombre
     `, [biz.id]);
 
-    const bySub = new Map();
-    for (const r of rows) {
-      const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
-      const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
-      if (!bySub.has(sub)) bySub.set(sub, new Map());
-      const byCat = bySub.get(sub);
-      if (!byCat.has(cat)) byCat.set(cat, []);
-      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
+      const bySub = new Map();
+      for (const r of rows) {
+        const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
+        const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
+        if (!bySub.has(sub)) bySub.set(sub, new Map());
+        const byCat = bySub.get(sub);
+        if (!byCat.has(cat)) byCat.set(cat, []);
+        byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
+      }
+
+      const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
+        subrubro,
+        categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos })),
+      }));
+      const resumen = {
+        subrubros: tree.length,
+        categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
+        articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
+      };
+      res.json({ ok: true, resumen, tree });
+    } catch (e) {
+      console.error('listArticlesTreeFromDB error:', e);
+      res.status(500).json({ error: 'internal', detail: e.message });
     }
+  };
 
-    const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
-      subrubro,
-      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos })),
-    }));
-    const resumen = {
-      subrubros: tree.length,
-      categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
-      articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
-    };
-    res.json({ ok: true, resumen, tree });
-  } catch (e) {
-    console.error('listArticlesTreeFromDB error:', e);
-    res.status(500).json({ error: 'internal', detail: e.message });
-  }
-};
+  /**
+   * GET /businesses/:id/maxi-articles-proxy?from=YYYY-MM-DD&to=YYYY-MM-DD
+   */
+  exports.maxiArticlesProxy = async (req, res) => {
+    const biz = req.business;
+    if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
-/**
- * GET /businesses/:id/maxi-articles-proxy?from=YYYY-MM-DD&to=YYYY-MM-DD
- */
-exports.maxiArticlesProxy = async (req, res) => {
-  const biz = req.business;
-  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+    const today = new Date();
+    const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+    const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
+    const from = ymd(parseDate(req.query.from, startOfMonth));
+    const to = ymd(parseDate(req.query.to, yesterday));
 
-  const today = new Date();
-  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-  const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
-  const from = ymd(parseDate(req.query.from, startOfMonth));
-  const to = ymd(parseDate(req.query.to, yesterday));
+    try {
+      const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
+      const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || mx.pass || '');
+      if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
 
-  try {
-    const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
-    const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || mx.pass || '');
-    if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+      const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
+      const { items } = await fetchMaxiArticles({ token, from, to });
+      res.json({ from, to, items });
+    } catch (e) {
+      console.error('maxiArticlesProxy error:', e);
+      res.status(500).json({ error: 'internal', detail: e.message });
+    }
+  };
 
-    const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
-    const { items } = await fetchMaxiArticles({ token, from, to });
-    res.json({ from, to, items });
-  } catch (e) {
-    console.error('maxiArticlesProxy error:', e);
-    res.status(500).json({ error: 'internal', detail: e.message });
-  }
-};
+  // controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
 
-// controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
-
-/* salesSummaryFromDB - versión top-N agregada (usa columnas reales) */
-exports.salesSummaryFromDB = async (req, res, next) => {
-try {
-const biz = req.business;
-const { from, to, limit = 50, q } = req.query;
+  /* salesSummaryFromDB - versión top-N agregada (usa columnas reales) */
+  exports.salesSummaryFromDB = async (req, res, next) => {
+    try {
+      const biz = req.business;
+      const { from, to, limit = 50, q } = req.query;
 
 
-const fromYmd = String(from || '').slice(0, 10);
-const toYmd = String(to || '').slice(0, 10);
+      const fromYmd = String(from || '').slice(0, 10);
+      const toYmd = String(to || '').slice(0, 10);
 
-if (!fromYmd || !toYmd) {
-  return res.status(400).json({ ok: false, error: 'from_to_required' });
-}
+      if (!fromYmd || !toYmd) {
+        return res.status(400).json({ ok: false, error: 'from_to_required' });
+      }
 
-const lim = Number(limit) || 50;
-const search = (q && String(q).trim()) || null;
+      const lim = Number(limit) || 50;
+      const search = (q && String(q).trim()) || null;
 
-/* Totales por día desde sales_daily */
-const sqlTotals = `
+      /* Totales por día desde sales_daily */
+      const sqlTotals = `
   SELECT
     COALESCE(SUM(total), 0)::numeric AS total,
     COALESCE(SUM(tx_count), 0)::int  AS tx_count
@@ -464,25 +477,25 @@ const sqlTotals = `
   WHERE business_id = $1
     AND day BETWEEN $2::date AND $3::date
 `;
-const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
-const total = Number(totRows[0]?.total || 0);
-const txCount = Number(totRows[0]?.tx_count || 0);
+      const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
+      const total = Number(totRows[0]?.total || 0);
+      const txCount = Number(totRows[0]?.tx_count || 0);
 
-const params = [biz.id, fromYmd, toYmd];
-let whereExtra = '';
+      const params = [biz.id, fromYmd, toYmd];
+      let whereExtra = '';
 
-if (search) {
-  params.push(`%${search}%`);
-  const pIdx = params.length;
-  whereExtra = `
+      if (search) {
+        params.push(`%${search}%`);
+        const pIdx = params.length;
+        whereExtra = `
     AND (
       COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text))
       ILIKE $${pIdx}
     )
   `;
-}
+      }
 
-const sqlItems = `
+      const sqlItems = `
 
 
 SELECT
@@ -508,69 +521,69 @@ LIMIT ${lim};
 `;
 
 
-const { rows } = await pool.query(sqlItems, params);
+      const { rows } = await pool.query(sqlItems, params);
 
-return res.json({
-  ok: true,
-  business_id: biz.id,
-  from: fromYmd,
-  to: toYmd,
-  total,
-  tx_count: txCount,
-  limit: lim,
-  items: rows.map((r) => ({
-    article_id: r.article_id,
-    article_title: r.nombre || '',
-    rubro: r.rubro || '',
-    subrubro: r.subrubro || '',
-    qty: Number(r.qty || 0),
-    amount: Number(r.amount || 0),
-  })),
-});
-
-
-} catch (e) {
-next(e);
-}
-};
+      return res.json({
+        ok: true,
+        business_id: biz.id,
+        from: fromYmd,
+        to: toYmd,
+        total,
+        tx_count: txCount,
+        limit: lim,
+        items: rows.map((r) => ({
+          article_id: r.article_id,
+          article_title: r.nombre || '',
+          rubro: r.rubro || '',
+          subrubro: r.subrubro || '',
+          qty: Number(r.qty || 0),
+          amount: Number(r.amount || 0),
+        })),
+      });
 
 
-/**
- * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
- *
- * Serie por ARTÍCULO usando sales_daily_items:
- * {
- *   ok, business_id, articulo_id, from, to, groupBy,
- *   total,
- *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
- * }
- */
-exports.salesSeriesFromDB = async (req, res, next) => {
-  try {
-    const biz = req.business;
-    const articuloId = Number(req.params.articuloId);
-    const fromRaw = String(req.query.from || '').slice(0, 10);
-    const toRaw = String(req.query.to || '').slice(0, 10);
-    const groupBy = (req.query.groupBy || 'day').toLowerCase();
-
-    if (!Number.isFinite(articuloId) || articuloId <= 0) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'invalid_articulo_id' });
+    } catch (e) {
+      next(e);
     }
-    if (!fromRaw || !toRaw) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'from_to_required' });
-    }
+  };
 
-    if (groupBy !== 'day') {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'unsupported_group_by', allowed: ['day'] });
-    }
 
-    const sql = `
+  /**
+   * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
+   *
+   * Serie por ARTÍCULO usando sales_daily_items:
+   * {
+   *   ok, business_id, articulo_id, from, to, groupBy,
+   *   total,
+   *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
+   * }
+   */
+  exports.salesSeriesFromDB = async (req, res, next) => {
+    try {
+      const biz = req.business;
+      const articuloId = Number(req.params.articuloId);
+      const fromRaw = String(req.query.from || '').slice(0, 10);
+      const toRaw = String(req.query.to || '').slice(0, 10);
+      const groupBy = (req.query.groupBy || 'day').toLowerCase();
+
+      if (!Number.isFinite(articuloId) || articuloId <= 0) {
+        return res
+          .status(400)
+          .json({ ok: false, error: 'invalid_articulo_id' });
+      }
+      if (!fromRaw || !toRaw) {
+        return res
+          .status(400)
+          .json({ ok: false, error: 'from_to_required' });
+      }
+
+      if (groupBy !== 'day') {
+        return res
+          .status(400)
+          .json({ ok: false, error: 'unsupported_group_by', allowed: ['day'] });
+      }
+
+      const sql = `
       SELECT
         to_char(sdi.day::date, 'YYYY-MM-DD') AS label,
         COALESCE(SUM(sdi.qty),    0)::numeric   AS qty,
@@ -583,30 +596,30 @@ exports.salesSeriesFromDB = async (req, res, next) => {
       ORDER BY sdi.day
     `;
 
-    const rows = await pool
-      .query(sql, [biz.id, articuloId, fromRaw, toRaw])
-      .then(r => r.rows);
+      const rows = await pool
+        .query(sql, [biz.id, articuloId, fromRaw, toRaw])
+        .then(r => r.rows);
 
-    const items = rows.map(r => ({
-      label: r.label,
-      qty: Number(r.qty || 0),
-      amount: Number(r.amount || 0),
-    }));
+      const items = rows.map(r => ({
+        label: r.label,
+        qty: Number(r.qty || 0),
+        amount: Number(r.amount || 0),
+      }));
 
-    const total = items.reduce((acc, it) => acc + (Number(it.qty) || 0), 0);
+      const total = items.reduce((acc, it) => acc + (Number(it.qty) || 0), 0);
 
-    return res.json({
-      ok: true,
-      business_id: biz.id,
-      articulo_id: articuloId,
-      from: fromRaw,
-      to: toRaw,
-      groupBy: 'day',
-      total,
-      items,
-    });
-  } catch (e) {
-    next(e);
-  }
-};
+      return res.json({
+        ok: true,
+        business_id: biz.id,
+        articulo_id: articuloId,
+        from: fromRaw,
+        to: toRaw,
+        groupBy: 'day',
+        total,
+        items,
+      });
+    } catch (e) {
+      next(e);
+    }
+  };
 
