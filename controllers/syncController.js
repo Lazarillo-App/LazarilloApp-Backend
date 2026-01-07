@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 const pool = require('../config/db');
 const { decryptSecretCompat } = require('../utils/cryptoField');
+const { autoAssignNewArticles } = require('../services/autoGroupAssignment');
 
 // fetch nativo (Node 18+) o fallback a node-fetch
 const fetchNative =
@@ -272,6 +273,7 @@ exports.syncNow = async (req, res) => {
     let upserted = 0;
     let mapped = 0;
     let cacheHash = null;
+    let autoAssigned = 0; // 🆕
 
     if (scope === 'articles' || scope === 'all') {
       const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
@@ -310,9 +312,32 @@ exports.syncNow = async (req, res) => {
       mapped = r.rowCount || 0;
 
       await client.query('COMMIT');
+
+      // 🆕 AUTO-ASIGNACIÓN POST-SYNC
+      try {
+        const result = await autoAssignNewArticles(biz.id);
+        autoAssigned = result.assigned;
+        
+        if (autoAssigned > 0) {
+          console.log(`[syncNow] Auto-asignados ${autoAssigned} artículos a agrupaciones existentes`);
+        }
+      } catch (autoErr) {
+        console.error('[syncNow] Error en auto-asignación (no crítico):', autoErr.message);
+        // No rompemos el sync por esto
+      }
     }
 
-    return res.json({ ok: true, business_id: biz.id, scope: 'articles', from: f, to: t, upserted, mapped, cacheHash });
+    return res.json({ 
+      ok: true, 
+      business_id: biz.id, 
+      scope: 'articles', 
+      from: f, 
+      to: t, 
+      upserted, 
+      mapped, 
+      cacheHash,
+      auto_assigned: autoAssigned // 🆕
+    });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     const msg = String(e?.message || '');
