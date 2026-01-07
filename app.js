@@ -21,31 +21,22 @@ const authRoutes         = require('./routes/authRoutes');
 const devRoutes          = require('./routes/devRoutes');
 const businessRoutes     = require('./routes/businessRoutes');
 const adminRoutes        = require('./routes/admin.routes');
-const adminCronRoutes    = require('./routes/adminCronRoutes');        // ⬅ cron sin JWT (X-Cron-Secret)
-const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes');  // ⬅ rebuild agregados (X-Cron-Secret)
+const adminCronRoutes    = require('./routes/adminCronRoutes');
+const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
-// ⚠ Usa el nombre real del archivo:
-//    - si tu archivo es routes/ventas.js -> require('./routes/ventas')
-//    - si es routes/ventasRoutes.js     -> require('./routes/ventasRoutes')
 const ventasRoutes       = require('./routes/ventasRoutes'); 
 const insumosRoutes      = require('./routes/insumosRoutes');
 const branchesRoutes     = require('./routes/branchRoutes');
+const notificationsRouter = require('./routes/notificationsRoutes'); // 🆕
+const diagnosticRoutes = require('./routes/diagnosticRoutes');
 
-// (Opcional) probe directo a Maxi en dev
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
 
 // CORS unificado con preflight cacheado
 const corsWithCache = require('./middleware/cors');
 
-const diagnosticRoutes = require('./routes/diagnosticRoutes');
-
-const notificationsRouter = require('./routes/notificationsRoutes');
-
 const app = express();
-
-/* ----------- notificaciones ----------- */
-app.use('/api/notifications', notificationsRouter);
 
 /* ----------- básicos ----------- */
 app.set('trust proxy', 1);
@@ -53,8 +44,6 @@ app.disable('x-powered-by');
 
 /* ----------- CORS (único, arriba de TODO) ----------- */
 app.use(corsWithCache);
-
-app.use('/api/diagnostic', diagnosticRoutes);
 
 /* ----------- logging simple por request ----------- */
 app.use((req, res, next) => {
@@ -81,8 +70,10 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 /* ----------- rutas públicas ----------- */
 app.use('/api/auth', authRoutes);
 app.use('/api/dev',  devRoutes);
+app.use('/api/diagnostic', diagnosticRoutes);
+
 if (exposeProbe) {
-  app.use('/api/dev', devMaxiProbeRoutes); // GET /api/dev/maxi-probe?biz=&from=&to=
+  app.use('/api/dev', devMaxiProbeRoutes);
 }
 
 /* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
@@ -94,6 +85,9 @@ app.use('/admin', adminRebuildAgg);
 /* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
+// 🆕 NOTIFICACIONES (con auth)
+app.use('/api/notifications', authRequired, notificationsRouter);
+
 // Guard global de /api (después de /api/cron y /api/admin), antes del resto
 app.use('/api', authRequired, loadActiveBusiness);
 
@@ -103,7 +97,7 @@ app.use('/api/ventas',                ventasRoutes);
 app.use('/api/branches',              branchesRoutes);
 
 // histórico: rutas bajo :businessId
-app.use('/api/businesses',            require('./routes/businessRoutes')); // ya cubierto por guard global
+app.use('/api/businesses',            require('./routes/businessRoutes'));
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 app.use('/api/businesses', businessRoutes);
 
