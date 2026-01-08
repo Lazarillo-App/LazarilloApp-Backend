@@ -17,19 +17,20 @@ const { authRequired, loadActiveBusiness } = require('./middleware/authMiddlewar
 const requireAppAdmin = require('./middleware/requireAppAdmin');
 
 // Rutas
-const authRoutes         = require('./routes/authRoutes');
-const devRoutes          = require('./routes/devRoutes');
-const businessRoutes     = require('./routes/businessRoutes');
-const adminRoutes        = require('./routes/admin.routes');
-const adminCronRoutes    = require('./routes/adminCronRoutes');
-const adminRebuildAgg    = require('./routes/adminRebuildAggRoutes');
+const authRoutes = require('./routes/authRoutes');
+const devRoutes = require('./routes/devRoutes');
+const businessRoutes = require('./routes/businessRoutes');
+const adminRoutes = require('./routes/admin.routes');
+const adminCronRoutes = require('./routes/adminCronRoutes');
+const adminRebuildAgg = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
-const ventasRoutes       = require('./routes/ventasRoutes'); 
-const insumosRoutes      = require('./routes/insumosRoutes');
-const branchesRoutes     = require('./routes/branchRoutes');
+const ventasRoutes = require('./routes/ventasRoutes');
+const insumosRoutes = require('./routes/insumosRoutes');
+const branchesRoutes = require('./routes/branchRoutes');
 const notificationsRouter = require('./routes/notificationsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
+const ventasCSVRoutes = require('./routes/ventasCSVRoutes');
 
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
@@ -79,13 +80,13 @@ app.use(morgan('➡️ :method :url :status :response-time ms'));
 
 /* ----------- uploads públicos ----------- */
 const uploadsDir = path.join(__dirname, 'uploads');
-const logosDir   = path.join(uploadsDir, 'logos');
+const logosDir = path.join(uploadsDir, 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 /* ----------- rutas públicas ----------- */
 app.use('/api/auth', authRoutes);
-app.use('/api/dev',  devRoutes);
+app.use('/api/dev', devRoutes);
 app.use('/api/diagnostic', diagnosticRoutes);
 
 if (exposeProbe) {
@@ -108,17 +109,18 @@ app.use('/api/notifications', authRequired, notificationsRouter);
 app.use('/api', authRequired, loadActiveBusiness);
 
 // módulos con negocio
-app.use('/api/insumos',               insumosRoutes);
-app.use('/api/ventas',                ventasRoutes);
-app.use('/api/branches',              branchesRoutes);
+app.use('/api/insumos', insumosRoutes);
+app.use('/api/ventas', ventasRoutes);
+app.use('/api/branches', branchesRoutes);
 
 // histórico: rutas bajo :businessId
-app.use('/api/businesses',            require('./routes/businessRoutes'));
+app.use('/api/businesses', require('./routes/businessRoutes'));
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 app.use('/api/businesses', businessRoutes);
 
 // 🆕 Importación CSV (con auth ya aplicado por guard global)
 app.use('/api/businesses', salesImportRoutes);
+app.use('/api/ventas-csv', ventasCSVRoutes);
 
 /* util debug */
 app.get('/api/_debug/whoami', authRequired, (req, res) => {
