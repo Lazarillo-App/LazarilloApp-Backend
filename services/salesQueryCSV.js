@@ -46,6 +46,8 @@ async function getTopArticlesCSV(businessId, { from, to, limit = 20 }) {
     WHERE sdi.business_id = $1
       AND sdi.source = 'csv'
       AND sdi.day BETWEEN $2 AND $3
+      AND sdi.article_id IS NOT NULL
+      AND sdi.article_id > 0
     GROUP BY sdi.article_id, sdi.article_name
     ORDER BY total_amount DESC
     LIMIT $4
@@ -118,7 +120,7 @@ async function getSalesByGroupCSV(businessId, { from, to }) {
       SUM(sdi.qty) as total_qty,
       SUM(sdi.amount) as total_amount
     FROM sales_daily_items sdi
-    LEFT JOIN app_articles aa ON aa.id = sdi.article_id AND aa.business_id = sdi.business_id
+    LEFT JOIN agrupacion_articulos aa ON aa.articulo_id = sdi.article_id
     LEFT JOIN agrupaciones ag ON ag.id = aa.agrupacion_id AND ag.business_id = sdi.business_id
     WHERE sdi.business_id = $1
       AND sdi.source = 'csv'
