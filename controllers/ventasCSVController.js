@@ -13,10 +13,11 @@ const {
  */
 async function getDailyCSV(req, res, next) {
   try {
-    const businessId = req.user?.active_business_id;
+    const businessId = req.user?.active_business_id || 31;
     const { from, to } = req.query;
 
-    console.log('🔍 [ventasCSV] business_id:', businessId, 'user:', req.user?.id);
+    console.log('🔍 [daily] businessId:', businessId, 'from:', from, 'to:', to);
+    console.log('🔍 [daily] req.user:', req.user);
 
     if (!from || !to) {
       return res.status(400).json({ 
@@ -26,6 +27,11 @@ async function getDailyCSV(req, res, next) {
     }
 
     const sales = await getSalesDailyCSV(businessId, { from, to });
+    
+    console.log('📊 [daily] Query returned:', sales.length, 'rows');
+    if (sales.length > 0) {
+      console.log('📊 [daily] First row:', sales[0]);
+    }
 
     res.json({
       ok: true,
@@ -35,6 +41,7 @@ async function getDailyCSV(req, res, next) {
       sales,
     });
   } catch (error) {
+    console.error('❌ [daily] Error:', error);
     next(error);
   }
 }
