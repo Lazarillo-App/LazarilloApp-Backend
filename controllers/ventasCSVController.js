@@ -16,6 +16,8 @@ async function getDailyCSV(req, res, next) {
     const businessId = req.user?.active_business_id;
     const { from, to } = req.query;
 
+    console.log('🔍 [ventasCSV] business_id:', businessId, 'user:', req.user?.id);
+
     if (!from || !to) {
       return res.status(400).json({ 
         error: 'missing_params', 
