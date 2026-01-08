@@ -47,7 +47,7 @@ async function getTopArticlesCSV(businessId, { from, to, limit = 20 }) {
       AND sdi.source = 'csv'
       AND sdi.day BETWEEN $2 AND $3
       AND sdi.article_id IS NOT NULL
-      AND sdi.article_id > 0
+      -- ❌ ELIMINAR: AND sdi.article_id > 0
     GROUP BY sdi.article_id, sdi.article_name
     ORDER BY total_amount DESC
     LIMIT $4
