@@ -111,8 +111,11 @@ async function getByArticleHandler(req, res, next) {
  */
 async function getSummaryHandler(req, res, next) {
   try {
-    const businessId = req.user?.active_business_id;
+    // 🔧 TEMPORAL: hardcodear business_id
+    const businessId = req.user?.active_business_id || 31;
     const { from, to } = req.query;
+
+    console.log('🔍 [ventasCSV/summary] businessId:', businessId, 'user:', req.user);
 
     if (!from || !to) {
       return res.status(400).json({ 
@@ -134,7 +137,6 @@ async function getSummaryHandler(req, res, next) {
     next(error);
   }
 }
-
 /**
  * GET /api/ventas-csv/by-group
  * Ventas por agrupación (SOLO CSV)
