@@ -282,7 +282,7 @@ exports.listDailyItems = async (req, res, next) => {
       from,
       to,
       articleId,
-      limit = 500,
+      limit = 10000,
       offset = 0,
       source = null,
     } = req.query;
