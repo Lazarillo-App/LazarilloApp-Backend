@@ -284,12 +284,13 @@ exports.listDailyItems = async (req, res, next) => {
       articleId,
       limit = 500,
       offset = 0,
+      source = null,
     } = req.query;
 
     if (!from || !to) {
-      return res.status(400).json({ 
-        error: 'bad_request', 
-        message: 'from y to son requeridos (YYYY-MM-DD)' 
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'from y to son requeridos (YYYY-MM-DD)'
       });
     }
 
@@ -300,7 +301,11 @@ exports.listDailyItems = async (req, res, next) => {
       params.push(Number(articleId));
       whereClause = `AND sdi.article_id = $${params.length}`;
     }
-
+    let sourceFilter = '';
+    if (source) {
+      params.push(source);
+      sourceFilter = `AND sdi.source = $${params.length}`;
+    }
     // ✅ QUERY CON DOBLE JOIN: busca en maxi_articles Y app_articles
     const sql = `
       SELECT
@@ -323,6 +328,7 @@ exports.listDailyItems = async (req, res, next) => {
       WHERE sdi.business_id = $1
         AND sdi.day BETWEEN $2::date AND $3::date
         ${whereClause}
+        ${sourceFilter}
       GROUP BY sdi.day::date, sdi.article_id, ma.nombre, aa.name
       ORDER BY sdi.day DESC, sdi.article_id
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
@@ -341,7 +347,7 @@ exports.listDailyItems = async (req, res, next) => {
     `;
 
     const pool = require('../config/db');
-    
+
     const [rows, totals] = await Promise.all([
       pool.query(sql, params).then(r => r.rows),
       pool.query(sqlTotals, params).then(r => r.rows[0]),
@@ -352,8 +358,8 @@ exports.listDailyItems = async (req, res, next) => {
       business_id: String(biz.id),
       from,
       to,
-      filters: { 
-        articleId: articleId ? Number(articleId) : null 
+      filters: {
+        articleId: articleId ? Number(articleId) : null
       },
       totals: {
         rows_total: Number(totals?.rows_total || 0),
@@ -382,8 +388,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       return res.status(400).json({ error: 'businessId inválido' });
     }
     if (!from || !to) {
-      return res.status(400).json({ 
-        error: 'from y to son obligatorios (YYYY-MM-DD)' 
+      return res.status(400).json({
+        error: 'from y to son obligatorios (YYYY-MM-DD)'
       });
     }
 
@@ -450,7 +456,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     // Escribir filas
     for (const r of rows) {
       try {
-        const fecha = r.fecha instanceof Date 
+        const fecha = r.fecha instanceof Date
           ? r.fecha.toISOString().slice(0, 10)
           : String(r.fecha || '').slice(0, 10);
 
@@ -476,8 +482,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
   } catch (e) {
     console.error('[exportSalesCsv] error:', e);
-    res.status(500).json({ 
-      error: 'Error exportando CSV', 
+    res.status(500).json({
+      error: 'Error exportando CSV',
       detail: e?.message || String(e)
     });
   }
@@ -511,11 +517,11 @@ exports.diagnosticRaw = async (req, res) => {
     console.log('----------------------------------------\n');
 
     // Traer datos crudos de MaxiRest
-    const raw = await fetchSalesRanged({ 
-      businessId: biz.id, 
-      from, 
-      to, 
-      req 
+    const raw = await fetchSalesRanged({
+      businessId: biz.id,
+      from,
+      to,
+      req
     });
 
     console.log('=== CANTIDAD DE ITEMS ===');
@@ -556,7 +562,7 @@ exports.diagnosticRaw = async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error en diagnóstico:', error);
-    res.status(error.status || 500).json({ 
+    res.status(error.status || 500).json({
       success: false,
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
