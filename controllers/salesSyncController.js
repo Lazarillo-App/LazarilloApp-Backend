@@ -301,12 +301,14 @@ exports.listDailyItems = async (req, res, next) => {
       params.push(Number(articleId));
       whereClause = `AND sdi.article_id = $${params.length}`;
     }
+
     let sourceFilter = '';
     if (source) {
       params.push(source);
       sourceFilter = `AND sdi.source = $${params.length}`;
     }
-    // ✅ QUERY CON DOBLE JOIN: busca en maxi_articles Y app_articles
+
+    // ✅ QUERY principal
     const sql = `
       SELECT
         sdi.day::date AS day,
@@ -334,7 +336,7 @@ exports.listDailyItems = async (req, res, next) => {
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
-    // Query de totales
+    // ✅ Query de totales (AGREGAR sourceFilter)
     const sqlTotals = `
       SELECT
         COUNT(DISTINCT sdi.article_id) AS rows_total,
@@ -344,6 +346,7 @@ exports.listDailyItems = async (req, res, next) => {
       WHERE sdi.business_id = $1
         AND sdi.day BETWEEN $2::date AND $3::date
         ${whereClause}
+        ${sourceFilter}  -- ✅ AGREGAR ESTA LÍNEA
     `;
 
     const pool = require('../config/db');
@@ -359,7 +362,8 @@ exports.listDailyItems = async (req, res, next) => {
       from,
       to,
       filters: {
-        articleId: articleId ? Number(articleId) : null
+        articleId: articleId ? Number(articleId) : null,
+        source: source || null,  // ✅ Incluir en respuesta
       },
       totals: {
         rows_total: Number(totals?.rows_total || 0),
