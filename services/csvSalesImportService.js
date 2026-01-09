@@ -260,7 +260,7 @@ async function importFileToDatabase({
             if (!minDate || date < minDate) minDate = date;
             if (!maxDate || date > maxDate) maxDate = date;
 
-            // 5. Insertar/actualizar en sales_daily_items (sin transacción)
+            // ✅ 5. Insertar/actualizar en sales_daily_items - CORREGIDO
             try {
                 const result = await client.query(`
           INSERT INTO sales_daily_items 
@@ -268,8 +268,8 @@ async function importFileToDatabase({
           VALUES ($1, $2::date, $3, $4, $5, $6, 'csv', NOW(), NOW())
           ON CONFLICT (business_id, day, article_id, source)
           DO UPDATE SET
-            qty = sales_daily_items.qty + EXCLUDED.qty,
-            amount = sales_daily_items.amount + EXCLUDED.amount,
+            qty = EXCLUDED.qty,              -- ✅ REEMPLAZA (no suma)
+            amount = EXCLUDED.amount,        -- ✅ REEMPLAZA (no suma)
             article_name = COALESCE(EXCLUDED.article_name, sales_daily_items.article_name),
             updated_at = NOW()
         `, [businessId, date, article_id, qty, amount, article_name]);

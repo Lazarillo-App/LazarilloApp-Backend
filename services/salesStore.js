@@ -244,7 +244,7 @@ function normalizeInvoices(businessId, rawDocs) {
 
       // ❌ NO procesar menuItems - es solo metadata
       // menuItems contiene precio de lista y descuentos, pero NO son items adicionales
-      
+
       // 🎯 Calcular total desde items agrupados
       const itemsArray = Array.from(itemsByTitle.values());
       const total = itemsArray.reduce((sum, it) => sum + it.totalPrice, 0);
@@ -501,45 +501,41 @@ async function upsertDailyAggregates(businessId, fromYmd, toYmd, clientOpt) {
        👇 Ojo: NULL → 0 para mantener NOT NULL en article_id
     */
     const sqlItems = `
-      INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount)
-      SELECT
-        s.business_id,
-        (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
-        COALESCE(si.article_id, 0) AS article_id,
-        -- Cantidad: priorizamos si.qty, si no quantity
-        SUM(
-          CASE
-            WHEN si.qty IS NOT NULL AND si.qty <> 0
-              THEN si.qty
-            WHEN si.quantity IS NOT NULL
-              THEN si.quantity
-            ELSE 0
-          END
-        ) AS qty,
-        -- Importe: priorizamos si.amount, si no total
-        SUM(
-          CASE
-            WHEN si.amount IS NOT NULL AND si.amount <> 0
-              THEN si.amount
-            WHEN si.total IS NOT NULL
-              THEN si.total
-            ELSE 0
-          END
-        ) AS amount
-      FROM app_sales_items si
-      JOIN app_sales s
-        ON s.id = si.sale_id
-      WHERE s.business_id = $1
-        AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2 AND $3
-      GROUP BY
-        s.business_id,
-        (s.occurred_at AT TIME ZONE 'UTC')::date,
-        COALESCE(si.article_id, 0)
-      ON CONFLICT (business_id, day, article_id)
-      DO UPDATE SET
-        qty    = EXCLUDED.qty,
-        amount = EXCLUDED.amount
-    `;
+  INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount, source)
+  SELECT
+    s.business_id,
+    (s.occurred_at AT TIME ZONE 'UTC')::date AS day,
+    COALESCE(si.article_id, 0) AS article_id,
+    SUM(
+      CASE
+        WHEN si.qty IS NOT NULL AND si.qty <> 0
+          THEN si.qty
+        WHEN si.quantity IS NOT NULL
+          THEN si.quantity
+        ELSE 0
+      END
+    ) AS qty,
+    SUM(
+      CASE
+        WHEN si.amount IS NOT NULL AND si.amount <> 0
+          THEN si.amount
+        WHEN si.total IS NOT NULL
+          THEN si.total
+        ELSE 0
+      END
+    ) AS amount,
+    'maxi' AS source  -- 🎯 AGREGAR source = 'maxi'
+  FROM app_sales_items si
+  JOIN app_sales s ON s.id = si.sale_id
+  WHERE s.business_id = $1
+    AND (s.occurred_at AT TIME ZONE 'UTC')::date BETWEEN $2 AND $3
+  GROUP BY s.business_id, (s.occurred_at AT TIME ZONE 'UTC')::date, COALESCE(si.article_id, 0)
+  ON CONFLICT (business_id, day, article_id, source)  -- ✅ AGREGAR source
+  DO UPDATE SET
+    qty    = EXCLUDED.qty,
+    amount = EXCLUDED.amount,
+    updated_at = NOW()  -- 🎯 Opcional: actualizar timestamp
+`;
     await client.query(sqlItems, params);
 
     /* 3) maxi_sales_daily: espejo 1:1 de sales_daily_items
