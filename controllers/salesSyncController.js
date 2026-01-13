@@ -282,7 +282,7 @@ exports.listDailyItems = async (req, res, next) => {
       from,
       to,
       articleId,
-      limit = 10000,
+      limit = 500000,
       offset = 0,
       source = null,
     } = req.query;
@@ -314,8 +314,8 @@ exports.listDailyItems = async (req, res, next) => {
         sdi.day::date AS day,
         sdi.article_id,
         COALESCE(
-          NULLIF(TRIM(ma.nombre), ''),
-          NULLIF(TRIM(aa.name), ''),
+          NULLIF(TRIM(MAX(ma.nombre)), ''),
+          NULLIF(TRIM(MAX(aa.name)), ''),
           '#' || sdi.article_id::text
         ) AS title,
         SUM(sdi.qty)::numeric AS qty,
@@ -331,7 +331,7 @@ exports.listDailyItems = async (req, res, next) => {
         AND sdi.day BETWEEN $2::date AND $3::date
         ${whereClause}
         ${sourceFilter}
-      GROUP BY sdi.day::date, sdi.article_id, ma.nombre, aa.name
+      GROUP BY sdi.day::date, sdi.article_id
       ORDER BY sdi.day DESC, sdi.article_id
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
@@ -406,8 +406,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       SELECT
         sdi.article_id AS codigo,
         COALESCE(
-          NULLIF(TRIM(ma.nombre), ''),
-          NULLIF(TRIM(aa.name), ''),
+         NULLIF(TRIM(MAX(ma.nombre)), ''), 
+         NULLIF(TRIM(MAX(aa.name)), ''),
           'Artículo #' || sdi.article_id::text
         ) AS nombre,
         SUM(sdi.qty)::numeric AS unidades,
@@ -427,7 +427,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       WHERE sdi.business_id = $1
         AND sdi.source = 'csv'
         AND sdi.day BETWEEN $2::date AND $3::date
-      GROUP BY sdi.day::date, sdi.article_id, ma.nombre, aa.name
+      GROUP BY sdi.day::date, sdi.article_id 
       ORDER BY sdi.day ASC, sdi.article_id ASC;
     `;
 
