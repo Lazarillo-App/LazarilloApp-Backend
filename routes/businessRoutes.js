@@ -256,4 +256,9 @@ router.patch('/:id', ensureFn('businesses.update', businesses.update));
 router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
 router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 
+router.get(
+  '/:id/sales/summary',
+  ensureFn('sales.salesSummary', sales.salesSummary)
+);
+
 module.exports = router;

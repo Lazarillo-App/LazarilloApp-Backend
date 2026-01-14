@@ -574,6 +574,94 @@ exports.diagnosticRaw = async (req, res) => {
   }
 };
 
+exports.salesSummary = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const {
+      from,
+      to,
+      source = 'csv',
+      articleIds = null, // Opcional: filtrar por IDs específicos
+    } = req.query;
+
+    if (!from || !to) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'from y to son requeridos (YYYY-MM-DD)'
+      });
+    }
+
+    const params = [biz.id, from, to, source];
+    let articleFilter = '';
+
+    // Filtro opcional por artículos específicos
+    if (articleIds) {
+      const ids = String(articleIds).split(',').map(Number).filter(n => Number.isFinite(n));
+      if (ids.length > 0) {
+        params.push(ids);
+        articleFilter = `AND sdi.article_id = ANY($${params.length})`;
+      }
+    }
+
+    // ✅ Query super optimizada: una fila por artículo
+    const sql = `
+      SELECT
+        sdi.article_id,
+        COALESCE(
+          NULLIF(TRIM(MAX(ma.nombre)), ''),
+          NULLIF(TRIM(MAX(aa.name)), ''),
+          '#' || sdi.article_id::text
+        ) AS title,
+        SUM(sdi.qty)::numeric AS total_qty,
+        SUM(sdi.amount)::numeric AS total_amount,
+        COUNT(DISTINCT sdi.day) AS days_with_sales,
+        MIN(sdi.day)::date AS first_sale,
+        MAX(sdi.day)::date AS last_sale
+      FROM sales_daily_items sdi
+      LEFT JOIN maxi_articles ma
+        ON ma.business_id = sdi.business_id 
+        AND ma.articulo_id = sdi.article_id
+      LEFT JOIN app_articles aa
+        ON aa.business_id = sdi.business_id
+        AND aa.id = sdi.article_id
+      WHERE sdi.business_id = $1
+        AND sdi.day BETWEEN $2::date AND $3::date
+        AND sdi.source = $4
+        ${articleFilter}
+      GROUP BY sdi.article_id
+      HAVING SUM(sdi.qty) > 0
+      ORDER BY SUM(sdi.qty) DESC
+    `;
+
+    const pool = require('../config/db');
+    const { rows } = await pool.query(sql, params);
+
+    // Calcular totales globales
+    const totals = rows.reduce((acc, row) => {
+      acc.total_qty += Number(row.total_qty || 0);
+      acc.total_amount += Number(row.total_amount || 0);
+      return acc;
+    }, { total_qty: 0, total_amount: 0 });
+
+    res.json({
+      ok: true,
+      business_id: String(biz.id),
+      from,
+      to,
+      source,
+      totals: {
+        articles_count: rows.length,
+        total_qty: totals.total_qty,
+        total_amount: totals.total_amount,
+      },
+      items: rows,
+    });
+  } catch (e) {
+    console.error('[salesSummary] error:', e);
+    next(e);
+  }
+};
+
 module.exports = {
   maxiPing: exports.maxiPing,
   syncWindow: exports.syncWindow,
@@ -584,5 +672,6 @@ module.exports = {
   reconcileAndRebuild: exports.reconcileAndRebuild,
   listDailyItems: exports.listDailyItems,
   exportSalesCsv: exports.exportSalesCsv,
-  diagnosticRaw: exports.diagnosticRaw, // 👈 AGREGAR ESTA LÍNEA
+  diagnosticRaw: exports.diagnosticRaw, 
+  salesSummary: exports.salesSummary,
 };
