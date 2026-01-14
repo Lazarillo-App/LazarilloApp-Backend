@@ -124,6 +124,12 @@ router.get(
   ensureFn('sales.listDailyItems', sales.listDailyItems)
 );
 
+/* ───────── Ventas: resumen por artículo ───────── */
+router.get(
+  '/:id/sales/summary',
+  ensureFn('sales.salesSummary', sales.salesSummary)
+);
+
 /* ───────── Ventas legacy lectura (serie por artículo) ───────── */
 
 router.get(
@@ -255,10 +261,5 @@ router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOn
 router.patch('/:id', ensureFn('businesses.update', businesses.update));
 router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
 router.post('/:id/select', ensureFn('businesses.select', businesses.select));
-
-router.get(
-  '/:id/sales/summary',
-  ensureFn('sales.salesSummary', sales.salesSummary)
-);
 
 module.exports = router;
