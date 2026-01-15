@@ -40,7 +40,7 @@ async function getMainDivision(businessId) {
   const division = await divisionsRepo.getMainDivision(businessId);
   
   if (!division) {
-    const error = new Error('No existe división principal para este negocio');
+    const error = new Error('No existe division principal para este negocio');
     error.status = 404;
     throw error;
   }
@@ -88,7 +88,7 @@ async function updateDivision(divisionId, updates) {
   
   // No permitir desactivar la división principal
   if (division.is_main && updates.is_active === false) {
-    const error = new Error('No se puede desactivar la división principal');
+    const error = new Error('No se puede desactivar la division principal');
     error.status = 400;
     throw error;
   }
@@ -140,7 +140,7 @@ async function deleteDivision(divisionId) {
   
   // No permitir eliminar la división principal
   if (division.is_main) {
-    const error = new Error('No se puede eliminar la división principal');
+    const error = new Error('No se puede eliminar la division principal');
     error.status = 400;
     throw error;
   }
@@ -148,7 +148,7 @@ async function deleteDivision(divisionId) {
   // Obtener división principal para mover artículos
   const mainDivision = await divisionsRepo.getMainDivision(division.business_id);
   if (!mainDivision) {
-    const error = new Error('No existe división principal para mover los artículos');
+    const error = new Error('No existe division principal para mover los artículos');
     error.status = 500;
     throw error;
   }
