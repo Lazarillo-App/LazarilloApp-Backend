@@ -310,6 +310,62 @@ function generateCodeFromName(name) {
   return baseCode.padEnd(4, 'X');
 }
 
+/**
+ * Mover artículos de una agrupación a una división
+ * @param {number} businessId - ID del negocio
+ * @param {number} groupId - ID de la agrupación
+ * @param {number} divisionId - ID de la división destino
+ * @returns {Promise<Object>}
+ */
+async function moverArticulosDeAgrupacion(businessId, groupId, divisionId) {
+  // Verificar que la división existe
+  const division = await getDivisionById(divisionId);
+  if (!division || division.business_id !== businessId) {
+    const error = new Error('División no encontrada o no pertenece al negocio');
+    error.status = 404;
+    throw error;
+  }
+  
+  // Obtener artículos de la agrupación
+  const articlesQuery = `
+    SELECT DISTINCT article_id
+    FROM article_groups
+    WHERE group_id = $1 AND business_id = $2
+  `;
+  
+  const articlesResult = await pool.query(articlesQuery, [groupId, businessId]);
+  const articleIds = articlesResult.rows.map(r => r.article_id);
+  
+  if (articleIds.length === 0) {
+    return {
+      moved: 0,
+      errors: [],
+      message: 'No hay artículos en esta agrupación',
+    };
+  }
+  
+  // Mover artículos
+  const updateQuery = `
+    UPDATE app_articles
+    SET division_id = $1
+    WHERE id = ANY($2) AND business_id = $3
+  `;
+  
+  const updateResult = await pool.query(updateQuery, [
+    divisionId,
+    articleIds,
+    businessId,
+  ]);
+  
+  return {
+    moved: updateResult.rowCount,
+    errors: [],
+    message: `${updateResult.rowCount} artículos movidos correctamente`,
+    division_id: divisionId,
+    division_name: division.name,
+  };
+}
+
 module.exports = {
   getDivisions,
   getDivisionById,
@@ -319,4 +375,5 @@ module.exports = {
   deleteDivision,
   convertGroupToDivision,
   reorderDivisions,
+  moverArticulosDeAgrupacion,
 };

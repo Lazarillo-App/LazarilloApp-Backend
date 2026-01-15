@@ -218,4 +218,83 @@ router.post('/business/:businessId/reorder', async (req, res, next) => {
   }
 });
 
+/**
+ * POST /api/divisions/move-articles
+ * Mover todos los artículos de una agrupación a una división
+ * 
+ * Body:
+ * {
+ *   "business_id": 31,
+ *   "group_id": 5,
+ *   "division_id": 14
+ * }
+ */
+router.post('/move-articles', async (req, res, next) => {
+  try {
+    const { business_id, group_id, division_id } = req.body;
+    
+    // Validaciones básicas
+    if (!business_id) {
+      return res.status(400).json({ error: 'business_id es requerido' });
+    }
+    if (!group_id) {
+      return res.status(400).json({ error: 'group_id es requerido' });
+    }
+    if (!division_id) {
+      return res.status(400).json({ error: 'division_id es requerido' });
+    }
+    
+    // Verificar que la división existe
+    const division = await divisionService.getDivisionById(division_id);
+    if (!division || division.business_id !== business_id) {
+      return res.status(404).json({ error: 'División no encontrada o no pertenece al negocio' });
+    }
+    
+    // Obtener artículos de la agrupación
+    const articlesQuery = `
+      SELECT DISTINCT article_id
+      FROM article_groups
+      WHERE group_id = $1 AND business_id = $2
+    `;
+    
+    const pool = require('../config/db');
+    const articlesResult = await pool.query(articlesQuery, [group_id, business_id]);
+    const articleIds = articlesResult.rows.map(r => r.article_id);
+    
+    if (articleIds.length === 0) {
+      return res.json({
+        moved: 0,
+        errors: [],
+        message: 'No hay artículos en esta agrupación',
+      });
+    }
+    
+    // Mover artículos a la división
+    const updateQuery = `
+      UPDATE app_articles
+      SET division_id = $1
+      WHERE id = ANY($2) AND business_id = $3
+      RETURNING id
+    `;
+    
+    const updateResult = await pool.query(updateQuery, [
+      division_id,
+      articleIds,
+      business_id,
+    ]);
+    
+    const movedCount = updateResult.rowCount;
+    
+    res.json({
+      moved: movedCount,
+      errors: [],
+      message: `${movedCount} artículos movidos correctamente`,
+      division_id,
+      division_name: division.name,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;
