@@ -26,6 +26,7 @@ const adminRebuildAgg = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
+const divisionsRoutes = require('./routes/divisionsRoutes');  
 const branchesRoutes = require('./routes/branchRoutes');
 const notificationsRouter = require('./routes/notificationsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
@@ -112,6 +113,7 @@ app.use('/api', authRequired, loadActiveBusiness);
 app.use('/api/insumos', insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/branches', branchesRoutes);
+app.use('/api/divisions', divisionsRoutes); 
 
 // histórico: rutas bajo :businessId
 app.use('/api/businesses', require('./routes/businessRoutes'));
