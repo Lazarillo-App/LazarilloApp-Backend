@@ -1,0 +1,464 @@
+/**
+ * Controller de divisiones (subnegocios)
+ * Usa app_businesses con parent_id para jerarquía
+ */
+
+const pool = require('../config/db');
+
+const num = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+const slugify = (s) =>
+  String(s || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 64);
+
+async function ensureUniqueSlug(client, baseSlug, excludeId = null) {
+  const base = baseSlug || 'division';
+  let slug = base;
+  let i = 2;
+
+  while (true) {
+    const query = excludeId
+      ? `SELECT 1 FROM app_businesses WHERE slug = $1 AND id != $2 LIMIT 1`
+      : `SELECT 1 FROM app_businesses WHERE slug = $1 LIMIT 1`;
+    const params = excludeId ? [slug, excludeId] : [slug];
+    const { rows } = await client.query(query, params);
+    if (rows.length === 0) return slug;
+    slug = `${base}-${i++}`;
+  }
+}
+
+/**
+ * GET /api/divisions/business/:businessId
+ * Lista divisiones (hijas directas) de un negocio principal
+ */
+exports.getDivisionsByBusiness = async (req, res) => {
+  try {
+    const businessId = num(req.params.businessId);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    // Obtener info del negocio padre
+    const parentQuery = await pool.query(
+      `SELECT id, name, slug, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [businessId]
+    );
+    
+    if (!parentQuery.rows.length) {
+      return res.status(404).json({ ok: false, error: 'business_not_found' });
+    }
+
+    // Obtener hijos directos con conteo de artículos e insumos
+    const { rows } = await pool.query(
+      `
+      SELECT 
+        b.id, 
+        b.name, 
+        b.slug, 
+        b.parent_id,
+        b.created_at,
+        b.updated_at,
+        COALESCE(art.count, 0)::integer as article_count,
+        COALESCE(ins.count, 0)::integer as insumo_count
+      FROM app_businesses b
+      LEFT JOIN (
+        SELECT business_id, COUNT(*) as count 
+        FROM app_articles 
+        GROUP BY business_id
+      ) art ON art.business_id = b.id
+      LEFT JOIN (
+        SELECT business_id, COUNT(*) as count 
+        FROM insumos 
+        GROUP BY business_id
+      ) ins ON ins.business_id = b.id
+      WHERE b.parent_id = $1
+      ORDER BY b.name ASC
+      `,
+      [businessId]
+    );
+
+    res.json({
+      ok: true,
+      business_id: businessId,
+      business_name: parentQuery.rows[0].name,
+      total: rows.length,
+      has_main_division: true,
+      divisions: rows,
+    });
+  } catch (e) {
+    console.error('[divisions] getDivisionsByBusiness', e);
+    res.status(500).json({ ok: false, error: 'error_getting_divisions' });
+  }
+};
+
+/**
+ * GET /api/divisions/business/:businessId/main
+ * Devuelve el negocio principal (el padre)
+ */
+exports.getMainDivision = async (req, res) => {
+  try {
+    const businessId = num(req.params.businessId);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const { rows } = await pool.query(
+      `SELECT id, name, slug, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [businessId]
+    );
+
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'business_not_found' });
+
+    res.json({ ok: true, division: rows[0] });
+  } catch (e) {
+    console.error('[divisions] getMainDivision', e);
+    res.status(500).json({ ok: false, error: 'error_getting_main_division' });
+  }
+};
+
+/**
+ * GET /api/divisions/:divisionId
+ * Obtener una división por ID
+ */
+exports.getDivisionById = async (req, res) => {
+  try {
+    const divisionId = num(req.params.divisionId);
+    if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+
+    const { rows } = await pool.query(
+      `
+      SELECT 
+        b.id, 
+        b.name, 
+        b.slug, 
+        b.parent_id,
+        b.created_at,
+        b.updated_at,
+        p.name as parent_name,
+        p.slug as parent_slug,
+        COALESCE(art.count, 0)::integer as article_count,
+        COALESCE(ins.count, 0)::integer as insumo_count
+      FROM app_businesses b
+      LEFT JOIN app_businesses p ON b.parent_id = p.id
+      LEFT JOIN (
+        SELECT business_id, COUNT(*) as count 
+        FROM app_articles 
+        GROUP BY business_id
+      ) art ON art.business_id = b.id
+      LEFT JOIN (
+        SELECT business_id, COUNT(*) as count 
+        FROM insumos 
+        GROUP BY business_id
+      ) ins ON ins.business_id = b.id
+      WHERE b.id = $1 
+      LIMIT 1
+      `,
+      [divisionId]
+    );
+
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'division_not_found' });
+
+    res.json({ ok: true, division: rows[0] });
+  } catch (e) {
+    console.error('[divisions] getDivisionById', e);
+    res.status(500).json({ ok: false, error: 'error_getting_division' });
+  }
+};
+
+/**
+ * POST /api/divisions
+ * Crear un subnegocio
+ * Body: { parent_business_id, name, slug? }
+ */
+exports.createDivision = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const parentId = num(req.body?.parent_business_id);
+    const name = String(req.body?.name || '').trim();
+    const slugInput = String(req.body?.slug || '').trim();
+
+    if (!parentId) return res.status(400).json({ ok: false, error: 'parent_business_id_required' });
+    if (!name) return res.status(400).json({ ok: false, error: 'name_required' });
+
+    await client.query('BEGIN');
+
+    // Validar que el padre exista
+    const parentCheck = await client.query(
+      `SELECT id, name, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [parentId]
+    );
+    if (!parentCheck.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'parent_business_not_found' });
+    }
+
+    // Validar que no exista otro subnegocio con el mismo nombre bajo el mismo padre
+    const nameCheck = await client.query(
+      `SELECT id FROM app_businesses WHERE parent_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1`,
+      [parentId, name]
+    );
+    if (nameCheck.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'name_already_exists' });
+    }
+
+    const baseSlug = slugInput ? slugify(slugInput) : slugify(name);
+    const slug = await ensureUniqueSlug(client, baseSlug);
+
+    const ins = await client.query(
+      `
+      INSERT INTO app_businesses (name, slug, parent_id, props, created_at, updated_at)
+      VALUES ($1, $2, $3, '{}', NOW(), NOW())
+      RETURNING id, name, slug, parent_id, created_at, updated_at
+      `,
+      [name, slug, parentId]
+    );
+
+    await client.query('COMMIT');
+    
+    res.status(201).json({ 
+      ok: true, 
+      division: ins.rows[0],
+      parent_name: parentCheck.rows[0].name
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] createDivision', e);
+    if (e.code === '23505') return res.status(409).json({ ok: false, error: 'slug_already_exists' });
+    res.status(500).json({ ok: false, error: 'error_creating_division' });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * PUT /api/divisions/:divisionId
+ * Actualizar un subnegocio
+ * Body: { name?, slug? }
+ */
+exports.updateDivision = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const divisionId = num(req.params.divisionId);
+    if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+
+    const name = req.body?.name != null ? String(req.body.name).trim() : null;
+    const slugInput = req.body?.slug != null ? String(req.body.slug).trim() : null;
+
+    if (!name && !slugInput) {
+      return res.status(400).json({ ok: false, error: 'nothing_to_update' });
+    }
+
+    await client.query('BEGIN');
+
+    const current = await client.query(
+      `SELECT id, name, slug, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [divisionId]
+    );
+    if (!current.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'division_not_found' });
+    }
+
+    const division = current.rows[0];
+
+    // Validar nombre único bajo el mismo padre (si se está cambiando)
+    if (name && name.toLowerCase() !== division.name.toLowerCase() && division.parent_id) {
+      const nameCheck = await client.query(
+        `SELECT id FROM app_businesses WHERE parent_id = $1 AND LOWER(name) = LOWER($2) AND id != $3 LIMIT 1`,
+        [division.parent_id, name, divisionId]
+      );
+      if (nameCheck.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ ok: false, error: 'name_already_exists' });
+      }
+    }
+
+    let newSlug = null;
+    if (slugInput && slugInput !== division.slug) {
+      newSlug = await ensureUniqueSlug(client, slugify(slugInput), divisionId);
+    }
+
+    const upd = await client.query(
+      `
+      UPDATE app_businesses
+      SET
+        name = COALESCE($1, name),
+        slug = COALESCE($2, slug),
+        updated_at = NOW()
+      WHERE id = $3
+      RETURNING id, name, slug, parent_id, created_at, updated_at
+      `,
+      [name || null, newSlug, divisionId]
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true, division: upd.rows[0] });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] updateDivision', e);
+    if (e.code === '23505') return res.status(409).json({ ok: false, error: 'slug_already_exists' });
+    res.status(500).json({ ok: false, error: 'error_updating_division' });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * DELETE /api/divisions/:divisionId
+ * Eliminar un subnegocio
+ * Los artículos e insumos se mueven al padre
+ */
+exports.deleteDivision = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const divisionId = num(req.params.divisionId);
+    if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+
+    await client.query('BEGIN');
+
+    const div = await client.query(
+      `SELECT id, name, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [divisionId]
+    );
+    if (!div.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'division_not_found' });
+    }
+
+    const parentId = div.rows[0].parent_id;
+    const divisionName = div.rows[0].name;
+
+    // No permitir borrar un negocio principal (sin parent)
+    if (!parentId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'cannot_delete_main_business' });
+    }
+
+    // Verificar si tiene sub-hijos
+    const childCheck = await client.query(
+      `SELECT id, name FROM app_businesses WHERE parent_id = $1 LIMIT 5`,
+      [divisionId]
+    );
+    if (childCheck.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'division_has_children',
+        children: childCheck.rows.map(c => c.name)
+      });
+    }
+
+    // Mover artículos al padre
+    const movedArticles = await client.query(
+      `UPDATE app_articles SET business_id = $1 WHERE business_id = $2 RETURNING id`,
+      [parentId, divisionId]
+    );
+
+    // Mover insumos al padre
+    const movedInsumos = await client.query(
+      `UPDATE insumos SET business_id = $1 WHERE business_id = $2 RETURNING id`,
+      [parentId, divisionId]
+    );
+
+    // Obtener nombre del padre para el mensaje
+    const parentInfo = await client.query(
+      `SELECT name FROM app_businesses WHERE id = $1`,
+      [parentId]
+    );
+
+    // Eliminar la división
+    await client.query(`DELETE FROM app_businesses WHERE id = $1`, [divisionId]);
+
+    await client.query('COMMIT');
+    
+    res.json({
+      ok: true,
+      message: `División "${divisionName}" eliminada`,
+      moved_to: parentInfo.rows[0]?.name || 'Principal',
+      moved_articles: movedArticles.rowCount,
+      moved_insumos: movedInsumos.rowCount,
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] deleteDivision', e);
+    res.status(500).json({ ok: false, error: 'error_deleting_division' });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * GET /api/businesses/:id/hierarchy
+ * Usa la función SQL get_business_hierarchy
+ */
+exports.getBusinessHierarchy = async (req, res) => {
+  try {
+    const businessId = num(req.params.id);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const result = await pool.query(`SELECT * FROM get_business_hierarchy($1)`, [businessId]);
+    res.json({ ok: true, hierarchy: result.rows });
+  } catch (e) {
+    console.error('[divisions] getBusinessHierarchy', e);
+    res.status(500).json({ ok: false, error: 'error_getting_hierarchy' });
+  }
+};
+
+/**
+ * GET /api/businesses/:id/all-subnegocios
+ * Usa la función SQL get_all_subnegocios
+ */
+exports.getAllSubnegocios = async (req, res) => {
+  try {
+    const businessId = num(req.params.id);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const result = await pool.query(`SELECT * FROM get_all_subnegocios($1)`, [businessId]);
+    res.json({ 
+      ok: true, 
+      business_id: businessId,
+      total: result.rows.length,
+      subnegocios: result.rows 
+    });
+  } catch (e) {
+    console.error('[divisions] getAllSubnegocios', e);
+    res.status(500).json({ ok: false, error: 'error_getting_subnegocios' });
+  }
+};
+
+/**
+ * GET /api/businesses/:id/stats-with-subnegocios
+ * Estadísticas del negocio incluyendo subnegocios
+ */
+exports.getStatsWithSubnegocios = async (req, res) => {
+  try {
+    const businessId = num(req.params.id);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    // Usar las funciones SQL que creamos
+    const [articulosResult, insumosResult, subResult] = await Promise.all([
+      pool.query(`SELECT count_articulos_including_subnegocios($1) as total`, [businessId]),
+      pool.query(`SELECT count_insumos_including_subnegocios($1) as total`, [businessId]),
+      pool.query(`SELECT * FROM get_all_subnegocios($1)`, [businessId])
+    ]);
+
+    res.json({ 
+      ok: true, 
+      business_id: businessId,
+      stats: {
+        total_articulos: articulosResult.rows[0]?.total || 0,
+        total_insumos: insumosResult.rows[0]?.total || 0,
+        total_subnegocios: subResult.rows.length
+      },
+      subnegocios: subResult.rows
+    });
+  } catch (e) {
+    console.error('[divisions] getStatsWithSubnegocios', e);
+    res.status(500).json({ ok: false, error: 'error_getting_stats' });
+  }
+};
