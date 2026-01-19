@@ -1,6 +1,7 @@
 /**
  * Controller de divisiones (subnegocios)
  * Usa app_businesses con parent_id para jerarquía
+ * Incluye métodos para gestión de insumos en subnegocios
  */
 
 const pool = require('../config/db');
@@ -35,6 +36,10 @@ async function ensureUniqueSlug(client, baseSlug, excludeId = null) {
   }
 }
 
+// ============================================================================
+// GESTIÓN DE SUBNEGOCIOS
+// ============================================================================
+
 /**
  * GET /api/divisions/business/:businessId
  * Lista divisiones (hijas directas) de un negocio principal
@@ -44,7 +49,6 @@ exports.getDivisionsByBusiness = async (req, res) => {
     const businessId = num(req.params.businessId);
     if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
-    // Obtener info del negocio padre
     const parentQuery = await pool.query(
       `SELECT id, name, slug, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
       [businessId]
@@ -54,7 +58,6 @@ exports.getDivisionsByBusiness = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'business_not_found' });
     }
 
-    // Obtener hijos directos con conteo de artículos e insumos
     const { rows } = await pool.query(
       `
       SELECT 
@@ -186,7 +189,6 @@ exports.createDivision = async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Validar que el padre exista
     const parentCheck = await client.query(
       `SELECT id, name, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
       [parentId]
@@ -196,7 +198,6 @@ exports.createDivision = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'parent_business_not_found' });
     }
 
-    // Validar que no exista otro subnegocio con el mismo nombre bajo el mismo padre
     const nameCheck = await client.query(
       `SELECT id FROM app_businesses WHERE parent_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1`,
       [parentId, name]
@@ -266,7 +267,6 @@ exports.updateDivision = async (req, res) => {
 
     const division = current.rows[0];
 
-    // Validar nombre único bajo el mismo padre (si se está cambiando)
     if (name && name.toLowerCase() !== division.name.toLowerCase() && division.parent_id) {
       const nameCheck = await client.query(
         `SELECT id FROM app_businesses WHERE parent_id = $1 AND LOWER(name) = LOWER($2) AND id != $3 LIMIT 1`,
@@ -310,8 +310,7 @@ exports.updateDivision = async (req, res) => {
 
 /**
  * DELETE /api/divisions/:divisionId
- * Eliminar un subnegocio
- * Los artículos e insumos se mueven al padre
+ * Eliminar un subnegocio - Los artículos e insumos se mueven al padre
  */
 exports.deleteDivision = async (req, res) => {
   const client = await pool.connect();
@@ -333,13 +332,11 @@ exports.deleteDivision = async (req, res) => {
     const parentId = div.rows[0].parent_id;
     const divisionName = div.rows[0].name;
 
-    // No permitir borrar un negocio principal (sin parent)
     if (!parentId) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'cannot_delete_main_business' });
     }
 
-    // Verificar si tiene sub-hijos
     const childCheck = await client.query(
       `SELECT id, name FROM app_businesses WHERE parent_id = $1 LIMIT 5`,
       [divisionId]
@@ -365,13 +362,11 @@ exports.deleteDivision = async (req, res) => {
       [parentId, divisionId]
     );
 
-    // Obtener nombre del padre para el mensaje
     const parentInfo = await client.query(
       `SELECT name FROM app_businesses WHERE id = $1`,
       [parentId]
     );
 
-    // Eliminar la división
     await client.query(`DELETE FROM app_businesses WHERE id = $1`, [divisionId]);
 
     await client.query('COMMIT');
@@ -392,13 +387,17 @@ exports.deleteDivision = async (req, res) => {
   }
 };
 
+// ============================================================================
+// JERARQUÍA Y ESTADÍSTICAS (usando funciones SQL)
+// ============================================================================
+
 /**
- * GET /api/businesses/:id/hierarchy
+ * GET /api/divisions/business/:businessId/hierarchy
  * Usa la función SQL get_business_hierarchy
  */
 exports.getBusinessHierarchy = async (req, res) => {
   try {
-    const businessId = num(req.params.id);
+    const businessId = num(req.params.businessId);
     if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const result = await pool.query(`SELECT * FROM get_business_hierarchy($1)`, [businessId]);
@@ -410,12 +409,12 @@ exports.getBusinessHierarchy = async (req, res) => {
 };
 
 /**
- * GET /api/businesses/:id/all-subnegocios
+ * GET /api/divisions/business/:businessId/all-subnegocios
  * Usa la función SQL get_all_subnegocios
  */
 exports.getAllSubnegocios = async (req, res) => {
   try {
-    const businessId = num(req.params.id);
+    const businessId = num(req.params.businessId);
     if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const result = await pool.query(`SELECT * FROM get_all_subnegocios($1)`, [businessId]);
@@ -432,15 +431,14 @@ exports.getAllSubnegocios = async (req, res) => {
 };
 
 /**
- * GET /api/businesses/:id/stats-with-subnegocios
+ * GET /api/divisions/business/:businessId/stats
  * Estadísticas del negocio incluyendo subnegocios
  */
 exports.getStatsWithSubnegocios = async (req, res) => {
   try {
-    const businessId = num(req.params.id);
+    const businessId = num(req.params.businessId);
     if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
-    // Usar las funciones SQL que creamos
     const [articulosResult, insumosResult, subResult] = await Promise.all([
       pool.query(`SELECT count_articulos_including_subnegocios($1) as total`, [businessId]),
       pool.query(`SELECT count_insumos_including_subnegocios($1) as total`, [businessId]),
@@ -460,5 +458,245 @@ exports.getStatsWithSubnegocios = async (req, res) => {
   } catch (e) {
     console.error('[divisions] getStatsWithSubnegocios', e);
     res.status(500).json({ ok: false, error: 'error_getting_stats' });
+  }
+};
+
+// ============================================================================
+// GESTIÓN DE INSUMOS EN SUBNEGOCIOS
+// ============================================================================
+
+/**
+ * POST /api/divisions/:divisionId/move-insumos
+ * Mover insumos específicos a un subnegocio
+ * Body: { insumo_ids: number[] }
+ */
+exports.moveInsumosToSubnegocio = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const targetBusinessId = num(req.params.divisionId);
+    const { insumo_ids } = req.body;
+    
+    if (!targetBusinessId) {
+      return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+    }
+    
+    if (!insumo_ids || !Array.isArray(insumo_ids) || insumo_ids.length === 0) {
+      return res.status(400).json({ ok: false, error: 'insumo_ids_required' });
+    }
+    
+    await client.query('BEGIN');
+    
+    const targetCheck = await client.query(
+      `SELECT id, name, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [targetBusinessId]
+    );
+    
+    if (targetCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'target_business_not_found' });
+    }
+    
+    const result = await client.query(`
+      UPDATE insumos
+      SET business_id = $1
+      WHERE id = ANY($2)
+      RETURNING id, nombre
+    `, [targetBusinessId, insumo_ids]);
+    
+    await client.query('COMMIT');
+    
+    res.json({
+      ok: true,
+      moved_count: result.rowCount,
+      moved_insumos: result.rows,
+      target_business: targetCheck.rows[0].name,
+      message: `${result.rowCount} insumos movidos exitosamente`
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] moveInsumosToSubnegocio', error);
+    res.status(500).json({ ok: false, error: 'error_moving_insumos' });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * POST /api/divisions/business/:businessId/move-insumos-by-rubro
+ * Mover todos los insumos de un rubro a un subnegocio
+ * Body: { rubro: string, target_business_id: number }
+ */
+exports.moveInsumosByRubroToSubnegocio = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const sourceBusinessId = num(req.params.businessId);
+    const { rubro, target_business_id } = req.body;
+    
+    if (!sourceBusinessId) {
+      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+    }
+    
+    if (!rubro) {
+      return res.status(400).json({ ok: false, error: 'rubro_required' });
+    }
+    
+    if (!target_business_id) {
+      return res.status(400).json({ ok: false, error: 'target_business_id_required' });
+    }
+    
+    await client.query('BEGIN');
+    
+    // Verificar relación padre-hijo entre negocios
+    const targetCheck = await client.query(`
+      SELECT id, name, parent_id FROM app_businesses 
+      WHERE id = $1 
+      AND (parent_id = $2 OR id = $2 OR $2 IN (SELECT id FROM app_businesses WHERE parent_id = $1))
+      LIMIT 1
+    `, [target_business_id, sourceBusinessId]);
+    
+    if (targetCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'invalid_target_business' });
+    }
+    
+    const result = await client.query(`
+      UPDATE insumos
+      SET business_id = $1
+      WHERE business_id = $2 AND rubro = $3
+      RETURNING id, nombre
+    `, [target_business_id, sourceBusinessId, rubro]);
+    
+    await client.query('COMMIT');
+    
+    res.json({
+      ok: true,
+      moved_count: result.rowCount,
+      rubro,
+      target_business: targetCheck.rows[0].name,
+      message: `${result.rowCount} insumos del rubro "${rubro}" movidos exitosamente`
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] moveInsumosByRubroToSubnegocio', error);
+    res.status(500).json({ ok: false, error: 'error_moving_insumos' });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * GET /api/divisions/business/:businessId/insumos-stats
+ * Estadísticas de insumos por negocio y subnegocios
+ */
+exports.getInsumosStats = async (req, res) => {
+  try {
+    const businessId = num(req.params.businessId);
+    
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+    }
+    
+    const result = await pool.query(`
+      WITH all_businesses AS (
+        SELECT id, name, parent_id 
+        FROM app_businesses
+        WHERE id = $1 OR parent_id = $1
+      )
+      SELECT 
+        b.id,
+        b.name,
+        b.parent_id,
+        COALESCE(COUNT(i.id), 0)::integer as insumos_count,
+        CASE 
+          WHEN b.parent_id IS NULL THEN 'principal'
+          ELSE 'subnegocio'
+        END as tipo
+      FROM all_businesses b
+      LEFT JOIN insumos i ON i.business_id = b.id
+      GROUP BY b.id, b.name, b.parent_id
+      ORDER BY b.parent_id NULLS FIRST, b.name
+    `, [businessId]);
+    
+    const totalInsumos = result.rows.reduce((sum, r) => sum + r.insumos_count, 0);
+    const principalCount = result.rows.find(r => r.tipo === 'principal')?.insumos_count || 0;
+    const subnegocios = result.rows.filter(r => r.tipo === 'subnegocio');
+    
+    res.json({
+      ok: true,
+      business_id: businessId,
+      total_insumos: totalInsumos,
+      insumos_en_principal: principalCount,
+      insumos_en_subnegocios: totalInsumos - principalCount,
+      detalle: result.rows,
+      subnegocios_count: subnegocios.length
+    });
+  } catch (error) {
+    console.error('[divisions] getInsumosStats', error);
+    res.status(500).json({ ok: false, error: 'error_getting_insumos_stats' });
+  }
+};
+
+/**
+ * GET /api/divisions/business/:businessId/insumos-by-rubro
+ * Obtener insumos agrupados por rubro
+ */
+exports.getInsumosByRubro = async (req, res) => {
+  try {
+    const businessId = num(req.params.businessId);
+    const includeSubnegocios = req.query.includeSubnegocios === 'true';
+    
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+    }
+    
+    let query;
+    let params;
+    
+    if (includeSubnegocios) {
+      query = `
+        WITH all_businesses AS (
+          SELECT id FROM app_businesses
+          WHERE id = $1 OR parent_id = $1
+        )
+        SELECT 
+          i.rubro,
+          COUNT(i.id)::integer as count,
+          array_agg(DISTINCT b.name) as negocios
+        FROM insumos i
+        INNER JOIN app_businesses b ON i.business_id = b.id
+        WHERE i.business_id IN (SELECT id FROM all_businesses)
+        AND i.rubro IS NOT NULL AND i.rubro != ''
+        GROUP BY i.rubro
+        ORDER BY count DESC
+      `;
+      params = [businessId];
+    } else {
+      query = `
+        SELECT 
+          rubro,
+          COUNT(id)::integer as count
+        FROM insumos
+        WHERE business_id = $1
+        AND rubro IS NOT NULL AND rubro != ''
+        GROUP BY rubro
+        ORDER BY count DESC
+      `;
+      params = [businessId];
+    }
+    
+    const result = await pool.query(query, params);
+    
+    res.json({
+      ok: true,
+      business_id: businessId,
+      include_subnegocios: includeSubnegocios,
+      rubros: result.rows,
+      total_rubros: result.rows.length
+    });
+  } catch (error) {
+    console.error('[divisions] getInsumosByRubro', error);
+    res.status(500).json({ ok: false, error: 'error_getting_insumos_by_rubro' });
   }
 };
