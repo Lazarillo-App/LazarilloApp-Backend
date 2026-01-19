@@ -700,3 +700,352 @@ exports.getInsumosByRubro = async (req, res) => {
     res.status(500).json({ ok: false, error: 'error_getting_insumos_by_rubro' });
   }
 };
+
+// ============================================================================
+// MOVER ARTÍCULOS Y AGRUPACIONES A SUBNEGOCIOS
+// ============================================================================
+
+/**
+ * POST /api/divisions/:divisionId/move-articles
+ * Mover artículos específicos a un subnegocio
+ * Body: { articleIds: number[], sourceBusinessId?: number }
+ */
+exports.moveArticlesToSubnegocio = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const targetBusinessId = num(req.params.divisionId);
+    const { articleIds, sourceBusinessId } = req.body;
+    
+    if (!targetBusinessId) {
+      return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+    }
+    
+    if (!articleIds || !Array.isArray(articleIds) || articleIds.length === 0) {
+      return res.status(400).json({ ok: false, error: 'articleIds_required' });
+    }
+    
+    await client.query('BEGIN');
+    
+    // Verificar que el subnegocio existe
+    const targetCheck = await client.query(
+      `SELECT id, name, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [targetBusinessId]
+    );
+    
+    if (targetCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'target_business_not_found' });
+    }
+    
+    const targetBiz = targetCheck.rows[0];
+    
+    // Construir la query de actualización
+    let updateQuery;
+    let updateParams;
+    
+    if (sourceBusinessId) {
+      // Si se especifica el negocio origen, solo mover artículos de ese negocio
+      updateQuery = `
+        UPDATE app_articles
+        SET business_id = $1, updated_at = NOW()
+        WHERE id = ANY($2::int[])
+          AND business_id = $3
+        RETURNING id, nombre, codigo
+      `;
+      updateParams = [targetBusinessId, articleIds, sourceBusinessId];
+    } else {
+      // Mover sin verificar origen (menos seguro pero más flexible)
+      updateQuery = `
+        UPDATE app_articles
+        SET business_id = $1, updated_at = NOW()
+        WHERE id = ANY($2::int[])
+        RETURNING id, nombre, codigo
+      `;
+      updateParams = [targetBusinessId, articleIds];
+    }
+    
+    const result = await client.query(updateQuery, updateParams);
+    
+    await client.query('COMMIT');
+    
+    console.log(`[divisions] moveArticlesToSubnegocio: ${result.rowCount} artículos movidos a negocio ${targetBusinessId}`);
+    
+    res.json({
+      ok: true,
+      moved_count: result.rowCount,
+      target_business_id: targetBusinessId,
+      target_business_name: targetBiz.name,
+      moved_articles: result.rows,
+      message: `${result.rowCount} artículos movidos exitosamente`
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] moveArticlesToSubnegocio', error);
+    res.status(500).json({ ok: false, error: 'error_moving_articles', details: error.message });
+  } finally {
+    client.release();
+  }
+};
+
+
+/**
+ * POST /api/divisions/:divisionId/move-agrupacion
+ * Mover una agrupación completa (con sus artículos) a un subnegocio
+ * Body: { agrupacionId: number, sourceBusinessId: number }
+ */
+exports.moveAgrupacionToSubnegocio = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const targetBusinessId = num(req.params.divisionId);
+    const { agrupacionId, sourceBusinessId } = req.body;
+    
+    if (!targetBusinessId) {
+      return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+    }
+    
+    if (!agrupacionId) {
+      return res.status(400).json({ ok: false, error: 'agrupacionId_required' });
+    }
+    
+    await client.query('BEGIN');
+    
+    // 1. Verificar que el subnegocio destino existe
+    const targetCheck = await client.query(
+      `SELECT id, name, parent_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [targetBusinessId]
+    );
+    
+    if (targetCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'target_business_not_found' });
+    }
+    
+    const targetBiz = targetCheck.rows[0];
+    
+    // 2. Obtener la agrupación y sus artículos
+    const agrupQuery = sourceBusinessId
+      ? `SELECT id, nombre, articulos, business_id FROM agrupaciones WHERE id = $1 AND business_id = $2`
+      : `SELECT id, nombre, articulos, business_id FROM agrupaciones WHERE id = $1`;
+    
+    const agrupParams = sourceBusinessId ? [agrupacionId, sourceBusinessId] : [agrupacionId];
+    const agrupResult = await client.query(agrupQuery, agrupParams);
+    
+    if (agrupResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'agrupacion_not_found' });
+    }
+    
+    const agrupacion = agrupResult.rows[0];
+    const articulos = agrupacion.articulos || [];
+    const originalBusinessId = agrupacion.business_id;
+    
+    // 3. Extraer IDs de artículos
+    const articleIds = articulos
+      .map(a => {
+        const id = a?.id ?? a?.article_id ?? a?.articulo_id ?? a?.articuloId;
+        return num(id);
+      })
+      .filter(id => id !== null);
+    
+    console.log(`[divisions] moveAgrupacionToSubnegocio: Agrupación "${agrupacion.nombre}" con ${articleIds.length} artículos`);
+    
+    // 4. Mover artículos al subnegocio
+    let movedArticlesCount = 0;
+    if (articleIds.length > 0) {
+      const moveResult = await client.query(`
+        UPDATE app_articles
+        SET business_id = $1, updated_at = NOW()
+        WHERE id = ANY($2::int[])
+          AND business_id = $3
+      `, [targetBusinessId, articleIds, originalBusinessId]);
+      
+      movedArticlesCount = moveResult.rowCount;
+      console.log(`[divisions] moveAgrupacionToSubnegocio: ${movedArticlesCount} artículos movidos`);
+    }
+    
+    // 5. Mover la agrupación al subnegocio
+    await client.query(`
+      UPDATE agrupaciones
+      SET business_id = $1, updated_at = NOW()
+      WHERE id = $2
+    `, [targetBusinessId, agrupacionId]);
+    
+    console.log(`[divisions] moveAgrupacionToSubnegocio: Agrupación actualizada`);
+    
+    await client.query('COMMIT');
+    
+    res.json({
+      ok: true,
+      message: 'Agrupación movida correctamente',
+      agrupacion: {
+        id: agrupacionId,
+        nombre: agrupacion.nombre,
+      },
+      target_business: {
+        id: targetBusinessId,
+        name: targetBiz.name,
+      },
+      source_business_id: originalBusinessId,
+      articles_moved: movedArticlesCount,
+      articles_in_agrupacion: articleIds.length,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] moveAgrupacionToSubnegocio', error);
+    res.status(500).json({ ok: false, error: 'error_moving_agrupacion', details: error.message });
+  } finally {
+    client.release();
+  }
+};
+
+
+/**
+ * POST /api/divisions/move-agrupacion-complete
+ * Endpoint completo: crea subnegocio si es necesario y mueve agrupación
+ * Body: { 
+ *   agrupacionId: number, 
+ *   sourceBusinessId: number,
+ *   targetBusinessId?: number,  // Si existe, usa este
+ *   createNew?: boolean,        // Si true, crea nuevo subnegocio
+ *   newBusinessName?: string    // Nombre del nuevo subnegocio
+ * }
+ */
+exports.moveAgrupacionComplete = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { 
+      agrupacionId, 
+      sourceBusinessId, 
+      targetBusinessId, 
+      createNew, 
+      newBusinessName 
+    } = req.body;
+    
+    if (!agrupacionId) {
+      return res.status(400).json({ ok: false, error: 'agrupacionId_required' });
+    }
+    
+    if (!sourceBusinessId) {
+      return res.status(400).json({ ok: false, error: 'sourceBusinessId_required' });
+    }
+    
+    if (!targetBusinessId && !createNew) {
+      return res.status(400).json({ ok: false, error: 'targetBusinessId_or_createNew_required' });
+    }
+    
+    if (createNew && !newBusinessName) {
+      return res.status(400).json({ ok: false, error: 'newBusinessName_required_when_createNew' });
+    }
+    
+    await client.query('BEGIN');
+    
+    let finalTargetId = targetBusinessId;
+    let targetName = null;
+    let createdNewBusiness = false;
+    
+    // 1. Crear subnegocio si es necesario
+    if (createNew && newBusinessName) {
+      const name = String(newBusinessName).trim();
+      const baseSlug = slugify(name);
+      const slug = await ensureUniqueSlug(client, baseSlug);
+      
+      const createResult = await client.query(`
+        INSERT INTO app_businesses (name, slug, parent_id, props, created_at, updated_at)
+        VALUES ($1, $2, $3, '{}', NOW(), NOW())
+        RETURNING id, name, slug
+      `, [name, slug, sourceBusinessId]);
+      
+      finalTargetId = createResult.rows[0].id;
+      targetName = createResult.rows[0].name;
+      createdNewBusiness = true;
+      
+      console.log(`[divisions] moveAgrupacionComplete: Subnegocio creado: ${finalTargetId} - ${targetName}`);
+    } else {
+      // Verificar que el subnegocio existe
+      const targetCheck = await client.query(
+        `SELECT id, name FROM app_businesses WHERE id = $1 LIMIT 1`,
+        [finalTargetId]
+      );
+      
+      if (targetCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ ok: false, error: 'target_business_not_found' });
+      }
+      
+      targetName = targetCheck.rows[0].name;
+    }
+    
+    // 2. Obtener la agrupación
+    const agrupResult = await client.query(`
+      SELECT id, nombre, articulos, business_id 
+      FROM agrupaciones 
+      WHERE id = $1 AND business_id = $2
+    `, [agrupacionId, sourceBusinessId]);
+    
+    if (agrupResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'agrupacion_not_found' });
+    }
+    
+    const agrupacion = agrupResult.rows[0];
+    const articulos = agrupacion.articulos || [];
+    
+    // 3. Extraer IDs de artículos
+    const articleIds = articulos
+      .map(a => {
+        const id = a?.id ?? a?.article_id ?? a?.articulo_id ?? a?.articuloId;
+        return num(id);
+      })
+      .filter(id => id !== null);
+    
+    // 4. Mover artículos
+    let movedArticlesCount = 0;
+    if (articleIds.length > 0) {
+      const moveResult = await client.query(`
+        UPDATE app_articles
+        SET business_id = $1, updated_at = NOW()
+        WHERE id = ANY($2::int[])
+          AND business_id = $3
+      `, [finalTargetId, articleIds, sourceBusinessId]);
+      
+      movedArticlesCount = moveResult.rowCount;
+    }
+    
+    // 5. Mover la agrupación
+    await client.query(`
+      UPDATE agrupaciones
+      SET business_id = $1, updated_at = NOW()
+      WHERE id = $2
+    `, [finalTargetId, agrupacionId]);
+    
+    await client.query('COMMIT');
+    
+    console.log(`[divisions] moveAgrupacionComplete: Completado - ${movedArticlesCount} artículos, agrupación "${agrupacion.nombre}" → "${targetName}"`);
+    
+    res.json({
+      ok: true,
+      message: 'Agrupación movida correctamente',
+      agrupacion: {
+        id: agrupacionId,
+        nombre: agrupacion.nombre,
+      },
+      target_business: {
+        id: finalTargetId,
+        name: targetName,
+      },
+      source_business_id: sourceBusinessId,
+      articles_moved: movedArticlesCount,
+      articles_in_agrupacion: articleIds.length,
+      created_new_business: createdNewBusiness,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] moveAgrupacionComplete', error);
+    res.status(500).json({ ok: false, error: 'error_moving_agrupacion', details: error.message });
+  } finally {
+    client.release();
+  }
+};
