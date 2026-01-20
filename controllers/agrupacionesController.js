@@ -41,12 +41,10 @@ async function resolveDivision(businessId, req) {
 
   if (requested != null) {
     const { rows } = await pool.query(
-      `
-      SELECT id, is_main
-        FROM business_divisions
-       WHERE id=$1 AND business_id=$2 AND is_active=true
-       LIMIT 1
-      `,
+      `SELECT id, is_main
+         FROM business_divisions
+        WHERE id=$1 AND business_id=$2 AND is_active=true
+        LIMIT 1`,
       [requested, businessId]
     );
     if (!rows[0]) {
@@ -56,12 +54,10 @@ async function resolveDivision(businessId, req) {
   }
 
   const { rows } = await pool.query(
-    `
-    SELECT id, is_main
-      FROM business_divisions
-     WHERE business_id=$1 AND is_main=true AND is_active=true
-     LIMIT 1
-    `,
+    `SELECT id, is_main
+       FROM business_divisions
+      WHERE business_id=$1 AND is_main=true AND is_active=true
+      LIMIT 1`,
     [businessId]
   );
 
@@ -84,42 +80,22 @@ const DISC_NAME = 'Discontinuados';
 
 function isTodoName(s) {
   const n = normName(s);
-  return n === 'sin agrupacion' || n === 'todo';
+  return n === 'sin agrupacion' || n === 'sin agrupación' || n === 'todo';
 }
 function isDiscName(s) {
   const n = normName(s);
   return n === 'discontinuados' || n === 'descontinuados';
 }
 
-function parseArticleIds(body) {
-  // acepta:
-  // - { articulos:[{id,precio}] }
-  // - { ids:[1,2] }
-  // - { articleIds:[1,2] }
-  // - { items:[{id}] } (por si aparece)
-  let ids = [];
-
-  if (Array.isArray(body?.articulos)) {
-    ids = body.articulos.map((a) => num(a?.id)).filter(Boolean);
-  } else if (Array.isArray(body?.items)) {
-    ids = body.items.map((a) => num(a?.id)).filter(Boolean);
-  } else if (Array.isArray(body?.ids)) {
-    ids = body.ids.map(num).filter(Boolean);
-  } else if (Array.isArray(body?.articleIds)) {
-    ids = body.articleIds.map(num).filter(Boolean);
-  }
-
-  // unique
-  return Array.from(new Set(ids));
-}
-
 /* ========================= System groups per division ========================= */
 
 async function ensureSystemGroup(businessId, divisionId, systemKey, displayName) {
+  // systemKey: 'todo' | 'discontinuados'
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // buscar existente
     const { rows: found } = await client.query(
       `
       SELECT id
@@ -137,13 +113,12 @@ async function ensureSystemGroup(businessId, divisionId, systemKey, displayName)
       return found[0].id;
     }
 
+    // ✅ FIX: NO se puede referenciar "config" en VALUES.
+    // Creamos un json nuevo (mínimo) con {system: 'todo'|'discontinuados'}
     const { rows: created } = await client.query(
       `
       INSERT INTO business_groups (business_id, name, status, converted_to_division_id, config)
-      VALUES (
-        $1, $2, 'active', $3,
-        jsonb_set(COALESCE(config,'{}'::jsonb), '{system}', to_jsonb($4::text), true)
-      )
+      VALUES ($1, $2, 'active', $3, jsonb_build_object('system', $4))
       RETURNING id
       `,
       [businessId, displayName, divisionId, systemKey]
@@ -173,33 +148,33 @@ exports.ensureTodoAgrupacion = async (req, res) => {
     const { divisionId } = await resolveDivision(businessId, req);
     const id = await ensureSystemGroup(businessId, divisionId, 'todo', TODO_NAME);
 
-    res.json({ ok: true, group_id: id, division_id: divisionId });
+    return res.json({ ok: true, group_id: id, division_id: divisionId });
   } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
+    return res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 };
 
-/* ========================= Exclusiones (schema) =========================
-   Tabla: group_exclusions(business_id, group_id, scope, ref_id)
-   scope: 'categoria'|'subrubro'|'articulo'
+/* ========================= Exclusiones (USAR TABLA REAL) =========================
+   Tu DB ya tiene: agrupacion_exclusiones
+   columnas: (agrupacion_id, scope, ref_id, business_id)
 */
 
-async function ensureGroupExclusionsTable() {
+async function ensureAgrupacionExclusionesTable() {
+  // Por si algún entorno no la tiene (idempotente)
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS group_exclusions (
+    CREATE TABLE IF NOT EXISTS agrupacion_exclusiones (
       id SERIAL PRIMARY KEY,
-      business_id INT NOT NULL REFERENCES app_businesses(id) ON DELETE CASCADE,
-      group_id INT NOT NULL REFERENCES business_groups(id) ON DELETE CASCADE,
+      agrupacion_id INT NOT NULL,
       scope TEXT NOT NULL CHECK (scope IN ('categoria','subrubro','articulo')),
       ref_id TEXT NOT NULL,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      UNIQUE (business_id, group_id, scope, ref_id)
+      business_id INT NOT NULL,
+      UNIQUE (business_id, agrupacion_id, scope, ref_id)
     );
   `);
 
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS ix_group_excl_biz_group
-    ON group_exclusions (business_id, group_id);
+    CREATE INDEX IF NOT EXISTS ix_agrup_excl_biz_group
+    ON agrupacion_exclusiones (business_id, agrupacion_id);
   `);
 }
 
@@ -212,9 +187,9 @@ exports.listarExclusiones = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
-    await ensureGroupExclusionsTable();
+    await ensureAgrupacionExclusionesTable();
 
-    // Validar que el grupo exista y pertenezca al negocio
+    // validar grupo existe y pertenece al negocio
     const { rows: okG } = await pool.query(
       `SELECT 1 FROM business_groups WHERE id=$1 AND business_id=$2 LIMIT 1`,
       [groupId, businessId]
@@ -223,8 +198,8 @@ exports.listarExclusiones = async (req, res) => {
 
     const { rows } = await pool.query(
       `SELECT scope, ref_id
-         FROM group_exclusions
-        WHERE business_id=$1 AND group_id=$2
+         FROM agrupacion_exclusiones
+        WHERE business_id=$1 AND agrupacion_id=$2
         ORDER BY scope, ref_id`,
       [businessId, groupId]
     );
@@ -252,9 +227,9 @@ exports.upsertExclusiones = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'payload inválido' });
     }
 
-    await ensureGroupExclusionsTable();
+    await ensureAgrupacionExclusionesTable();
 
-    // Validar grupo
+    // validar grupo
     const { rows: okG } = await pool.query(
       `SELECT 1 FROM business_groups WHERE id=$1 AND business_id=$2 LIMIT 1`,
       [groupId, businessId]
@@ -273,7 +248,7 @@ exports.upsertExclusiones = async (req, res) => {
         if (!['categoria', 'subrubro', 'articulo'].includes(scope) || !ref_id) continue;
 
         const r = await client.query(
-          `INSERT INTO group_exclusions (business_id, group_id, scope, ref_id)
+          `INSERT INTO agrupacion_exclusiones (business_id, agrupacion_id, scope, ref_id)
            VALUES ($1,$2,$3,$4)
            ON CONFLICT DO NOTHING`,
           [businessId, groupId, scope, ref_id]
@@ -287,8 +262,8 @@ exports.upsertExclusiones = async (req, res) => {
         if (!['categoria', 'subrubro', 'articulo'].includes(scope) || !ref_id) continue;
 
         const r = await client.query(
-          `DELETE FROM group_exclusions
-            WHERE business_id=$1 AND group_id=$2 AND scope=$3 AND ref_id=$4`,
+          `DELETE FROM agrupacion_exclusiones
+            WHERE business_id=$1 AND agrupacion_id=$2 AND scope=$3 AND ref_id=$4`,
           [businessId, groupId, scope, ref_id]
         );
         removed += r.rowCount || 0;
@@ -305,7 +280,6 @@ exports.upsertExclusiones = async (req, res) => {
   }
 };
 
-
 /* ========================= Listar agrupaciones (main/sub) ========================= */
 
 exports.obtenerAgrupaciones = async (req, res) => {
@@ -317,13 +291,10 @@ exports.obtenerAgrupaciones = async (req, res) => {
 
     const { divisionId, isMain } = await resolveDivision(businessId, req);
 
-    // Asegurar grupos sistema por división
+    // asegurar grupos sistema por división
     await ensureSystemGroup(businessId, divisionId, 'todo', TODO_NAME);
     await ensureDiscontinuados(businessId, divisionId);
 
-    // Regla:
-    // - MAIN: solo grupos NO convertidos a división y NO system
-    // - SUB: grupos convertidos a esa división o asignados por division_group_assignments
     const sql = `
       SELECT 
         bg.id,
@@ -350,6 +321,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
             LEFT JOIN categorias c ON c.id = aa.categoria_id
             LEFT JOIN subrubros s ON s.id = aa.subrubro_id
             WHERE ag.group_id = bg.id
+              AND ag.business_id = $1 -- ✅ FIX multi-tenant
           ),
           '[]'::jsonb
         ) as articulos
@@ -378,17 +350,16 @@ exports.obtenerAgrupaciones = async (req, res) => {
 
     const { rows } = await pool.query(sql, [businessId, isMain, divisionId]);
 
-    // 👇 IMPORTANTE: compatible con tu front (apiAgrupaciones espera data)
-    res.json({
+    return res.json({
       ok: true,
       business_id: businessId,
       division_id: divisionId,
       is_main: isMain,
-      data: rows,
+      data: rows, // ✅ lo que espera tu front
     });
   } catch (e) {
     console.error('obtenerAgrupaciones error:', e);
-    res.status(e.status || 500).json({ ok: false, error: e.message });
+    return res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 };
 
@@ -574,9 +545,9 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     for (const articleId of articleIds) {
       await client.query(
         `
-        INSERT INTO article_groups (group_id, article_id)
-        VALUES ($1, $2)
-        ON CONFLICT (group_id, article_id) DO NOTHING
+        INSERT INTO article_groups (business_id, group_id, article_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (business_id, article_id, group_id) DO NOTHING
         `,
         [groupId, articleId]
       );
@@ -603,7 +574,8 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
     }
 
     await pool.query(
-      `DELETE FROM article_groups WHERE group_id=$1 AND article_id=$2`,
+      `DELETE FROM article_groups
+       WHERE business_id=$1 AND group_id=$2 AND article_id=$3`,
       [groupId, articuloId]
     );
 
@@ -645,12 +617,11 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     }
 
     for (const articleId of articleIds) {
-      await client.query(`DELETE FROM article_groups WHERE group_id=$1 AND article_id=$2`, [fromId, articleId]);
+      await client.query(`DELETE FROM article_groups WHERE business_id=$1 AND group_id=$2 AND article_id=$3`, [fromId, articleId]);
       await client.query(
         `
-        INSERT INTO article_groups (group_id, article_id)
-        VALUES ($1,$2)
-        ON CONFLICT (group_id, article_id) DO NOTHING
+        INSERT INTO article_groups (business_id, group_id, article_id) VALUES ($1,$2,$3)
+        ON CONFLICT (business_id, article_id, group_id) DO NOTHING
         `,
         [toGroupId, articleId]
       );
