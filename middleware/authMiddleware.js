@@ -1,4 +1,4 @@
-// middleware/auth.js
+// middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 

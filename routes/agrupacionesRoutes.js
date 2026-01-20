@@ -25,7 +25,7 @@ const safe = (fn, name) =>
 // Todas bajo /businesses/:businessId/...
 router.post('/agrupaciones', crearAgrupacion);
 router.get('/agrupaciones', obtenerAgrupaciones);
-router.put('/agrupaciones/todo', safe (ensureTodoAgrupacion, 'ensureTodoAgrupacion'));
+router.put('/agrupaciones/todo', safe(ensureTodoAgrupacion, 'ensureTodoAgrupacion'));
 
 router.put('/agrupaciones/:id', actualizarAgrupacion);
 router.delete('/agrupaciones/:id', eliminarAgrupacion);
