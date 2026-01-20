@@ -117,12 +117,13 @@ async function ensureSystemGroup(businessId, divisionId, systemKey, displayName)
     // Creamos un json nuevo (mínimo) con {system: 'todo'|'discontinuados'}
     const { rows: created } = await client.query(
       `
-      INSERT INTO business_groups (business_id, name, status, converted_to_division_id, config)
-      VALUES ($1, $2, 'active', $3, jsonb_build_object('system', $4))
-      RETURNING id
-      `,
+  INSERT INTO business_groups (business_id, name, status, converted_to_division_id, config)
+  VALUES ($1, $2, 'active', $3, jsonb_build_object('system', $4::text))
+  RETURNING id
+  `,
       [businessId, displayName, divisionId, systemKey]
     );
+
 
     await client.query('COMMIT');
     return created[0].id;
@@ -273,7 +274,7 @@ exports.upsertExclusiones = async (req, res) => {
     await client.query('COMMIT');
     return res.json({ ok: true, added, removed, total: added + removed });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     return res.status(e.status || 500).json({ ok: false, error: e.message });
   } finally {
     client.release();
