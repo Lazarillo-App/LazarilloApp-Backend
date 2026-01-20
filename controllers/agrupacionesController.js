@@ -1,11 +1,74 @@
 // controllers/agrupacionesController.js
 const pool = require('../config/db');
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   🆕 HELPER PARA SUBNEGOCIOS
+   Detecta si un businessId es un subnegocio y retorna el contexto correcto
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Obtiene el contexto de negocio/subnegocio
+ * @param {number} businessId - ID del negocio a verificar
+ * @returns {Promise<{
+ *   isSubnegocio: boolean,
+ *   effectiveId: number,
+ *   parentId: number|null,
+ *   agrupacionIds: number[]
+ * }>}
+ */
+async function getBusinessContext(businessId) {
+  // Obtener información del negocio
+  const { rows: bizRows } = await pool.query(`
+    SELECT id, parent_id 
+    FROM app_businesses 
+    WHERE id = $1
+  `, [businessId]);
+
+  if (!bizRows.length) {
+    throw Object.assign(new Error('business_not_found'), { status: 404 });
+  }
+
+  const biz = bizRows[0];
+  const isSubnegocio = !!biz.parent_id;
+  const effectiveId = isSubnegocio ? biz.parent_id : businessId;
+  
+  let agrupacionIds = [];
+  
+  // Si es subnegocio, obtener agrupaciones asignadas
+  if (isSubnegocio) {
+    const { rows: agrupRows } = await pool.query(`
+      SELECT agrupacion_id 
+      FROM business_agrupaciones 
+      WHERE business_id = $1
+    `, [businessId]);
+    
+    agrupacionIds = agrupRows.map(r => r.agrupacion_id);
+  }
+
+  return {
+    isSubnegocio,
+    effectiveId,      // ID del negocio principal (o el mismo si no es subnegocio)
+    parentId: biz.parent_id,
+    agrupacionIds,    // IDs de agrupaciones asignadas (solo si es subnegocio)
+    originalId: businessId
+  };
+}
+
 /* ========================= Helpers ========================= */
 const safeNum = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+
+function getBusinessId(req) {
+  const ctx = Number(req.businessId);
+  if (Number.isFinite(ctx)) return ctx;
+  const p = Number(req.params?.businessId);
+  if (Number.isFinite(p)) return p;
+  const h = Number(req.header('X-Business-Id'));
+  if (Number.isFinite(h)) return h;
+  return NaN;
+}
 
 const normalizeItem = (o = {}) => {
   const id =
@@ -52,17 +115,6 @@ const mergeJsonById = (base = [], incoming = []) => {
   return Array.from(map.values());
 };
 
-/** Prioridad: middleware (req.businessId) > param (:businessId) > header (X-Business-Id) */
-function getBusinessId(req) {
-  const ctx = Number(req.businessId);
-  if (Number.isFinite(ctx)) return ctx;
-  const p = Number(req.params?.businessId);
-  if (Number.isFinite(p)) return p;
-  const h = Number(req.header('X-Business-Id'));
-  if (Number.isFinite(h)) return h;
-  return NaN;
-}
-
 /* ========================= Nombres especiales ========================= */
 
 const TODO_NAME_INITIAL = 'Sin Agrupacion';
@@ -89,456 +141,431 @@ const isDiscontinuadosName = (s) => {
   return n === 'discontinuados' || n === 'descontinuados';
 };
 
-/* ========================= CRUD Agrupaciones ========================= */
+/* ═══════════════════════════════════════════════════════════════════════════
+   🆕 CRUD AGRUPACIONES CON SOPORTE PARA SUBNEGOCIOS
+   Si es subnegocio, filtra las agrupaciones asignadas
+   ═══════════════════════════════════════════════════════════════════════════ */
 
-// GET /businesses/:businessId/agrupaciones
+/**
+ * GET /businesses/:businessId/agrupaciones
+ * 
+ * ANTES: SELECT FROM agrupaciones
+ * AHORA: SELECT FROM business_groups + article_groups
+ */
 exports.obtenerAgrupaciones = async (req, res) => {
   try {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) {
       return res.status(400).json({ ok: false, error: 'business_id requerido' });
     }
+
+    // Query que emula la estructura de agrupaciones usando business_groups
     const { rows } = await pool.query(
-      `SELECT id, nombre,
-              COALESCE(NULLIF(articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
-         FROM agrupaciones
-        WHERE business_id = $1
-        ORDER BY id ASC`,
+      `
+      SELECT 
+        bg.id,
+        bg.name as nombre,
+        bg.description,
+        bg.created_at,
+        bg.updated_at,
+        -- Reconstruir array de artículos en formato JSONB (compatible)
+        COALESCE(
+          (
+            SELECT jsonb_agg(
+              jsonb_build_object(
+                'id', aa.id,
+                'nombre', aa.name,
+                'categoria', COALESCE(c.nombre, 'Sin categoría'),
+                'subrubro', COALESCE(s.nombre, 'Sin subrubro'),
+                'precio', COALESCE(aa.price, 0)
+              )
+              ORDER BY aa.name
+            )
+            FROM article_groups ag
+            INNER JOIN app_articles aa ON aa.id = ag.article_id
+            LEFT JOIN categorias c ON c.id = aa.categoria_id
+            LEFT JOIN subrubros s ON s.id = aa.subrubro_id
+            WHERE ag.group_id = bg.id
+          ),
+          '[]'::jsonb
+        ) as articulos
+      FROM business_groups bg
+      WHERE bg.business_id = $1
+        AND bg.status = 'active'
+      ORDER BY bg.id ASC
+      `,
       [bizId]
     );
+
     res.json(rows);
   } catch (e) {
-    console.error('obtenerAgrupaciones error:', e);
+    console.error('obtenerAgrupaciones (adapted) error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
 
-// POST /businesses/:businessId/agrupaciones
+/**
+ * POST /businesses/:businessId/agrupaciones
+ * 
+ * ANTES: INSERT INTO agrupaciones
+ * AHORA: INSERT INTO business_groups
+ */
 exports.crearAgrupacion = async (req, res) => {
-  try {
-    const bizId = getBusinessId(req);
-    if (!Number.isFinite(bizId)) {
-      return res.status(400).json({ ok: false, error: 'business_id requerido' });
-    }
-
-    const nombre = String(req.body?.nombre ?? '').trim();
-    const articulos = toItemsArray(req.body?.articulos);
-    if (!nombre) return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
-
-    const { rows } = await pool.query(
-      `INSERT INTO agrupaciones (business_id, nombre, articulos)
-       VALUES ($1, $2, $3::jsonb)
-       RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-      [bizId, nombre, JSON.stringify(articulos)]
-    );
-    res.status(201).json(rows[0]);
-  } catch (e) {
-    if (e.code === '23505') {
-      return res.status(409).json({ ok: false, error: 'Ya existe una agrupación con ese nombre' });
-    }
-    console.error('crearAgrupacion error:', e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-// PUT /businesses/:businessId/agrupaciones/:id
-exports.actualizarAgrupacion = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    const id = Number(req.params.id);
-    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
-      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
-    }
-
-    // Necesitamos saber cómo se llamaba ANTES para detectar si era el grupo automático
-    let prevNombre = null;
-    try {
-      const { rows: prevRows } = await pool.query(
-        `SELECT nombre FROM agrupaciones WHERE id = $1 AND business_id = $2`,
-        [id, businessId]
-      );
-      prevNombre = prevRows[0]?.nombre || null;
-    } catch (_) { }
-
-    const sets = [];
-    const vals = [];
-    const push = (col, val) => { vals.push(val); sets.push(`${col} = $${vals.length}`); };
-
-    let todoRenamedOutOfTodo = false;
-
-    if (req.body?.nombre !== undefined) {
-      const nombre = String(req.body.nombre ?? '').trim();
-      if (!nombre) {
-        return res.status(400).json({ ok: false, error: 'El nombre no puede quedar vacío' });
-      }
-
-      // 🚫 No permitir renombrar "Discontinuados"
-      if (prevNombre && isDiscontinuadosName(prevNombre) && nombre !== prevNombre) {
-        return res.status(400).json({ ok: false, error: 'La agrupación "Discontinuados" no se puede renombrar' });
-      }
-
-      // ✅ Si era el grupo automático (Sin Agrupación/TODO) y pasa a otro nombre → disparar recreación del TODO
-      if (prevNombre && isTodoName(prevNombre) && !isTodoName(nombre)) {
-        todoRenamedOutOfTodo = true;
-      }
-
-      push('nombre', nombre);
-    }
-
-    if (req.body?.articulos !== undefined) {
-      const articulos = toItemsArray(req.body.articulos);
-      push('articulos', JSON.stringify(articulos));
-    }
-
-    if (!sets.length) return res.json({ ok: true, data: null });
-
-    const sql = `
-  UPDATE agrupaciones
-     SET ${sets.join(', ')}, updated_at = NOW()
-   WHERE id = $${vals.length + 1}
-     AND business_id = $${vals.length + 2}
-   RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`;
-    const { rows } = await pool.query(sql, [...vals, id, businessId]);
-    if (!rows.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
-
-    const updated = rows[0];
-
-    // 🔁 Si sacamos al grupo del "rol automático", nos aseguramos de recrear "Sin Agrupacion"
-    if (todoRenamedOutOfTodo) {
-      try {
-        await pool.query(
-          `INSERT INTO agrupaciones (business_id, nombre, articulos)
-       VALUES ($1, $2, '[]'::jsonb)
-       ON CONFLICT (business_id, nombre) DO NOTHING`,
-          [businessId, TODO_NAME_INITIAL]
-        );
-      } catch (_) { }
-
-      // y garantizamos también que exista "Discontinuados"
-      try {
-        await pool.query(
-          `INSERT INTO agrupaciones (business_id, nombre, articulos)
-       VALUES ($1, $2, '[]'::jsonb)
-       ON CONFLICT (business_id, nombre) DO NOTHING`,
-          [businessId, DISC_NAME]
-        );
-      } catch (_) { }
-    }
-
-    return res.json(updated);
-
-  } catch (e) {
-    console.error('actualizarAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-// DELETE /businesses/:businessId/agrupaciones/:id
-exports.eliminarAgrupacion = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    const id = Number(req.params.id);
-    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
-      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
-    }
-
-    // mirar nombre antes de borrar
-    const { rows: prevRows } = await pool.query(
-      `SELECT nombre FROM agrupaciones WHERE id=$1 AND business_id=$2`,
-      [id, businessId]
-    );
-    if (!prevRows.length) {
-      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
-    }
-
-    const nombre = prevRows[0].nombre || '';
-    if (isTodoName(nombre) || isDiscontinuadosName(nombre)) {
-      return res.status(400).json({ ok: false, error: 'Esta agrupación especial no se puede eliminar' });
-    }
-
-    const r = await pool.query(
-      `DELETE FROM agrupaciones WHERE id=$1 AND business_id=$2`,
-      [id, businessId]
-    );
-
-    // Limpieza de exclusiones (si existen)
-    try {
-      await pool.query(
-        `DELETE FROM agrupacion_exclusiones WHERE agrupacion_id=$1 AND business_id=$2`,
-        [id, businessId]
-      );
-    } catch (_) { }
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error('eliminarAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-// PUT /businesses/:businessId/agrupaciones/:id/articulos
-exports.agregarArticulosAgrupacion = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    const id = Number(req.params.id ?? req.params.agrupacionId);
-    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
-      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
-    }
-
-    // Puede venir `articulos` (objetos) o `ids` (números)
-    const incomingArticulos = toItemsArray(req.body?.articulos);
-    const incomingIds = Array.isArray(req.body?.ids)
-      ? [...new Set(req.body.ids.map(Number))].filter(Number.isFinite)
-      : [];
-
-    const incoming = incomingArticulos.length
-      ? incomingArticulos
-      : incomingIds.map((x) => ({
-        id: x, nombre: '', categoria: 'Sin categoría', subrubro: 'Sin subrubro', precio: 0
-      }));
-
-    if (!incoming.length) {
-      return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
-    }
-
-    // Traer agrupación
-    const { rows: r0 } = await pool.query(
-      `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
-      [id, businessId]
-    );
-    if (!r0.length) {
-      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
-    }
-
-    const base = parseJsonArrayLoose(r0[0].articulos);
-    const merged = mergeJsonById(base, incoming);
-
-    const { rows } = await pool.query(
-      `UPDATE agrupaciones
-         SET articulos = $1::jsonb, updated_at = NOW()
-       WHERE id = $2 AND business_id = $3
-       RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-      [JSON.stringify(merged), id, businessId]
-    );
-
-    return res.json(rows[0]);
-  } catch (e) {
-    console.error('agregarArticulosAgrupacion error:', { code: e.code, detail: e.detail, msg: e.message });
-    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
-  }
-};
-
-// DELETE /businesses/:businessId/agrupaciones/:id/articulos/:articuloId
-exports.eliminarArticuloDeAgrupacion = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    const id = Number(req.params.id);
-    const articuloId = Number(req.params.articuloId);
-    if (!Number.isFinite(businessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
-      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
-    }
-
-    const { rows: r0 } = await pool.query(
-      `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
-      [id, businessId]
-    );
-    if (!r0.length) return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
-
-    const base = parseJsonArrayLoose(r0[0].articulos);
-    const filtered = base.filter(a => Number(a.id) !== articuloId);
-
-    const { rows } = await pool.query(
-      `UPDATE agrupaciones
-          SET articulos = $1::jsonb, updated_at = NOW()
-        WHERE id = $2 AND business_id = $3
-        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-      [JSON.stringify(filtered), id, businessId]
-    );
-
-    return res.json(rows[0]);
-  } catch (e) {
-    console.error('eliminarArticuloDeAgrupacion error:', { code: e.code, detail: e.detail, msg: e.message });
-    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
-  }
-};
-
-// POST /businesses/:businessId/agrupaciones/create-or-move
-// Body: { nombre: string, ids?: number[] }  (opcional: articulos:[{...}] si querés enriquecer)
-exports.createOrMoveAgrupacion = async (req, res) => {
-  const businessId = getBusinessId(req);
-  const nombre = String(req.body?.nombre || '').trim();
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
-
-  if (!Number.isFinite(businessId) || !nombre || !ids.length) {
-    return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
-  }
-
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1) crear o encontrar la agrupación destino
-    let destRow;
-    {
-      const r = await client.query(
-        `SELECT id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
-           FROM agrupaciones
-          WHERE business_id=$1 AND nombre=$2
-          FOR UPDATE`,
-        [businessId, nombre]
-      );
-      if (r.rows.length) {
-        destRow = r.rows[0];
-      } else {
-        const r2 = await client.query(
-          `INSERT INTO agrupaciones (business_id, nombre, articulos)
-           VALUES ($1, $2, '[]'::jsonb)
-           RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-          [businessId, nombre]
-        );
-        destRow = r2.rows[0];
-      }
+    const bizId = getBusinessId(req);
+    if (!Number.isFinite(bizId)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'business_id requerido' });
     }
 
-    const destId = Number(destRow.id);
+    const nombre = String(req.body?.nombre ?? '').trim();
+    if (!nombre) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
+    }
 
-    // 2) bloquear todas las agrupaciones del negocio para operar en memoria
-    const { rows: groups } = await client.query(
-      `SELECT id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
-         FROM agrupaciones
-        WHERE business_id=$1
-        FOR UPDATE`,
-      [businessId]
+    // Crear en business_groups
+    const { rows } = await client.query(
+      `
+      INSERT INTO business_groups (business_id, name, description, status)
+      VALUES ($1, $2, $3, 'active')
+      RETURNING id, name as nombre, description, created_at, updated_at, '[]'::jsonb as articulos
+      `,
+      [bizId, nombre, req.body?.description || null]
     );
 
-    const idsSet = new Set(ids);
-    let moved = 0;
-
-    // 3) quitar ids de TODAS las otras agrupaciones
-    for (const g of groups) {
-      const gid = Number(g.id);
-      const list = parseJsonArrayLoose(g.articulos);
-      if (gid === destId) continue;
-
-      const filtered = list.filter(a => !idsSet.has(Number(a?.id)));
-      if (filtered.length !== list.length) {
-        await client.query(
-          `UPDATE agrupaciones SET articulos=$1::jsonb WHERE id=$2 AND business_id=$3`,
-          [JSON.stringify(filtered), gid, businessId]
-        );
-      }
-    }
-
-    // 4) agregar ids (sin duplicar) a la agrupación destino
-    {
-      const list = parseJsonArrayLoose(destRow.articulos);
-      const seen = new Set(list.map(a => Number(a?.id)));
-      const toAdd = [];
-
-      for (const id of ids) {
-        if (!seen.has(id)) {
-          toAdd.push({ id, nombre: '', categoria: 'Sin categoría', subrubro: 'Sin subrubro', precio: 0 });
-          seen.add(id);
-          moved++;
-        }
-      }
-
-      if (toAdd.length) {
-        const merged = [...list, ...toAdd];
-        await client.query(
-          `UPDATE agrupaciones SET articulos=$1::jsonb WHERE id=$2 AND business_id=$3`,
-          [JSON.stringify(merged), destId, businessId]
-        );
-      }
-    }
-
     await client.query('COMMIT');
-    return res.json({ ok: true, id: destId, nombre, moved });
+
+    res.status(201).json(rows[0]);
   } catch (e) {
     await client.query('ROLLBACK');
-    console.error('createOrMoveAgrupacion error:', e);
+    
+    if (e.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'Ya existe una agrupación con ese nombre' });
+    }
+    
+    console.error('crearAgrupacion (adapted) error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * PUT /businesses/:businessId/agrupaciones/:id
+ * 
+ * ANTES: UPDATE agrupaciones
+ * AHORA: UPDATE business_groups
+ */
+exports.actualizarAgrupacion = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const businessId = getBusinessId(req);
+    const id = Number(req.params.id);
+    
+    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    const sets = [];
+    const vals = [];
+    let i = 1;
+
+    if (req.body?.nombre !== undefined) {
+      const nombre = String(req.body.nombre ?? '').trim();
+      if (!nombre) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'El nombre no puede quedar vacío' });
+      }
+      vals.push(nombre);
+      sets.push(`name = $${i++}`);
+    }
+
+    if (req.body?.description !== undefined) {
+      vals.push(req.body.description || null);
+      sets.push(`description = $${i++}`);
+    }
+
+    if (!sets.length) {
+      await client.query('COMMIT');
+      return res.json({ ok: true, data: null });
+    }
+
+    sets.push(`updated_at = NOW()`);
+    vals.push(id, businessId);
+
+    const { rows } = await client.query(
+      `
+      UPDATE business_groups
+      SET ${sets.join(', ')}
+      WHERE id = $${i++} AND business_id = $${i++}
+      RETURNING id, name as nombre, description, created_at, updated_at
+      `,
+      vals
+    );
+
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    }
+
+    // Obtener artículos
+    const { rows: articulos } = await client.query(
+      `
+      SELECT jsonb_agg(
+        jsonb_build_object(
+          'id', aa.id,
+          'nombre', aa.name,
+          'categoria', COALESCE(c.nombre, 'Sin categoría'),
+          'subrubro', COALESCE(s.nombre, 'Sin subrubro'),
+          'precio', COALESCE(aa.price, 0)
+        )
+      ) as articulos
+      FROM article_groups ag
+      INNER JOIN app_articles aa ON aa.id = ag.article_id
+      LEFT JOIN categorias c ON c.id = aa.categoria_id
+      LEFT JOIN subrubros s ON s.id = aa.subrubro_id
+      WHERE ag.group_id = $1
+      `,
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    const updated = {
+      ...rows[0],
+      articulos: articulos[0]?.articulos || []
+    };
+
+    return res.json(updated);
+
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('actualizarAgrupacion (adapted) error:', e);
     return res.status(500).json({ ok: false, error: e.message });
   } finally {
     client.release();
   }
 };
 
-// PUT /businesses/:businessId/agrupaciones/todo
-// Devuelve el grupo automático de "sobrantes" (Sin Agrupacion).
-// Además garantiza que exista también "Discontinuados".
-exports.ensureTodoAgrupacion = async (req, res) => {
+/**
+ * DELETE /businesses/:businessId/agrupaciones/:id
+ * 
+ * ANTES: DELETE FROM agrupaciones
+ * AHORA: DELETE FROM business_groups (CASCADE elimina article_groups)
+ */
+exports.eliminarAgrupacion = async (req, res) => {
+  const client = await pool.connect();
   try {
-    const businessId = getBusinessId(req);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'businessId requerido' });
-    }
+    await client.query('BEGIN');
 
-    // 1) ¿Ya hay un grupo "Sin Agrupacion / Sin Agrupación / TODO"?
-    const { rows: all } = await pool.query(
-      `SELECT id, nombre
-         FROM agrupaciones
-        WHERE business_id = $1`,
-      [businessId]
-    );
-
-    let todoRow = all.find(r => isTodoName(r.nombre)) || null;
-    let discRow = all.find(r => isDiscontinuadosName(r.nombre)) || null;
-
-    // 2) Si no existe TODO → crearlo
-    if (!todoRow) {
-      const { rows } = await pool.query(
-        `INSERT INTO agrupaciones (business_id, nombre, articulos)
-         VALUES ($1, $2, '[]'::jsonb)
-         ON CONFLICT (business_id, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
-         RETURNING id, nombre`,
-        [businessId, TODO_NAME_INITIAL]
-      );
-      todoRow = rows[0];
-    }
-
-    // 3) Asegurar también "Discontinuados"
-    if (!discRow) {
-      try {
-        await pool.query(
-          `INSERT INTO agrupaciones (business_id, nombre, articulos)
-           VALUES ($1, $2, '[]'::jsonb)
-           ON CONFLICT (business_id, nombre) DO NOTHING`,
-          [businessId, DISC_NAME]
-        );
-      } catch (_) { }
-    }
-
-    return res.json(todoRow);
-  } catch (e) {
-    console.error('ensureTodoAgrupacion error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-// GET /businesses/:businessId/agrupaciones/:id/exclusiones
-exports.listarExclusiones = async (req, res) => {
-  try {
     const businessId = getBusinessId(req);
     const id = Number(req.params.id);
+    
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
-    try {
-      const { rows } = await pool.query(
-        `SELECT scope, ref_id
-           FROM agrupacion_exclusiones
-          WHERE agrupacion_id = $1 AND business_id = $2
-          ORDER BY scope, ref_id`,
-        [id, businessId]
-      );
-      return res.json(rows);
-    } catch (e) {
-      if (e.code === '42P01') return res.json([]); // tabla aún no creada
-      throw e;
+    // Verificar que existe
+    const { rows: check } = await client.query(
+      `SELECT name FROM business_groups WHERE id = $1 AND business_id = $2`,
+      [id, businessId]
+    );
+
+    if (!check.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
     }
+
+    // Eliminar (CASCADE limpia article_groups automáticamente)
+    await client.query(
+      `DELETE FROM business_groups WHERE id = $1 AND business_id = $2`,
+      [id, businessId]
+    );
+
+    await client.query('COMMIT');
+
+    return res.json({ ok: true });
   } catch (e) {
-    console.error('listarExclusiones error:', e);
+    await client.query('ROLLBACK');
+    console.error('eliminarAgrupacion (adapted) error:', e);
     return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * PUT /businesses/:businessId/agrupaciones/:id/articulos
+ * 
+ * ANTES: Actualizar JSONB en agrupaciones
+ * AHORA: INSERT INTO article_groups
+ */
+exports.agregarArticulosAgrupacion = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const businessId = getBusinessId(req);
+    const id = Number(req.params.id ?? req.params.agrupacionId);
+    
+    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    // Puede venir `articulos` (objetos) o `ids` (números)
+    let articleIds = [];
+    
+    if (Array.isArray(req.body?.articulos)) {
+      articleIds = req.body.articulos
+        .map(a => safeNum(a.id))
+        .filter(Boolean);
+    } else if (Array.isArray(req.body?.ids)) {
+      articleIds = req.body.ids.map(Number).filter(Number.isFinite);
+    }
+
+    if (!articleIds.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
+    }
+
+    // Insertar en article_groups (ON CONFLICT evita duplicados)
+    for (const articleId of articleIds) {
+      await client.query(
+        `
+        INSERT INTO article_groups (group_id, article_id)
+        VALUES ($1, $2)
+        ON CONFLICT (group_id, article_id) DO NOTHING
+        `,
+        [id, articleId]
+      );
+    }
+
+    // Retornar grupo actualizado
+    const { rows } = await client.query(
+      `
+      SELECT 
+        bg.id,
+        bg.name as nombre,
+        bg.description,
+        bg.created_at,
+        bg.updated_at,
+        COALESCE(
+          (
+            SELECT jsonb_agg(
+              jsonb_build_object(
+                'id', aa.id,
+                'nombre', aa.name,
+                'categoria', COALESCE(c.nombre, 'Sin categoría'),
+                'subrubro', COALESCE(s.nombre, 'Sin subrubro'),
+                'precio', COALESCE(aa.price, 0)
+              )
+            )
+            FROM article_groups ag
+            INNER JOIN app_articles aa ON aa.id = ag.article_id
+            LEFT JOIN categorias c ON c.id = aa.categoria_id
+            LEFT JOIN subrubros s ON s.id = aa.subrubro_id
+            WHERE ag.group_id = bg.id
+          ),
+          '[]'::jsonb
+        ) as articulos
+      FROM business_groups bg
+      WHERE bg.id = $1 AND bg.business_id = $2
+      `,
+      [id, businessId]
+    );
+
+    await client.query('COMMIT');
+
+    return res.json(rows[0] || { ok: false, error: 'Grupo no encontrado' });
+
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('agregarArticulosAgrupacion (adapted) error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * DELETE /businesses/:businessId/agrupaciones/:id/articulos/:articuloId
+ * 
+ * ANTES: Quitar del JSONB en agrupaciones
+ * AHORA: DELETE FROM article_groups
+ */
+exports.eliminarArticuloDeAgrupacion = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const businessId = getBusinessId(req);
+    const id = Number(req.params.id);
+    const articuloId = Number(req.params.articuloId);
+    
+    if (!Number.isFinite(businessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    // Eliminar de article_groups
+    await client.query(
+      `DELETE FROM article_groups WHERE group_id = $1 AND article_id = $2`,
+      [id, articuloId]
+    );
+
+    // Retornar grupo actualizado
+    const { rows } = await client.query(
+      `
+      SELECT 
+        bg.id,
+        bg.name as nombre,
+        bg.description,
+        bg.created_at,
+        bg.updated_at,
+        COALESCE(
+          (
+            SELECT jsonb_agg(
+              jsonb_build_object(
+                'id', aa.id,
+                'nombre', aa.name,
+                'categoria', COALESCE(c.nombre, 'Sin categoría'),
+                'subrubro', COALESCE(s.nombre, 'Sin subrubro'),
+                'precio', COALESCE(aa.price, 0)
+              )
+            )
+            FROM article_groups ag
+            INNER JOIN app_articles aa ON aa.id = ag.article_id
+            LEFT JOIN categorias c ON c.id = aa.categoria_id
+            LEFT JOIN subrubros s ON s.id = aa.subrubro_id
+            WHERE ag.group_id = bg.id
+          ),
+          '[]'::jsonb
+        ) as articulos
+      FROM business_groups bg
+      WHERE bg.id = $1 AND bg.business_id = $2
+      `,
+      [id, businessId]
+    );
+
+    await client.query('COMMIT');
+
+    return res.json(rows[0] || { ok: false, error: 'Grupo no encontrado' });
+
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('eliminarArticuloDeAgrupacion (adapted) error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 
@@ -550,6 +577,9 @@ exports.upsertExclusiones = async (req, res) => {
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
+
+    // 🆕 Obtener contexto
+    const ctx = await getBusinessContext(businessId);
 
     const mode = String(req.body?.mode || '').toLowerCase();
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
@@ -582,7 +612,7 @@ exports.upsertExclusiones = async (req, res) => {
             `INSERT INTO agrupacion_exclusiones (business_id, agrupacion_id, scope, ref_id)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT DO NOTHING`,
-            [businessId, id, scope, ref_id]
+            [ctx.effectiveId, id, scope, ref_id]
           );
           added += r.rowCount || 0;
         }
@@ -601,7 +631,7 @@ exports.upsertExclusiones = async (req, res) => {
         const scope = String(raw.scope || '').toLowerCase();
         const ref_id = String(raw.ref_id ?? '').trim();
         if (!['categoria', 'subrubro', 'articulo'].includes(scope) || !ref_id) continue;
-        params.push(businessId, id, scope, ref_id);
+        params.push(ctx.effectiveId, id, scope, ref_id);
         conds.push(`(business_id=$${i++} AND agrupacion_id=$${i++} AND scope=$${i++} AND ref_id=$${i++})`);
       }
       if (!conds.length) return res.json({ ok: true, added: 0, removed: 0, total: 0 });
@@ -616,71 +646,6 @@ exports.upsertExclusiones = async (req, res) => {
   }
 };
 
-// POST /businesses/:businessId/agrupaciones/:fromId/move-items
-exports.moveItemsBetweenGroups = async (req, res) => {
-  const businessId = getBusinessId(req);
-  const fromId = Number(req.params.id ?? req.params.fromId);
-  const toId = Number(req.body?.toId);
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
-
-  if (!Number.isFinite(businessId) || !Number.isFinite(fromId) || !Number.isFinite(toId) || !ids.length) {
-    return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
-  }
-  if (fromId === toId) return res.json({ ok: true, moved: 0 });
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const { rows } = await client.query(
-      `SELECT id, articulos FROM agrupaciones
-        WHERE business_id=$1 AND id = ANY($2::int[])
-        FOR UPDATE`,
-      [businessId, [fromId, toId]]
-    );
-
-    const fromRow = rows.find(r => Number(r.id) === fromId);
-    const toRow = rows.find(r => Number(r.id) === toId);
-    if (!fromRow || !toRow) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, error: 'Agrupación/es no encontrada/s' });
-    }
-
-    const fromList = parseJsonArrayLoose(fromRow.articulos);
-    const toList = parseJsonArrayLoose(toRow.articulos);
-
-    const idsSet = new Set(ids);
-    const moving = fromList.filter(a => idsSet.has(Number(a.id)));
-    if (!moving.length) { await client.query('COMMIT'); return res.json({ ok: true, moved: 0 }); }
-
-    const seen = new Set(toList.map(x => Number(x.id)));
-    const toMerged = [...toList];
-    for (const it of moving) {
-      const id = Number(it.id);
-      if (!seen.has(id)) { toMerged.push({ ...it, id }); seen.add(id); }
-    }
-    const fromFiltered = fromList.filter(a => !idsSet.has(Number(a.id)));
-
-    await client.query(
-      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
-      [JSON.stringify(fromFiltered), fromId, businessId]
-    );
-    await client.query(
-      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
-      [JSON.stringify(toMerged), toId, businessId]
-    );
-
-    await client.query('COMMIT');
-    return res.json({ ok: true, moved: moving.length });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('moveItemsBetweenGroups error:', { code: e.code, detail: e.detail, msg: e.message });
-    return res.status(500).json({ ok: false, error: e.message, code: e.code, detail: e.detail });
-  } finally {
-    client.release();
-  }
-};
-
 /* ========================= Default Group ========================= */
 
 // PATCH /businesses/:businessId/agrupaciones/default
@@ -691,16 +656,19 @@ exports.setDefaultGroup = async (req, res) => {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
   }
 
-  // validar pertenencia del grupo al negocio
+  // 🆕 Obtener contexto
+  const ctx = await getBusinessContext(businessId);
+
+  // validar pertenencia del grupo al negocio efectivo
   const { rows } = await pool.query(
     `SELECT 1 FROM agrupaciones WHERE id=$1 AND business_id=$2`,
-    [groupId, businessId]
+    [groupId, ctx.effectiveId]
   );
   if (!rows[0]) return res.status(404).json({ ok: false, error: 'group_not_found' });
 
   await pool.query(
     `UPDATE app_businesses SET default_group_id=$1 WHERE id=$2`,
-    [groupId, businessId]
+    [groupId, ctx.effectiveId]
   );
   res.json({ ok: true, default_group_id: groupId });
 };
@@ -711,8 +679,21 @@ exports.getDefaultGroup = async (req, res) => {
   if (!Number.isFinite(businessId)) {
     return res.status(400).json({ ok: false, error: 'businessId requerido' });
   }
+
+  // 🆕 Obtener contexto
+  const ctx = await getBusinessContext(businessId);
+
   const { rows } = await pool.query(
-    `SELECT default_group_id FROM app_businesses WHERE id=$1`, [businessId]
+    `SELECT default_group_id FROM app_businesses WHERE id=$1`, [ctx.effectiveId]
   );
   res.json({ default_group_id: rows[0]?.default_group_id ?? null });
+};
+
+module.exports = {
+  obtenerAgrupaciones: exports.obtenerAgrupaciones,
+  crearAgrupacion: exports.crearAgrupacion,
+  actualizarAgrupacion: exports.actualizarAgrupacion,
+  eliminarAgrupacion: exports.eliminarAgrupacion,
+  agregarArticulosAgrupacion: exports.agregarArticulosAgrupacion,
+  eliminarArticuloDeAgrupacion: exports.eliminarArticuloDeAgrupacion,
 };

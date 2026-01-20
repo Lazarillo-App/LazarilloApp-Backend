@@ -51,6 +51,59 @@ function clampToYesterday(fromStr, toStr) {
   return { from: ymd(F), to: ymd(Tc) };
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   🆕 HELPER PARA SUBNEGOCIOS
+   Detecta si un businessId es un subnegocio y retorna el contexto correcto
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Obtiene el contexto de negocio/subnegocio
+ * @param {number} businessId - ID del negocio a verificar
+ * @returns {Promise<{
+ *   isSubnegocio: boolean,
+ *   effectiveId: number,
+ *   parentId: number|null,
+ *   agrupacionIds: number[]
+ * }>}
+ */
+async function getBusinessContext(businessId) {
+  // Obtener información del negocio
+  const { rows: bizRows } = await pool.query(`
+    SELECT id, parent_id 
+    FROM app_businesses 
+    WHERE id = $1
+  `, [businessId]);
+
+  if (!bizRows.length) {
+    throw Object.assign(new Error('business_not_found'), { status: 404 });
+  }
+
+  const biz = bizRows[0];
+  const isSubnegocio = !!biz.parent_id;
+  const effectiveId = isSubnegocio ? biz.parent_id : businessId;
+  
+  let agrupacionIds = [];
+  
+  // Si es subnegocio, obtener agrupaciones asignadas
+  if (isSubnegocio) {
+    const { rows: agrupRows } = await pool.query(`
+      SELECT agrupacion_id 
+      FROM business_agrupaciones 
+      WHERE business_id = $1
+    `, [businessId]);
+    
+    agrupacionIds = agrupRows.map(r => r.agrupacion_id);
+  }
+
+  return {
+    isSubnegocio,
+    effectiveId,      // ID del negocio principal (o el mismo si no es subnegocio)
+    parentId: biz.parent_id,
+    agrupacionIds,    // IDs de agrupaciones asignadas (solo si es subnegocio)
+    originalId: businessId
+  };
+}
+
 /* ───────────────── Negocios (CRUD + selección) ───────────────── */
 exports.listMine = async (req, res) => {
   try {
@@ -58,7 +111,7 @@ exports.listMine = async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
     const { rows } = await pool.query(`
-      SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, b.created_at
+      SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, b.parent_id, b.created_at
       FROM app_businesses b
       LEFT JOIN user_businesses ub ON ub.business_id = b.id
       WHERE (ub.user_id = $1 OR b.owner_id = $1)
@@ -330,18 +383,29 @@ exports.maxiStatus = async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
     if (!Number.isFinite(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
 
+    // 🆕 Obtener contexto (si es subnegocio, usar el parent para credenciales)
+    const ctx = await getBusinessContext(bizId);
+    const credBusinessId = ctx.effectiveId;
+
     const { rows: access } = await pool.query(`
       SELECT b.props
         FROM app_businesses b
-        LEFT JOIN user_businesses ub ON ub.business_id=b.id AND ub.user_id=$2
-       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id IS NOT NULL)
-       LIMIT 1`, [bizId, uid]);
+        LEFT JOIN user_businesses ub ON ub.business_id=$2 AND ub.user_id=$3
+       WHERE b.id=$1 AND (b.owner_id=$3 OR ub.user_id IS NOT NULL)
+       LIMIT 1`, [credBusinessId, credBusinessId, uid]);
     if (!access[0]) return res.status(404).json({ error: 'not_found' });
 
     const props = access[0].props || {};
     const mx = props.maxi || {};
     const configured = !!(mx.email && mx.codcli && (mx.pass_enc || mx.password));
-    res.json({ ok: true, business_id: bizId, configured, email: mx.email || null, codcli: mx.codcli || null });
+    res.json({ 
+      ok: true, 
+      business_id: bizId,
+      parent_id: ctx.parentId,
+      configured, 
+      email: mx.email || null, 
+      codcli: mx.codcli || null 
+    });
   } catch (e) {
     console.error('GET /:id/maxi-status error:', e);
     res.status(500).json({ error: 'internal' });
@@ -659,13 +723,46 @@ exports.maxiRawInvoices = async (req, res, next) => {
   }
 };
 
-/* ───────────────── Árbol de artículos (desde DB propia) ───────────────── */
+/* ═══════════════════════════════════════════════════════════════════════════
+   🆕 ÁRBOL DE ARTÍCULOS CON SOPORTE PARA SUBNEGOCIOS
+   Si es subnegocio, filtra por agrupaciones asignadas
+   ═══════════════════════════════════════════════════════════════════════════ */
 exports.getArticlesTree = async (req, res, next) => {
   try {
     const businessId = Number(req.params.businessId);
-    const tree = await fetchArticlesTree(businessId);
-    res.json({ ok: true, tree });
-  } catch (e) { next(e); }
+    
+    // Obtener contexto de negocio/subnegocio
+    const ctx = await getBusinessContext(businessId);
+    
+    // Obtener árbol del negocio efectivo (principal si es subnegocio)
+    let tree = await fetchArticlesTree(ctx.effectiveId);
+    
+    // Si es subnegocio, filtrar por agrupaciones asignadas
+    if (ctx.isSubnegocio && ctx.agrupacionIds.length > 0) {
+      // Filtrar artículos por agrupación
+      tree = tree.map(subrubro => ({
+        ...subrubro,
+        categorias: subrubro.categorias.map(cat => ({
+          ...cat,
+          articulos: cat.articulos.filter(art => 
+            ctx.agrupacionIds.includes(art.agrupacion_id)
+          )
+        })).filter(cat => cat.articulos.length > 0)
+      })).filter(sub => sub.categorias.length > 0);
+    }
+    
+    res.json({ 
+      ok: true, 
+      tree,
+      context: {
+        is_subnegocio: ctx.isSubnegocio,
+        parent_id: ctx.parentId,
+        filtered_by_agrupaciones: ctx.agrupacionIds
+      }
+    });
+  } catch (e) { 
+    next(e); 
+  }
 };
 
 /* ───────────────── Branding: setear URL directa ───────────────── */
@@ -688,11 +785,6 @@ exports.setBrandingUrl = async (req, res, next) => {
     res.json({ ok: true, url: val, business_id: biz.id });
   } catch (e) { next(e); }
 };
-
-// ⬇️ ya los tenés arriba importados, los reutilizamos:
-// const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
-// const { fetchSalesRanged } = require('../services/maxiSalesService');
-// const { upsertSalesBatch } = require('../services/salesStore');
 
 /**
  * POST /api/businesses/:id/sync-sales-7d
@@ -727,7 +819,7 @@ exports.syncSales = async (req, res, next) => {
       return res.json({ ok: true, business_id: biz.id, mode, ...out });
     }
 
-    // Alias de “backfill_30d”: delega en la misma política que resuelve el primer backfill y luego incremental
+    // Alias de "backfill_30d": delega en la misma política que resuelve el primer backfill y luego incremental
     if (mode === 'backfill_30d') {
       const out = await runDailyAuto({ businessId: biz.id, req });
       return res.json({ ok: true, business_id: biz.id, mode, ...out });
@@ -782,8 +874,6 @@ exports.rebuildForBusiness = async (req, res, next) => {
   }
 };
 
-// controllers/businessController.js
-
 exports.saveMaxiCredentials = async (req, res, next) => {
   try {
     const businessId = Number(req.params.id);
@@ -801,7 +891,7 @@ exports.saveMaxiCredentials = async (req, res, next) => {
 
     // Traemos el negocio para ver si ya tiene pass
     const { rows } = await pool.query(
-      'SELECT props FROM app_businesses WHERE id = $1',   // 👈 asegurate que ya esté app_businesses acá
+      'SELECT props FROM app_businesses WHERE id = $1',
       [businessId]
     );
     if (!rows.length) {
@@ -810,7 +900,7 @@ exports.saveMaxiCredentials = async (req, res, next) => {
 
     const props = rows[0].props || {};
     const maxiPrev = props.maxi || {};
-    const hadPrevPass = !!maxiPrev.pass_enc;             // 👈 usamos pass_enc
+    const hadPrevPass = !!maxiPrev.pass_enc;
 
     // Validaciones mínimas
     if (!email || !codcli) {
@@ -824,7 +914,7 @@ exports.saveMaxiCredentials = async (req, res, next) => {
     // - si NO había ninguna y viene vacío → error
     let passEnc = maxiPrev.pass_enc || null;
     if (password) {
-      passEnc = encryptSecret(password);                // 👈 CAMBIO IMPORTANTE
+      passEnc = encryptSecret(password);
     } else if (!hadPrevPass) {
       return res.status(400).json({
         error: 'missing_fields',
@@ -836,7 +926,7 @@ exports.saveMaxiCredentials = async (req, res, next) => {
       ...maxiPrev,
       email,
       codcli,
-      pass_enc: passEnc,                                 // 👈 mismo nombre que usa todo el resto del código
+      pass_enc: passEnc,
     };
 
     const newProps = {
