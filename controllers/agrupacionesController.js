@@ -696,4 +696,11 @@ module.exports = {
   eliminarAgrupacion: exports.eliminarAgrupacion,
   agregarArticulosAgrupacion: exports.agregarArticulosAgrupacion,
   eliminarArticuloDeAgrupacion: exports.eliminarArticuloDeAgrupacion,
-};
+
+  // 👇 agregar estas porque las usás en rutas
+  upsertExclusiones: exports.upsertExclusiones,
+  listarExclusiones: exports.listarExclusiones,
+  ensureTodoAgrupacion: exports.ensureTodoAgrupacion,
+  moveItemsBetweenGroups: exports.moveItemsBetweenGroups,
+  createOrMoveAgrupacion: exports.createOrMoveAgrupacion,
+}
