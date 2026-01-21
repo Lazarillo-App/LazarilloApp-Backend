@@ -845,7 +845,7 @@ module.exports = {
   createDivision: exports.createDivision,
   updateDivision: exports.updateDivision,
   deleteDivision: exports.deleteDivision,
-  moveAgrupacionComplete: exports.moveAgrupacionComplete,
+  moveAgrupacionComplete,  
 
   // Grupos en divisiones
   getGroupsByDivision: exports.getGroupsByDivision,

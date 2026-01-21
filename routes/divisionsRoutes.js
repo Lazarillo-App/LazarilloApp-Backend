@@ -34,7 +34,7 @@ router.put('/:divisionId', ctrl.updateDivision);
 router.delete('/:divisionId', ctrl.deleteDivision);
 
 // Mover división
-router.post('/move-agrupacion-complete', divisionsController.moveAgrupacionComplete);
+router.post('/move-agrupacion-complete', ctrl.moveAgrupacionComplete);
 
 // ============================================================================
 // ESTADÍSTICAS Y CONTENIDO
