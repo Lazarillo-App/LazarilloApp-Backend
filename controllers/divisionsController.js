@@ -658,6 +658,7 @@ async function moveAgrupacionComplete(req, res) {
     targetBusinessId,
     createNew,
     newBusinessName,
+    agrupacionNombre, // opcional por si querés mandarlo desde el front algún día
   } = req.body || {};
 
   console.log('[moveAgrupacionComplete] 📦 Request:', {
@@ -666,9 +667,9 @@ async function moveAgrupacionComplete(req, res) {
     targetBusinessId,
     createNew,
     newBusinessName,
+    agrupacionNombre,
   });
 
-  // Validación
   if (!agrupacionId || !sourceBusinessId) {
     return res.status(400).json({
       ok: false,
@@ -695,6 +696,10 @@ async function moveAgrupacionComplete(req, res) {
   try {
     await client.query('BEGIN');
 
+    // ✅ 0) definir variables que después usás
+    let divisionId = createNew ? null : num(targetBusinessId);
+    let createdNewDivision = false;
+
     async function resolveBusinessGroupId(client, { agrupacionId, sourceBusinessId, agrupacionNombre }) {
       // 1) Intento directo: business_groups por ID
       let r = await client.query(
@@ -718,9 +723,7 @@ async function moveAgrupacionComplete(req, res) {
         [agrupacionId, sourceBusinessId]
       );
 
-      if (old.rows.length === 0) {
-        return null; // no existe ni en nueva ni en vieja
-      }
+      if (old.rows.length === 0) return null;
 
       const name = old.rows[0].nombre;
 
@@ -734,35 +737,42 @@ async function moveAgrupacionComplete(req, res) {
       // 5) Crear en business_groups si no existe
       const ins = await client.query(
         `INSERT INTO business_groups (business_id, name, created_at, updated_at)
-     VALUES ($1, $2, now(), now())
-     RETURNING id, name`,
+         VALUES ($1, $2, now(), now())
+         RETURNING id, name`,
         [sourceBusinessId, name]
       );
 
       return { id: ins.rows[0].id, name: ins.rows[0].name, created: true };
     }
 
-    // PASO 2: Si createNew, crear la división
+    // ✅ 1) resolver groupId REAL (business_groups.id)
+    const resolved = await resolveBusinessGroupId(client, {
+      agrupacionId: num(agrupacionId),
+      sourceBusinessId: num(sourceBusinessId),
+      agrupacionNombre: agrupacionNombre ? String(agrupacionNombre).trim() : null,
+    });
+
+    if (!resolved) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'group_not_found' });
+    }
+
+    const groupId = Number(resolved.id);
+
+    // ✅ 2) si createNew, crear división
     if (createNew) {
       console.log('[moveAgrupacionComplete] 🆕 Creando nueva división:', newBusinessName);
 
-      const insertDivisionSql = `
+      const code = await ensureUniqueCode(client, num(sourceBusinessId), newBusinessName);
+
+      const divisionRes = await client.query(
+        `
         INSERT INTO business_divisions (business_id, name, code, is_main, created_at, updated_at)
         VALUES ($1, $2, $3, false, now(), now())
         RETURNING id, name, code, is_main
-      `;
-
-      const code = newBusinessName
-        .toLowerCase()
-        .replace(/\s+/g, '-')
-        .replace(/[^a-z0-9-]/g, '')
-        .slice(0, 50);
-
-      const divisionRes = await client.query(insertDivisionSql, [
-        sourceBusinessId,
-        newBusinessName,
-        code,
-      ]);
+        `,
+        [num(sourceBusinessId), newBusinessName.trim(), code]
+      );
 
       divisionId = divisionRes.rows[0].id;
       createdNewDivision = true;
@@ -770,17 +780,15 @@ async function moveAgrupacionComplete(req, res) {
       console.log('[moveAgrupacionComplete] ✅ División creada:', divisionId);
     }
 
-    // PASO 3: Verificar que la división existe y pertenece al negocio
-    const checkDivisionSql = `
+    // ✅ 3) verificar división
+    const divisionCheck = await client.query(
+      `
       SELECT id, business_id, name, is_main
       FROM business_divisions
       WHERE id = $1 AND business_id = $2
-    `;
-
-    const divisionCheck = await client.query(checkDivisionSql, [
-      divisionId,
-      sourceBusinessId,
-    ]);
+      `,
+      [divisionId, num(sourceBusinessId)]
+    );
 
     if (divisionCheck.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -792,7 +800,7 @@ async function moveAgrupacionComplete(req, res) {
 
     const division = divisionCheck.rows[0];
 
-    // PASO 4: Si es la división principal, no hacer nada (ya tiene todo)
+    // ✅ 4) si es principal, listo
     if (division.is_main) {
       await client.query('COMMIT');
       return res.json({
@@ -805,65 +813,45 @@ async function moveAgrupacionComplete(req, res) {
       });
     }
 
-    // PASO 5: Verificar si el grupo ya está asignado
-    const checkAssignmentSql = `
-      SELECT id FROM division_group_assignments
+    // ✅ 5) asignación si no existe
+    const assignmentCheck = await client.query(
+      `
+      SELECT 1 FROM division_group_assignments
       WHERE division_id = $1 AND group_id = $2
-    `;
-
-    const assignmentCheck = await client.query(checkAssignmentSql, [
-      divisionId,
-      groupId,
-    ]);
+      `,
+      [divisionId, groupId]
+    );
 
     let groupAssigned = false;
 
     if (assignmentCheck.rows.length === 0) {
-      console.log('[moveAgrupacionComplete] 🔗 Asignando grupo a división');
-
-      const assignGroupSql = `
-        INSERT INTO division_group_assignments (division_id, group_id, created_at)
-        VALUES ($1, $2, now())
-      `;
-
-      await client.query(assignGroupSql, [divisionId, groupId]);
+      await client.query(
+        `
+        INSERT INTO division_group_assignments (division_id, group_id, is_customized, created_at)
+        VALUES ($1, $2, false, now())
+        ON CONFLICT (division_id, group_id) DO NOTHING
+        `,
+        [divisionId, groupId]
+      );
       groupAssigned = true;
-
-      console.log('[moveAgrupacionComplete] ✅ Grupo asignado');
-    } else {
-      console.log('[moveAgrupacionComplete] ℹ️ Grupo ya estaba asignado');
     }
 
-    // PASO 6: Contar artículos en el grupo (para estadísticas)
-    const countArticlesSql = `
-      SELECT COUNT(*) as count
-      FROM article_groups
-      WHERE group_id = $1
-    `;
-
-    const articlesCount = await client.query(countArticlesSql, [groupId]);
-    const articlesMoved = parseInt(articlesCount.rows[0]?.count || 0);
+    // ✅ 6) contar artículos
+    const articlesCount = await client.query(
+      `SELECT COUNT(*)::integer as count FROM article_groups WHERE group_id = $1`,
+      [groupId]
+    );
+    const articlesMoved = articlesCount.rows[0]?.count || 0;
 
     await client.query('COMMIT');
 
-    console.log('[moveAgrupacionComplete] ✅ Completado:', {
-      divisionId,
-      groupId,
-      createdNewDivision,
-      groupAssigned,
-      articlesMoved,
-    });
-
     return res.json({
       ok: true,
-      target_business: {
-        id: divisionId,
-        name: division.name,
-        is_main: division.is_main,
-      },
+      target_business: { id: divisionId, name: division.name, is_main: division.is_main },
       created_new_business: createdNewDivision,
       articles_moved: articlesMoved,
       group_assigned: groupAssigned,
+      group: { id: groupId, name: resolved.name },
     });
 
   } catch (err) {
