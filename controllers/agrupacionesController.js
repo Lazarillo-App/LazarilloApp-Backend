@@ -2,7 +2,6 @@
 const pool = require('../config/db');
 
 /* ========================= Helpers ========================= */
-
 const safeNum = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
@@ -91,273 +90,26 @@ const isDiscontinuadosName = (s) => {
 };
 
 /* ========================= CRUD Agrupaciones ========================= */
-/**
- * Asegura que existan los grupos especiales "Sin Agrupación" y "Discontinuados"
- * para un negocio y división específicos
- * 
- * @param {number} businessId - ID del negocio principal
- * @param {number|null} divisionId - ID de la división (null = principal)
- * @param {boolean} isMainDivision - true si es división principal
- * @returns {Promise<Array>} Array con los grupos especiales creados/encontrados
- */
 
-// ============================================================================
-// HELPER: ensureSpecialGroups (CON PREVENCIÓN DE DUPLICADOS)
-// ============================================================================
-async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
-  const specialGroups = [];
-  
-  try {
-    // 1️⃣ Asegurar "Sin Agrupación" (TODO)
-    const todoName = 'Sin Agrupación';
-    
-    // ✅ Buscar TODOS los grupos con nombre similar (case-insensitive)
-    let todoGroupQuery = await pool.query(`
-      SELECT id, name 
-      FROM business_groups 
-      WHERE business_id = $1 
-        AND (
-          LOWER(name) = LOWER($2)
-          OR LOWER(name) = 'sin agrupacion'
-          OR LOWER(name) = 'todo'
-        )
-      LIMIT 1
-    `, [businessId, todoName]);
-    
-    let todoGroupId;
-    
-    if (todoGroupQuery.rows.length === 0) {
-      // Crear solo si NO existe
-      const createTodo = await pool.query(`
-        INSERT INTO business_groups (business_id, name, created_at) 
-        VALUES ($1, $2, NOW()) 
-        ON CONFLICT DO NOTHING
-        RETURNING id, name
-      `, [businessId, todoName]);
-      
-      if (createTodo.rows.length > 0) {
-        todoGroupId = createTodo.rows[0].id;
-      } else {
-        // Si falló el INSERT (por race condition), buscar de nuevo
-        const retry = await pool.query(
-          'SELECT id FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
-          [businessId, todoName]
-        );
-        todoGroupId = retry.rows[0]?.id;
-      }
-    } else {
-      todoGroupId = todoGroupQuery.rows[0].id;
-    }
-    
-    if (!todoGroupId) {
-      console.error('[ensureSpecialGroups] ❌ No se pudo crear/obtener TODO group');
-      return specialGroups;
-    }
-    
-    // Asignar TODO a la división si es secundaria
-    if (divisionId && !isMainDivision) {
-      await pool.query(`
-        INSERT INTO division_group_assignments (division_id, group_id, created_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (division_id, group_id) DO NOTHING
-      `, [divisionId, todoGroupId]);
-    }
-    
-    // Obtener artículos sin agrupar
-    const todoArticlesQuery = await pool.query(`
-      SELECT 
-        a.id,
-        a.name AS nombre,
-        a.price AS precio,
-        a.costo,
-        COALESCE(c.nombre, 'Sin categoría') as categoria,
-        COALESCE(s.nombre, 'Sin subrubro') as subrubro
-      FROM app_articles a
-      LEFT JOIN categorias c ON c.id = a.categoria_id
-      LEFT JOIN subrubros s ON s.id = a.subrubro_id
-      WHERE a.business_id = $1
-        AND NOT EXISTS (
-          SELECT 1 FROM article_groups ag
-          WHERE ag.article_id = a.id
-            AND ag.group_id != $2
-        )
-      ORDER BY a.name
-    `, [businessId, todoGroupId]);
-    
-    specialGroups.push({
-      id: todoGroupId,
-      group_id: todoGroupId,
-      nombre: todoName,
-      articulos: todoArticlesQuery.rows,
-    });
-    
-    // 2️⃣ Asegurar "Discontinuados"
-    const discName = 'Discontinuados';
-    
-    let discGroupQuery = await pool.query(`
-      SELECT id, name 
-      FROM business_groups 
-      WHERE business_id = $1 
-        AND (
-          LOWER(name) = LOWER($2)
-          OR LOWER(name) = 'descontinuados'
-        )
-      LIMIT 1
-    `, [businessId, discName]);
-    
-    let discGroupId;
-    
-    if (discGroupQuery.rows.length === 0) {
-      const createDisc = await pool.query(`
-        INSERT INTO business_groups (business_id, name, created_at) 
-        VALUES ($1, $2, NOW())
-        ON CONFLICT DO NOTHING
-        RETURNING id, name
-      `, [businessId, discName]);
-      
-      if (createDisc.rows.length > 0) {
-        discGroupId = createDisc.rows[0].id;
-      } else {
-        const retry = await pool.query(
-          'SELECT id FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
-          [businessId, discName]
-        );
-        discGroupId = retry.rows[0]?.id;
-      }
-    } else {
-      discGroupId = discGroupQuery.rows[0].id;
-    }
-    
-    if (!discGroupId) {
-      console.error('[ensureSpecialGroups] ❌ No se pudo crear/obtener Discontinuados group');
-      return specialGroups;
-    }
-    
-    // Asignar Discontinuados a la división si es secundaria
-    if (divisionId && !isMainDivision) {
-      await pool.query(`
-        INSERT INTO division_group_assignments (division_id, group_id, created_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (division_id, group_id) DO NOTHING
-      `, [divisionId, discGroupId]);
-    }
-    
-    // Obtener artículos discontinuados
-    const discArticlesQuery = await pool.query(`
-      SELECT 
-        a.id,
-        a.name AS nombre,
-        a.price AS precio,
-        a.costo,
-        COALESCE(c.nombre, 'Sin categoría') as categoria,
-        COALESCE(s.nombre, 'Sin subrubro') as subrubro
-      FROM article_groups ag
-      JOIN app_articles a ON a.id = ag.article_id
-      LEFT JOIN categorias c ON c.id = a.categoria_id
-      LEFT JOIN subrubros s ON s.id = a.subrubro_id
-      WHERE ag.group_id = $1
-        AND a.business_id = $2
-      ORDER BY a.name
-    `, [discGroupId, businessId]);
-    
-    specialGroups.push({
-      id: discGroupId,
-      group_id: discGroupId,
-      nombre: discName,
-      articulos: discArticlesQuery.rows,
-    });
-    
-  } catch (error) {
-    console.error('[ensureSpecialGroups] ❌ Error:', error);
-  }
-  
-  return specialGroups;
-}
-
-// ============================================================================
 // GET /businesses/:businessId/agrupaciones
-// ============================================================================
-
 exports.obtenerAgrupaciones = async (req, res) => {
   try {
-    const businessId = num(req.params.businessId);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'businessId inválido' });
+    const bizId = getBusinessId(req);
+    if (!Number.isFinite(bizId)) {
+      return res.status(400).json({ ok: false, error: 'business_id requerido' });
     }
-
-    const hdr =
-      req.header('X-Division-Id') ||
-      req.headers['x-division-id'] ||
-      null;
-
-    const divisionId = hdr == null || hdr === '' || hdr === 'null'
-      ? null
-      : num(hdr);
-
-    // ======================
-    // PRINCIPAL (sin división)
-    // ======================
-    if (!divisionId) {
-      const sql = `
-        SELECT a.id, a.nombre, a.business_id,
-               COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
-        FROM agrupaciones a
-        WHERE a.business_id = $1
-          AND NOT EXISTS (
-            SELECT 1
-            FROM division_group_assignments dga
-            JOIN business_divisions bd ON bd.id = dga.division_id
-            WHERE bd.business_id = $1
-              AND dga.group_id = a.id
-          )
-        ORDER BY a.id ASC
-      `;
-
-      const { rows } = await pool.query(sql, [businessId]);
-      return res.json({
-        ok: true,
-        agrupaciones: rows || [],
-        filtered_by_division: false,
-        is_main_division: true,
-      });
-    }
-
-    // ======================
-    // DIVISIÓN (con filtro)
-    // ======================
-    // Seguridad: validar que la división pertenezca al negocio
-    const chk = await pool.query(
-      `SELECT id FROM business_divisions WHERE id = $1 AND business_id = $2 LIMIT 1`,
-      [divisionId, businessId]
+    const { rows } = await pool.query(
+      `SELECT id, nombre,
+              COALESCE(NULLIF(articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
+         FROM agrupaciones
+        WHERE business_id = $1
+        ORDER BY id ASC`,
+      [bizId]
     );
-    if (!chk.rows?.length) {
-      return res.status(404).json({
-        ok: false,
-        error: 'División no encontrada para este negocio',
-      });
-    }
-
-    const sql = `
-      SELECT a.id, a.nombre, a.business_id,
-             COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
-      FROM agrupaciones a
-      JOIN division_group_assignments dga ON dga.group_id = a.id
-      WHERE a.business_id = $1
-        AND dga.division_id = $2
-      ORDER BY a.id ASC
-    `;
-
-    const { rows } = await pool.query(sql, [businessId, divisionId]);
-    return res.json({
-      ok: true,
-      agrupaciones: rows || [],
-      filtered_by_division: true,
-      is_main_division: false,
-      division_id: divisionId,
-    });
+    res.json(rows);
   } catch (e) {
-    console.error('obtenerAgrupaciones error', e);
-    return res.status(500).json({ ok: false, error: 'Error obteniendo agrupaciones' });
+    console.error('obtenerAgrupaciones error:', e);
+    res.status(500).json({ ok: false, error: e.message });
   }
 };
 
