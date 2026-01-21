@@ -93,12 +93,15 @@ const isDiscontinuadosName = (s) => {
 
 // GET /businesses/:businessId/agrupaciones
 exports.obtenerAgrupaciones = async (req, res) => {
+  const client = await pool.connect();
   try {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) {
       return res.status(400).json({ ok: false, error: 'business_id requerido' });
     }
-    const { rows } = await pool.query(
+
+    // 1) Agrupaciones viejas (tal cual)
+    const { rows } = await client.query(
       `SELECT id, nombre,
               COALESCE(NULLIF(articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
          FROM agrupaciones
@@ -106,10 +109,52 @@ exports.obtenerAgrupaciones = async (req, res) => {
         ORDER BY id ASC`,
       [bizId]
     );
-    res.json(rows);
+
+    // 2) Mapa de business_groups por nombre (normalizado)
+    const { rows: bgRows } = await client.query(
+      `SELECT id, name
+         FROM business_groups
+        WHERE business_id = $1`,
+      [bizId]
+    );
+
+    const byName = new Map(
+      (bgRows || []).map(r => [normName(r.name), Number(r.id)])
+    );
+
+    // 3) Enriquecer respuesta con group_id
+    const out = [];
+    for (const g of rows) {
+      const key = normName(g.nombre);
+      let group_id = byName.get(key) ?? null;
+
+      // ✅ autocrear el business_group si falta (para que el modal SIEMPRE tenga group_id)
+      if (!group_id) {
+        try {
+          const ins = await client.query(
+            `INSERT INTO business_groups (business_id, name, created_at, updated_at, status)
+             VALUES ($1, $2, now(), now(), 'active')
+             ON CONFLICT (business_id, name)
+             DO UPDATE SET updated_at = now()
+             RETURNING id`,
+            [bizId, g.nombre]
+          );
+          group_id = Number(ins.rows[0]?.id) || null;
+          if (group_id) byName.set(key, group_id);
+        } catch (_) {
+          group_id = null;
+        }
+      }
+
+      out.push({ ...g, group_id });
+    }
+
+    return res.json(out);
   } catch (e) {
     console.error('obtenerAgrupaciones error:', e);
-    res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 

@@ -366,7 +366,7 @@ exports.assignGroupToDivision = async (req, res) => {
 
     const divisionId = num(req.params.divisionId);
     const groupId = num(req.body?.groupId);
-    
+
     if (!divisionId || !groupId) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'division_id y group_id requeridos' });
@@ -391,7 +391,7 @@ exports.assignGroupToDivision = async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
-    
+
     if (groupRows[0].business_id !== divRows[0].business_id) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'group_business_mismatch' });
@@ -429,7 +429,7 @@ exports.removeGroupFromDivision = async (req, res) => {
 
     const divisionId = num(req.params.divisionId);
     const groupId = num(req.params.groupId);
-    
+
     if (!divisionId || !groupId) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'division_id y group_id requeridos' });
@@ -479,7 +479,7 @@ exports.createDivisionFromGroup = async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
-    
+
     if (groupRows[0].business_id !== businessId) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'group_business_mismatch' });
@@ -514,8 +514,8 @@ exports.createDivisionFromGroup = async (req, res) => {
     );
 
     await client.query('COMMIT');
-    res.status(201).json({ 
-      ok: true, 
+    res.status(201).json({
+      ok: true,
       division: newDivision,
       group: { id: groupId, name: groupRows[0].name }
     });
@@ -578,11 +578,11 @@ exports.getArticlesByDivision = async (req, res) => {
       [groupIds]
     );
 
-    res.json({ 
-      ok: true, 
+    res.json({
+      ok: true,
       division_id: divisionId,
       article_count: articles.length,
-      articles 
+      articles
     });
   } catch (e) {
     console.error('[divisions] getArticlesByDivision error:', e);
@@ -695,33 +695,52 @@ async function moveAgrupacionComplete(req, res) {
   try {
     await client.query('BEGIN');
 
-    // PASO 1: Verificar que el grupo existe en business_groups
-    const checkGroupSql = `
-      SELECT id, business_id, name 
-      FROM business_groups 
-      WHERE id = $1 AND business_id = $2
-    `;
-    
-    const groupCheck = await client.query(checkGroupSql, [agrupacionId, sourceBusinessId]);
-    
-    if (groupCheck.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({
-        ok: false,
-        error: `Grupo ${agrupacionId} no encontrado en negocio ${sourceBusinessId}`,
-      });
+    async function resolveBusinessGroupId(client, { agrupacionId, sourceBusinessId, agrupacionNombre }) {
+      // 1) Intento directo: business_groups por ID
+      let r = await client.query(
+        `SELECT id, name FROM business_groups WHERE id = $1 AND business_id = $2`,
+        [agrupacionId, sourceBusinessId]
+      );
+      if (r.rows.length > 0) return { id: r.rows[0].id, name: r.rows[0].name, created: false };
+
+      // 2) Si me mandaron nombre (opcional), pruebo por nombre
+      if (agrupacionNombre) {
+        const byName = await client.query(
+          `SELECT id, name FROM business_groups WHERE business_id = $1 AND name = $2`,
+          [sourceBusinessId, agrupacionNombre]
+        );
+        if (byName.rows.length > 0) return { id: byName.rows[0].id, name: byName.rows[0].name, created: false };
+      }
+
+      // 3) Fallback: tabla vieja agrupaciones por ID -> nombre
+      const old = await client.query(
+        `SELECT nombre FROM agrupaciones WHERE id = $1 AND business_id = $2`,
+        [agrupacionId, sourceBusinessId]
+      );
+
+      if (old.rows.length === 0) {
+        return null; // no existe ni en nueva ni en vieja
+      }
+
+      const name = old.rows[0].nombre;
+
+      // 4) Buscar en business_groups por name
+      const bg = await client.query(
+        `SELECT id, name FROM business_groups WHERE business_id = $1 AND name = $2`,
+        [sourceBusinessId, name]
+      );
+      if (bg.rows.length > 0) return { id: bg.rows[0].id, name: bg.rows[0].name, created: false };
+
+      // 5) Crear en business_groups si no existe
+      const ins = await client.query(
+        `INSERT INTO business_groups (business_id, name, created_at, updated_at)
+     VALUES ($1, $2, now(), now())
+     RETURNING id, name`,
+        [sourceBusinessId, name]
+      );
+
+      return { id: ins.rows[0].id, name: ins.rows[0].name, created: true };
     }
-
-    const group = groupCheck.rows[0];
-    const groupId = group.id;
-
-    console.log('[moveAgrupacionComplete] ✅ Grupo encontrado:', {
-      id: groupId,
-      name: group.name,
-    });
-
-    let divisionId = targetBusinessId;
-    let createdNewDivision = false;
 
     // PASO 2: Si createNew, crear la división
     if (createNew) {
@@ -871,7 +890,7 @@ module.exports = {
   createDivision: exports.createDivision,
   updateDivision: exports.updateDivision,
   deleteDivision: exports.deleteDivision,
-  moveAgrupacionComplete,  
+  moveAgrupacionComplete,
 
   // Grupos en divisiones
   getGroupsByDivision: exports.getGroupsByDivision,
