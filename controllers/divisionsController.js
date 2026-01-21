@@ -636,8 +636,7 @@ exports.getDivisionStats = async (req, res) => {
 
 async function moveAgrupacionComplete(req, res) {
   try {
-    const businessId = Number(req.body.businessId);
-    const divisionIdRaw = req.body.divisionId; // puede ser null
+    const divisionIdRaw = req.body.divisionId;
     const groupId = Number(req.body.groupId);
 
     const divisionId =
@@ -645,43 +644,40 @@ async function moveAgrupacionComplete(req, res) {
         ? null
         : Number(divisionIdRaw);
 
-    if (!Number.isFinite(businessId) || businessId <= 0) {
-      return res.status(400).json({ ok: false, error: 'businessId inválido' });
-    }
     if (!Number.isFinite(groupId) || groupId <= 0) {
       return res.status(400).json({ ok: false, error: 'groupId inválido' });
     }
-    if (divisionId !== null && (!Number.isFinite(divisionId) || divisionId <= 0)) {
-      return res.status(400).json({ ok: false, error: 'divisionId inválido' });
-    }
 
-    // Principal => quitar asignación (si tu modelo usa "sin row" para principal)
+    // Si vuelve al "Principal" => quitamos asignación
     if (divisionId === null) {
       await pool.query(
         `DELETE FROM division_group_assignments
-         WHERE business_id = $1 AND group_id = $2`,
-        [businessId, groupId]
+         WHERE group_id = $1`,
+        [groupId]
       );
 
-      return res.json({ ok: true, assigned: false, businessId, divisionId: null, groupId });
+      return res.json({ ok: true, assigned: false, groupId });
     }
 
-    // Asignar (idempotente)
+    if (!Number.isFinite(divisionId) || divisionId <= 0) {
+      return res.status(400).json({ ok: false, error: 'divisionId inválido' });
+    }
+
+    // Asignar (si ya existía en otra división, se reemplaza)
     await pool.query(
-      `INSERT INTO division_group_assignments (business_id, division_id, group_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (business_id, group_id)
+      `INSERT INTO division_group_assignments (division_id, group_id)
+       VALUES ($1, $2)
+       ON CONFLICT (group_id)
        DO UPDATE SET division_id = EXCLUDED.division_id`,
-      [businessId, divisionId, groupId]
+      [divisionId, groupId]
     );
 
-    return res.json({ ok: true, assigned: true, businessId, divisionId, groupId });
+    return res.json({ ok: true, assigned: true, divisionId, groupId });
   } catch (e) {
     console.error('moveAgrupacionComplete error', e);
-    return res.status(500).json({ ok: false, error: e.message || 'Error asignando' });
+    res.status(500).json({ ok: false, error: e.message });
   }
 }
-
 
 // ============================================================================
 // EXPORT
