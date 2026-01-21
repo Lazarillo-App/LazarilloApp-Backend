@@ -2,7 +2,6 @@
 const pool = require('../config/db');
 
 /* ========================= Helpers ========================= */
-
 const safeNum = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
@@ -92,128 +91,6 @@ const isDiscontinuadosName = (s) => {
 
 /* ========================= CRUD Agrupaciones ========================= */
 
-async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
-  const specialGroups = [];
-  
-  try {
-    // 1️⃣ Asegurar "Sin Agrupación" (TODO)
-    const todoName = 'Sin Agrupación';
-    
-    // Buscar si ya existe
-    let todoGroupQuery = await pool.query(
-      'SELECT id, name FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2)',
-      [businessId, todoName]
-    );
-    
-    let todoGroupId;
-    
-    if (todoGroupQuery.rows.length === 0) {
-      // Crear el grupo TODO si no existe
-      const createTodo = await pool.query(
-        'INSERT INTO business_groups (business_id, name, created_at) VALUES ($1, $2, NOW()) RETURNING id, name',
-        [businessId, todoName]
-      );
-      todoGroupId = createTodo.rows[0].id;
-      console.log('[ensureSpecialGroups] ✅ Grupo TODO creado:', todoGroupId);
-    } else {
-      todoGroupId = todoGroupQuery.rows[0].id;
-      console.log('[ensureSpecialGroups] ℹ️ Grupo TODO ya existe:', todoGroupId);
-    }
-    
-    // Asignar TODO a la división si es secundaria
-    if (divisionId && !isMainDivision) {
-      await pool.query(`
-        INSERT INTO division_group_assignments (division_id, group_id, created_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (division_id, group_id) DO NOTHING
-      `, [divisionId, todoGroupId]);
-      
-      console.log(`[ensureSpecialGroups] ✅ Grupo TODO asignado a división ${divisionId}`);
-    }
-    
-    // Obtener artículos sin agrupar para este grupo
-    const todoArticlesQuery = await pool.query(`
-      SELECT a.id, a.nombre, a.precio, a.costo,
-             COALESCE(cat.categoria, 'Sin categoría') as categoria,
-             COALESCE(cat.subrubro, 'Sin subrubro') as subrubro
-      FROM app_articles a
-      LEFT JOIN articulo_categorias cat ON cat.articulo_id = a.id
-      WHERE a.business_id = $1
-        AND NOT EXISTS (
-          SELECT 1 FROM article_groups ag
-          WHERE ag.article_id = a.id
-            AND ag.group_id != $2
-        )
-      ORDER BY a.nombre
-    `, [businessId, todoGroupId]);
-    
-    specialGroups.push({
-      id: todoGroupId,
-      group_id: todoGroupId,
-      nombre: todoName,
-      articulos: todoArticlesQuery.rows,
-    });
-    
-    // 2️⃣ Asegurar "Discontinuados"
-    const discName = 'Discontinuados';
-    
-    let discGroupQuery = await pool.query(
-      'SELECT id, name FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2)',
-      [businessId, discName]
-    );
-    
-    let discGroupId;
-    
-    if (discGroupQuery.rows.length === 0) {
-      const createDisc = await pool.query(
-        'INSERT INTO business_groups (business_id, name, created_at) VALUES ($1, $2, NOW()) RETURNING id, name',
-        [businessId, discName]
-      );
-      discGroupId = createDisc.rows[0].id;
-      console.log('[ensureSpecialGroups] ✅ Grupo Discontinuados creado:', discGroupId);
-    } else {
-      discGroupId = discGroupQuery.rows[0].id;
-      console.log('[ensureSpecialGroups] ℹ️ Grupo Discontinuados ya existe:', discGroupId);
-    }
-    
-    // Asignar Discontinuados a la división si es secundaria
-    if (divisionId && !isMainDivision) {
-      await pool.query(`
-        INSERT INTO division_group_assignments (division_id, group_id, created_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (division_id, group_id) DO NOTHING
-      `, [divisionId, discGroupId]);
-      
-      console.log(`[ensureSpecialGroups] ✅ Grupo Discontinuados asignado a división ${divisionId}`);
-    }
-    
-    // Obtener artículos discontinuados
-    const discArticlesQuery = await pool.query(`
-      SELECT a.id, a.nombre, a.precio, a.costo,
-             COALESCE(cat.categoria, 'Sin categoría') as categoria,
-             COALESCE(cat.subrubro, 'Sin subrubro') as subrubro
-      FROM article_groups ag
-      JOIN app_articles a ON a.id = ag.article_id
-      LEFT JOIN articulo_categorias cat ON cat.articulo_id = a.id
-      WHERE ag.group_id = $1
-        AND a.business_id = $2
-      ORDER BY a.nombre
-    `, [discGroupId, businessId]);
-    
-    specialGroups.push({
-      id: discGroupId,
-      group_id: discGroupId,
-      nombre: discName,
-      articulos: discArticlesQuery.rows,
-    });
-    
-  } catch (error) {
-    console.error('[ensureSpecialGroups] ❌ Error:', error);
-  }
-  
-  return specialGroups;
-}
-
 /**
  * GET /businesses/:id/agrupaciones
  * ACTUALIZADO: Soporta filtrado por división
@@ -224,7 +101,7 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
 exports.obtenerAgrupaciones = async (req, res) => {
   const businessId = req.params.id;
   const divisionId = req.headers['x-division-id']; // 🆕 Division activa
-
+  
   console.log('[obtenerAgrupaciones] 📦 Request:', {
     businessId,
     divisionId: divisionId || 'ninguna (principal)',
@@ -233,13 +110,13 @@ exports.obtenerAgrupaciones = async (req, res) => {
   try {
     // 1. Determinar si es división principal o secundaria
     let isMainDivision = true;
-
+    
     if (divisionId) {
       const divCheck = await pool.query(
         'SELECT is_main FROM business_divisions WHERE id = $1 AND business_id = $2',
         [divisionId, businessId]
       );
-
+      
       if (divCheck.rows.length > 0) {
         isMainDivision = divCheck.rows[0].is_main;
       }
@@ -265,7 +142,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
         ORDER BY bg.name
       `;
       groupsParams = [businessId];
-
+      
       console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL (excluye asignados)');
     } else {
       // SECUNDARIA: Solo grupos asignados a esta división
@@ -278,7 +155,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
         ORDER BY bg.name
       `;
       groupsParams = [businessId, divisionId];
-
+      
       console.log('[obtenerAgrupaciones] 📁 Filtrando para división:', divisionId);
     }
 
@@ -321,7 +198,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
     // 4. Asegurar que existan "Sin Agrupación" y "Discontinuados"
     // Estos son independientes por división
     const specialGroups = await ensureSpecialGroups(businessId, divisionId, isMainDivision);
-
+    
     return res.json({
       ok: true,
       agrupaciones: [...agrupaciones, ...specialGroups],
