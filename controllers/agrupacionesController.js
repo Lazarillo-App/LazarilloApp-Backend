@@ -277,141 +277,73 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
 // ============================================================================
 // GET /businesses/:businessId/agrupaciones
 // ============================================================================
-exports.obtenerAgrupaciones = async (req, res) => {
-  const businessId = req.params.businessId || getBusinessId(req);
-  const divisionId = req.headers['x-division-id'];
-  
-  console.log('[obtenerAgrupaciones] 📦 Request:', {
-    businessId,
-    divisionId: divisionId || 'ninguna (principal)',
-  });
 
+exports.obtenerAgrupaciones = async (req, res) => {
   try {
-    if (!Number.isFinite(Number(businessId))) {
+    const bizId = getBusinessId(req);
+    const divisionId = req.headers['x-division-id']; // 🆕 Header de división activa
+
+    if (!Number.isFinite(bizId)) {
       return res.status(400).json({ ok: false, error: 'business_id requerido' });
     }
 
-    // 1. Determinar si es división principal o secundaria
-    let isMainDivision = true;
-    
-    if (divisionId) {
-      const divCheck = await pool.query(
-        'SELECT parent_id FROM app_businesses WHERE id = $1',
-        [divisionId]
-      );
-      
-      if (divCheck.rows.length > 0) {
-        isMainDivision = divCheck.rows[0].parent_id === null;
-      }
-    }
+    console.log('[obtenerAgrupaciones] 📦 Request:', {
+      businessId: bizId,
+      divisionId: divisionId || 'principal',
+    });
 
-    // 2. Obtener grupos filtrados según división
-    let groupsQuery;
-    let groupsParams;
+    let query;
+    let params;
 
-    if (!divisionId || isMainDivision) {
-      groupsQuery = `
-        SELECT DISTINCT bg.id, bg.name, bg.business_id, bg.created_at
-        FROM business_groups bg
-        WHERE bg.business_id = $1
-          AND bg.id NOT IN (
+    if (!divisionId) {
+      // 🏠 PRINCIPAL: Mostrar agrupaciones NO asignadas a ninguna división
+      query = `
+        SELECT DISTINCT
+          a.id, 
+          a.nombre,
+          a.business_id,
+          COALESCE(NULLIF(a.articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
+        FROM agrupaciones a
+        WHERE a.business_id = $1
+          AND a.id NOT IN (
             SELECT dga.group_id 
             FROM division_group_assignments dga
-            JOIN app_businesses b ON b.id = dga.division_id
-            WHERE b.parent_id = $1
+            INNER JOIN app_businesses b ON b.id = dga.division_id
+            WHERE b.parent_id = $1 OR b.id IN (
+              SELECT id FROM app_businesses WHERE parent_id = $1
+            )
           )
-        ORDER BY bg.name
+        ORDER BY a.id ASC
       `;
-      groupsParams = [businessId];
+      params = [bizId];
+      console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL (no asignadas)');
+
     } else {
-      groupsQuery = `
-        SELECT DISTINCT bg.id, bg.name, bg.business_id, bg.created_at
-        FROM business_groups bg
-        JOIN division_group_assignments dga ON dga.group_id = bg.id
-        WHERE bg.business_id = $1
+      // 📁 DIVISIÓN: Mostrar solo agrupaciones asignadas a esta división
+      query = `
+        SELECT DISTINCT
+          a.id, 
+          a.nombre,
+          a.business_id,
+          COALESCE(NULLIF(a.articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
+        FROM agrupaciones a
+        INNER JOIN division_group_assignments dga ON dga.group_id = a.id
+        WHERE a.business_id = $1
           AND dga.division_id = $2
-        ORDER BY bg.name
+        ORDER BY a.id ASC
       `;
-      groupsParams = [businessId, divisionId];
+      params = [bizId, divisionId];
+      console.log('[obtenerAgrupaciones] 📁 Filtrando para división:', divisionId);
     }
 
-    const groupsResult = await pool.query(groupsQuery, groupsParams);
-    const groups = groupsResult.rows;
+    const { rows } = await pool.query(query, params);
 
-    console.log('[obtenerAgrupaciones] ✅ Grupos encontrados:', groups.length);
+    console.log('[obtenerAgrupaciones] ✅ Grupos encontrados:', rows.length);
 
-    // 3. Para cada grupo, obtener sus artículos
-    const agrupaciones = [];
-    
-    // ✅ Usar Set para evitar duplicados por ID
-    const seenIds = new Set();
-
-    for (const group of groups) {
-      // ✅ Saltar si ya vimos este ID
-      if (seenIds.has(group.id)) {
-        console.warn('[obtenerAgrupaciones] ⚠️ ID duplicado encontrado:', group.id);
-        continue;
-      }
-      seenIds.add(group.id);
-      
-      const articlesQuery = `
-        SELECT 
-          a.id,
-          a.name AS nombre,
-          a.price AS precio,
-          a.costo,
-          COALESCE(c.nombre, 'Sin categoría') as categoria,
-          COALESCE(s.nombre, 'Sin subrubro') as subrubro
-        FROM article_groups ag
-        JOIN app_articles a ON a.id = ag.article_id
-        LEFT JOIN categorias c ON c.id = a.categoria_id
-        LEFT JOIN subrubros s ON s.id = a.subrubro_id
-        WHERE ag.group_id = $1
-          AND a.business_id = $2
-        ORDER BY a.name
-      `;
-
-      const articlesResult = await pool.query(articlesQuery, [group.id, businessId]);
-
-      agrupaciones.push({
-        id: group.id,
-        group_id: group.id,
-        nombre: group.name,
-        articulos: articlesResult.rows,
-      });
-    }
-
-    // 4. Asegurar que existan "Sin Agrupación" y "Discontinuados"
-    const specialGroups = await ensureSpecialGroups(businessId, divisionId, isMainDivision);
-    
-    // ✅ Filtrar duplicados de grupos especiales también
-    const allGroups = [...agrupaciones, ...specialGroups];
-    const uniqueGroups = [];
-    const seenGroupIds = new Set();
-    
-    for (const g of allGroups) {
-      if (!seenGroupIds.has(g.id)) {
-        seenGroupIds.add(g.id);
-        uniqueGroups.push(g);
-      }
-    }
-    
-    console.log('[obtenerAgrupaciones] ✅ Total grupos únicos:', uniqueGroups.length);
-    
-    return res.json({
-      ok: true,
-      agrupaciones: uniqueGroups,
-      filtered_by_division: !!divisionId,
-      is_main_division: isMainDivision,
-      division_id: divisionId || null,
-    });
-
-  } catch (error) {
-    console.error('[obtenerAgrupaciones] ❌ Error:', error);
-    return res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
+    res.json(rows);
+  } catch (e) {
+    console.error('obtenerAgrupaciones error:', e);
+    res.status(500).json({ ok: false, error: e.message });
   }
 };
 

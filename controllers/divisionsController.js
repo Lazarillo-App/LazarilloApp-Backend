@@ -866,6 +866,129 @@ async function moveAgrupacionComplete(req, res) {
   }
 }
 
+/**
+ * POST /api/divisions/:divisionId/assign-agrupacion
+ * Asigna una agrupación a un subnegocio (filtrado visual, no mover datos)
+ * Body: { agrupacionId: number }
+ */
+exports.assignAgrupacionToDivision = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const divisionId = num(req.params.divisionId);
+    const { agrupacionId } = req.body;
+    
+    if (!divisionId || !agrupacionId) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'division_id y agrupacionId requeridos' 
+      });
+    }
+    
+    await client.query('BEGIN');
+    
+    // 1. Verificar que la división existe
+    const divCheck = await client.query(
+      `SELECT id, name, parent_id FROM app_businesses WHERE id = $1`,
+      [divisionId]
+    );
+    
+    if (divCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'division_not_found' });
+    }
+    
+    const division = divCheck.rows[0];
+    const mainBusinessId = division.parent_id || division.id;
+    
+    // 2. Verificar que la agrupación existe y pertenece al negocio principal
+    const agrupCheck = await client.query(
+      `SELECT id, nombre, business_id FROM agrupaciones WHERE id = $1 AND business_id = $2`,
+      [agrupacionId, mainBusinessId]
+    );
+    
+    if (agrupCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'agrupacion_not_found_or_wrong_business' 
+      });
+    }
+    
+    const agrupacion = agrupCheck.rows[0];
+    
+    // 3. Crear asignación (INSERT IGNORE si ya existe)
+    await client.query(`
+      INSERT INTO division_group_assignments (division_id, group_id)
+      VALUES ($1, $2)
+      ON CONFLICT (division_id, group_id) DO NOTHING
+    `, [divisionId, agrupacionId]);
+    
+    await client.query('COMMIT');
+    
+    console.log(`[divisions] ✅ Agrupación "${agrupacion.nombre}" asignada a "${division.name}"`);
+    
+    res.json({
+      ok: true,
+      message: 'Agrupación asignada correctamente',
+      agrupacion: {
+        id: agrupacionId,
+        nombre: agrupacion.nombre,
+      },
+      division: {
+        id: divisionId,
+        name: division.name,
+      },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] assignAgrupacionToDivision', error);
+    res.status(500).json({ 
+      ok: false, 
+      error: 'error_assigning_agrupacion', 
+      details: error.message 
+    });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * DELETE /api/divisions/:divisionId/agrupaciones/:agrupacionId
+ * Desasigna una agrupación de un subnegocio (vuelve a principal)
+ */
+exports.unassignAgrupacionFromDivision = async (req, res) => {
+  try {
+    const divisionId = num(req.params.divisionId);
+    const agrupacionId = num(req.params.agrupacionId);
+    
+    if (!divisionId || !agrupacionId) {
+      return res.status(400).json({ ok: false, error: 'invalid_params' });
+    }
+    
+    const result = await pool.query(`
+      DELETE FROM division_group_assignments
+      WHERE division_id = $1 AND group_id = $2
+      RETURNING *
+    `, [divisionId, agrupacionId]);
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'assignment_not_found' 
+      });
+    }
+    
+    res.json({
+      ok: true,
+      message: 'Agrupación desasignada (vuelve a principal)',
+    });
+  } catch (error) {
+    console.error('[divisions] unassignAgrupacionFromDivision', error);
+    res.status(500).json({ ok: false, error: 'error_unassigning' });
+  }
+};
+
 // ============================================================================
 // EXPORT
 // ============================================================================
