@@ -695,6 +695,51 @@ async function moveAgrupacionComplete(req, res) {
   try {
     await client.query('BEGIN');
 
+    // 🆕 PASO 0: Buscar el group_id correcto en business_groups
+    // agrupacionId puede ser el id de la tabla 'agrupaciones' (vieja)
+    // o el id de 'business_groups' (nueva). Intentamos ambas.
+    
+    let groupId = null;
+    
+    // Primero, verificar si agrupacionId es directamente un business_groups.id
+    const checkGroupSql = `
+      SELECT id FROM business_groups 
+      WHERE id = $1 AND business_id = $2
+    `;
+    
+    const groupCheck = await client.query(checkGroupSql, [agrupacionId, sourceBusinessId]);
+    
+    if (groupCheck.rows.length > 0) {
+      // Es un group_id válido directamente
+      groupId = agrupacionId;
+      console.log('[moveAgrupacionComplete] ✅ group_id válido:', groupId);
+    } else {
+      // Puede ser un ID de la tabla vieja 'agrupaciones'
+      // Buscar en business_groups por nombre o relación
+      const findGroupSql = `
+        SELECT id FROM business_groups 
+        WHERE business_id = $1 
+        AND (
+          source_agrupacion_id = $2 
+          OR id = $2
+        )
+        LIMIT 1
+      `;
+      
+      const groupSearch = await client.query(findGroupSql, [sourceBusinessId, agrupacionId]);
+      
+      if (groupSearch.rows.length > 0) {
+        groupId = groupSearch.rows[0].id;
+        console.log('[moveAgrupacionComplete] ✅ group_id encontrado por búsqueda:', groupId);
+      } else {
+        await client.query('ROLLBACK');
+        return res.status(404).json({
+          ok: false,
+          error: `No se encontró el grupo con ID ${agrupacionId} en el negocio ${sourceBusinessId}`,
+        });
+      }
+    }
+
     let divisionId = targetBusinessId;
     let createdNewDivision = false;
 
@@ -769,7 +814,7 @@ async function moveAgrupacionComplete(req, res) {
 
     const assignmentCheck = await client.query(checkAssignmentSql, [
       divisionId,
-      agrupacionId,
+      groupId,  // 🆕 Usar groupId correcto
     ]);
 
     let groupAssigned = false;
@@ -782,7 +827,7 @@ async function moveAgrupacionComplete(req, res) {
         VALUES ($1, $2, now())
       `;
 
-      await client.query(assignGroupSql, [divisionId, agrupacionId]);
+      await client.query(assignGroupSql, [divisionId, groupId]);  // 🆕 Usar groupId correcto
       groupAssigned = true;
 
       console.log('[moveAgrupacionComplete] ✅ Grupo asignado');
@@ -797,13 +842,14 @@ async function moveAgrupacionComplete(req, res) {
       WHERE group_id = $1
     `;
 
-    const articlesCount = await client.query(countArticlesSql, [agrupacionId]);
+    const articlesCount = await client.query(countArticlesSql, [groupId]);  // 🆕 Usar groupId correcto
     const articlesMoved = parseInt(articlesCount.rows[0]?.count || 0);
 
     await client.query('COMMIT');
 
     console.log('[moveAgrupacionComplete] ✅ Completado:', {
       divisionId,
+      groupId,
       createdNewDivision,
       groupAssigned,
       articlesMoved,
