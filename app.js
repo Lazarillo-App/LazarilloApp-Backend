@@ -113,12 +113,13 @@ app.use('/api', authRequired, loadActiveBusiness);
 app.use('/api/insumos', insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/branches', branchesRoutes);
-app.use('/api/divisions', divisionsRoutes); 
+app.use('/api/divisions', divisionsRoutes);
 
-// histórico: rutas bajo :businessId
-app.use('/api/businesses', require('./routes/businessRoutes'));
-app.use('/api/businesses/:businessId', agrupacionesRoutes);
+// ✅ businesses (una sola vez)
 app.use('/api/businesses', businessRoutes);
+
+// ✅ rutas que dependen de :businessId
+app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
 // 🆕 Importación CSV (con auth ya aplicado por guard global)
 app.use('/api/businesses', salesImportRoutes);
