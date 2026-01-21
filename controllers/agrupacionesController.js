@@ -101,6 +101,9 @@ const isDiscontinuadosName = (s) => {
  * @returns {Promise<Array>} Array con los grupos especiales creados/encontrados
  */
 
+// ============================================================================
+// HELPER: ensureSpecialGroups (CON PREVENCIÓN DE DUPLICADOS)
+// ============================================================================
 async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
   const specialGroups = [];
   
@@ -108,21 +111,47 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
     // 1️⃣ Asegurar "Sin Agrupación" (TODO)
     const todoName = 'Sin Agrupación';
     
-    let todoGroupQuery = await pool.query(
-      'SELECT id, name FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2)',
-      [businessId, todoName]
-    );
+    // ✅ Buscar TODOS los grupos con nombre similar (case-insensitive)
+    let todoGroupQuery = await pool.query(`
+      SELECT id, name 
+      FROM business_groups 
+      WHERE business_id = $1 
+        AND (
+          LOWER(name) = LOWER($2)
+          OR LOWER(name) = 'sin agrupacion'
+          OR LOWER(name) = 'todo'
+        )
+      LIMIT 1
+    `, [businessId, todoName]);
     
     let todoGroupId;
     
     if (todoGroupQuery.rows.length === 0) {
-      const createTodo = await pool.query(
-        'INSERT INTO business_groups (business_id, name, created_at) VALUES ($1, $2, NOW()) RETURNING id, name',
-        [businessId, todoName]
-      );
-      todoGroupId = createTodo.rows[0].id;
+      // Crear solo si NO existe
+      const createTodo = await pool.query(`
+        INSERT INTO business_groups (business_id, name, created_at) 
+        VALUES ($1, $2, NOW()) 
+        ON CONFLICT DO NOTHING
+        RETURNING id, name
+      `, [businessId, todoName]);
+      
+      if (createTodo.rows.length > 0) {
+        todoGroupId = createTodo.rows[0].id;
+      } else {
+        // Si falló el INSERT (por race condition), buscar de nuevo
+        const retry = await pool.query(
+          'SELECT id FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+          [businessId, todoName]
+        );
+        todoGroupId = retry.rows[0]?.id;
+      }
     } else {
       todoGroupId = todoGroupQuery.rows[0].id;
+    }
+    
+    if (!todoGroupId) {
+      console.error('[ensureSpecialGroups] ❌ No se pudo crear/obtener TODO group');
+      return specialGroups;
     }
     
     // Asignar TODO a la división si es secundaria
@@ -134,7 +163,7 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
       `, [divisionId, todoGroupId]);
     }
     
-    // ✅ CORRECCIÓN: Obtener artículos sin agrupar con JOINs correctos
+    // Obtener artículos sin agrupar
     const todoArticlesQuery = await pool.query(`
       SELECT 
         a.id,
@@ -165,21 +194,43 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
     // 2️⃣ Asegurar "Discontinuados"
     const discName = 'Discontinuados';
     
-    let discGroupQuery = await pool.query(
-      'SELECT id, name FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2)',
-      [businessId, discName]
-    );
+    let discGroupQuery = await pool.query(`
+      SELECT id, name 
+      FROM business_groups 
+      WHERE business_id = $1 
+        AND (
+          LOWER(name) = LOWER($2)
+          OR LOWER(name) = 'descontinuados'
+        )
+      LIMIT 1
+    `, [businessId, discName]);
     
     let discGroupId;
     
     if (discGroupQuery.rows.length === 0) {
-      const createDisc = await pool.query(
-        'INSERT INTO business_groups (business_id, name, created_at) VALUES ($1, $2, NOW()) RETURNING id, name',
-        [businessId, discName]
-      );
-      discGroupId = createDisc.rows[0].id;
+      const createDisc = await pool.query(`
+        INSERT INTO business_groups (business_id, name, created_at) 
+        VALUES ($1, $2, NOW())
+        ON CONFLICT DO NOTHING
+        RETURNING id, name
+      `, [businessId, discName]);
+      
+      if (createDisc.rows.length > 0) {
+        discGroupId = createDisc.rows[0].id;
+      } else {
+        const retry = await pool.query(
+          'SELECT id FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+          [businessId, discName]
+        );
+        discGroupId = retry.rows[0]?.id;
+      }
     } else {
       discGroupId = discGroupQuery.rows[0].id;
+    }
+    
+    if (!discGroupId) {
+      console.error('[ensureSpecialGroups] ❌ No se pudo crear/obtener Discontinuados group');
+      return specialGroups;
     }
     
     // Asignar Discontinuados a la división si es secundaria
@@ -191,7 +242,7 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
       `, [divisionId, discGroupId]);
     }
     
-    // ✅ CORRECCIÓN: Obtener artículos discontinuados con JOINs correctos
+    // Obtener artículos discontinuados
     const discArticlesQuery = await pool.query(`
       SELECT 
         a.id,
@@ -272,8 +323,6 @@ exports.obtenerAgrupaciones = async (req, res) => {
         ORDER BY bg.name
       `;
       groupsParams = [businessId];
-      
-      console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL');
     } else {
       groupsQuery = `
         SELECT DISTINCT bg.id, bg.name, bg.business_id, bg.created_at
@@ -284,8 +333,6 @@ exports.obtenerAgrupaciones = async (req, res) => {
         ORDER BY bg.name
       `;
       groupsParams = [businessId, divisionId];
-      
-      console.log('[obtenerAgrupaciones] 📁 Filtrando para división:', divisionId);
     }
 
     const groupsResult = await pool.query(groupsQuery, groupsParams);
@@ -293,11 +340,20 @@ exports.obtenerAgrupaciones = async (req, res) => {
 
     console.log('[obtenerAgrupaciones] ✅ Grupos encontrados:', groups.length);
 
-    // 3. Para cada grupo, obtener sus artículos con JOINs correctos
+    // 3. Para cada grupo, obtener sus artículos
     const agrupaciones = [];
+    
+    // ✅ Usar Set para evitar duplicados por ID
+    const seenIds = new Set();
 
     for (const group of groups) {
-      // ✅ CORRECCIÓN: JOINs con categorias y subrubros
+      // ✅ Saltar si ya vimos este ID
+      if (seenIds.has(group.id)) {
+        console.warn('[obtenerAgrupaciones] ⚠️ ID duplicado encontrado:', group.id);
+        continue;
+      }
+      seenIds.add(group.id);
+      
       const articlesQuery = `
         SELECT 
           a.id,
@@ -328,9 +384,23 @@ exports.obtenerAgrupaciones = async (req, res) => {
     // 4. Asegurar que existan "Sin Agrupación" y "Discontinuados"
     const specialGroups = await ensureSpecialGroups(businessId, divisionId, isMainDivision);
     
+    // ✅ Filtrar duplicados de grupos especiales también
+    const allGroups = [...agrupaciones, ...specialGroups];
+    const uniqueGroups = [];
+    const seenGroupIds = new Set();
+    
+    for (const g of allGroups) {
+      if (!seenGroupIds.has(g.id)) {
+        seenGroupIds.add(g.id);
+        uniqueGroups.push(g);
+      }
+    }
+    
+    console.log('[obtenerAgrupaciones] ✅ Total grupos únicos:', uniqueGroups.length);
+    
     return res.json({
       ok: true,
-      agrupaciones: [...agrupaciones, ...specialGroups],
+      agrupaciones: uniqueGroups,
       filtered_by_division: !!divisionId,
       is_main_division: isMainDivision,
       division_id: divisionId || null,
