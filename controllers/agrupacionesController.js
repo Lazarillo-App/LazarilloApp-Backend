@@ -91,15 +91,6 @@ const isDiscontinuadosName = (s) => {
 };
 
 /* ========================= CRUD Agrupaciones ========================= */
-/**
- * Asegura que existan los grupos especiales "Sin Agrupación" y "Discontinuados"
- * para un negocio y división específicos
- * 
- * @param {number} businessId - ID del negocio principal
- * @param {number|null} divisionId - ID de la división (null = principal)
- * @param {boolean} isMainDivision - true si es división principal
- * @returns {Promise<Array>} Array con los grupos especiales creados/encontrados
- */
 
 async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
   const specialGroups = [];
@@ -232,8 +223,8 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
  */
 exports.obtenerAgrupaciones = async (req, res) => {
   const businessId = req.params.id;
-  const divisionId = req.headers['x-division-id']; // 🆕 División activa
-  
+  const divisionId = req.headers['x-division-id']; // 🆕 Division activa
+
   console.log('[obtenerAgrupaciones] 📦 Request:', {
     businessId,
     divisionId: divisionId || 'ninguna (principal)',
@@ -242,16 +233,15 @@ exports.obtenerAgrupaciones = async (req, res) => {
   try {
     // 1. Determinar si es división principal o secundaria
     let isMainDivision = true;
-    
+
     if (divisionId) {
       const divCheck = await pool.query(
-        'SELECT parent_id FROM app_businesses WHERE id = $1',
-        [divisionId]
+        'SELECT is_main FROM business_divisions WHERE id = $1 AND business_id = $2',
+        [divisionId, businessId]
       );
-      
+
       if (divCheck.rows.length > 0) {
-        // Si tiene parent_id, es división secundaria
-        isMainDivision = divCheck.rows[0].parent_id === null;
+        isMainDivision = divCheck.rows[0].is_main;
       }
     }
 
@@ -268,13 +258,14 @@ exports.obtenerAgrupaciones = async (req, res) => {
           AND bg.id NOT IN (
             SELECT dga.group_id 
             FROM division_group_assignments dga
-            JOIN app_businesses b ON b.id = dga.division_id
-            WHERE b.parent_id = $1
+            JOIN business_divisions bd ON bd.id = dga.division_id
+            WHERE bd.business_id = $1 
+              AND bd.is_main = false
           )
         ORDER BY bg.name
       `;
       groupsParams = [businessId];
-      
+
       console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL (excluye asignados)');
     } else {
       // SECUNDARIA: Solo grupos asignados a esta división
@@ -287,7 +278,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
         ORDER BY bg.name
       `;
       groupsParams = [businessId, divisionId];
-      
+
       console.log('[obtenerAgrupaciones] 📁 Filtrando para división:', divisionId);
     }
 
@@ -328,8 +319,9 @@ exports.obtenerAgrupaciones = async (req, res) => {
     }
 
     // 4. Asegurar que existan "Sin Agrupación" y "Discontinuados"
+    // Estos son independientes por división
     const specialGroups = await ensureSpecialGroups(businessId, divisionId, isMainDivision);
-    
+
     return res.json({
       ok: true,
       agrupaciones: [...agrupaciones, ...specialGroups],
@@ -345,7 +337,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
       error: error.message,
     });
   }
-};
+}
 
 // POST /businesses/:businessId/agrupaciones
 exports.crearAgrupacion = async (req, res) => {
