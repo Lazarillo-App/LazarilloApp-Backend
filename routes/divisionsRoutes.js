@@ -22,6 +22,8 @@ router.get('/business/:businessId/main', ctrl.getMainDivision);
 router.post('/', ctrl.createDivision);
 
 // Crear división desde un grupo existente
+console.log('moveAgrupacionComplete typeof =', typeof ctrl.moveAgrupacionComplete);
+
 router.post('/create-from-group', ctrl.createDivisionFromGroup);
 
 // Obtener una división específica

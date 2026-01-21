@@ -280,70 +280,84 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
 
 exports.obtenerAgrupaciones = async (req, res) => {
   try {
-    const bizId = getBusinessId(req);
-    const divisionId = req.headers['x-division-id']; // 🆕 Header de división activa
-
-    if (!Number.isFinite(bizId)) {
-      return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    const businessId = num(req.params.businessId);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'businessId inválido' });
     }
 
-    console.log('[obtenerAgrupaciones] 📦 Request:', {
-      businessId: bizId,
-      divisionId: divisionId || 'principal',
-    });
+    const hdr =
+      req.header('X-Division-Id') ||
+      req.headers['x-division-id'] ||
+      null;
 
-    let query;
-    let params;
+    const divisionId = hdr == null || hdr === '' || hdr === 'null'
+      ? null
+      : num(hdr);
 
+    // ======================
+    // PRINCIPAL (sin división)
+    // ======================
     if (!divisionId) {
-      // 🏠 PRINCIPAL: Mostrar agrupaciones NO asignadas a ninguna división
-      query = `
-        SELECT DISTINCT
-          a.id, 
-          a.nombre,
-          a.business_id,
-          COALESCE(NULLIF(a.articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
+      const sql = `
+        SELECT a.id, a.nombre, a.business_id,
+               COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
         FROM agrupaciones a
         WHERE a.business_id = $1
-          AND a.id NOT IN (
-            SELECT dga.group_id 
+          AND NOT EXISTS (
+            SELECT 1
             FROM division_group_assignments dga
-            INNER JOIN app_businesses b ON b.id = dga.division_id
-            WHERE b.parent_id = $1 OR b.id IN (
-              SELECT id FROM app_businesses WHERE parent_id = $1
-            )
+            JOIN business_divisions bd ON bd.id = dga.division_id
+            WHERE bd.business_id = $1
+              AND dga.group_id = a.id
           )
         ORDER BY a.id ASC
       `;
-      params = [bizId];
-      console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL (no asignadas)');
 
-    } else {
-      // 📁 DIVISIÓN: Mostrar solo agrupaciones asignadas a esta división
-      query = `
-        SELECT DISTINCT
-          a.id, 
-          a.nombre,
-          a.business_id,
-          COALESCE(NULLIF(a.articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
-        FROM agrupaciones a
-        INNER JOIN division_group_assignments dga ON dga.group_id = a.id
-        WHERE a.business_id = $1
-          AND dga.division_id = $2
-        ORDER BY a.id ASC
-      `;
-      params = [bizId, divisionId];
-      console.log('[obtenerAgrupaciones] 📁 Filtrando para división:', divisionId);
+      const { rows } = await pool.query(sql, [businessId]);
+      return res.json({
+        ok: true,
+        agrupaciones: rows || [],
+        filtered_by_division: false,
+        is_main_division: true,
+      });
     }
 
-    const { rows } = await pool.query(query, params);
+    // ======================
+    // DIVISIÓN (con filtro)
+    // ======================
+    // Seguridad: validar que la división pertenezca al negocio
+    const chk = await pool.query(
+      `SELECT id FROM business_divisions WHERE id = $1 AND business_id = $2 LIMIT 1`,
+      [divisionId, businessId]
+    );
+    if (!chk.rows?.length) {
+      return res.status(404).json({
+        ok: false,
+        error: 'División no encontrada para este negocio',
+      });
+    }
 
-    console.log('[obtenerAgrupaciones] ✅ Grupos encontrados:', rows.length);
+    const sql = `
+      SELECT a.id, a.nombre, a.business_id,
+             COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
+      FROM agrupaciones a
+      JOIN division_group_assignments dga ON dga.group_id = a.id
+      WHERE a.business_id = $1
+        AND dga.division_id = $2
+      ORDER BY a.id ASC
+    `;
 
-    res.json(rows);
+    const { rows } = await pool.query(sql, [businessId, divisionId]);
+    return res.json({
+      ok: true,
+      agrupaciones: rows || [],
+      filtered_by_division: true,
+      is_main_division: false,
+      division_id: divisionId,
+    });
   } catch (e) {
-    console.error('obtenerAgrupaciones error:', e);
-    res.status(500).json({ ok: false, error: e.message });
+    console.error('obtenerAgrupaciones error', e);
+    return res.status(500).json({ ok: false, error: 'Error obteniendo agrupaciones' });
   }
 };
 
