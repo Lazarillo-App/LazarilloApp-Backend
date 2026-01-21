@@ -101,9 +101,6 @@ const isDiscontinuadosName = (s) => {
  * @returns {Promise<Array>} Array con los grupos especiales creados/encontrados
  */
 
-// ============================================================================
-// HELPER: ensureSpecialGroups
-// ============================================================================
 async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
   const specialGroups = [];
   
@@ -137,20 +134,25 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
       `, [divisionId, todoGroupId]);
     }
     
-    // Obtener artículos sin agrupar
+    // ✅ CORRECCIÓN: Obtener artículos sin agrupar con JOINs correctos
     const todoArticlesQuery = await pool.query(`
-      SELECT a.id, a.nombre, a.precio, a.costo,
-             COALESCE(cat.categoria, 'Sin categoría') as categoria,
-             COALESCE(cat.subrubro, 'Sin subrubro') as subrubro
+      SELECT 
+        a.id,
+        a.name AS nombre,
+        a.price AS precio,
+        a.costo,
+        COALESCE(c.nombre, 'Sin categoría') as categoria,
+        COALESCE(s.nombre, 'Sin subrubro') as subrubro
       FROM app_articles a
-      LEFT JOIN articulo_categorias cat ON cat.articulo_id = a.id
+      LEFT JOIN categorias c ON c.id = a.categoria_id
+      LEFT JOIN subrubros s ON s.id = a.subrubro_id
       WHERE a.business_id = $1
         AND NOT EXISTS (
           SELECT 1 FROM article_groups ag
           WHERE ag.article_id = a.id
             AND ag.group_id != $2
         )
-      ORDER BY a.nombre
+      ORDER BY a.name
     `, [businessId, todoGroupId]);
     
     specialGroups.push({
@@ -189,17 +191,22 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
       `, [divisionId, discGroupId]);
     }
     
-    // Obtener artículos discontinuados
+    // ✅ CORRECCIÓN: Obtener artículos discontinuados con JOINs correctos
     const discArticlesQuery = await pool.query(`
-      SELECT a.id, a.nombre, a.precio, a.costo,
-             COALESCE(cat.categoria, 'Sin categoría') as categoria,
-             COALESCE(cat.subrubro, 'Sin subrubro') as subrubro
+      SELECT 
+        a.id,
+        a.name AS nombre,
+        a.price AS precio,
+        a.costo,
+        COALESCE(c.nombre, 'Sin categoría') as categoria,
+        COALESCE(s.nombre, 'Sin subrubro') as subrubro
       FROM article_groups ag
       JOIN app_articles a ON a.id = ag.article_id
-      LEFT JOIN articulo_categorias cat ON cat.articulo_id = a.id
+      LEFT JOIN categorias c ON c.id = a.categoria_id
+      LEFT JOIN subrubros s ON s.id = a.subrubro_id
       WHERE ag.group_id = $1
         AND a.business_id = $2
-      ORDER BY a.nombre
+      ORDER BY a.name
     `, [discGroupId, businessId]);
     
     specialGroups.push({
@@ -221,7 +228,7 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
 // ============================================================================
 exports.obtenerAgrupaciones = async (req, res) => {
   const businessId = req.params.businessId || getBusinessId(req);
-  const divisionId = req.headers['x-division-id']; // 🆕 División activa
+  const divisionId = req.headers['x-division-id'];
   
   console.log('[obtenerAgrupaciones] 📦 Request:', {
     businessId,
@@ -243,7 +250,6 @@ exports.obtenerAgrupaciones = async (req, res) => {
       );
       
       if (divCheck.rows.length > 0) {
-        // Si tiene parent_id, es división secundaria
         isMainDivision = divCheck.rows[0].parent_id === null;
       }
     }
@@ -253,7 +259,6 @@ exports.obtenerAgrupaciones = async (req, res) => {
     let groupsParams;
 
     if (!divisionId || isMainDivision) {
-      // PRINCIPAL: Excluir grupos asignados a divisiones secundarias
       groupsQuery = `
         SELECT DISTINCT bg.id, bg.name, bg.business_id, bg.created_at
         FROM business_groups bg
@@ -268,9 +273,8 @@ exports.obtenerAgrupaciones = async (req, res) => {
       `;
       groupsParams = [businessId];
       
-      console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL (excluye asignados)');
+      console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL');
     } else {
-      // SECUNDARIA: Solo grupos asignados a esta división
       groupsQuery = `
         SELECT DISTINCT bg.id, bg.name, bg.business_id, bg.created_at
         FROM business_groups bg
@@ -289,25 +293,26 @@ exports.obtenerAgrupaciones = async (req, res) => {
 
     console.log('[obtenerAgrupaciones] ✅ Grupos encontrados:', groups.length);
 
-    // 3. Para cada grupo, obtener sus artículos
+    // 3. Para cada grupo, obtener sus artículos con JOINs correctos
     const agrupaciones = [];
 
     for (const group of groups) {
-      // Obtener artículos del grupo
+      // ✅ CORRECCIÓN: JOINs con categorias y subrubros
       const articlesQuery = `
         SELECT 
           a.id,
-          a.nombre,
-          a.precio,
+          a.name AS nombre,
+          a.price AS precio,
           a.costo,
-          COALESCE(cat.categoria, 'Sin categoría') as categoria,
-          COALESCE(cat.subrubro, 'Sin subrubro') as subrubro
+          COALESCE(c.nombre, 'Sin categoría') as categoria,
+          COALESCE(s.nombre, 'Sin subrubro') as subrubro
         FROM article_groups ag
         JOIN app_articles a ON a.id = ag.article_id
-        LEFT JOIN articulo_categorias cat ON cat.articulo_id = a.id
+        LEFT JOIN categorias c ON c.id = a.categoria_id
+        LEFT JOIN subrubros s ON s.id = a.subrubro_id
         WHERE ag.group_id = $1
           AND a.business_id = $2
-        ORDER BY a.nombre
+        ORDER BY a.name
       `;
 
       const articlesResult = await pool.query(articlesQuery, [group.id, businessId]);
