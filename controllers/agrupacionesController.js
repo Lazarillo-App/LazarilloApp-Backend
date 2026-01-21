@@ -101,6 +101,9 @@ const isDiscontinuadosName = (s) => {
  * @returns {Promise<Array>} Array con los grupos especiales creados/encontrados
  */
 
+// ============================================================================
+// HELPER: ensureSpecialGroups
+// ============================================================================
 async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
   const specialGroups = [];
   
@@ -108,7 +111,6 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
     // 1️⃣ Asegurar "Sin Agrupación" (TODO)
     const todoName = 'Sin Agrupación';
     
-    // Buscar si ya existe
     let todoGroupQuery = await pool.query(
       'SELECT id, name FROM business_groups WHERE business_id = $1 AND LOWER(name) = LOWER($2)',
       [businessId, todoName]
@@ -117,16 +119,13 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
     let todoGroupId;
     
     if (todoGroupQuery.rows.length === 0) {
-      // Crear el grupo TODO si no existe
       const createTodo = await pool.query(
         'INSERT INTO business_groups (business_id, name, created_at) VALUES ($1, $2, NOW()) RETURNING id, name',
         [businessId, todoName]
       );
       todoGroupId = createTodo.rows[0].id;
-      console.log('[ensureSpecialGroups] ✅ Grupo TODO creado:', todoGroupId);
     } else {
       todoGroupId = todoGroupQuery.rows[0].id;
-      console.log('[ensureSpecialGroups] ℹ️ Grupo TODO ya existe:', todoGroupId);
     }
     
     // Asignar TODO a la división si es secundaria
@@ -136,11 +135,9 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
         VALUES ($1, $2, NOW())
         ON CONFLICT (division_id, group_id) DO NOTHING
       `, [divisionId, todoGroupId]);
-      
-      console.log(`[ensureSpecialGroups] ✅ Grupo TODO asignado a división ${divisionId}`);
     }
     
-    // Obtener artículos sin agrupar para este grupo
+    // Obtener artículos sin agrupar
     const todoArticlesQuery = await pool.query(`
       SELECT a.id, a.nombre, a.precio, a.costo,
              COALESCE(cat.categoria, 'Sin categoría') as categoria,
@@ -179,10 +176,8 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
         [businessId, discName]
       );
       discGroupId = createDisc.rows[0].id;
-      console.log('[ensureSpecialGroups] ✅ Grupo Discontinuados creado:', discGroupId);
     } else {
       discGroupId = discGroupQuery.rows[0].id;
-      console.log('[ensureSpecialGroups] ℹ️ Grupo Discontinuados ya existe:', discGroupId);
     }
     
     // Asignar Discontinuados a la división si es secundaria
@@ -192,8 +187,6 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
         VALUES ($1, $2, NOW())
         ON CONFLICT (division_id, group_id) DO NOTHING
       `, [divisionId, discGroupId]);
-      
-      console.log(`[ensureSpecialGroups] ✅ Grupo Discontinuados asignado a división ${divisionId}`);
     }
     
     // Obtener artículos discontinuados
@@ -223,15 +216,11 @@ async function ensureSpecialGroups(businessId, divisionId, isMainDivision) {
   return specialGroups;
 }
 
-/**
- * GET /businesses/:id/agrupaciones
- * ACTUALIZADO: Soporta filtrado por división
- * 
- * Headers opcionales:
- * - X-Division-Id: ID de la división activa (si hay)
- */
+// ============================================================================
+// GET /businesses/:businessId/agrupaciones
+// ============================================================================
 exports.obtenerAgrupaciones = async (req, res) => {
-  const businessId = req.params.id;
+  const businessId = req.params.businessId || getBusinessId(req);
   const divisionId = req.headers['x-division-id']; // 🆕 División activa
   
   console.log('[obtenerAgrupaciones] 📦 Request:', {
@@ -240,6 +229,10 @@ exports.obtenerAgrupaciones = async (req, res) => {
   });
 
   try {
+    if (!Number.isFinite(Number(businessId))) {
+      return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    }
+
     // 1. Determinar si es división principal o secundaria
     let isMainDivision = true;
     
