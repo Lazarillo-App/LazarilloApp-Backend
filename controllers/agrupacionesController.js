@@ -91,72 +91,130 @@ const isDiscontinuadosName = (s) => {
 
 /* ========================= CRUD Agrupaciones ========================= */
 
-// GET /businesses/:businessId/agrupaciones
+/**
+ * GET /businesses/:id/agrupaciones
+ * ACTUALIZADO: Soporta filtrado por división
+ * 
+ * Headers opcionales:
+ * - X-Division-Id: ID de la división activa (si hay)
+ */
 exports.obtenerAgrupaciones = async (req, res) => {
-  const client = await pool.connect();
+  const businessId = req.params.id;
+  const divisionId = req.headers['x-division-id']; // 🆕 Division activa
+  
+  console.log('[obtenerAgrupaciones] 📦 Request:', {
+    businessId,
+    divisionId: divisionId || 'ninguna (principal)',
+  });
+
   try {
-    const bizId = getBusinessId(req);
-    if (!Number.isFinite(bizId)) {
-      return res.status(400).json({ ok: false, error: 'business_id requerido' });
-    }
-
-    // 1) Agrupaciones viejas (tal cual)
-    const { rows } = await client.query(
-      `SELECT id, nombre,
-              COALESCE(NULLIF(articulos::text, '')::jsonb, '[]'::jsonb) AS articulos
-         FROM agrupaciones
-        WHERE business_id = $1
-        ORDER BY id ASC`,
-      [bizId]
-    );
-
-    // 2) Mapa de business_groups por nombre (normalizado)
-    const { rows: bgRows } = await client.query(
-      `SELECT id, name
-         FROM business_groups
-        WHERE business_id = $1`,
-      [bizId]
-    );
-
-    const byName = new Map(
-      (bgRows || []).map(r => [normName(r.name), Number(r.id)])
-    );
-
-    // 3) Enriquecer respuesta con group_id
-    const out = [];
-    for (const g of rows) {
-      const key = normName(g.nombre);
-      let group_id = byName.get(key) ?? null;
-
-      // ✅ autocrear el business_group si falta (para que el modal SIEMPRE tenga group_id)
-      if (!group_id) {
-        try {
-          const ins = await client.query(
-            `INSERT INTO business_groups (business_id, name, created_at, updated_at, status)
-             VALUES ($1, $2, now(), now(), 'active')
-             ON CONFLICT (business_id, name)
-             DO UPDATE SET updated_at = now()
-             RETURNING id`,
-            [bizId, g.nombre]
-          );
-          group_id = Number(ins.rows[0]?.id) || null;
-          if (group_id) byName.set(key, group_id);
-        } catch (_) {
-          group_id = null;
-        }
+    // 1. Determinar si es división principal o secundaria
+    let isMainDivision = true;
+    
+    if (divisionId) {
+      const divCheck = await pool.query(
+        'SELECT is_main FROM business_divisions WHERE id = $1 AND business_id = $2',
+        [divisionId, businessId]
+      );
+      
+      if (divCheck.rows.length > 0) {
+        isMainDivision = divCheck.rows[0].is_main;
       }
-
-      out.push({ ...g, group_id });
     }
 
-    return res.json(out);
-  } catch (e) {
-    console.error('obtenerAgrupaciones error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    client.release();
+    // 2. Obtener grupos filtrados según división
+    let groupsQuery;
+    let groupsParams;
+
+    if (!divisionId || isMainDivision) {
+      // PRINCIPAL: Excluir grupos asignados a divisiones secundarias
+      groupsQuery = `
+        SELECT DISTINCT bg.id, bg.name, bg.business_id, bg.created_at
+        FROM business_groups bg
+        WHERE bg.business_id = $1
+          AND bg.id NOT IN (
+            SELECT dga.group_id 
+            FROM division_group_assignments dga
+            JOIN business_divisions bd ON bd.id = dga.division_id
+            WHERE bd.business_id = $1 
+              AND bd.is_main = false
+          )
+        ORDER BY bg.name
+      `;
+      groupsParams = [businessId];
+      
+      console.log('[obtenerAgrupaciones] 🏠 Filtrando para PRINCIPAL (excluye asignados)');
+    } else {
+      // SECUNDARIA: Solo grupos asignados a esta división
+      groupsQuery = `
+        SELECT DISTINCT bg.id, bg.name, bg.business_id, bg.created_at
+        FROM business_groups bg
+        JOIN division_group_assignments dga ON dga.group_id = bg.id
+        WHERE bg.business_id = $1
+          AND dga.division_id = $2
+        ORDER BY bg.name
+      `;
+      groupsParams = [businessId, divisionId];
+      
+      console.log('[obtenerAgrupaciones] 📁 Filtrando para división:', divisionId);
+    }
+
+    const groupsResult = await pool.query(groupsQuery, groupsParams);
+    const groups = groupsResult.rows;
+
+    console.log('[obtenerAgrupaciones] ✅ Grupos encontrados:', groups.length);
+
+    // 3. Para cada grupo, obtener sus artículos
+    const agrupaciones = [];
+
+    for (const group of groups) {
+      // Obtener artículos del grupo
+      const articlesQuery = `
+        SELECT 
+          a.id,
+          a.nombre,
+          a.precio,
+          a.costo,
+          COALESCE(cat.categoria, 'Sin categoría') as categoria,
+          COALESCE(cat.subrubro, 'Sin subrubro') as subrubro
+        FROM article_groups ag
+        JOIN app_articles a ON a.id = ag.article_id
+        LEFT JOIN articulo_categorias cat ON cat.articulo_id = a.id
+        WHERE ag.group_id = $1
+          AND a.business_id = $2
+        ORDER BY a.nombre
+      `;
+
+      const articlesResult = await pool.query(articlesQuery, [group.id, businessId]);
+
+      agrupaciones.push({
+        id: group.id,
+        group_id: group.id,
+        nombre: group.name,
+        articulos: articlesResult.rows,
+      });
+    }
+
+    // 4. Asegurar que existan "Sin Agrupación" y "Discontinuados"
+    // Estos son independientes por división
+    const specialGroups = await ensureSpecialGroups(businessId, divisionId, isMainDivision);
+    
+    return res.json({
+      ok: true,
+      agrupaciones: [...agrupaciones, ...specialGroups],
+      filtered_by_division: !!divisionId,
+      is_main_division: isMainDivision,
+      division_id: divisionId || null,
+    });
+
+  } catch (error) {
+    console.error('[obtenerAgrupaciones] ❌ Error:', error);
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
   }
-};
+}
 
 // POST /businesses/:businessId/agrupaciones
 exports.crearAgrupacion = async (req, res) => {
