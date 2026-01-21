@@ -6,59 +6,6 @@ const { getBearer, fetchSalesRanged } = require('../services/maxiSalesService');
 const { upsertSalesBatch, upsertDailyAggregates } = require('../services/salesStore');
 const { ensureInitialBackfillOnce, runDailyAuto } = require('../services/salesSyncPolicy');
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   🆕 HELPER PARA SUBNEGOCIOS
-   Detecta si un businessId es un subnegocio y retorna el contexto correcto
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-/**
- * Obtiene el contexto de negocio/subnegocio
- * @param {number} businessId - ID del negocio a verificar
- * @returns {Promise<{
- *   isSubnegocio: boolean,
- *   effectiveId: number,
- *   parentId: number|null,
- *   agrupacionIds: number[]
- * }>}
- */
-async function getBusinessContext(businessId) {
-  // Obtener información del negocio
-  const { rows: bizRows } = await pool.query(`
-    SELECT id, parent_id 
-    FROM app_businesses 
-    WHERE id = $1
-  `, [businessId]);
-
-  if (!bizRows.length) {
-    throw Object.assign(new Error('business_not_found'), { status: 404 });
-  }
-
-  const biz = bizRows[0];
-  const isSubnegocio = !!biz.parent_id;
-  const effectiveId = isSubnegocio ? biz.parent_id : businessId;
-  
-  let agrupacionIds = [];
-  
-  // Si es subnegocio, obtener agrupaciones asignadas
-  if (isSubnegocio) {
-    const { rows: agrupRows } = await pool.query(`
-      SELECT agrupacion_id 
-      FROM business_agrupaciones 
-      WHERE business_id = $1
-    `, [businessId]);
-    
-    agrupacionIds = agrupRows.map(r => r.agrupacion_id);
-  }
-
-  return {
-    isSubnegocio,
-    effectiveId,      // ID del negocio principal (o el mismo si no es subnegocio)
-    parentId: biz.parent_id,
-    agrupacionIds,    // IDs de agrupaciones asignadas (solo si es subnegocio)
-    originalId: businessId
-  };
-}
-
 /* ───────── helpers fecha ───────── */
 const pad2 = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
@@ -83,35 +30,25 @@ exports.maxiPing = async (req, res) => {
   try {
     const biz = req.business;
     
-    // 🆕 Si es subnegocio, usar credenciales del parent
-    const ctx = await getBusinessContext(biz.id);
-    const credBusinessId = ctx.effectiveId;
-    
-    // Obtener negocio con credenciales
-    const { rows: credRows } = await pool.query(
-      `SELECT props FROM app_businesses WHERE id = $1`,
-      [credBusinessId]
-    );
-    
-    const credBiz = credRows[0] || {};
-    
     // Si hay credenciales en DB o header X-Maxi-Token, esto devuelve token válido o lanza
-    const token = await getBearer(credBusinessId, req);
-    const props = credBiz?.props || {};
+    const token = await getBearer(biz.id, req);
+    const props = biz?.props || {};
     const mx = props.maxi || props.maxi_credentials || {};
+    
     return res.json({
       ok: true,
       configured: !!(mx?.email && (mx?.codcli || mx?.cod_cli)),
       connected: !!token,
       email: mx?.email || null,
       codcli: mx?.codcli || mx?.cod_cli || null,
-      context: {
-        is_subnegocio: ctx.isSubnegocio,
-        parent_id: ctx.parentId
-      }
     });
   } catch (e) {
-    return res.json({ ok: false, configured: false, connected: false, error: e.message || 'ping_failed' });
+    return res.json({ 
+      ok: false, 
+      configured: false, 
+      connected: false, 
+      error: e.message || 'ping_failed' 
+    });
   }
 };
 
@@ -133,7 +70,7 @@ exports.syncWindow = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'from_to_required' });
     }
 
-    // 2) Clamp hasta AYER (mantengo tu lógica)
+    // 2) Clamp hasta AYER
     const defFrom = new Date(`${fromRaw}T00:00:00Z`);
     const defTo = new Date(`${toRaw}T00:00:00Z`);
 
@@ -200,7 +137,6 @@ exports.syncWindow = async (req, res) => {
 };
 
 /** POST /api/businesses/:id/sync-sales/backfill-once */
-
 exports.backfillOnce = async (req, res) => {
   try {
     const biz = req.business;
@@ -309,7 +245,6 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
 
     case 'auto':
     default: {
-      // Corre tu política automática (usa INIT_BACKFILL_DAYS y luego incremental)
       const out = await runDailyAuto({ businessId: biz.id, req });
       return { ok: true, ...out };
     }
@@ -320,7 +255,7 @@ exports.reconcileAndRebuild = async (req, res, next) => {
   try {
     const biz = req.business;
     const { from, to } = req.body || {};
-    // 1) reconciliar mappings (usa tu helper actual)
+    
     const client = await require('../config/db').connect();
     try {
       await client.query('BEGIN');
@@ -333,16 +268,25 @@ exports.reconcileAndRebuild = async (req, res, next) => {
     } finally {
       client.release();
     }
-    // 2) rebuild agregados
+    
     await require('../services/salesStore').upsertDailyAggregates(biz.id, from, to);
     res.json({ ok: true, business_id: String(biz.id), from, to, reconciled: true, rebuilt: true });
   } catch (e) { next(e); }
 };
 
 // ============================================================================
-// 🆕 FIX: listDailyItems con soporte para subnegocios
+// LISTADO DE VENTAS DIARIAS
 // ============================================================================
 
+/**
+ * GET /api/businesses/:id/sales/daily-items
+ * Query params:
+ * - from, to (YYYY-MM-DD) - requeridos
+ * - articleId (opcional) - filtrar por artículo específico
+ * - groupIds (opcional) - filtrar por grupos: "1,2,3"
+ * - limit, offset (paginación)
+ * - source (csv|maxi)
+ */
 exports.listDailyItems = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -350,6 +294,7 @@ exports.listDailyItems = async (req, res, next) => {
       from,
       to,
       articleId,
+      groupIds, // 🆕 Filtro por grupos (viene del frontend)
       limit = 500000,
       offset = 0,
       source = null,
@@ -362,31 +307,39 @@ exports.listDailyItems = async (req, res, next) => {
       });
     }
 
-    // 🆕 Obtener contexto de negocio/subnegocio
-    const ctx = await getBusinessContext(biz.id);
-
-    const params = [ctx.effectiveId, from, to]; // Usar effectiveId (parent si es subnegocio)
+    const params = [biz.id, from, to];
     let whereClause = '';
-    let agrupacionFilter = '';
+    let groupFilter = '';
 
+    // Filtro por artículo específico
     if (articleId) {
       params.push(Number(articleId));
       whereClause = `AND sdi.article_id = $${params.length}`;
     }
 
+    // Filtro por source
     let sourceFilter = '';
     if (source) {
       params.push(source);
       sourceFilter = `AND sdi.source = $${params.length}`;
     }
 
-    // 🆕 Si es subnegocio, filtrar por agrupaciones
-    if (ctx.isSubnegocio && ctx.agrupacionIds.length > 0) {
-      params.push(ctx.agrupacionIds);
-      agrupacionFilter = `AND aa.agrupacion_id = ANY($${params.length})`;
+    // 🆕 Filtro por grupos (viene del frontend cuando está en una división)
+    if (groupIds) {
+      const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
+      if (ids.length > 0) {
+        params.push(ids);
+        groupFilter = `
+          AND sdi.article_id IN (
+            SELECT DISTINCT article_id 
+            FROM article_groups 
+            WHERE group_id = ANY($${params.length})
+          )
+        `;
+      }
     }
 
-    // ✅ QUERY principal con filtro de agrupaciones
+    // Query principal
     const sql = `
       SELECT
         sdi.day::date AS day,
@@ -409,30 +362,25 @@ exports.listDailyItems = async (req, res, next) => {
         AND sdi.day BETWEEN $2::date AND $3::date
         ${whereClause}
         ${sourceFilter}
-        ${agrupacionFilter}
+        ${groupFilter}
       GROUP BY sdi.day::date, sdi.article_id
       ORDER BY sdi.day DESC, sdi.article_id
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
-    // ✅ Query de totales con filtro de agrupaciones
+    // Query de totales
     const sqlTotals = `
       SELECT
         COUNT(DISTINCT sdi.article_id) AS rows_total,
         SUM(sdi.qty)::numeric AS qty_total,
         SUM(sdi.amount)::numeric AS amount_total
       FROM sales_daily_items sdi
-      LEFT JOIN app_articles aa
-        ON aa.business_id = sdi.business_id
-        AND aa.id = sdi.article_id
       WHERE sdi.business_id = $1
         AND sdi.day BETWEEN $2::date AND $3::date
         ${whereClause}
         ${sourceFilter}
-        ${agrupacionFilter}
+        ${groupFilter}
     `;
-
-    const pool = require('../config/db');
 
     const [rows, totals] = await Promise.all([
       pool.query(sql, params).then(r => r.rows),
@@ -444,13 +392,9 @@ exports.listDailyItems = async (req, res, next) => {
       business_id: String(biz.id),
       from,
       to,
-      context: {
-        is_subnegocio: ctx.isSubnegocio,
-        parent_id: ctx.parentId,
-        filtered_by_agrupaciones: ctx.agrupacionIds
-      },
       filters: {
         articleId: articleId ? Number(articleId) : null,
+        groupIds: groupIds || null,
         source: source || null,
       },
       totals: {
@@ -467,13 +411,17 @@ exports.listDailyItems = async (req, res, next) => {
 };
 
 // ============================================================================
-// 🆕 exportSalesCsv con soporte para subnegocios
+// EXPORTAR CSV
 // ============================================================================
 
+/**
+ * GET /api/businesses/:id/sales/export-csv
+ * Query: from, to, groupIds (opcional)
+ */
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
   try {
     const businessId = Number(req.params.id);
-    const { from, to } = req.query;
+    const { from, to, groupIds } = req.query;
 
     if (!Number.isFinite(businessId)) {
       return res.status(400).json({ error: 'businessId inválido' });
@@ -484,23 +432,24 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       });
     }
 
-    // 🆕 Obtener contexto de negocio/subnegocio
-    const ctx = await getBusinessContext(businessId);
+    const params = [businessId, from, to];
+    let groupFilter = '';
 
-    const pool = require('../config/db');
-
-    // 🆕 Filtro de agrupaciones si es subnegocio
-    let agrupacionFilter = '';
-    const params = [ctx.effectiveId, from, to];
-    
-    if (ctx.isSubnegocio && ctx.agrupacionIds.length > 0) {
-      params.push(ctx.agrupacionIds);
-      agrupacionFilter = `AND aa.agrupacion_id = ANY($${params.length})`;
+    // 🆕 Filtro por grupos si viene
+    if (groupIds) {
+      const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
+      if (ids.length > 0) {
+        params.push(ids);
+        groupFilter = `
+          AND sdi.article_id IN (
+            SELECT DISTINCT article_id 
+            FROM article_groups 
+            WHERE group_id = ANY($${params.length})
+          )
+        `;
+      }
     }
 
-    // ========================================
-    // FORMATO MAXI v7: Agregado por día-artículo con filtro de subnegocios
-    // ========================================
     const sql = `
       SELECT
         sdi.article_id AS codigo,
@@ -526,7 +475,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       WHERE sdi.business_id = $1
         AND sdi.source = 'csv'
         AND sdi.day BETWEEN $2::date AND $3::date
-        ${agrupacionFilter}
+        ${groupFilter}
       GROUP BY sdi.day::date, sdi.article_id 
       ORDER BY sdi.day ASC, sdi.article_id ASC;
     `;
@@ -543,7 +492,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     // BOM UTF-8 para Excel
     res.write('\uFEFF');
 
-    // 🎯 HEADERS IDÉNTICOS A v7
     const headers = [
       'codigo',
       'nombre',
@@ -620,7 +568,6 @@ exports.diagnosticRaw = async (req, res) => {
     console.log('to:', to);
     console.log('----------------------------------------\n');
 
-    // Traer datos crudos de MaxiRest
     const raw = await fetchSalesRanged({
       businessId: biz.id,
       from,
@@ -648,7 +595,6 @@ exports.diagnosticRaw = async (req, res) => {
 
     console.log('\n========================================\n');
 
-    // Respuesta HTTP para ver en Postman/navegador
     res.json({
       success: true,
       business_id: biz.id,
@@ -660,7 +606,6 @@ exports.diagnosticRaw = async (req, res) => {
         segunda: raw[1] || null,
         tercera: raw[2] || null
       },
-      // Solo las primeras 5 completas para no saturar
       primeras_5: raw.slice(0, 5)
     });
 
@@ -675,9 +620,13 @@ exports.diagnosticRaw = async (req, res) => {
 };
 
 // ============================================================================
-// 🆕 salesSummary con soporte para subnegocios
+// RESUMEN DE VENTAS
 // ============================================================================
 
+/**
+ * GET /api/businesses/:id/sales/summary
+ * Query: from, to, source, groupIds (opcional), articleIds (opcional)
+ */
 exports.salesSummary = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -685,7 +634,8 @@ exports.salesSummary = async (req, res, next) => {
       from,
       to,
       source = 'csv',
-      articleIds = null, // Opcional: filtrar por IDs específicos
+      articleIds = null,
+      groupIds = null, // 🆕 Filtro por grupos
     } = req.query;
 
     if (!from || !to) {
@@ -695,14 +645,11 @@ exports.salesSummary = async (req, res, next) => {
       });
     }
 
-    // 🆕 Obtener contexto de negocio/subnegocio
-    const ctx = await getBusinessContext(biz.id);
-
-    const params = [ctx.effectiveId, from, to, source];
+    const params = [biz.id, from, to, source];
     let articleFilter = '';
-    let agrupacionFilter = '';
+    let groupFilter = '';
 
-    // Filtro opcional por artículos específicos
+    // Filtro por artículos específicos
     if (articleIds) {
       const ids = String(articleIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
@@ -711,13 +658,21 @@ exports.salesSummary = async (req, res, next) => {
       }
     }
 
-    // 🆕 Si es subnegocio, filtrar por agrupaciones
-    if (ctx.isSubnegocio && ctx.agrupacionIds.length > 0) {
-      params.push(ctx.agrupacionIds);
-      agrupacionFilter = `AND aa.agrupacion_id = ANY($${params.length})`;
+    // 🆕 Filtro por grupos
+    if (groupIds) {
+      const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
+      if (ids.length > 0) {
+        params.push(ids);
+        groupFilter = `
+          AND sdi.article_id IN (
+            SELECT DISTINCT article_id 
+            FROM article_groups 
+            WHERE group_id = ANY($${params.length})
+          )
+        `;
+      }
     }
 
-    // ✅ Query super optimizada: una fila por artículo con filtro de agrupaciones
     const sql = `
       SELECT
         sdi.article_id,
@@ -742,13 +697,12 @@ exports.salesSummary = async (req, res, next) => {
         AND sdi.day BETWEEN $2::date AND $3::date
         AND sdi.source = $4
         ${articleFilter}
-        ${agrupacionFilter}
+        ${groupFilter}
       GROUP BY sdi.article_id
       HAVING SUM(sdi.qty) > 0
       ORDER BY SUM(sdi.qty) DESC
     `;
 
-    const pool = require('../config/db');
     const { rows } = await pool.query(sql, params);
 
     // Calcular totales globales
@@ -764,10 +718,9 @@ exports.salesSummary = async (req, res, next) => {
       from,
       to,
       source,
-      context: {
-        is_subnegocio: ctx.isSubnegocio,
-        parent_id: ctx.parentId,
-        filtered_by_agrupaciones: ctx.agrupacionIds
+      filters: {
+        groupIds: groupIds || null,
+        articleIds: articleIds || null,
       },
       totals: {
         articles_count: rows.length,

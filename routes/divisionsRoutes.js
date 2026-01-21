@@ -1,45 +1,59 @@
-// routes/divisionsRoutes.js
 const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/divisionsController');
 
 const { authRequired, loadActiveBusiness } = require('../middleware/authMiddleware');
 
-const safe = (fn, name) =>
-  typeof fn === 'function'
-    ? fn
-    : (req, res) => res.status(501).json({ ok: false, error: `Handler faltante: ${name}` });
-
 // Todas las rutas requieren autenticación
 router.use(authRequired);
 router.use(loadActiveBusiness);
 
-/* CRUD DE DIVISIONES */
-router.get('/business/:businessId', safe(ctrl.getDivisionsByBusiness, 'getDivisionsByBusiness'));
-router.get('/business/:businessId/hierarchy', safe(ctrl.getBusinessHierarchy || ctrl.getDivisionsByBusiness, 'getBusinessHierarchy|getDivisionsByBusiness'));
-router.get('/business/:businessId/main', safe(ctrl.getMainDivision || ctrl.getDivisionsByBusiness, 'getMainDivision|getDivisionsByBusiness'));
-router.get('/business/:businessId/all-subnegocios', safe(ctrl.getAllSubnegocios || ctrl.getDivisionsByBusiness, 'getAllSubnegocios|getDivisionsByBusiness'));
-router.get('/business/:businessId/stats', safe(ctrl.getStatsWithSubnegocios || ctrl.getDivisionsByBusiness, 'getStatsWithSubnegocios|getDivisionsByBusiness'));
+// ============================================================================
+// CRUD DE DIVISIONES
+// ============================================================================
 
-router.post('/', safe(ctrl.createDivision, 'createDivision'));
-router.get('/:divisionId', safe(ctrl.getDivisionById, 'getDivisionById'));
-router.put('/:divisionId', safe(ctrl.updateDivision, 'updateDivision'));
-router.delete('/:divisionId', safe(ctrl.deleteDivision, 'deleteDivision'));
+// Listar divisiones de un negocio
+router.get('/business/:businessId', ctrl.getDivisionsByBusiness);
 
-/* MOVER AGRUPACIONES Y ARTÍCULOS */
-router.post('/move-agrupacion-complete', safe(ctrl.moveAgrupacionComplete, 'moveAgrupacionComplete'));
-router.post('/:divisionId/move-agrupacion', safe(ctrl.moveAgrupacionToSubnegocio || ctrl.moveAgrupacionComplete, 'moveAgrupacionToSubnegocio|moveAgrupacionComplete'));
-router.post('/:divisionId/move-articles', safe(ctrl.moveArticlesToSubnegocio || ctrl.moveAgrupacionComplete, 'moveArticlesToSubnegocio|moveAgrupacionComplete'));
+// Obtener división principal
+router.get('/business/:businessId/main', ctrl.getMainDivision);
 
-/* GRUPOS ASIGNADOS */
-router.get('/:divisionId/groups', safe(ctrl.getGroupsByDivision, 'getGroupsByDivision'));
-router.post('/:divisionId/assign-group', safe(ctrl.assignGroupToDivision, 'assignGroupToDivision'));
-router.delete('/:divisionId/groups/:groupId', safe(ctrl.removeGroupFromDivision, 'removeGroupFromDivision'));
+// Crear división
+router.post('/', ctrl.createDivision);
 
-/* INSUMOS (opcionales) */
-router.get('/business/:businessId/insumos-stats', safe(ctrl.getInsumosStats || ((req, res) => res.json({ ok: true, stats: {} })), 'getInsumosStats'));
-router.get('/business/:businessId/insumos-by-rubro', safe(ctrl.getInsumosByRubro || ((req, res) => res.json({ ok: true, rubros: [] })), 'getInsumosByRubro'));
-router.post('/:divisionId/move-insumos', safe(ctrl.moveInsumosToSubnegocio || ((req, res) => res.json({ ok: true, moved: 0 })), 'moveInsumosToSubnegocio'));
-router.post('/business/:businessId/move-insumos-by-rubro', safe(ctrl.moveInsumosByRubroToSubnegocio || ((req, res) => res.json({ ok: true, moved: 0 })), 'moveInsumosByRubroToSubnegocio'));
+// Crear división desde un grupo existente
+router.post('/create-from-group', ctrl.createDivisionFromGroup);
+
+// Obtener una división específica
+router.get('/:divisionId', ctrl.getDivisionById);
+
+// Actualizar división
+router.put('/:divisionId', ctrl.updateDivision);
+
+// Eliminar división
+router.delete('/:divisionId', ctrl.deleteDivision);
+
+// ============================================================================
+// ESTADÍSTICAS Y CONTENIDO
+// ============================================================================
+
+// Estadísticas de una división (grupos, artículos)
+router.get('/:divisionId/stats', ctrl.getDivisionStats);
+
+// Obtener artículos de una división (FILTRADOS por grupos asignados)
+router.get('/:divisionId/articles', ctrl.getArticlesByDivision);
+
+// ============================================================================
+// GESTIÓN DE GRUPOS
+// ============================================================================
+
+// Listar grupos asignados a una división
+router.get('/:divisionId/groups', ctrl.getGroupsByDivision);
+
+// Asignar un grupo a una división
+router.post('/:divisionId/assign-group', ctrl.assignGroupToDivision);
+
+// Remover grupo de una división
+router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
 
 module.exports = router;
