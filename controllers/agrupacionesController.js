@@ -29,7 +29,8 @@ const parseJsonArrayLoose = (x) => {
   try {
     if (Array.isArray(x)) return x.filter(Boolean);
     if (x == null) return [];
-    const j = JSON.parse(typeof x === 'string' ? x : String(x));
+    const raw = typeof x === 'string' ? x : String(x);
+    const j = JSON.parse(raw);
     return Array.isArray(j) ? j.filter(Boolean) : [];
   } catch {
     return [];
@@ -501,16 +502,53 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
 // POST /businesses/:businessId/agrupaciones/create-or-move
 // Body: { nombre: string, ids: number[] }
 // ============================================================================
+
+function extractArticuloId(a) {
+  if (a == null) return null;
+
+  // si viene como número directo
+  if (typeof a === 'number') {
+    const n = Number(a);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  // si viene como string numérica
+  if (typeof a === 'string') {
+    const n = Number(a);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  // si viene como objeto con distintas keys
+  if (typeof a === 'object') {
+    const raw =
+      a.id ??
+      a.articulo_id ??
+      a.article_id ??
+      a.articuloId ??
+      a.idArticulo ??
+      a.codigo ??
+      a.codigoArticulo ??
+      a.code;
+
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  return null;
+}
+
 exports.createOrMoveAgrupacion = async (req, res) => {
   const businessId = getBusinessId(req);
   const nombre = String(req.body?.nombre || '').trim();
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
     .map(Number)
-    .filter(Boolean);
+    .filter((n) => Number.isFinite(n) && n > 0);
 
   if (!Number.isFinite(businessId) || !nombre || !ids.length) {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
   }
+
+  const idsSet = new Set(ids);
 
   const client = await pool.connect();
   try {
@@ -542,7 +580,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 
     const destId = Number(destRow.id);
 
-    // 2) bloquear todas las agrupaciones del negocio para operar en memoria
+    // 2) bloquear todas las agrupaciones del negocio
     const { rows: groups } = await client.query(
       `SELECT id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
          FROM agrupaciones
@@ -551,16 +589,18 @@ exports.createOrMoveAgrupacion = async (req, res) => {
       [businessId]
     );
 
-    const idsSet = new Set(ids);
-    let moved = 0;
-
-    // 3) quitar ids de TODAS las otras agrupaciones
+    // 3) quitar ids de TODAS las otras agrupaciones (mover real)
     for (const g of groups) {
       const gid = Number(g.id);
-      const list = parseJsonArrayLoose(g.articulos);
       if (gid === destId) continue;
 
-      const filtered = list.filter((a) => !idsSet.has(Number(a?.id)));
+      const list = parseJsonArrayLoose(g.articulos);
+
+      const filtered = list.filter((a) => {
+        const aid = extractArticuloId(a);
+        return !(aid != null && idsSet.has(aid));
+      });
+
       if (filtered.length !== list.length) {
         await client.query(
           `UPDATE agrupaciones SET articulos=$1::jsonb WHERE id=$2 AND business_id=$3`,
@@ -570,20 +610,20 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     }
 
     // 4) agregar ids (sin duplicar) a la agrupación destino
+    let moved = 0;
     {
       const list = parseJsonArrayLoose(destRow.articulos);
-      const seen = new Set(list.map((a) => Number(a?.id)));
-      const toAdd = [];
 
+      const seen = new Set(
+        list
+          .map(extractArticuloId)
+          .filter((n) => n != null)
+      );
+
+      const toAdd = [];
       for (const id of ids) {
         if (!seen.has(id)) {
-          toAdd.push({
-            id,
-            nombre: '',
-            categoria: 'Sin categoría',
-            subrubro: 'Sin subrubro',
-            precio: 0,
-          });
+          toAdd.push({ id }); // ✅ mínimo, limpio
           seen.add(id);
           moved++;
         }
