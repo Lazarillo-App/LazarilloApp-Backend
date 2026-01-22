@@ -11,11 +11,18 @@ const corsWithCache = cors({
     'https://lazarillo-app.github.io',
   ],
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization','X-Business-Id','X-Maxi-Token','X-Cron-Secret'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Business-Id',
+    'X-Division-Id',    
+    'X-Maxi-Token',
+    'X-Cron-Secret',
+  ],
   credentials: false,
   optionsSuccessStatus: 204,
   preflightContinue: false,
-  maxAge: 86400, 
+  maxAge: 86400,
 });
 
 module.exports = corsWithCache;
