@@ -407,24 +407,27 @@ async function removeItemFromGroup(req, res) {
   const groupId = Number(req.params.id);
   const insumoId = Number(req.params.insumoId);
 
-  if (!Number.isFinite(groupId) || !Number.isFinite(insumoId)) {
-    return sendError(res, 400, 'IDs inválidos');
-  }
+  if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'ID inválido');
+  if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'ID inválido');
 
   try {
-    const okGroup = await assertGroup(bizId, groupId);
-    if (!okGroup) return sendError(res, 404, 'not_found');
+    // 1) valida que el grupo es de este business
+    const ok = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [groupId, bizId]
+    );
+    if (!ok.rowCount) return sendError(res, 404, 'not_found');
 
+    // 2) delete idempotente
     const r = await pool.query(
       'DELETE FROM insumo_group_items WHERE group_id = $1 AND insumo_id = $2',
       [groupId, insumoId]
     );
 
-    // ✅ aunque sea 0, devolvemos ok:true
-    return res.json({ ok: true, removed: r.rowCount });
+    return res.json({ ok: true, removed: r.rowCount || 0 });
   } catch (err) {
     console.error('[insumoGroups] removeItemFromGroup error:', err);
-    return sendError(res, 500, 'Error al quitar insumo de la agrupación');
+    return sendError(res, 500, err.message || 'Error al quitar insumo de la agrupación');
   }
 }
 
