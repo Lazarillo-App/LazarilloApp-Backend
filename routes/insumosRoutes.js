@@ -1,7 +1,8 @@
 // routes/insumosRoutes.js
 const router = require('express').Router();
-const ctrl = require('../controllers/insumosController');
 const multer = require('multer');
+
+const ctrl = require('../controllers/insumosController');
 const groupsCtrl = require('../controllers/insumosGroupsController');
 
 const upload = multer({
@@ -17,15 +18,16 @@ router.get('/maxi', ctrl.listarMaxi);
 router.post('/maxi/rubros/sync', ctrl.syncRubrosFromMaxi);
 router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
 
-/* ================== AGRUPACIONES DE INSUMOS ================== */
-// ✅ ORDEN CORRECTO: más específicas primero
+/* ================== AGRUPACIONES DE INSUMOS (UNIFICADO) ================== */
+/**
+ * Nota de orden:
+ * - Primero rutas "fijas" (create-or-move)
+ * - Luego rutas con :id
+ * - Dentro de :id, primero las más específicas (bulk, exclusions) y luego las generales
+ */
 
-// Items bulk (MÁS ESPECÍFICA)
-router.post('/groups/:groupId/items/bulk', ctrl.addMultipleItemsToGroup);
-
-// Items individuales (MENOS ESPECÍFICA)
-router.post('/groups/:groupId/items', ctrl.addItemToGroup);
-router.delete('/groups/:groupId/items/:insumoId', ctrl.removeItemFromGroup);
+// Crear o mover por nombre (no lleva :id)
+router.post('/groups/create-or-move', groupsCtrl.createOrMove);
 
 // Grupos CRUD
 router.get('/groups', groupsCtrl.list);
@@ -34,14 +36,15 @@ router.post('/groups', groupsCtrl.create);
 router.put('/groups/:id', groupsCtrl.update);
 router.delete('/groups/:id', groupsCtrl.remove);
 
-// 🆕 CREATE OR MOVE (debe ir ANTES de rutas con :id)
-router.post('/groups/create-or-move', groupsCtrl.createOrMove);
+// Items (mismo estilo que venís usando, pero ya en groupsCtrl)
+router.post('/groups/:id/items/bulk', groupsCtrl.addMultipleItemsToGroup);
+router.post('/groups/:id/items', groupsCtrl.addItemToGroup);
+router.delete('/groups/:id/items/:insumoId', groupsCtrl.removeItemFromGroup); 
 
-// ⚠️ ESTAS RUTAS ENTRAN EN CONFLICTO - Comentá las del groupsCtrl
-// router.put('/groups/:id/items', groupsCtrl.replaceItems);   // ❌ Conflicto con bulk
-// router.post('/groups/:id/items', groupsCtrl.addItem);       // ❌ Conflicto con individual
+// (Opcional) Reemplazar items completo (si lo querés usar)
+router.put('/groups/:id/items', groupsCtrl.replaceItems);
 
-/* ================== EXCLUSIONES (TODO System) ================== */
+// Exclusiones
 router.get('/groups/:id/exclusions', groupsCtrl.getExclusions);
 router.post('/groups/:id/exclusions', groupsCtrl.addExclusions);
 router.delete('/groups/:id/exclusions', groupsCtrl.removeExclusions);
