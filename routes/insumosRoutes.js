@@ -2,8 +2,8 @@
 const router = require('express').Router();
 const multer = require('multer');
 
+// ✅ UN SOLO CONTROLLER
 const ctrl = require('../controllers/insumosController');
-const groupsCtrl = require('../controllers/insumosGroupsController');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -20,25 +20,25 @@ router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
 
 /* ================== AGRUPACIONES DE INSUMOS ================== */
 /** Rutas fijas primero */
-router.post('/groups/create-or-move', groupsCtrl.createOrMove);
+router.post('/groups/create-or-move', ctrl.groups_createOrMove);
 
 /** CRUD grupos */
-router.get('/groups', groupsCtrl.list);
-router.get('/groups/:id', groupsCtrl.getOne);
-router.post('/groups', groupsCtrl.create);
-router.put('/groups/:id', groupsCtrl.update);
-router.delete('/groups/:id', groupsCtrl.remove);
+router.get('/groups', ctrl.groups_list);
+router.get('/groups/:id', ctrl.groups_getOne);
+router.post('/groups', ctrl.groups_create);
+router.put('/groups/:id', ctrl.groups_update);
+router.delete('/groups/:id', ctrl.groups_remove);
 
 /** Items */
-router.post('/groups/:id/items/bulk', groupsCtrl.addMultipleItemsToGroup);
-router.put('/groups/:id/items', groupsCtrl.replaceItems);
-router.post('/groups/:id/items', groupsCtrl.addItemToGroup);
-router.delete('/groups/:id/items/:insumoId', groupsCtrl.removeItemFromGroup);
+router.post('/groups/:id/items/bulk', ctrl.groups_addMultiple);
+router.put('/groups/:id/items', ctrl.groups_replaceItems);
+router.post('/groups/:id/items', ctrl.groups_addItem);
+router.delete('/groups/:id/items/:insumoId', ctrl.groups_removeItem);
 
 /** Exclusiones */
-router.get('/groups/:id/exclusions', groupsCtrl.getExclusions);
-router.post('/groups/:id/exclusions', groupsCtrl.addExclusions);
-router.delete('/groups/:id/exclusions', groupsCtrl.removeExclusions);
+router.get('/groups/:id/exclusions', ctrl.groups_getExclusions);
+router.post('/groups/:id/exclusions', ctrl.groups_addExclusions);
+router.delete('/groups/:id/exclusions', ctrl.groups_removeExclusions);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.get('/', ctrl.listar);
