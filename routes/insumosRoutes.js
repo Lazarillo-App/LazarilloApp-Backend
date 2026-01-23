@@ -18,37 +18,24 @@ router.get('/maxi', ctrl.listarMaxi);
 router.post('/maxi/rubros/sync', ctrl.syncRubrosFromMaxi);
 router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
 
-/* ================== AGRUPACIONES DE INSUMOS (UNIFICADO) ================== */
-/**
- * Orden:
- * 1) Rutas fijas (sin :id)
- * 2) CRUD /groups
- * 3) Rutas con :id más específicas primero (bulk, exclusions)
- * 4) Luego items generales
- */
-
-// 1) Ruta fija
+/* ================== AGRUPACIONES DE INSUMOS ================== */
+/** Rutas fijas primero */
 router.post('/groups/create-or-move', groupsCtrl.createOrMove);
 
-// 2) Grupos CRUD
+/** CRUD grupos */
 router.get('/groups', groupsCtrl.list);
 router.get('/groups/:id', groupsCtrl.getOne);
 router.post('/groups', groupsCtrl.create);
 router.put('/groups/:id', groupsCtrl.update);
 router.delete('/groups/:id', groupsCtrl.remove);
 
-// 3) Items bulk (elegí UNA sola)
-// Si querés usar la que ya venías usando:
+/** Items */
 router.post('/groups/:id/items/bulk', groupsCtrl.addMultipleItemsToGroup);
-// Si preferís usar addItemsBulk, entonces comentá la de arriba y dejá esta:
-// router.post('/groups/:id/items/bulk', groupsCtrl.addItemsBulk);
+router.put('/groups/:id/items', groupsCtrl.replaceItems);
+router.post('/groups/:id/items', groupsCtrl.addItemToGroup);
+router.delete('/groups/:id/items/:insumoId', groupsCtrl.removeItemFromGroup);
 
-// 4) Items generales
-router.put('/groups/:id/items', groupsCtrl.replaceItems); // reemplazar set completo
-router.post('/groups/:id/items', groupsCtrl.addItemToGroup); // agregar 1
-router.delete('/groups/:id/items/:insumoId', groupsCtrl.removeItemFromGroup); // quitar 1
-
-// 5) Exclusiones
+/** Exclusiones */
 router.get('/groups/:id/exclusions', groupsCtrl.getExclusions);
 router.post('/groups/:id/exclusions', groupsCtrl.addExclusions);
 router.delete('/groups/:id/exclusions', groupsCtrl.removeExclusions);
