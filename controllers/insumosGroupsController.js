@@ -634,6 +634,61 @@ async function createOrMove(req, res) {
   }
 }
 
+async function addItemsBulk(req, res) {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const groupId = Number(req.params.id);
+  const insumoIds = Array.isArray(req.body?.insumoIds) ? req.body.insumoIds : [];
+  const ids = insumoIds.map(Number).filter(n => Number.isFinite(n) && n > 0);
+
+  if (!Number.isFinite(groupId) || !ids.length) {
+    return sendError(res, 400, 'groupId e insumoIds son obligatorios');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rowCount: okGroup } = await client.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
+      [groupId, bizId]
+    );
+    if (!okGroup) {
+      await client.query('ROLLBACK');
+      return sendError(res, 404, 'not_found');
+    }
+
+    const values = [];
+    const placeholders = [];
+    ids.forEach((insumoId, i) => {
+      values.push(groupId, insumoId);
+      const p1 = 2 * i + 1;
+      const p2 = 2 * i + 2;
+      placeholders.push(`($${p1}, $${p2})`);
+    });
+
+    const r = await client.query(
+      `
+      INSERT INTO insumo_group_items (group_id, insumo_id)
+      VALUES ${placeholders.join(', ')}
+      ON CONFLICT (group_id, insumo_id) DO NOTHING
+      `,
+      values
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, added: r.rowCount });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[insumoGroups] addItemsBulk error:', err);
+    return sendError(res, 500, 'Error al agregar insumos en bulk');
+  } finally {
+    client.release();
+  }
+}
+
+
 module.exports = {
   list,
   getOne,
@@ -653,4 +708,6 @@ module.exports = {
   removeExclusions,
 
   createOrMove,
+
+  addItemsBulk,
 };
