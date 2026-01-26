@@ -17,7 +17,14 @@ const isSystemGroup = (nombre) => {
  * (business_id, rubro_codigo, es_elaborador) -> group_id
  *
  * Devuelve:
- * { assigned, details: [{ rubro, es_elaborador, group_id, group_nombre, intentados, agregados }] }
+ * {
+ *   assigned,
+ *   details: [{
+ *     group_id, group_nombre,
+ *     intentados, agregados,
+ *     rubros: string[]   // opcional, ayuda para notificación/debug
+ *   }]
+ * }
  */
 async function autoAssignNewInsumos(businessId) {
   const bid = Number(businessId);
@@ -35,7 +42,7 @@ async function autoAssignNewInsumos(businessId) {
       WHERE r.business_id = $1
     `, [bid]);
 
-    // Filtrar reglas cuyo grupo sea “sistema” (por si alguien lo mapea mal)
+    // Filtrar reglas cuyo grupo sea “sistema”
     const rules = rulesRows
       .filter(r => !isSystemGroup(r.group_nombre))
       .map(r => ({
@@ -50,13 +57,12 @@ async function autoAssignNewInsumos(businessId) {
       return { assigned: 0, details: [] };
     }
 
-    const ruleMap = new Map(); // key = `${rubro}|${es_elaborador}` -> {group_id,...}
+    const ruleMap = new Map(); // key = `${rubro}|${es_elaborador}` -> rule
     for (const r of rules) {
       ruleMap.set(`${r.rubro}|${r.es_elaborador ? 1 : 0}`, r);
     }
 
     // 2) Insumos elegibles (activos y no discontinuados)
-    // + Traer si el rubro es elaborador desde insumo_rubros
     const { rows: insRows } = await client.query(`
       SELECT
         i.id,
@@ -76,7 +82,7 @@ async function autoAssignNewInsumos(businessId) {
       return { assigned: 0, details: [] };
     }
 
-    // 3) Insumos ya asignados (a cualquier grupo del negocio)
+    // 3) Insumos ya asignados
     const { rows: assignedRows } = await client.query(`
       SELECT DISTINCT gi.insumo_id
       FROM insumo_group_items gi
@@ -85,11 +91,13 @@ async function autoAssignNewInsumos(businessId) {
     `, [bid]);
 
     const assignedIds = new Set(
-      assignedRows.map(x => Number(x.insumo_id)).filter(n => Number.isFinite(n) && n > 0)
+      assignedRows
+        .map(x => Number(x.insumo_id))
+        .filter(n => Number.isFinite(n) && n > 0)
     );
 
-    // 4) Armar lote por group_id
-    const byGroup = new Map(); // group_id -> { group_nombre, rubro, es_elaborador, ids[] }
+    // 4) Armar lote por group_id (con rubros agregados como Set)
+    const byGroup = new Map();
     for (const ins of insRows) {
       const id = Number(ins.id);
       if (!Number.isFinite(id) || id <= 0) continue;
@@ -100,18 +108,20 @@ async function autoAssignNewInsumos(businessId) {
 
       const esElab = !!ins.es_elaborador;
       const rule = ruleMap.get(`${rubro}|${esElab ? 1 : 0}`);
-      if (!rule) continue; // no hay destino definido para ese rubro+tipo
+      if (!rule) continue;
 
       if (!byGroup.has(rule.group_id)) {
         byGroup.set(rule.group_id, {
           group_id: rule.group_id,
           group_nombre: rule.group_nombre,
-          rubro,
-          es_elaborador: esElab,
           ids: [],
+          rubros: new Set(),
         });
       }
-      byGroup.get(rule.group_id).ids.push(id);
+
+      const bucket = byGroup.get(rule.group_id);
+      bucket.ids.push(id);
+      bucket.rubros.add(rubro);
     }
 
     if (byGroup.size === 0) {
@@ -119,7 +129,7 @@ async function autoAssignNewInsumos(businessId) {
       return { assigned: 0, details: [] };
     }
 
-    // 5) Bulk insert idempotente (tenés UNIQUE(group_id, insumo_id), perfecto)
+    // 5) Bulk insert idempotente
     let totalAssigned = 0;
     const details = [];
 
@@ -139,12 +149,11 @@ async function autoAssignNewInsumos(businessId) {
       totalAssigned += added;
 
       details.push({
-        rubro: g.rubro,
-        es_elaborador: g.es_elaborador,
         group_id: g.group_id,
         group_nombre: g.group_nombre,
         intentados: ids.length,
         agregados: added,
+        rubros: Array.from(g.rubros).slice(0, 30),
       });
     }
 
