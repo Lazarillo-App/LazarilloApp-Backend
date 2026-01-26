@@ -488,29 +488,29 @@ exports.listarMaxi = async (req, res) => {
 exports.syncFromMaxi = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
+    if (!businessId) return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
 
     const raw = await fetchMaxiInsumos({ businessId, req });
     const norm = normalizarInsumosMaxi(raw);
     const summary = await upsertFromMaxi(businessId, norm);
 
-    let autoAssigned = 0;
-    let autoDetails = [];
+    // ✅ auto-assign post-sync
+    let auto = { assigned: 0, details: [] };
     try {
-      const rAuto = await autoAssignNewInsumos(businessId);
-      autoAssigned = rAuto.assigned || 0;
-      autoDetails = rAuto.details || [];
+      auto = await autoAssignNewInsumos(businessId);
     } catch (e) {
-      console.error('[sync-insumos] auto-assign error (no crítico):', e.message);
+      console.error('[syncFromMaxi] autoAssign error (no crítico):', e.message);
     }
 
-    return res.json({ ok: true, ...summary, auto_assigned: autoAssigned, auto_details: autoDetails });
-
+    return res.json({
+      ok: true,
+      ...summary,
+      auto_assigned: auto.assigned,
+      details: auto.details,
+    });
   } catch (e) {
     console.error('syncFromMaxi error:', e);
-    res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
