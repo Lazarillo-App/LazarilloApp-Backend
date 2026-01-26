@@ -286,7 +286,7 @@ async function getUnreadCount(userId, businessId = null) {
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) return 0;
 
-    let query = 'SELECT COUNT(*)::int AS count FROM sync_notifications WHERE user_id = $1 AND read = false';
+    let query = 'SELECT COUNT(*)::int AS count FROM sync_notifications WHERE user_id = $1 AND ($2::int IS NULL OR business_id = $2) AND read = false';
     const params = [uid];
 
     if (businessId) {
