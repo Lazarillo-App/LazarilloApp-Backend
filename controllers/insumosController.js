@@ -11,6 +11,7 @@ const {
 
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
+const { autoAssignNewInsumos } = require('../services/autoAssignNewInsumos');
 
 // ===================== HELPERS COMPARTIDOS =====================
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -311,7 +312,7 @@ exports.bulkUpsert = async (req, res) => {
 
     try {
       await client.query('BEGIN');
-      
+
       for (const it of items) {
         const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
         if (!codigo || String(codigo).trim() === '') {
@@ -350,11 +351,11 @@ exports.bulkUpsert = async (req, res) => {
             estado,
           ]
         );
-        
+
         if (r.rows?.[0]?.inserted) inserted++;
         else updated++;
       }
-      
+
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');
@@ -398,8 +399,8 @@ exports.bulkUpsertCSV = async (req, res) => {
       precioRef: r.precioRef ?? r.precio_ref ?? null,
       rubro: r.rubro ?? null,
       origen: r.origen ?? 'csv',
-      estado: String(r.estado ?? r.activo ?? 'activo').toLowerCase() === 'discontinuado' 
-        ? 'discontinuado' 
+      estado: String(r.estado ?? r.activo ?? 'activo').toLowerCase() === 'discontinuado'
+        ? 'discontinuado'
         : 'activo'
     }));
 
@@ -440,7 +441,7 @@ exports.__cleanupNullInsumos = async (req, res) => {
     `);
 
     await client.query('COMMIT');
-    
+
     return res.json({
       ok: true,
       removed_without_name: r1.rowCount,
@@ -495,7 +496,18 @@ exports.syncFromMaxi = async (req, res) => {
     const norm = normalizarInsumosMaxi(raw);
     const summary = await upsertFromMaxi(businessId, norm);
 
-    res.json({ ok: true, ...summary });
+    let autoAssigned = 0;
+    let autoDetails = [];
+    try {
+      const rAuto = await autoAssignNewInsumos(businessId);
+      autoAssigned = rAuto.assigned || 0;
+      autoDetails = rAuto.details || [];
+    } catch (e) {
+      console.error('[sync-insumos] auto-assign error (no crítico):', e.message);
+    }
+
+    return res.json({ ok: true, ...summary, auto_assigned: autoAssigned, auto_details: autoDetails });
+
   } catch (e) {
     console.error('syncFromMaxi error:', e);
     res.status(500).json({ ok: false, error: e.message });
@@ -764,7 +776,7 @@ exports.groups_replaceItems = async (req, res) => {
     await client.query('DELETE FROM insumo_group_items WHERE group_id = $1', [groupId]);
 
     if (insumoIds.length) {
-      const placeholders = insumoIds.map((_, i) => `($${2*i+1}, $${2*i+2})`).join(', ');
+      const placeholders = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
       const values = insumoIds.flatMap(id => [groupId, id]);
 
       await client.query(
@@ -781,7 +793,7 @@ exports.groups_replaceItems = async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error('[groups_replaceItems] error:', err);
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     return sendError(res, 500, 'Error al actualizar items de la agrupación');
   } finally {
     client.release();
@@ -837,7 +849,7 @@ exports.groups_addMultiple = async (req, res) => {
 
     await client.query('BEGIN');
 
-    const placeholders = insumoIds.map((_, i) => `($${2*i+1}, $${2*i+2})`).join(', ');
+    const placeholders = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
     const values = insumoIds.flatMap(id => [groupId, id]);
 
     const r = await client.query(
@@ -852,7 +864,7 @@ exports.groups_addMultiple = async (req, res) => {
     await client.query('COMMIT');
     return res.json({ ok: true, added: r.rowCount || 0 });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('[groups_addMultiple] error:', err);
     return sendError(res, 500, err.message || 'Error al agregar insumos en bulk');
   } finally {
@@ -1061,7 +1073,7 @@ exports.groups_createOrMove = async (req, res) => {
       [bizId, destId, ids]
     );
 
-    const placeholders = ids.map((_, i) => `($${2*i+1}, $${2*i+2})`).join(', ');
+    const placeholders = ids.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
     const values = ids.flatMap(id => [destId, id]);
 
     await client.query(
