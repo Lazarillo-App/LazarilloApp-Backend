@@ -1,6 +1,3 @@
-/* eslint-disable no-empty */
-/* eslint-disable no-unused-vars */
-
 // services/csvSalesImportService.js
 const pool = require('../config/db');
 const XLSX = require('xlsx');
@@ -9,24 +6,50 @@ const path = require('path');
 const { VERBOSE_IMPORT_LOGS, MAX_IMPORT_ROWS } = require('../config/features');
 
 /**
- * Parsea archivo Excel (XLS/XLSX) o CSV usando XLSX.
- * Nota: XLSX.utils.sheet_to_json devuelve keys EXACTAS del header (p.ej. "FECHA").
+ * Helpers: obtener valor por key de forma case-insensitive
+ */
+function getByKeysCI(obj, keys) {
+  if (!obj || typeof obj !== 'object') return undefined;
+
+  // mapa de keys normalizadas -> key real
+  const map = new Map();
+  for (const k of Object.keys(obj)) {
+    map.set(String(k).trim().toLowerCase(), k);
+  }
+
+  for (const candidate of keys) {
+    const norm = String(candidate).trim().toLowerCase();
+    const realKey = map.get(norm);
+    if (realKey != null) return obj[realKey];
+  }
+  return undefined;
+}
+
+/**
+ * Parsea archivo Excel (XLS/XLSX) o CSV
+ * Nota: XLSX puede leer CSV también.
  */
 async function parseFile(filePath, fileType) {
   try {
-    const workbook = XLSX.readFile(filePath, { type: 'file' });
+    const readOpts = {
+      type: 'file',
+      cellDates: true,  // <-- clave: traer Date cuando Excel es fecha
+      raw: true,        // <-- evitar que XLSX "formatee" strings ambiguos
+    };
+
+    const workbook = XLSX.readFile(filePath, readOpts);
     const sheetName = workbook.SheetNames[0];
+    if (!sheetName) throw new Error('El archivo no contiene hojas');
+
     const worksheet = workbook.Sheets[sheetName];
 
     const data = XLSX.utils.sheet_to_json(worksheet, {
-      raw: false,          // mantener fechas como strings cuando corresponda
-      dateNF: 'yyyy-mm-dd' // si la celda viene como date, intenta formatear así
+      raw: true,
+      defval: null,
     });
 
-    return {
-      headers: Object.keys(data[0] || {}),
-      rows: data,
-    };
+    const headers = Object.keys(data[0] || {});
+    return { headers, rows: data };
   } catch (error) {
     throw new Error(`Error parseando archivo: ${error.message}`);
   }
@@ -36,93 +59,98 @@ async function parseFile(filePath, fileType) {
  * Detecta el formato del archivo basándose en las columnas
  */
 function detectFormat(headers) {
-  const lowerHeaders = (headers || []).map((h) => String(h).toLowerCase().trim());
+  const lowerHeaders = headers.map(h => String(h).toLowerCase().trim());
 
-  // Formato Maxi Export (tu archivo actual)
+  // Formato Maxi Export
   const maxiFormat = ['codigo', 'fecha', 'unidades', 'importe'];
-  const hasMaxi = maxiFormat.every((col) => lowerHeaders.includes(col));
+  const hasMaxi = maxiFormat.every(col => lowerHeaders.includes(col));
   if (hasMaxi) return 'maxi_export';
 
   // Formato básico genérico
   const basicFormat = ['article_id', 'date', 'qty', 'amount'];
-  const hasBasic = basicFormat.every((col) => lowerHeaders.includes(col));
+  const hasBasic = basicFormat.every(col => lowerHeaders.includes(col));
   if (hasBasic) return 'basic';
 
   return null;
 }
 
 /**
- * Normaliza una fecha hacia YYYY-MM-DD.
+ * Normaliza una fecha a YYYY-MM-DD.
  * Soporta:
- *  - YYYY-MM-DD (string)
- *  - serial Excel (number)
- *  - Date object
- *  - strings tipo "10/4/25" (DD/MM/YY o MM/DD/YY) con heurística
+ * - Date object
+ * - Excel serial (number)
+ * - "YYYY-MM-DD"
+ * - "DD/MM/YY" y "DD/MM/YYYY"
+ * - "DD-MM-YY" y "DD-MM-YYYY"
+ *
+ * Ojo: NO usamos new Date("10/4/25") porque es ambiguo (MM/DD vs DD/MM).
  */
 function normalizeDate(dateValue) {
   if (dateValue == null || dateValue === '') return null;
 
-  // Si ya es string ISO YYYY-MM-DD
-  if (typeof dateValue === 'string') {
-    const s0 = dateValue.trim();
-
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) return s0;
-
-    // DD/MM/YY o MM/DD/YY (ambigua). Heurística + default AR (DD/MM).
-    const m = s0.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
-    if (m) {
-      let a = parseInt(m[1], 10);
-      let b = parseInt(m[2], 10);
-      let y = parseInt(m[3], 10);
-      if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(y)) return null;
-      if (y < 100) y += 2000;
-
-      let day, month;
-
-      // Si a>12 => a es día (DD/MM)
-      // Si b>12 => b es día (MM/DD)
-      // Si ambos <=12 => asumir DD/MM (AR)
-      if (a > 12) { day = a; month = b; }
-      else if (b > 12) { day = b; month = a; }
-      else { day = a; month = b; }
-
-      const dt = new Date(Date.UTC(y, month - 1, day));
-      if (!Number.isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
-      return null;
-    }
+  // Date object (si cellDates=true)
+  if (dateValue instanceof Date && !isNaN(dateValue.getTime())) {
+    return dateValue.toISOString().slice(0, 10);
   }
 
-  // Si es número Excel (serial date)
-  if (typeof dateValue === 'number') {
+  // Excel serial date
+  if (typeof dateValue === 'number' && Number.isFinite(dateValue)) {
+    // Excel epoch: 1899-12-30 (para compatibilidad)
     const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-    const dt = new Date(excelEpoch.getTime() + dateValue * 86400000);
-    if (!Number.isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
+    const d = new Date(excelEpoch.getTime() + dateValue * 86400000);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+
+  const s = String(dateValue).trim();
+
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // DD/MM/YY o DD/MM/YYYY
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    let yy = parseInt(m[3], 10);
+
+    if (m[3].length === 2) {
+      // 00-69 => 2000-2069, 70-99 => 1970-1999 (ajustable)
+      yy = yy <= 69 ? 2000 + yy : 1900 + yy;
+    }
+
+    if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
+      const d = new Date(Date.UTC(yy, mm - 1, dd));
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    }
     return null;
   }
 
-  // Si es Date object
-  if (dateValue instanceof Date) {
-    if (!Number.isNaN(dateValue.getTime())) return dateValue.toISOString().slice(0, 10);
+  // DD-MM-YY o DD-MM-YYYY
+  m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2}|\d{4})$/);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    let yy = parseInt(m[3], 10);
+
+    if (m[3].length === 2) {
+      yy = yy <= 69 ? 2000 + yy : 1900 + yy;
+    }
+
+    if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
+      const d = new Date(Date.UTC(yy, mm - 1, dd));
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    }
     return null;
   }
 
-  // Último intento: Date.parse sobre string rara
-  try {
-    const dt = new Date(dateValue);
-    if (!Number.isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
-  } catch {}
+  // Último recurso: intentar parseo ISO seguro (no ambiguo)
+  // (evitamos formatos con / )
+  if (/^\d{4}\//.test(s) || /^\d{4}\./.test(s)) {
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
 
   return null;
-}
-
-/**
- * Helpers: obtener campo por variantes (incluye MAYÚSCULAS)
- */
-function pick(row, keys = []) {
-  for (const k of keys) {
-    if (row && Object.prototype.hasOwnProperty.call(row, k)) return row[k];
-  }
-  return undefined;
 }
 
 /**
@@ -141,19 +169,17 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
     let dateField, idField, qtyField, amountField, nameField;
 
     if (format === 'maxi_export') {
-      // ✅ Maxi export real (como tu XLS): FECHA, CODIGO, UNIDADES, IMPORTE, NOMBRE
-      dateField = pick(row, ['FECHA', 'Fecha', 'fecha']);
-      idField = pick(row, ['CODIGO', 'Codigo', 'codigo']);
-      qtyField = pick(row, ['UNIDADES', 'Unidades', 'unidades']);
-      amountField = pick(row, ['IMPORTE', 'Importe', 'importe']);
-      nameField = pick(row, ['NOMBRE', 'Nombre', 'nombre']);
+      dateField   = getByKeysCI(row, ['fecha']);
+      idField     = getByKeysCI(row, ['codigo']);
+      qtyField    = getByKeysCI(row, ['unidades']);
+      amountField = getByKeysCI(row, ['importe']);
+      nameField   = getByKeysCI(row, ['nombre']);
     } else {
-      // Formato genérico
-      dateField = pick(row, ['date', 'DATE', 'Fecha', 'fecha', 'FECHA']);
-      idField = pick(row, ['article_id', 'ARTICLE_ID', 'codigo', 'CODIGO']);
-      qtyField = pick(row, ['qty', 'QTY', 'unidades', 'UNIDADES']);
-      amountField = pick(row, ['amount', 'AMOUNT', 'importe', 'IMPORTE']);
-      nameField = pick(row, ['article_name', 'ARTICLE_NAME', 'nombre', 'NOMBRE']);
+      dateField   = getByKeysCI(row, ['date', 'fecha']);
+      idField     = getByKeysCI(row, ['article_id', 'codigo']);
+      qtyField    = getByKeysCI(row, ['qty', 'unidades']);
+      amountField = getByKeysCI(row, ['amount', 'importe']);
+      nameField   = getByKeysCI(row, ['article_name', 'nombre']);
     }
 
     // Fecha (obligatorio)
@@ -163,13 +189,12 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
     }
 
     // Article ID (obligatorio)
-    normalized.article_id = parseInt(idField, 10);
+    normalized.article_id = parseInt(String(idField ?? '').trim(), 10);
     if (!Number.isFinite(normalized.article_id) || normalized.article_id < 0) {
       throw new Error(`ID de artículo inválido: "${idField}"`);
     }
 
     // Cantidad (obligatorio)
-    // Nota: soporta coma decimal
     normalized.qty = parseFloat(String(qtyField ?? '').replace(',', '.'));
     if (!Number.isFinite(normalized.qty)) {
       throw new Error(`Cantidad inválida: "${qtyField}"`);
@@ -181,7 +206,7 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
       throw new Error(`Importe inválido: "${amountField}"`);
     }
 
-    // Nombre (opcional, para referencia)
+    // Nombre (opcional)
     normalized.article_name = nameField != null ? String(nameField).trim() : null;
 
     return { ok: true, data: normalized };
@@ -203,23 +228,22 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
   let importId = null;
 
   try {
-    // 1) Crear registro de importación
-    const { rows: [importRecord] } = await client.query(
-      `
+    await client.query('BEGIN');
+
+    // 1) Crear registro importación
+    const { rows: [importRecord] } = await client.query(`
       INSERT INTO sales_csv_imports
         (business_id, user_id, filename, original_name, file_size, file_type, status)
       VALUES ($1, $2, $3, $4, $5, $6, 'processing')
       RETURNING id
-      `,
-      [
-        businessId,
-        userId,
-        path.basename(filePath),
-        originalName,
-        fs.statSync(filePath).size,
-        fileType,
-      ]
-    );
+    `, [
+      businessId,
+      userId,
+      path.basename(filePath),
+      originalName,
+      fs.statSync(filePath).size,
+      fileType
+    ]);
 
     importId = importRecord.id;
 
@@ -227,19 +251,21 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
       console.log(`[CSV Import] Iniciando importación #${importId} para business ${businessId}`);
     }
 
-    // 2) Parsear archivo
+    // 2) Parsear
     const { headers, rows } = await parseFile(filePath, fileType);
+
+    if (rows.length === 0) {
+      throw new Error('El archivo no contiene filas de datos.');
+    }
 
     if (VERBOSE_IMPORT_LOGS) {
       console.log(`[CSV Import] Parseado: ${rows.length} filas, columnas:`, headers);
-      console.log(`[CSV Import] Sample row keys:`, Object.keys(rows[0] || {}));
     }
 
-    // Validar límite de filas
+    // límite
     if (rows.length > MAX_IMPORT_ROWS) {
       throw new Error(
-        `El archivo excede el límite de ${MAX_IMPORT_ROWS} filas. ` +
-        `Actual: ${rows.length}. Dividí el archivo en partes más pequeñas.`
+        `El archivo excede el límite de ${MAX_IMPORT_ROWS} filas. Actual: ${rows.length}. Dividí el archivo en partes.`
       );
     }
 
@@ -247,8 +273,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     const format = detectFormat(headers);
     if (!format) {
       throw new Error(
-        `Formato de archivo no reconocido. Columnas encontradas: ${headers.join(', ')}. ` +
-        `Columnas esperadas: fecha, codigo, unidades, importe`
+        `Formato no reconocido. Columnas: ${headers.join(', ')}. Esperadas: fecha, codigo, unidades, importe`
       );
     }
 
@@ -270,25 +295,18 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
       if (!normalized.ok) {
         failed++;
         if (errors.length < 100) {
-          errors.push({
-            row: normalized.row,
-            error: normalized.error,
-            sample: normalized.data,
-          });
+          errors.push({ row: normalized.row, error: normalized.error, sample: normalized.data });
         }
         continue;
       }
 
       const { date, article_id, qty, amount, article_name } = normalized.data;
 
-      // Trackear rango de fechas
       if (!minDate || date < minDate) minDate = date;
       if (!maxDate || date > maxDate) maxDate = date;
 
-      // 5) Insertar/actualizar en sales_daily_items (source=csv)
       try {
-        const result = await client.query(
-          `
+        const { rows: ret } = await client.query(`
           INSERT INTO sales_daily_items
             (business_id, day, article_id, qty, amount, article_name, source, created_at, updated_at)
           VALUES ($1, $2::date, $3, $4, $5, $6, 'csv', NOW(), NOW())
@@ -298,30 +316,25 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
             amount = EXCLUDED.amount,
             article_name = COALESCE(EXCLUDED.article_name, sales_daily_items.article_name),
             updated_at = NOW()
-          `,
-          [businessId, date, article_id, qty, amount, article_name]
-        );
+          RETURNING (xmax = 0) AS inserted
+        `, [businessId, date, article_id, qty, amount, article_name]);
 
-        // Nota: con ON CONFLICT, contar insert vs update exacto requiere lógica extra.
-        inserted++;
+        if (ret?.[0]?.inserted) inserted++;
+        else updated++;
       } catch (dbError) {
-        if (VERBOSE_IMPORT_LOGS) {
-          console.error(`[CSV Import] Error DB fila ${i + 1}:`, dbError.message);
-        }
         failed++;
         if (errors.length < 100) {
           errors.push({
             row: i + 1,
             error: `Error DB: ${dbError.message}`,
-            sample: normalized.data,
+            sample: normalized.data
           });
         }
       }
     }
 
-    // 6) Actualizar registro de importación
-    await client.query(
-      `
+    // 5) Actualizar import
+    await client.query(`
       UPDATE sales_csv_imports
       SET
         status = $2,
@@ -334,30 +347,22 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
         error_log = $9::jsonb,
         processed_at = NOW()
       WHERE id = $1
-      `,
-      [
-        importId,
-        failed === rows.length ? 'failed' : 'completed',
-        rows.length,
-        minDate,
-        maxDate,
-        inserted,
-        updated,
-        failed,
-        JSON.stringify(errors),
-      ]
-    );
+    `, [
+      importId,
+      failed === rows.length ? 'failed' : 'completed',
+      rows.length,
+      minDate,
+      maxDate,
+      inserted,
+      updated,
+      failed,
+      JSON.stringify(errors)
+    ]);
 
-    // 7) Limpiar archivo temporal
-    try {
-      fs.unlinkSync(filePath);
-    } catch (unlinkErr) {
-      console.warn('[CSV Import] No se pudo eliminar archivo temporal:', unlinkErr.message);
-    }
+    await client.query('COMMIT');
 
-    if (VERBOSE_IMPORT_LOGS) {
-      console.log(`[CSV Import] Completado: ${inserted} insertadas, ${failed} fallidas`);
-    }
+    // 6) limpiar temp
+    try { fs.unlinkSync(filePath); } catch {}
 
     return {
       ok: true,
@@ -368,29 +373,24 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
         updated,
         failed,
         has_errors: failed > 0,
-        date_range: { from: minDate, to: maxDate },
+        date_range: { from: minDate, to: maxDate }
       },
-      errors: errors.slice(0, 20),
+      errors: errors.slice(0, 20)
     };
-  } catch (error) {
-    // No usamos BEGIN explícito; evitamos que un ROLLBACK ensucie con error.
-    try { await client.query('ROLLBACK'); } catch {}
 
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('[CSV Import] Error fatal:', error);
 
     if (importId) {
       try {
-        await client.query(
-          `
+        await client.query(`
           UPDATE sales_csv_imports
-          SET
-            status = 'failed',
-            error_log = $2::jsonb,
-            processed_at = NOW()
+          SET status = 'failed',
+              error_log = $2::jsonb,
+              processed_at = NOW()
           WHERE id = $1
-          `,
-          [importId, JSON.stringify([{ error: error.message }])]
-        );
+        `, [importId, JSON.stringify([{ error: error.message }])]);
       } catch {}
     }
 
@@ -404,8 +404,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
  * Lista importaciones de un negocio
  */
 async function listImports(businessId, { limit = 20 } = {}) {
-  const { rows } = await pool.query(
-    `
+  const { rows } = await pool.query(`
     SELECT
       id,
       filename,
@@ -422,27 +421,23 @@ async function listImports(businessId, { limit = 20 } = {}) {
       created_at,
       processed_at,
       CASE
-        WHEN error_log IS NOT NULL
-        THEN jsonb_array_length(error_log)
+        WHEN error_log IS NOT NULL THEN jsonb_array_length(error_log)
         ELSE 0
       END AS error_count
     FROM sales_csv_imports
     WHERE business_id = $1
     ORDER BY created_at DESC
     LIMIT $2
-    `,
-    [businessId, limit]
-  );
+  `, [businessId, limit]);
 
   return rows;
 }
 
 /**
- * Obtiene detalles de una importación específica
+ * Detalle de import
  */
 async function getImportDetails(importId, businessId) {
-  const { rows } = await pool.query(
-    `
+  const { rows } = await pool.query(`
     SELECT
       id,
       business_id,
@@ -464,16 +459,13 @@ async function getImportDetails(importId, businessId) {
     FROM sales_csv_imports
     WHERE id = $1 AND business_id = $2
     LIMIT 1
-    `,
-    [importId, businessId]
-  );
+  `, [importId, businessId]);
 
-  if (!rows.length) return null;
-  return rows[0];
+  return rows[0] || null;
 }
 
 module.exports = {
   importFileToDatabase,
   listImports,
-  getImportDetails,
+  getImportDetails
 };
