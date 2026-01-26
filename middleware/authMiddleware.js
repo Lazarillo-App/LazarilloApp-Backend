@@ -26,10 +26,26 @@ async function authRequired(req, res, next) {
 
     // caso JWT normal
     let payload;
-    try { payload = jwt.verify(token, SECRET); }
-    catch { return res.status(401).json({ error: 'invalid_token' }); }
+    try {
+      payload = jwt.verify(token, SECRET);
+    } catch {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
 
-    req.user = { id: payload.uid, email: payload.email, role: payload.role || null };
+    // ✅ Normalizar uid/id a integer
+    const rawUid = payload.uid ?? payload.id ?? null;
+    const uidNum = Number(rawUid);
+
+    if (!Number.isFinite(uidNum) || uidNum <= 0) {
+      return res.status(401).json({ error: 'invalid_token_payload' });
+    }
+
+    req.user = {
+      id: uidNum,
+      email: payload.email || null,
+      role: payload.role || null,
+    };
+
     req.isService = false;
     next();
   } catch (e) {
@@ -52,15 +68,15 @@ async function loadActiveBusiness(req, res, next) {
 
     const uid = req.user?.id ?? null;
     const headerId = req.header('X-Business-Id');
-    const queryId  = req.query?.businessId;
-    const paramId  = req.params?.businessId || req.params?.id;
+    const queryId = req.query?.businessId;
+    const paramId = req.params?.businessId || req.params?.id;
 
     let source = 'none';
     let bizId = null;
 
-    if (headerId)      { bizId = Number(headerId); source = 'header'; }
-    else if (queryId)  { bizId = Number(queryId);  source = 'query'; }
-    else if (paramId)  { bizId = Number(paramId);  source = 'param'; }
+    if (headerId) { bizId = Number(headerId); source = 'header'; }
+    else if (queryId) { bizId = Number(queryId); source = 'query'; }
+    else if (paramId) { bizId = Number(paramId); source = 'param'; }
     else if (!req.isService) {
       // sólo usuarios reales: usar active_business_id
       const { rows } = await pool.query(
@@ -85,7 +101,7 @@ async function loadActiveBusiness(req, res, next) {
       const props = (row.props && typeof row.props === 'object') ? row.props : {};
       if (!props.maxi) props.maxi = {};
       req.businessId = row.id;
-      req.business   = { ...row, props };
+      req.business = { ...row, props };
       return next();
     }
 
@@ -99,7 +115,7 @@ async function loadActiveBusiness(req, res, next) {
     `, [bizId, uid]);
 
     if (!rows[0]) {
-      if (['header','query','param'].includes(source)) {
+      if (['header', 'query', 'param'].includes(source)) {
         return res.status(403).json({ error: 'no_access_to_business' });
       }
       req.businessId = null;
@@ -111,7 +127,7 @@ async function loadActiveBusiness(req, res, next) {
     const props = (row.props && typeof row.props === 'object') ? row.props : {};
     if (!props.maxi) props.maxi = {};
     req.businessId = row.id;
-    req.business   = { ...row, props };
+    req.business = { ...row, props };
     next();
   } catch (e) {
     console.error('loadActiveBusiness error:', e);
