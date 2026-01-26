@@ -12,8 +12,9 @@ const {
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 const { autoAssignNewInsumos } = require('../services/autoAssignNewInsumos');
+const { notifyAutoAssignInsumos } = require('../services/notificationService'); 
 
-// ===================== HELPERS COMPARTIDOS =====================
+// ===================== HELPERS COMPARTIDOS ====================
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
 const ALLOWED_ORDER_BY = ['nombre', 'codigo_maxi', 'rubro', 'unidad_med', 'precio_ref', 'created_at'];
@@ -488,21 +489,31 @@ exports.listarMaxi = async (req, res) => {
 exports.syncFromMaxi = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
-    if (!businessId) return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    const userId = req.user?.id; // igual que hiciste en artículos
 
+    // ... tu sync actual
     const raw = await fetchMaxiInsumos({ businessId, req });
-    const norm = normalizarInsumosMaxi(raw);
-    const summary = await upsertFromMaxi(businessId, norm);
+    const normItems = normalizarInsumosMaxi(raw);
+    const summary = await upsertFromMaxi(businessId, normItems);
 
-    // ✅ auto-assign post-sync
+    // 🆕 auto-assign
     let auto = { assigned: 0, details: [] };
     try {
       auto = await autoAssignNewInsumos(businessId);
+
+      if (auto.assigned > 0 && userId) {
+        await notifyAutoAssignInsumos({
+          businessId,
+          userId,
+          result: auto,
+        });
+      }
     } catch (e) {
-      console.error('[syncFromMaxi] autoAssign error (no crítico):', e.message);
+      // no crítico
+      console.error('[syncFromMaxi] autoAssign error:', e.message);
     }
 
-    return res.json({
+    res.json({
       ok: true,
       ...summary,
       auto_assigned: auto.assigned,
@@ -510,7 +521,7 @@ exports.syncFromMaxi = async (req, res) => {
     });
   } catch (e) {
     console.error('syncFromMaxi error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 };
 

@@ -1,27 +1,23 @@
 // services/autoAssignNewInsumos.js
 const pool = require('../config/db');
 
-const norm = (s) => String(s || '').trim().toLowerCase();
+const norm = (s) => String(s || '').trim();
 
 const isSystemGroup = (nombre) => {
-  const n = norm(nombre);
-  return (
-    n === 'todo' ||
-    n === 'sin agrupacion' ||
-    n === 'sin agrupación' ||
-    n === 'sin agrupar' ||
-    n === 'sin grupo' ||
-    n === 'discontinuados' ||
-    n === 'descontinuados'
-  );
+  const n = norm(nombre).toLowerCase();
+  return n === 'todo'
+    || n === 'sin agrupacion'
+    || n === 'sin agrupación'
+    || n === 'discontinuados'
+    || n === 'descontinuados';
 };
 
 /**
- * Auto-asigna insumos NO asignados a grupos existentes, por rubro.
- * Regla: si existe un grupo (insumo_groups) que ya contiene al menos 1 insumo
- * con rubro X, entonces insumos nuevos con rubro X van a ese grupo.
+ * Auto-asigna insumos sin grupo según reglas:
+ * (business_id, rubro_codigo, es_elaborador) -> group_id
  *
- * Idempotente: ON CONFLICT DO NOTHING requiere UNIQUE(group_id, insumo_id)
+ * Devuelve:
+ * { assigned, details: [{ rubro, es_elaborador, group_id, group_nombre, intentados, agregados }] }
  */
 async function autoAssignNewInsumos(businessId) {
   const bid = Number(businessId);
@@ -31,129 +27,124 @@ async function autoAssignNewInsumos(businessId) {
   try {
     await client.query('BEGIN');
 
-    // 1) Insumos del negocio (válidos para agrupar)
-    const { rows: allInsumos } = await client.query(
-      `
-      SELECT i.id, COALESCE(NULLIF(TRIM(i.rubro), ''), '[PENDIENTE]') AS rubro
+    // 1) Traer reglas (destinos) para este negocio
+    const { rows: rulesRows } = await client.query(`
+      SELECT r.rubro_codigo, r.es_elaborador, r.group_id, g.nombre AS group_nombre
+      FROM insumo_group_rules r
+      JOIN insumo_groups g ON g.id = r.group_id
+      WHERE r.business_id = $1
+    `, [bid]);
+
+    // Filtrar reglas cuyo grupo sea “sistema” (por si alguien lo mapea mal)
+    const rules = rulesRows
+      .filter(r => !isSystemGroup(r.group_nombre))
+      .map(r => ({
+        rubro: norm(r.rubro_codigo),
+        es_elaborador: !!r.es_elaborador,
+        group_id: Number(r.group_id),
+        group_nombre: r.group_nombre,
+      }));
+
+    if (!rules.length) {
+      await client.query('COMMIT');
+      return { assigned: 0, details: [] };
+    }
+
+    const ruleMap = new Map(); // key = `${rubro}|${es_elaborador}` -> {group_id,...}
+    for (const r of rules) {
+      ruleMap.set(`${r.rubro}|${r.es_elaborador ? 1 : 0}`, r);
+    }
+
+    // 2) Insumos elegibles (activos y no discontinuados)
+    // + Traer si el rubro es elaborador desde insumo_rubros
+    const { rows: insRows } = await client.query(`
+      SELECT
+        i.id,
+        COALESCE(NULLIF(TRIM(i.rubro), ''), '') AS rubro,
+        COALESCE(ir.es_elaborador, false) AS es_elaborador
       FROM insumos i
+      LEFT JOIN insumo_rubros ir
+        ON ir.business_id = i.business_id
+       AND ir.codigo::text = i.rubro::text
       WHERE i.business_id = $1
         AND i.activo = true
-        AND COALESCE(i.estado, 'activo') <> 'discontinuado'
-      `,
-      [bid]
-    );
+        AND COALESCE(i.estado,'activo') <> 'discontinuado'
+    `, [bid]);
 
-    if (!allInsumos.length) {
+    if (!insRows.length) {
       await client.query('COMMIT');
       return { assigned: 0, details: [] };
     }
 
-    // 2) Mapa rubro -> grupos (solo grupos reales y con al menos 1 item)
-    const { rows: grouped } = await client.query(
-      `
-      SELECT
-        g.id     AS group_id,
-        g.nombre AS group_nombre,
-        COALESCE(NULLIF(TRIM(i.rubro), ''), '[PENDIENTE]') AS rubro
-      FROM insumo_groups g
-      JOIN insumo_group_items gi ON gi.group_id = g.id
-      JOIN insumos i             ON i.id = gi.insumo_id
-      WHERE g.business_id = $1
-      `,
-      [bid]
-    );
-
-    const rubroToGroups = new Map(); // rubroNorm -> [{id,nombre}, ...]
-    for (const r of grouped) {
-      if (isSystemGroup(r.group_nombre)) continue;
-
-      const key = norm(r.rubro);
-      if (!key) continue;
-
-      const gid = Number(r.group_id);
-      if (!Number.isFinite(gid) || gid <= 0) continue;
-
-      if (!rubroToGroups.has(key)) rubroToGroups.set(key, []);
-      const arr = rubroToGroups.get(key);
-
-      if (!arr.some((x) => Number(x.id) === gid)) {
-        arr.push({ id: gid, nombre: r.group_nombre });
-      }
-    }
-
-    if (rubroToGroups.size === 0) {
-      await client.query('COMMIT');
-      return { assigned: 0, details: [] };
-    }
-
-    // 3) Insumos ya asignados a algún grupo del negocio
-    const { rows: assignedRows } = await client.query(
-      `
+    // 3) Insumos ya asignados (a cualquier grupo del negocio)
+    const { rows: assignedRows } = await client.query(`
       SELECT DISTINCT gi.insumo_id
       FROM insumo_group_items gi
       JOIN insumo_groups g ON g.id = gi.group_id
       WHERE g.business_id = $1
-      `,
-      [bid]
-    );
+    `, [bid]);
 
     const assignedIds = new Set(
-      assignedRows
-        .map((x) => Number(x.insumo_id))
-        .filter((n) => Number.isFinite(n) && n > 0)
+      assignedRows.map(x => Number(x.insumo_id)).filter(n => Number.isFinite(n) && n > 0)
     );
 
-    // 4) Detectar no asignados + matchear por rubro
-    const toAssign = new Map(); // groupId -> { nombre, ids: [] }
-
-    for (const ins of allInsumos) {
+    // 4) Armar lote por group_id
+    const byGroup = new Map(); // group_id -> { group_nombre, rubro, es_elaborador, ids[] }
+    for (const ins of insRows) {
       const id = Number(ins.id);
       if (!Number.isFinite(id) || id <= 0) continue;
       if (assignedIds.has(id)) continue;
 
-      const key = norm(ins.rubro);
-      if (!key) continue;
+      const rubro = norm(ins.rubro);
+      if (!rubro) continue;
 
-      const groups = rubroToGroups.get(key);
-      if (!groups || !groups.length) continue;
+      const esElab = !!ins.es_elaborador;
+      const rule = ruleMap.get(`${rubro}|${esElab ? 1 : 0}`);
+      if (!rule) continue; // no hay destino definido para ese rubro+tipo
 
-      const target = groups[0]; // criterio: primer match
-      if (!toAssign.has(target.id)) toAssign.set(target.id, { nombre: target.nombre, ids: [] });
-      toAssign.get(target.id).ids.push(id);
+      if (!byGroup.has(rule.group_id)) {
+        byGroup.set(rule.group_id, {
+          group_id: rule.group_id,
+          group_nombre: rule.group_nombre,
+          rubro,
+          es_elaborador: esElab,
+          ids: [],
+        });
+      }
+      byGroup.get(rule.group_id).ids.push(id);
     }
 
-    if (toAssign.size === 0) {
+    if (byGroup.size === 0) {
       await client.query('COMMIT');
       return { assigned: 0, details: [] };
     }
 
-    // 5) Bulk insert en insumo_group_items
+    // 5) Bulk insert idempotente (tenés UNIQUE(group_id, insumo_id), perfecto)
     let totalAssigned = 0;
     const details = [];
 
-    for (const [groupId, data] of toAssign.entries()) {
-      const ids = data.ids;
+    for (const g of byGroup.values()) {
+      const ids = g.ids;
       if (!ids.length) continue;
 
-      const gIds = new Array(ids.length).fill(Number(groupId));
+      const groupIds = new Array(ids.length).fill(Number(g.group_id));
 
-      const res = await client.query(
-        `
+      const r = await client.query(`
         INSERT INTO insumo_group_items (group_id, insumo_id)
         SELECT * FROM UNNEST($1::int[], $2::int[])
-        ON CONFLICT DO NOTHING
-        `,
-        [gIds, ids]
-      );
+        ON CONFLICT (group_id, insumo_id) DO NOTHING
+      `, [groupIds, ids]);
 
-      const added = res.rowCount || 0;
+      const added = r.rowCount || 0;
       totalAssigned += added;
 
       details.push({
-        group_id: Number(groupId),
-        group_nombre: data.nombre,
-        insumos_intentados: ids.length,
-        insumos_agregados: added,
+        rubro: g.rubro,
+        es_elaborador: g.es_elaborador,
+        group_id: g.group_id,
+        group_nombre: g.group_nombre,
+        intentados: ids.length,
+        agregados: added,
       });
     }
 
