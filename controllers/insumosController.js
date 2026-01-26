@@ -12,7 +12,7 @@ const {
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 const { autoAssignNewInsumos } = require('../services/autoAssignNewInsumos');
-const { notifyAutoAssignInsumos } = require('../services/notificationService'); 
+const { notifyAutoAssign } = require('../services/notificationService');
 
 // ===================== HELPERS COMPARTIDOS ====================
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -502,10 +502,11 @@ exports.syncFromMaxi = async (req, res) => {
       auto = await autoAssignNewInsumos(businessId);
 
       if (auto.assigned > 0 && userId) {
-        await notifyAutoAssignInsumos({
+        await notifyAutoAssign({
           businessId,
           userId,
           result: auto,
+          entity: 'insumos',
         });
       }
     } catch (e) {
