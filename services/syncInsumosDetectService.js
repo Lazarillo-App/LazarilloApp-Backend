@@ -7,16 +7,15 @@ const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('./maxiSuppliesServi
 /** helpers */
 const normStr = (v) => (v == null ? '' : String(v).trim());
 const numOrNull = (v) => {
-  if (v == null || v === '') return null;
-  const n = Number(String(v).replace(',', '.'));
-  if (!Number.isFinite(n)) return null;
-  return Math.round(n * 1000) / 1000; // 
+    if (v == null || v === '') return null;
+    const n = Number(String(v).replace(',', '.'));
+    if (!Number.isFinite(n)) return null;
+    return Math.round(n * 1000) / 1000; // 
 };
 
 function diffFields(canon, stg) {
     const diffs = {};
 
-    // comparaciones "importantes"
     const checks = [
         ['nombre', normStr],
         ['rubro', normStr],
@@ -33,7 +32,7 @@ function diffFields(canon, stg) {
             const aa = a ?? null;
             const bb = b ?? null;
             if (aa === null && bb === null) continue;
-            if (aa === null || bb === null || Math.abs(aa - bb) > 0.0001) {
+            if (aa === null || bb === null || Math.abs(aa - bb) > 0.001) {
                 diffs[k] = { from: aa, to: bb };
             }
         } else {
@@ -230,17 +229,14 @@ async function detectInsumosChanges({ businessId, userId, req }) {
                 unidad_med: canon.unidad_med,
                 precio_ref: canon.precio_ref,
                 costo_ref: canon.costo_ref,
-                iva: canon.iva,
             };
             const stgShape = {
                 nombre: stg.nombre,
                 rubro: stg.rubro,
                 unidad_med: stg.medida,
-                precio_ref: stg.precio,
+                precio_ref: numOrNull(stg.precio),
                 costo_ref: null,
-                iva: null,
             };
-
             const diffs = diffFields(canonShape, stgShape);
             if (Object.keys(diffs).length) {
                 updCount++;
@@ -273,27 +269,30 @@ async function detectInsumosChanges({ businessId, userId, req }) {
             }
         }
 
-        // 6) Crear change_set
         const status = blocked ? 'error' : 'pending';
         const summary = {
             counts: { new: newCount, updated: updCount, missing: missingCount, incoming: incomingCount, canonical: canonicalCount },
             risk: { blocked, reasons: riskReasons, missingPercent: Number(missingPercent.toFixed(2)) },
         };
 
+        if (!blocked && newCount === 0 && updCount === 0 && missingCount === 0) {
+            await client.query('COMMIT');
+            return { ok: true, status: 'noop', summary };
+        }
+
         const csRes = await client.query(`
-      INSERT INTO sync_change_sets
-        (business_id, scope, status, created_by, summary, changes, source_snapshot)
-      VALUES ($1, 'insumos', $2, $3, $4::jsonb, $5::jsonb, $6::jsonb)
-      RETURNING id
-    `, [
+  INSERT INTO sync_change_sets
+    (business_id, scope, status, created_by, summary, changes, source_snapshot)
+  VALUES ($1, 'insumos', $2, $3, $4::jsonb, $5::jsonb, $6::jsonb)
+  RETURNING id
+`, [
             bid,
-            blocked ? 'error' : 'pending',
+            status,
             userId || null,
             JSON.stringify(summary),
             JSON.stringify(changes),
             JSON.stringify({ source: sourceMeta, sample_count: incomingCount })
         ]);
-
         changeSetId = csRes.rows[0].id;
 
         // 7) Crear notificación
