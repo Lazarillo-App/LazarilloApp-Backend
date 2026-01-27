@@ -3,6 +3,7 @@ const pool = require('../config/db');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 const { autoAssignNewArticles } = require('../services/autoGroupAssignment');
 const { notifyAutoAssign } = require('../services/notificationService');
+const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
 
 // fetch nativo (Node 18+) o fallback a node-fetch
 const fetchNative =
@@ -623,3 +624,133 @@ LIMIT ${lim};
     }
   };
 
+// ============================ CHANGE SETS (INSUMOS) ============================
+
+async function getCanonicalInsumosCount(client, businessId) {
+  const { rows } = await client.query(`
+    SELECT COUNT(*)::int AS cnt
+    FROM insumos
+    WHERE business_id = $1
+      AND activo = true
+  `, [businessId]);
+  return rows?.[0]?.cnt ?? 0;
+}
+
+function riskForCounts({ canonicalCount, incomingCount, minKeepRatio = 0.8 }) {
+  const missingPercent = canonicalCount > 0
+    ? (1 - (incomingCount / canonicalCount)) * 100
+    : 0;
+
+  const blocked = canonicalCount > 0 && incomingCount < canonicalCount * minKeepRatio;
+
+  const reasons = [];
+  if (blocked) {
+    reasons.push(
+      `Incoming ${incomingCount} < ${(minKeepRatio * 100).toFixed(0)}% de canonical ${canonicalCount} (missing ~${missingPercent.toFixed(1)}%)`
+    );
+  }
+
+  return { blocked, missingPercent, reasons, minKeepRatio };
+}
+
+/**
+ * POST /api/businesses/:businessId/sync/insumos/detect
+ * Crea un change set para insumos.
+ * - NO aplica cambios
+ * - Si Maxi viene “cortado” (ej 220 vs 1170), lo bloquea (status = error)
+ */
+exports.detectInsumosChanges = async (req, res) => {
+  const businessId = Number(req.params.businessId);
+  const userId = req.user?.id ? Number(req.user.id) : null;
+
+  if (!Number.isFinite(businessId) || businessId <= 0) {
+    return res.status(400).json({ error: 'bad_request', message: 'businessId inválido' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Canonical = lo fijo en tu DB
+    const canonicalCount = await getCanonicalInsumosCount(client, businessId);
+
+    // Incoming = lo que vino de Maxi
+    const raw = await fetchMaxiInsumos({ businessId, req });
+    const incoming = normalizarInsumosMaxi(raw);
+    const incomingCount = incoming.length;
+
+    // Policy (si existe en sync_policies)
+    const { rows: polRows } = await client.query(`
+      SELECT policies
+      FROM sync_policies
+      WHERE business_id = $1
+      LIMIT 1
+    `, [businessId]);
+
+    const minKeepRatio =
+      Number(polRows?.[0]?.policies?.insumos?.minKeepRatio) ||
+      Number(process.env.SYNC_INSUMOS_MIN_KEEP_RATIO || 0.8);
+
+    const risk = riskForCounts({ canonicalCount, incomingCount, minKeepRatio });
+
+    const summary = {
+      counts: { canonical: canonicalCount, incoming: incomingCount },
+      risk,
+    };
+
+    // Si viene roto -> status error (bloqueado)
+    const status = risk.blocked ? 'error' : 'pending';
+
+    // Por ahora guardamos change set sin diff detallado (lo hacemos después)
+    const changes = [];
+
+    const { rows: csRows } = await client.query(`
+      INSERT INTO sync_change_sets
+        (business_id, scope, status, created_by, summary, changes, source_snapshot)
+      VALUES
+        ($1, 'insumos', $2, $3, $4::jsonb, $5::jsonb, $6::jsonb)
+      RETURNING id, status, created_at, summary
+    `, [
+      businessId,
+      status,
+      userId,
+      JSON.stringify(summary),
+      JSON.stringify(changes),
+      JSON.stringify({ source: 'maxi', fetched_at: new Date().toISOString() }),
+    ]);
+
+    const cs = csRows?.[0];
+
+    // Notificación (si querés)
+    if (userId) {
+      await client.query(`
+        INSERT INTO sync_notifications (business_id, user_id, type, title, message, metadata)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+      `, [
+        businessId,
+        userId,
+        'error', // usamos tipo existente del CHECK
+        risk.blocked ? 'Detect insumos BLOQUEADO' : 'Detect insumos listo',
+        risk.blocked
+          ? 'Maxi devolvió menos insumos de lo esperado. No se aplicará nada hasta revisar.'
+          : 'Hay cambios detectados para revisar y aprobar.',
+        JSON.stringify({ change_set_id: cs.id, summary }),
+      ]);
+    }
+
+    await client.query('COMMIT');
+
+    return res.json({
+      ok: true,
+      change_set_id: cs.id,
+      status: cs.status,
+      summary: cs.summary,
+    });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error('[detectInsumosChanges] error:', e);
+    return res.status(500).json({ error: 'internal', detail: e.message });
+  } finally {
+    client.release();
+  }
+};

@@ -21,6 +21,7 @@ const loadBusiness = require('../middleware/loadBusiness');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
 const viewPrefsCtrl = require('../controllers/viewPrefsController');
+const syncRoutes = require('./syncRoutes');
 
 // 🔴 ÚNICA importación del controlador de ventas
 const sales = require('../controllers/salesSyncController');
@@ -58,6 +59,8 @@ const upload = multer({
 /* ───────── Auth + param :id ───────── */
 router.use(authRequired);
 router.param('id', requireBusinessAccessParam);
+
+router.use('/:id/sync', syncRoutes);
 
 /* ───────── Logo: subir archivo ───────── */
 const uploadFields = upload.fields([

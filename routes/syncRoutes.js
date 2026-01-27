@@ -61,7 +61,7 @@ router.get('/change-sets/:id', async (req, res, next) => {
 // Approve
 router.post('/change-sets/:id/approve', async (req, res, next) => {
   try {
-    const businessId = Number(req.params.businessId);
+    const businessId = Number(req.params.id);
     const id = Number(req.params.id);
     const userId = getUserId(req);
 
