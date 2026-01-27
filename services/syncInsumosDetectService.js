@@ -7,9 +7,10 @@ const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('./maxiSuppliesServi
 /** helpers */
 const normStr = (v) => (v == null ? '' : String(v).trim());
 const numOrNull = (v) => {
-    if (v == null || v === '') return null;
-    const n = Number(String(v).replace(',', '.'));
-    return Number.isFinite(n) ? n : null;
+  if (v == null || v === '') return null;
+  const n = Number(String(v).replace(',', '.'));
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n * 1000) / 1000; // 
 };
 
 function diffFields(canon, stg) {
