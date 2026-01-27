@@ -4,9 +4,38 @@
 const pool = require('../config/db');
 
 function getCodeFromEntityId(entityId) {
-  // "codigo_maxi:123"
   const m = String(entityId || '').match(/codigo_maxi:(\d+)/);
   return m ? Number(m[1]) : null;
+}
+
+const normStr = (v) => (v == null ? null : String(v).trim());
+const toIntOrNull = (v) => {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+const toNumOrNull = (v) => {
+  if (v == null) return null;
+  const s = String(v).trim().replace(',', '.');
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+
+function parseChanges(raw) {
+  if (Array.isArray(raw)) return raw;
+  // por si quedó guardado como string JSON
+  if (typeof raw === 'string') {
+    try {
+      const j = JSON.parse(raw);
+      return Array.isArray(j) ? j : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 async function applyInsumosChangeSet({ businessId, changeSetId, userId }) {
@@ -20,19 +49,22 @@ async function applyInsumosChangeSet({ businessId, changeSetId, userId }) {
     await client.query('BEGIN');
 
     const csRes = await client.query(
-      `SELECT id, status, summary, changes
-       FROM sync_change_sets
-       WHERE id=$1 AND business_id=$2
-       FOR UPDATE`,
+      `
+      SELECT id, status, summary, changes
+      FROM sync_change_sets
+      WHERE id=$1 AND business_id=$2
+      FOR UPDATE
+      `,
       [csid, bid]
     );
+
     const cs = csRes.rows[0];
     if (!cs) throw new Error('change_set no encontrado');
     if (cs.status !== 'approved') {
       throw new Error(`No se puede aplicar: status=${cs.status}. Debe estar en approved.`);
     }
 
-    const changes = Array.isArray(cs.changes) ? cs.changes : [];
+    const changes = parseChanges(cs.changes);
 
     let inserted = 0;
     let updated = 0;
@@ -42,17 +74,18 @@ async function applyInsumosChangeSet({ businessId, changeSetId, userId }) {
       if (ch?.entity !== 'insumo') { skipped++; continue; }
 
       const code = getCodeFromEntityId(ch.entity_id);
-      if (!Number.isFinite(code)) { skipped++; continue; }
+      if (!Number.isFinite(code) || code <= 0) { skipped++; continue; }
+
+      const f = ch.fields || {};
 
       if (ch.action === 'create') {
-        // Usamos valores "to" desde fields
-        const f = ch.fields || {};
-        const nombre = f?.nombre?.to ?? '';
-        const rubro = f?.rubro?.to ?? null;
-        const unidad_med = f?.unidad_med?.to ?? null;
-        const precio_ref = f?.precio_ref?.to ?? null;
+        const nombre = normStr(f?.nombre?.to) || '';
+        const rubro = toIntOrNull(f?.rubro?.to);
+        const unidad_med = normStr(f?.unidad_med?.to);
+        const precio_ref = toNumOrNull(f?.precio_ref?.to);
 
-        await client.query(`
+        const r = await client.query(
+          `
           INSERT INTO insumos
             (business_id, codigo_maxi, nombre, rubro, unidad_med, precio_ref, origen, activo, created_at, updated_at)
           VALUES ($1, $2::text, $3, $4, $5, $6, 'maxi', true, now(), now())
@@ -63,63 +96,76 @@ async function applyInsumosChangeSet({ businessId, changeSetId, userId }) {
             unidad_med = EXCLUDED.unidad_med,
             precio_ref = EXCLUDED.precio_ref,
             updated_at = now()
-        `, [bid, String(code), String(nombre), rubro, unidad_med, precio_ref]);
+          `,
+          [bid, String(code), String(nombre), rubro, unidad_med, precio_ref]
+        );
 
-        inserted++;
+        // INSERT/UPSERT en PG suele dar rowCount 1
+        inserted += (r.rowCount || 0);
         continue;
       }
 
       if (ch.action === 'update') {
-        // Solo actualizamos campos que estén en fields
-        const f = ch.fields || {};
         const sets = [];
         const vals = [bid, String(code)];
         let idx = 3;
 
+        // Mapeo field -> columna
         const map = {
-          nombre: 'nombre',
-          rubro: 'rubro',
-          unidad_med: 'unidad_med',
-          precio_ref: 'precio_ref',
-          costo_ref: 'costo_ref',
-          iva: 'iva',
+          nombre:   { col: 'nombre',     cast: (x) => normStr(x) },
+          rubro:    { col: 'rubro',      cast: (x) => toIntOrNull(x) },
+          unidad_med:{ col:'unidad_med', cast: (x) => normStr(x) },
+          precio_ref:{ col:'precio_ref', cast: (x) => toNumOrNull(x) },
+          costo_ref:{ col:'costo_ref',   cast: (x) => toNumOrNull(x) },
+          iva:      { col: 'iva',        cast: (x) => normStr(x) },
         };
 
-        for (const [k, col] of Object.entries(map)) {
+        for (const [k, spec] of Object.entries(map)) {
           if (Object.prototype.hasOwnProperty.call(f, k)) {
-            sets.push(`${col} = $${idx}`);
-            vals.push(f[k]?.to ?? null);
+            sets.push(`${spec.col} = $${idx}`);
+            vals.push(spec.cast(f[k]?.to));
             idx++;
           }
         }
 
         if (!sets.length) { skipped++; continue; }
 
-        await client.query(`
+        const r = await client.query(
+          `
           UPDATE insumos
           SET ${sets.join(', ')}, updated_at = now()
           WHERE business_id = $1 AND codigo_maxi = $2
-        `, vals);
+          `,
+          vals
+        );
 
-        updated++;
+        updated += (r.rowCount || 0);
         continue;
       }
 
-      // missing: no se aplica
+      // missing u otras acciones: no se aplica por ahora
       skipped++;
     }
 
-    await client.query(`
+    // ✅ marcar como aplicado SOLO para ese business
+    const mark = await client.query(
+      `
       UPDATE sync_change_sets
-      SET status='applied', applied_by=$2, applied_at=now()
-      WHERE id=$1
-    `, [csid, userId || null]);
+      SET status='applied', applied_by=$3, applied_at=now()
+      WHERE id=$1 AND business_id=$2
+      `,
+      [csid, bid, userId || null]
+    );
+
+    if ((mark.rowCount || 0) === 0) {
+      throw new Error('no se pudo marcar aplicado (change_set no pertenece al negocio)');
+    }
 
     await client.query('COMMIT');
 
     return { ok: true, inserted, updated, skipped };
   } catch (e) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch {}
     throw e;
   } finally {
     client.release();
