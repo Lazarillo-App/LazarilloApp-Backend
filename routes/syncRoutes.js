@@ -11,7 +11,7 @@ const getUserId = (req) => req.user?.id || 1;
 // Detect insumos
 router.post('/insumos/detect', async (req, res, next) => {
   try {
-    const businessId = Number(req.params.businessId);
+    const businessId = Number(req.params.id);
     const userId = getUserId(req);
     const out = await detectInsumosChanges({ businessId, userId, req });
     res.json(out);
@@ -21,7 +21,7 @@ router.post('/insumos/detect', async (req, res, next) => {
 // List change sets
 router.get('/change-sets', async (req, res, next) => {
   try {
-    const businessId = Number(req.params.businessId);
+    const businessId = Number(req.params.id);
     const status = req.query.status || null;
     const scope = req.query.scope || null;
 
@@ -45,7 +45,7 @@ router.get('/change-sets', async (req, res, next) => {
 // Get details
 router.get('/change-sets/:id', async (req, res, next) => {
   try {
-    const businessId = Number(req.params.businessId);
+    const businessId = Number(req.params.id);
     const id = Number(req.params.id);
     const { rows } = await require('../config/db').query(`
       SELECT *
@@ -78,7 +78,7 @@ router.post('/change-sets/:id/approve', async (req, res, next) => {
 // Reject
 router.post('/change-sets/:id/reject', async (req, res, next) => {
   try {
-    const businessId = Number(req.params.businessId);
+    const businessId = Number(req.params.id);
     const id = Number(req.params.id);
     const userId = getUserId(req);
 
@@ -95,7 +95,7 @@ router.post('/change-sets/:id/reject', async (req, res, next) => {
 // Apply
 router.post('/change-sets/:id/apply', async (req, res, next) => {
   try {
-    const businessId = Number(req.params.businessId);
+    const businessId = Number(req.params.id);
     const id = Number(req.params.id);
     const userId = getUserId(req);
 
