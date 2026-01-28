@@ -32,7 +32,7 @@ const notificationsRouter = require('./routes/notificationsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
 const ventasCSVRoutes = require('./routes/ventasCSVRoutes');
-
+const notificationsRoutes = require('./routes/notificationsRoutes');
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
 
@@ -105,6 +105,7 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
 // NOTIFICACIONES (con auth)
 app.use('/api/notifications', authRequired, notificationsRouter);
+app.use('/businesses/:businessId/notifications', notificationsRoutes);
 
 // Guard global de /api (después de /api/cron y /api/admin), antes del resto
 app.use('/api', authRequired, loadActiveBusiness);
