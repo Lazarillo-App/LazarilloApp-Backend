@@ -1,6 +1,6 @@
 // routes/notifications.js
 const express = require('express');
-const router = express.Router();
+const router = express.Router({ mergeParams: true });
 const db = require('../config/db');
 const { authRequired } = require('../middleware/authMiddleware');
 const notifService = require('../services/notificationService');

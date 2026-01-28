@@ -105,26 +105,26 @@ app.use('/admin', adminRebuildAgg);
 /* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
-// Guard global de /api (después de /api/cron y /api/admin), antes del resto
+// Guard global de /api (después de /api/cron y /api/admin)
 app.use('/api', authRequired, loadActiveBusiness);
 
-// módulos con negocio
+// módulos sin :businessId en la URL
 app.use('/api/insumos', insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/branches', branchesRoutes);
 app.use('/api/divisions', divisionsRoutes);
 
-// ✅ businesses (una sola vez)
+// businesses base
 app.use('/api/businesses', businessRoutes);
 
-// ✅ rutas que dependen de :businessId
-app.use('/api/businesses/:businessId', agrupacionesRoutes);
-
-// ✅ CORREGIDO: Montar notificaciones y sync correctamente DESPUÉS del guard de auth
+// 🔴 IMPORTANTE: rutas ESPECÍFICAS primero
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
 app.use('/api/businesses/:businessId/sync', syncRoutes);
 
-// 🆕 Importación CSV (con auth ya aplicado por guard global)
+// 🔵 GENÉRICA AL FINAL
+app.use('/api/businesses/:businessId', agrupacionesRoutes);
+
+// otros módulos
 app.use('/api/businesses', salesImportRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
 
