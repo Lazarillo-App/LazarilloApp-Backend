@@ -134,11 +134,10 @@ router.get(
 );
 
 /* ───────── Ventas legacy lectura (serie por artículo) ───────── */
-
 router.get(
-  '/:id/sales/:articuloId',
+  '/:id/sales/:articuloId(\\d+)',
   cacheJson(300),
-  ensureFn('salesSeriesFromDB', salesSeriesFromDB)  // ← Esta déjala igual (es para series)
+  ensureFn('salesSeriesFromDB', salesSeriesFromDB)
 );
 
 /* ───────── Ventas: probes (diagnóstico) ───────── */
