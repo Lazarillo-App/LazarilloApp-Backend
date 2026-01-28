@@ -28,11 +28,13 @@ const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
 const divisionsRoutes = require('./routes/divisionsRoutes');  
 const branchesRoutes = require('./routes/branchRoutes');
-const notificationsRouter = require('./routes/notificationsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
 const ventasCSVRoutes = require('./routes/ventasCSVRoutes');
+// ✅ CORREGIDO: Importar notificaciones y sync una sola vez con nombres consistentes
 const notificationsRoutes = require('./routes/notificationsRoutes');
+const syncRoutes = require('./routes/syncRoutes');
+
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
 
@@ -103,10 +105,6 @@ app.use('/admin', adminRebuildAgg);
 /* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
-// NOTIFICACIONES (con auth)
-app.use('/api/notifications', authRequired, notificationsRouter);
-app.use('/businesses/:businessId/notifications', notificationsRoutes);
-
 // Guard global de /api (después de /api/cron y /api/admin), antes del resto
 app.use('/api', authRequired, loadActiveBusiness);
 
@@ -121,6 +119,10 @@ app.use('/api/businesses', businessRoutes);
 
 // ✅ rutas que dependen de :businessId
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
+
+// ✅ CORREGIDO: Montar notificaciones y sync correctamente DESPUÉS del guard de auth
+app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
+app.use('/api/businesses/:businessId/sync', syncRoutes);
 
 // 🆕 Importación CSV (con auth ya aplicado por guard global)
 app.use('/api/businesses', salesImportRoutes);
