@@ -134,9 +134,18 @@ router.get(
 );
 
 /* ───────── Ventas legacy lectura (serie por artículo) ───────── */
+function requireNumericParam(paramName) {
+  return (req, res, next) => {
+    const v = String(req.params[paramName] || '');
+    if (!/^\d+$/.test(v)) return res.status(404).json({ error: 'not_found' });
+    next();
+  };
+}
+
 router.get(
-  '/:id/sales/:articuloId(\\d+)',
+  '/:id/sales/:articuloId',
   cacheJson(300),
+  requireNumericParam('articuloId'),
   ensureFn('salesSeriesFromDB', salesSeriesFromDB)
 );
 
