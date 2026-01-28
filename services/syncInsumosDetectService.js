@@ -10,7 +10,7 @@ const numOrNull = (v) => {
     if (v == null || v === '') return null;
     const n = Number(String(v).replace(',', '.'));
     if (!Number.isFinite(n)) return null;
-    return Math.round(n * 1000) / 1000; // 
+    return Math.round(n * 1000) / 1000;
 };
 
 function diffFields(canon, stg) {
@@ -171,15 +171,19 @@ async function detectInsumosChanges({ businessId, userId, req }) {
         }
 
         // 4) Upsert staging siempre (para auditoría)
-        const sourceMeta = { provider: 'maxirest', endpoint: '/estadisticasmaster/insumos', fetched_at: new Date().toISOString() };
+        const sourceMeta = { 
+            provider: 'maxirest', 
+            endpoint: '/estadisticasmaster/insumos', 
+            fetched_at: new Date().toISOString() 
+        };
         await upsertMaxiSuppliesStaging(client, bid, normalized, sourceMeta);
 
         // 5) Leer staging vs canonical para diff
         // staging map
         const stgRes = await client.query(
             `SELECT codigo, nombre, rubro, medida, precio
-       FROM maxi_supplies
-       WHERE business_id = $1`,
+             FROM maxi_supplies
+             WHERE business_id = $1`,
             [bid]
         );
         const stgByCode = new Map(stgRes.rows.map(r => [Number(r.codigo), r]));
@@ -187,8 +191,8 @@ async function detectInsumosChanges({ businessId, userId, req }) {
         // canonical map
         const canonRes = await client.query(
             `SELECT codigo_maxi, nombre, rubro, unidad_med, precio_ref, costo_ref, nota
-   FROM insumos
-   WHERE business_id = $1`,
+             FROM insumos
+             WHERE business_id = $1`,
             [bid]
         );
         const canonByCode = new Map(
@@ -271,21 +275,33 @@ async function detectInsumosChanges({ businessId, userId, req }) {
 
         const status = blocked ? 'error' : 'pending';
         const summary = {
-            counts: { new: newCount, updated: updCount, missing: missingCount, incoming: incomingCount, canonical: canonicalCount },
-            risk: { blocked, reasons: riskReasons, missingPercent: Number(missingPercent.toFixed(2)) },
+            counts: { 
+                new: newCount, 
+                updated: updCount, 
+                missing: missingCount, 
+                incoming: incomingCount, 
+                canonical: canonicalCount 
+            },
+            risk: { 
+                blocked, 
+                reasons: riskReasons, 
+                missingPercent: Number(missingPercent.toFixed(2)) 
+            },
         };
 
+        // 6) Si no hay cambios, retornar sin crear change_set
         if (!blocked && newCount === 0 && updCount === 0 && missingCount === 0) {
             await client.query('COMMIT');
             return { ok: true, status: 'noop', summary };
         }
 
+        // 7) Crear change_set
         const csRes = await client.query(`
-  INSERT INTO sync_change_sets
-    (business_id, scope, status, created_by, summary, changes, source_snapshot)
-  VALUES ($1, 'insumos', $2, $3, $4::jsonb, $5::jsonb, $6::jsonb)
-  RETURNING id
-`, [
+          INSERT INTO sync_change_sets
+            (business_id, scope, status, created_by, summary, changes, source_snapshot)
+          VALUES ($1, 'insumos', $2, $3, $4::jsonb, $5::jsonb, $6::jsonb)
+          RETURNING id
+        `, [
             bid,
             status,
             userId || null,
@@ -295,7 +311,7 @@ async function detectInsumosChanges({ businessId, userId, req }) {
         ]);
         changeSetId = csRes.rows[0].id;
 
-        // 7) Crear notificación
+        // 8) Crear notificación - ✅ NOMBRE DE TABLA CORRECTO: 'notifications'
         const title = blocked
             ? 'Sync Insumos BLOQUEADA (Maxi inconsistente)'
             : 'Cambios detectados en Insumos (requiere aprobación)';
@@ -305,31 +321,44 @@ async function detectInsumosChanges({ businessId, userId, req }) {
             : `Nuevos: ${newCount}, Actualizaciones: ${updCount}, Faltantes en Maxi: ${missingCount}.`;
 
         await client.query(`
-      INSERT INTO sync_notifications (business_id, user_id, type, title, message, metadata, read)
-      VALUES ($1, $2, 'sync_articles', $3, $4, $5::jsonb, false)
-    `, [
+          INSERT INTO notifications (business_id, type, title, message, metadata, read, created_at)
+          VALUES ($1, $2, $3, $4, $5::jsonb, false, now())
+        `, [
             bid,
-            userId || 1,
+            blocked ? 'sync_insumos_blocked' : 'sync_insumos_pending',
             title,
             message,
-            JSON.stringify({ change_set_id: changeSetId, scope: 'insumos', ...summary })
+            JSON.stringify({ 
+                change_set_id: String(changeSetId), 
+                scope: 'insumos', 
+                ...summary 
+            })
         ]);
 
         await client.query('COMMIT');
 
-        return { ok: true, change_set_id: changeSetId, status, summary };
+        return { 
+            ok: true, 
+            change_set_id: changeSetId, 
+            status, 
+            summary 
+        };
 
     } catch (e) {
         await client.query('ROLLBACK');
-        // si ya creamos changeSetId, marcarlo como error (best effort)
+        
+        // Si ya creamos changeSetId, marcarlo como error (best effort)
         if (changeSetId) {
             try {
                 await client.query(
                     `UPDATE sync_change_sets SET status='error', error=$2 WHERE id=$1`,
                     [changeSetId, String(e.message || e)]
                 );
-            } catch { }
+            } catch (updateError) {
+                console.error('[detectInsumosChanges] Error al marcar change_set como error:', updateError);
+            }
         }
+        
         throw e;
     } finally {
         client.release();
