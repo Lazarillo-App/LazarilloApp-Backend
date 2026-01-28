@@ -19,6 +19,45 @@ const getBusinessIdParam = (req) => {
   return bid;
 };
 
+const resolveNotificationsForChangeSet = async ({ businessId, changeSetId, userId, resolutionStatus }) => {
+  // Nota: metadata puede ser json o jsonb según tu tabla. Asumo jsonb.
+  // Si es json, te digo abajo el ajuste.
+  await db.query(`
+    UPDATE notifications
+    SET
+      read = true,
+      metadata = jsonb_set(
+        COALESCE(metadata, '{}'::jsonb),
+        '{resolution}',
+        to_jsonb(json_build_object(
+          'status', $3,
+          'at', now(),
+          'by', $4
+        )),
+        true
+      )
+    WHERE business_id = $1
+      AND NULLIF(metadata->>'change_set_id', '')::int = $2
+  `, [businessId, changeSetId, resolutionStatus, userId]);
+};
+
+const createOutcomeNotification = async ({ businessId, changeSetId, scope, type, title, message, metadata }) => {
+  await db.query(`
+    INSERT INTO notifications (business_id, type, title, message, metadata, read, created_at)
+    VALUES ($1, $2, $3, $4, $5::jsonb, false, now())
+  `, [
+    businessId,
+    type,
+    title,
+    message,
+    JSON.stringify({
+      change_set_id: String(changeSetId),
+      scope,
+      ...(metadata || {}),
+    }),
+  ]);
+};
+
 /* ========================= INSUMOS ========================= */
 
 // Detect insumos
@@ -136,12 +175,31 @@ router.post('/change-sets/:changeSetId/reject', async (req, res, next) => {
     const r = await db.query(`
       UPDATE sync_change_sets
       SET status='rejected', approved_by=$3, approved_at=now()
-      WHERE id=$1 AND business_id=$2 AND status IN ('pending','error')
+      WHERE id=$1 AND business_id=$2 AND status IN ('pending','error','approved')
     `, [changeSetId, businessId, userId]);
 
     if ((r.rowCount || 0) === 0) {
       return res.status(404).json({ ok: false, error: 'change_set_not_found_or_not_rejectable' });
     }
+
+    // ✅ Cierra la notificación original (ya no es accionable nunca)
+    await resolveNotificationsForChangeSet({
+      businessId,
+      changeSetId,
+      userId,
+      resolutionStatus: 'rejected'
+    });
+
+    // ✅ Opcional: generar notificación de resultado
+    await createOutcomeNotification({
+      businessId,
+      changeSetId,
+      scope: 'insumos',
+      type: 'sync_insumos_rejected',
+      title: 'Cambios rechazados (Insumos)',
+      message: `Se rechazó el change set #${changeSetId}. No se aplicaron cambios.`,
+      metadata: { outcome: 'rejected' },
+    });
 
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -161,7 +219,31 @@ router.post('/change-sets/:changeSetId/apply', async (req, res, next) => {
     }
 
     const userId = getUserId(req);
+
     const out = await applyInsumosChangeSet({ businessId, changeSetId, userId });
+
+    // ✅ Cierra notificación original
+    await resolveNotificationsForChangeSet({
+      businessId,
+      changeSetId,
+      userId,
+      resolutionStatus: 'applied'
+    });
+
+    // ✅ Opcional: notificación de éxito con resumen
+    const counts = out?.summary?.counts || out?.item?.summary?.counts || {};
+    const msg = `Aplicado change set #${changeSetId}. Nuevos: ${counts.new ?? '-'}, Actualizados: ${counts.updated ?? '-'}, Faltantes: ${counts.missing ?? '-'}.`;
+
+    await createOutcomeNotification({
+      businessId,
+      changeSetId,
+      scope: 'insumos',
+      type: 'sync_insumos_applied',
+      title: 'Cambios aplicados correctamente (Insumos)',
+      message: msg,
+      metadata: { outcome: 'applied', counts },
+    });
+
     res.json(out);
   } catch (e) { next(e); }
 });
