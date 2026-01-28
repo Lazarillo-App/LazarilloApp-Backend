@@ -128,7 +128,7 @@ exports.listar = async (req, res) => {
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const hardLimit = Math.min(Math.max(Number(limit), 1), 100000);
+    const hardLimit = Math.min(Math.max(Number(limit), 1), 500000);
     const offset = (Number(page) - 1) * hardLimit;
 
     const safeOrderBy = ALLOWED_ORDER_BY.includes(orderBy) ? orderBy : 'nombre';
