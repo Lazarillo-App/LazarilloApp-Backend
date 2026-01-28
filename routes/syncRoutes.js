@@ -19,44 +19,77 @@ const getBusinessIdParam = (req) => {
   return bid;
 };
 
-const resolveNotificationsForChangeSet = async ({ businessId, changeSetId, userId, resolutionStatus }) => {
-  // Nota: metadata puede ser json o jsonb según tu tabla. Asumo jsonb.
-  // Si es json, te digo abajo el ajuste.
-  await db.query(`
+/**
+ * ✅ Resuelve/cierra las notificaciones asociadas a un changeSetId:
+ * - read=true
+ * - metadata.resolution.status = applied|rejected|approved
+ *
+ * Nota: asume metadata JSONB. Si tu columna es JSON (no JSONB), te digo abajo el ajuste.
+ */
+async function resolveNotificationsForChangeSet({ businessId, changeSetId, userId, resolutionStatus }) {
+  // resolutionStatus: 'applied' | 'rejected'
+
+  const q = `
     UPDATE notifications
     SET
       read = true,
-      metadata = jsonb_set(
-        COALESCE(metadata, '{}'::jsonb),
-        '{resolution}',
-        to_jsonb(json_build_object(
-          'status', $3,
-          'at', now(),
-          'by', $4
-        )),
-        true
+      metadata = (
+        CASE
+          WHEN pg_typeof(metadata) = 'jsonb'::regtype THEN
+            jsonb_set(
+              COALESCE(metadata, '{}'::jsonb),
+              '{resolution}',
+              to_jsonb(json_build_object(
+                'status', $3,
+                'at', now(),
+                'by', $4,
+                'change_set_id', $2
+              )),
+              true
+            )
+          ELSE
+            (
+              jsonb_set(
+                COALESCE(metadata::jsonb, '{}'::jsonb),
+                '{resolution}',
+                to_jsonb(json_build_object(
+                  'status', $3,
+                  'at', now(),
+                  'by', $4,
+                  'change_set_id', $2
+                )),
+                true
+              )
+            )::json
+        END
       )
     WHERE business_id = $1
-      AND NULLIF(metadata->>'change_set_id', '')::int = $2
-  `, [businessId, changeSetId, resolutionStatus, userId]);
-};
+      AND (metadata->>'change_set_id') = $2::text
+  `;
 
-const createOutcomeNotification = async ({ businessId, changeSetId, scope, type, title, message, metadata }) => {
-  await db.query(`
+  const r = await db.query(q, [businessId, String(changeSetId), resolutionStatus, userId || null]);
+  return r.rowCount || 0;
+}
+
+async function createOutcomeNotification({ businessId, changeSetId, scope, type, title, message, metadata }) {
+  await db.query(
+    `
     INSERT INTO notifications (business_id, type, title, message, metadata, read, created_at)
     VALUES ($1, $2, $3, $4, $5::jsonb, false, now())
-  `, [
-    businessId,
-    type,
-    title,
-    message,
-    JSON.stringify({
-      change_set_id: String(changeSetId),
-      scope,
-      ...(metadata || {}),
-    }),
-  ]);
-};
+    `,
+    [
+      businessId,
+      type,
+      title,
+      message,
+      JSON.stringify({
+        change_set_id: String(changeSetId),
+        scope,
+        ...(metadata || {}),
+      }),
+    ]
+  );
+}
 
 /* ========================= INSUMOS ========================= */
 
@@ -153,6 +186,14 @@ router.post('/change-sets/:changeSetId/approve', async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'change_set_not_found_or_not_approvable' });
     }
 
+    // ✅ marcar notificación como "approved" (opcional, pero te ayuda a que el front no la “reviva”)
+    await resolveNotificationsForChangeSet({
+      businessId,
+      changeSetId,
+      userId,
+      resolutionStatus: 'approved',
+    });
+
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -182,15 +223,16 @@ router.post('/change-sets/:changeSetId/reject', async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'change_set_not_found_or_not_rejectable' });
     }
 
-    // ✅ Cierra la notificación original (ya no es accionable nunca)
+    // ✅ Cierra notificación original
     await resolveNotificationsForChangeSet({
       businessId,
       changeSetId,
       userId,
-      resolutionStatus: 'rejected'
+      resolutionStatus: 'rejected',
     });
+    console.log('[sync] resolved notifications', { businessId, changeSetId, affected });
 
-    // ✅ Opcional: generar notificación de resultado
+    // ✅ Opcional: notificación de resultado
     await createOutcomeNotification({
       businessId,
       changeSetId,
@@ -227,8 +269,9 @@ router.post('/change-sets/:changeSetId/apply', async (req, res, next) => {
       businessId,
       changeSetId,
       userId,
-      resolutionStatus: 'applied'
+      resolutionStatus: 'applied',
     });
+    console.log('[sync] resolved notifications', { businessId, changeSetId, affected });
 
     // ✅ Opcional: notificación de éxito con resumen
     const counts = out?.summary?.counts || out?.item?.summary?.counts || {};
