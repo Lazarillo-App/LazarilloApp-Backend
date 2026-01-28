@@ -3,6 +3,8 @@ const pool = require('../config/db');
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
+const notifService = require('./notificationService'); 
+const { rebuildSalesDailyRange } = require('./salesDailyRebuildService'); 
 const { VERBOSE_IMPORT_LOGS, MAX_IMPORT_ROWS } = require('../config/features');
 
 /**
@@ -160,17 +162,17 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
     let dateField, idField, qtyField, amountField, nameField;
 
     if (format === 'maxi_export') {
-      dateField   = getByKeysCI(row, ['fecha']);
-      idField     = getByKeysCI(row, ['codigo']);
-      qtyField    = getByKeysCI(row, ['unidades']);
+      dateField = getByKeysCI(row, ['fecha']);
+      idField = getByKeysCI(row, ['codigo']);
+      qtyField = getByKeysCI(row, ['unidades']);
       amountField = getByKeysCI(row, ['importe']);
-      nameField   = getByKeysCI(row, ['nombre']);
+      nameField = getByKeysCI(row, ['nombre']);
     } else {
-      dateField   = getByKeysCI(row, ['date', 'fecha']);
-      idField     = getByKeysCI(row, ['article_id', 'codigo']);
-      qtyField    = getByKeysCI(row, ['qty', 'unidades']);
+      dateField = getByKeysCI(row, ['date', 'fecha']);
+      idField = getByKeysCI(row, ['article_id', 'codigo']);
+      qtyField = getByKeysCI(row, ['qty', 'unidades']);
       amountField = getByKeysCI(row, ['amount', 'importe']);
-      nameField   = getByKeysCI(row, ['article_name', 'nombre']);
+      nameField = getByKeysCI(row, ['article_name', 'nombre']);
     }
 
     normalized.date = normalizeDate(dateField);
@@ -206,16 +208,129 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
   }
 }
 
+/* ============================================================
+   NUEVOS HELPERS (staging + overlap + diff + apply replace)
+   ============================================================ */
+
+async function insertStagingItems(client, { importId, businessId, items }) {
+  // Reemplazar staging previo de ese import (idempotente)
+  await client.query('DELETE FROM sales_csv_import_items WHERE import_id = $1', [importId]);
+
+  const CHUNK = 1000;
+
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const chunk = items.slice(i, i + CHUNK);
+
+    const params = [];
+    const rowsSql = chunk.map((r, idx) => {
+      const base = idx * 7;
+      params.push(importId, businessId, r.day, r.article_id, r.qty, r.amount, r.article_name);
+      return `($${base + 1}, $${base + 2}, $${base + 3}::date, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
+    }).join(',');
+
+    await client.query(`
+      INSERT INTO sales_csv_import_items
+        (import_id, business_id, day, article_id, qty, amount, article_name)
+      VALUES ${rowsSql}
+      ON CONFLICT (import_id, day, article_id)
+      DO UPDATE SET
+        qty = EXCLUDED.qty,
+        amount = EXCLUDED.amount,
+        article_name = COALESCE(EXCLUDED.article_name, sales_csv_import_items.article_name)
+    `, params);
+  }
+}
+
+async function hasCsvOverlap(client, { businessId, from, to }) {
+  const r = await client.query(`
+    SELECT 1
+    FROM sales_daily_items
+    WHERE business_id = $1
+      AND source = 'csv'
+      AND day BETWEEN $2::date AND $3::date
+    LIMIT 1
+  `, [businessId, from, to]);
+
+  return r.rowCount > 0;
+}
+
+async function computeDiffStats(client, { importId, businessId, from, to }) {
+  const { rows: [diff] } = await client.query(`
+    WITH new_rows AS (
+      SELECT day, article_id, qty, amount
+      FROM sales_csv_import_items
+      WHERE import_id = $1
+    ),
+    old_rows AS (
+      SELECT day, article_id, qty, amount
+      FROM sales_daily_items
+      WHERE business_id = $2
+        AND source='csv'
+        AND day BETWEEN $3::date AND $4::date
+    )
+    SELECT
+      COALESCE(SUM(CASE WHEN o.day IS NULL THEN 1 ELSE 0 END),0) AS rows_new,
+      COALESCE(SUM(CASE WHEN o.day IS NOT NULL AND (o.qty <> n.qty OR o.amount <> n.amount) THEN 1 ELSE 0 END),0) AS rows_changed,
+      COALESCE(SUM(CASE WHEN o.day IS NOT NULL AND (o.qty = n.qty AND o.amount = n.amount) THEN 1 ELSE 0 END),0) AS rows_same,
+      COALESCE((
+        SELECT COUNT(*)
+        FROM old_rows o2
+        LEFT JOIN new_rows n2
+          ON n2.day=o2.day AND n2.article_id=o2.article_id
+        WHERE n2.day IS NULL
+      ),0) AS rows_missing_in_new,
+      COALESCE(SUM(COALESCE(n.amount,0) - COALESCE(o.amount,0)),0) AS delta_amount,
+      COALESCE(SUM(COALESCE(n.qty,0) - COALESCE(o.qty,0)),0) AS delta_qty
+    FROM new_rows n
+    LEFT JOIN old_rows o
+      ON o.day=n.day AND o.article_id=n.article_id
+  `, [importId, businessId, from, to]);
+
+  return diff || {
+    rows_new: 0,
+    rows_changed: 0,
+    rows_same: 0,
+    rows_missing_in_new: 0,
+    delta_amount: 0,
+    delta_qty: 0
+  };
+}
+
+async function applyReplaceRange(client, { businessId, from, to, importId }) {
+  // Reemplazo por rango solo para source='csv'
+  await client.query(`
+    DELETE FROM sales_daily_items
+    WHERE import_id = $1
+      AND business_id = $2
+      AND day BETWEEN $3::date AND $4::date
+      AND source='csv'
+      AND day BETWEEN $2::date AND $3::date
+  `, [importId, businessId, from, to]);
+
+  const ins = await client.query(`
+    INSERT INTO sales_daily_items
+      (business_id, day, article_id, qty, amount, article_name, source, created_at, updated_at)
+    SELECT
+      business_id, day, article_id, qty, amount, article_name,
+      'csv', NOW(), NOW()
+    FROM sales_csv_import_items
+    WHERE import_id = $1
+  `, [importId]);
+
+  return ins.rowCount || 0;
+}
+
 /**
  * Importa archivo a la base de datos
- * FIX CLAVE: SAVEPOINT por fila para que 1 error no aborte toda la transacción.
+ * NUEVO: staging + detección solapamiento + change set + notificación
+ *
+ * Regla:
+ * - si NO solapa: aplica directo (replace por rango) y termina "completed"
+ * - si SÍ solapa: deja en "awaiting_approval" + crea change_set + sync_notification
  */
 async function importFileToDatabase({ businessId, userId, filePath, originalName, fileType }) {
   const client = await pool.connect();
   let importId = null;
-
-  // Para evitar “transaction aborted” en el mismo request,
-  // guardamos si ya hicimos COMMIT/ROLLBACK.
   let txOpen = false;
 
   try {
@@ -272,26 +387,13 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
       console.log(`[CSV Import] Formato detectado: ${format}`);
     }
 
-    // 4) Procesar filas
-    let inserted = 0;
-    let updated = 0;
+    // 4) Normalizar filas + agregación (day+article_id) para evitar duplicados
     let failed = 0;
     const errors = [];
     let minDate = null;
     let maxDate = null;
 
-    const SQL_UPSERT = `
-      INSERT INTO sales_daily_items
-        (business_id, day, article_id, qty, amount, article_name, source, created_at, updated_at)
-      VALUES ($1, $2::date, $3, $4, $5, $6, 'csv', NOW(), NOW())
-      ON CONFLICT (business_id, day, article_id, source)
-      DO UPDATE SET
-        qty = EXCLUDED.qty,
-        amount = EXCLUDED.amount,
-        article_name = COALESCE(EXCLUDED.article_name, sales_daily_items.article_name),
-        updated_at = NOW()
-      RETURNING (xmax = 0) AS inserted
-    `;
+    const agg = new Map(); // key: `${date}|${article_id}` => { day, article_id, qty, amount, article_name }
 
     for (let i = 0; i < rows.length; i++) {
       const normalized = normalizeRow(rows[i], format, i + 1);
@@ -309,100 +411,206 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
       if (!minDate || date < minDate) minDate = date;
       if (!maxDate || date > maxDate) maxDate = date;
 
-      // FIX: SAVEPOINT por fila
-      const sp = `sp_row_${i + 1}`;
-      try {
-        await client.query(`SAVEPOINT ${sp}`);
-
-        const { rows: ret } = await client.query(SQL_UPSERT, [
-          businessId,
-          date,
-          article_id,
-          qty,
-          amount,
-          article_name,
-        ]);
-
-        await client.query(`RELEASE SAVEPOINT ${sp}`);
-
-        if (ret?.[0]?.inserted) inserted++;
-        else updated++;
-      } catch (dbError) {
-        // Importantísimo: volver a un estado válido dentro de la tx
-        try { await client.query(`ROLLBACK TO SAVEPOINT ${sp}`); } catch {}
-        try { await client.query(`RELEASE SAVEPOINT ${sp}`); } catch {}
-
-        failed++;
-        if (errors.length < 100) {
-          errors.push({
-            row: i + 1,
-            error: `Error DB: ${dbError.message}`,
-            sample: normalized.data,
-          });
-        }
-
-        // Log útil (sin llenar logs si no querés)
-        if (VERBOSE_IMPORT_LOGS) {
-          console.error(`[CSV Import] DB error fila ${i + 1}:`, dbError.message);
-        }
+      const key = `${date}|${article_id}`;
+      const prev = agg.get(key);
+      if (!prev) {
+        agg.set(key, { day: date, article_id, qty, amount, article_name });
+      } else {
+        prev.qty += qty;
+        prev.amount += amount;
+        if (!prev.article_name && article_name) prev.article_name = article_name;
       }
     }
 
-    // 5) Actualizar import
-    await client.query(`
-      UPDATE sales_csv_imports
-      SET
-        status = $2,
-        row_count = $3,
-        date_from = $4::date,
-        date_to = $5::date,
-        rows_inserted = $6,
-        rows_updated = $7,
-        rows_failed = $8,
-        error_log = $9::jsonb,
-        processed_at = NOW()
-      WHERE id = $1
-    `, [
-      importId,
-      failed === rows.length ? 'failed' : 'completed',
-      rows.length,
-      minDate,
-      maxDate,
-      inserted,
-      updated,
-      failed,
-      JSON.stringify(errors),
-    ]);
+    if (!minDate || !maxDate) {
+      // todas fallaron
+      await client.query(`
+        UPDATE sales_csv_imports
+        SET
+          status = 'failed',
+          row_count = $2,
+          rows_failed = $3,
+          error_log = $4::jsonb,
+          processed_at = NOW()
+        WHERE id = $1
+      `, [importId, rows.length, failed, JSON.stringify(errors)]);
+      await client.query('COMMIT');
+      txOpen = false;
+
+      try { fs.unlinkSync(filePath); } catch { }
+
+      return {
+        ok: false,
+        import_id: importId,
+        error: 'no_valid_rows',
+        summary: {
+          total_rows: rows.length,
+          failed,
+          has_errors: true,
+          date_range: { from: null, to: null },
+        },
+        errors: errors.slice(0, 20),
+      };
+    }
+
+    const items = Array.from(agg.values());
+
+    // 5) Guardar en staging (sales_csv_import_items)
+    await insertStagingItems(client, { importId, businessId, items });
+
+    // 6) Detectar solapamiento contra CSV previo
+    const hasOverlap = await hasCsvOverlap(client, { businessId, from: minDate, to: maxDate });
+
+    let mode = 'applied';
+    let changeSetId = null;
+    let notifId = null;
+    let appliedRows = 0;
+    let diffStats = null;
+
+    if (!hasOverlap) {
+  appliedRows = await applyReplaceRange(client, {
+    businessId,
+    from: minDate,
+    to: maxDate,
+    importId
+  });
+
+  // ✅ NUEVO: reconstruir sales_daily desde sales_daily_items (prefiere csv)
+  await rebuildSalesDailyRange({
+    businessId,
+    from: minDate,
+    to: maxDate,
+    client, // misma transacción
+  });
+
+      // Marcar import como completed
+      await client.query(`
+        UPDATE sales_csv_imports
+        SET
+          status = $2,
+          row_count = $3,
+          date_from = $4::date,
+          date_to = $5::date,
+          rows_inserted = $6,  -- aquí usamos rows_inserted como "aplicadas"
+          rows_updated = 0,
+          rows_failed = $7,
+          error_log = $8::jsonb,
+          processed_at = NOW()
+        WHERE id = $1
+      `, [
+        importId,
+        failed === rows.length ? 'failed' : 'completed',
+        rows.length,
+        minDate,
+        maxDate,
+        appliedRows,
+        failed,
+        JSON.stringify(errors),
+      ]);
+
+    } else {
+      // ⚠️ Solapa: NO tocar sales_daily_items, crear change set + notificación
+      mode = 'pending';
+      diffStats = await computeDiffStats(client, { importId, businessId, from: minDate, to: maxDate });
+
+      const summary = {
+        import_id: importId,
+        range: { from: minDate, to: maxDate },
+        stats: diffStats,
+        action: 'replace_range'
+      };
+
+      // Crear change set (requiere que agregues 'sales_import' al check)
+      const { rows: [cs] } = await client.query(`
+        INSERT INTO sync_change_sets
+          (business_id, scope, status, created_by, summary, changes)
+        VALUES
+          ($1, 'sales_import', 'pending', $2, $3::jsonb, '[]'::jsonb)
+        RETURNING id
+      `, [businessId, userId, JSON.stringify(summary)]);
+
+      changeSetId = cs.id;
+
+      // Marcar import como awaiting_approval
+      await client.query(`
+        UPDATE sales_csv_imports
+        SET
+          status = 'awaiting_approval',
+          row_count = $2,
+          date_from = $3::date,
+          date_to = $4::date,
+          rows_failed = $5,
+          error_log = $6::jsonb,
+          processed_at = NOW()
+        WHERE id = $1
+      `, [
+        importId,
+        rows.length,
+        minDate,
+        maxDate,
+        failed,
+        JSON.stringify(errors),
+      ]);
+
+      // Notificación (sync_notifications)
+      const title = 'Ventas CSV: solapamiento detectado';
+      const message =
+        `Rango ${minDate} → ${maxDate}. ` +
+        `Cambios: ${diffStats.rows_changed}, Nuevos: ${diffStats.rows_new}, ` +
+        `Δ$ ${diffStats.delta_amount}`;
+
+      const createdNotif = await notifService.createSyncNotification({
+        businessId,
+        userId,
+        type: 'sales_import_overlap', // 👈 asegurate de permitirlo en ALLOWED_TYPES
+        title,
+        message,
+        metadata: {
+          scope: 'sales_import',
+          change_set_id: changeSetId,
+          import_id: importId,
+          range: { from: minDate, to: maxDate },
+          stats: diffStats,
+          suggested_action: 'replace_range',
+        }
+      });
+
+      notifId = createdNotif?.id || null;
+    }
 
     await client.query('COMMIT');
     txOpen = false;
 
-    // 6) limpiar temp
-    try { fs.unlinkSync(filePath); } catch {}
+    // 7) limpiar temp
+    try { fs.unlinkSync(filePath); } catch { }
 
     return {
       ok: true,
+      mode,
       import_id: importId,
+      change_set_id: changeSetId,
+      notification_id: notifId,
       summary: {
         total_rows: rows.length,
-        inserted,
-        updated,
+        valid_rows: items.length,
         failed,
         has_errors: failed > 0,
         date_range: { from: minDate, to: maxDate },
+        applied_rows: mode === 'applied' ? appliedRows : 0,
+        diff: mode === 'pending' ? diffStats : null,
       },
       errors: errors.slice(0, 20),
     };
+
   } catch (error) {
-    // Si la tx sigue abierta, cerrala prolijo
     if (txOpen) {
-      try { await client.query('ROLLBACK'); } catch {}
+      try { await client.query('ROLLBACK'); } catch { }
       txOpen = false;
     }
 
     console.error('[CSV Import] Error fatal:', error);
 
-    // Ojo: esto es fuera de la tx (pool.query), para que no quede bloqueado
+    // fuera de tx
     if (importId) {
       try {
         await pool.query(`
@@ -412,11 +620,10 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
               processed_at = NOW()
           WHERE id = $1
         `, [importId, JSON.stringify([{ error: error.message }])]);
-      } catch {}
+      } catch { }
     }
 
-    // Limpiar archivo si falló antes del unlink
-    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(filePath); } catch { }
 
     throw error;
   } finally {
@@ -492,4 +699,5 @@ module.exports = {
   importFileToDatabase,
   listImports,
   getImportDetails,
+  applyReplaceRange,
 };

@@ -2,66 +2,45 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
+const { authRequired } = require('../middleware/authMiddleware');
+
 const { detectInsumosChanges } = require('../services/syncInsumosDetectService');
 const { applyInsumosChangeSet } = require('../services/syncChangeSetApplyService');
+const { applySalesImportChangeSet } = require('../services/salesImportChangeSetApplyService');
 
 const db = require('../config/db');
+const notifService = require('../services/notificationService');
 
-// Helpers auth
-const getUserId = (req) => req.user?.id || 1;
+// ✅ helpers
+const getUserId = (req) => req.user?.id || null;
 
-// ✅ Soporta ambos montajes:
-// - app.use('/api/businesses/:businessId', syncRoutes)
-// - router.use('/:id/sync', syncRoutes)
 const getBusinessIdParam = (req) => {
   const bid = Number(req.params.businessId ?? req.params.id);
   if (!Number.isFinite(bid) || bid <= 0) return NaN;
   return bid;
 };
 
-/**
- * ✅ Resuelve/cierra las notificaciones asociadas a un changeSetId:
- * - read=true
- * - metadata.resolution.status = applied|rejected|approved
- *
- * Nota: asume metadata JSONB. Si tu columna es JSON (no JSONB), ajusta el CASE.
- */
-async function resolveNotificationsForChangeSet({ businessId, changeSetId, userId, resolutionStatus }) {
-  // resolutionStatus: 'applied' | 'rejected' | 'approved'
+// ✅ proteger todo el router
+router.use(authRequired);
 
+/**
+ * ✅ Resuelve/cierra notificaciones en sync_notifications asociadas a changeSetId
+ */
+async function resolveSyncNotificationsForChangeSet({ businessId, changeSetId, userId, resolutionStatus }) {
   const q = `
-    UPDATE notifications
+    UPDATE sync_notifications
     SET
       read = true,
-      metadata = (
-        CASE
-          WHEN pg_typeof(metadata) = 'jsonb'::regtype THEN
-            jsonb_set(
-              COALESCE(metadata, '{}'::jsonb),
-              '{resolution}',
-              to_jsonb(json_build_object(
-                'status', $3,
-                'at', now(),
-                'by', $4,
-                'change_set_id', $2
-              )),
-              true
-            )
-          ELSE
-            (
-              jsonb_set(
-                COALESCE(metadata::jsonb, '{}'::jsonb),
-                '{resolution}',
-                to_jsonb(json_build_object(
-                  'status', $3,
-                  'at', now(),
-                  'by', $4,
-                  'change_set_id', $2
-                )),
-                true
-              )
-            )::json
-        END
+      metadata = jsonb_set(
+        COALESCE(metadata, '{}'::jsonb),
+        '{resolution}',
+        to_jsonb(json_build_object(
+          'status', $3,
+          'at', now(),
+          'by', $4,
+          'change_set_id', $2
+        )),
+        true
       )
     WHERE business_id = $1
       AND (metadata->>'change_set_id') = $2::text
@@ -71,67 +50,65 @@ async function resolveNotificationsForChangeSet({ businessId, changeSetId, userI
     const r = await db.query(q, [businessId, String(changeSetId), resolutionStatus, userId || null]);
     return r.rowCount || 0;
   } catch (error) {
-    console.error('[resolveNotifications] Error:', error);
-    // No lanzamos el error para que no rompa el flujo principal
+    console.error('[resolveSyncNotificationsForChangeSet] Error:', error);
     return 0;
   }
 }
 
 /**
- * ✅ Crea una notificación de resultado (aplicado/rechazado)
+ * ✅ Outcome usando notificationService (consistencia total)
  */
-async function createOutcomeNotification({ businessId, changeSetId, scope, type, title, message, metadata }) {
-  try {
-    await db.query(
-      `
-      INSERT INTO notifications (business_id, type, title, message, metadata, read, created_at)
-      VALUES ($1, $2, $3, $4, $5::jsonb, false, now())
-      `,
-      [
-        businessId,
-        type,
-        title,
-        message,
-        JSON.stringify({
-          change_set_id: String(changeSetId),
-          scope,
-          ...(metadata || {}),
-        }),
-      ]
-    );
-  } catch (error) {
-    console.error('[createOutcomeNotification] Error:', error);
-    // No lanzamos el error para que no rompa el flujo principal
-  }
+async function createOutcome({ businessId, userId, scope, changeSetId, outcome, message, extraMeta = {} }) {
+  // type coherente (sin inventar demasiados)
+  const type =
+    scope === 'sales_import' ? 'sync_sales' :
+    scope === 'insumos' ? 'sync_articles' : // o 'error' si no querés mezclar
+    'error';
+
+  const title =
+    outcome === 'applied' ? 'Cambio aplicado' :
+    outcome === 'rejected' ? 'Cambio rechazado' :
+    outcome === 'approved' ? 'Cambio aprobado' :
+    'Cambio actualizado';
+
+  return notifService.createSyncNotification({
+    businessId,
+    userId,
+    type,
+    title,
+    message: message || null,
+    metadata: {
+      scope,
+      change_set_id: String(changeSetId),
+      outcome,
+      ...extraMeta,
+    },
+  });
 }
 
 /* ========================= INSUMOS ========================= */
 
-// Detect insumos
 router.post('/insumos/detect', async (req, res, next) => {
   try {
     const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
-    }
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ ok: false, error: 'unauthorized' });
+
     const out = await detectInsumosChanges({ businessId, userId, req });
     res.json(out);
-  } catch (e) { 
-    next(e); 
+  } catch (e) {
+    next(e);
   }
 });
 
 /* ========================= CHANGE SETS ========================= */
 
-// List change sets
 router.get('/change-sets', async (req, res, next) => {
   try {
     const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
-    }
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const status = req.query.status || null;
     const scope = req.query.scope || null;
@@ -150,18 +127,15 @@ router.get('/change-sets', async (req, res, next) => {
     `, params);
 
     res.json({ ok: true, rows });
-  } catch (e) { 
-    next(e); 
+  } catch (e) {
+    next(e);
   }
 });
 
-// Get details
 router.get('/change-sets/:changeSetId', async (req, res, next) => {
   try {
     const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
-    }
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const changeSetId = Number(req.params.changeSetId);
     if (!Number.isFinite(changeSetId) || changeSetId <= 0) {
@@ -176,18 +150,15 @@ router.get('/change-sets/:changeSetId', async (req, res, next) => {
     `, [changeSetId, businessId]);
 
     res.json({ ok: true, item: rows[0] || null });
-  } catch (e) { 
-    next(e); 
+  } catch (e) {
+    next(e);
   }
 });
 
-// Approve
 router.post('/change-sets/:changeSetId/approve', async (req, res, next) => {
   try {
     const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
-    }
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const changeSetId = Number(req.params.changeSetId);
     if (!Number.isFinite(changeSetId) || changeSetId <= 0) {
@@ -195,6 +166,7 @@ router.post('/change-sets/:changeSetId/approve', async (req, res, next) => {
     }
 
     const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
     const r = await db.query(`
       UPDATE sync_change_sets
@@ -206,29 +178,23 @@ router.post('/change-sets/:changeSetId/approve', async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'change_set_not_found_or_not_approvable' });
     }
 
-    // ✅ marcar notificación como "approved"
-    const affected = await resolveNotificationsForChangeSet({
+    const affected = await resolveSyncNotificationsForChangeSet({
       businessId,
       changeSetId,
       userId,
       resolutionStatus: 'approved',
     });
 
-    console.log('[sync] Cambios aprobados', { businessId, changeSetId, notificationsResolved: affected });
-
     res.json({ ok: true, notificationsResolved: affected });
-  } catch (e) { 
-    next(e); 
+  } catch (e) {
+    next(e);
   }
 });
 
-// Reject
 router.post('/change-sets/:changeSetId/reject', async (req, res, next) => {
   try {
     const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
-    }
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const changeSetId = Number(req.params.changeSetId);
     if (!Number.isFinite(changeSetId) || changeSetId <= 0) {
@@ -236,6 +202,7 @@ router.post('/change-sets/:changeSetId/reject', async (req, res, next) => {
     }
 
     const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
     const r = await db.query(`
       UPDATE sync_change_sets
@@ -247,40 +214,38 @@ router.post('/change-sets/:changeSetId/reject', async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'change_set_not_found_or_not_rejectable' });
     }
 
-    // ✅ Cierra notificación original
-    const affected = await resolveNotificationsForChangeSet({
+    const affected = await resolveSyncNotificationsForChangeSet({
       businessId,
       changeSetId,
       userId,
       resolutionStatus: 'rejected',
     });
-    
-    console.log('[sync] Cambios rechazados', { businessId, changeSetId, notificationsResolved: affected });
 
-    // ✅ Opcional: notificación de resultado
-    await createOutcomeNotification({
+    // leer scope para outcome correcto
+    const { rows: [cs] } = await db.query(
+      `SELECT scope FROM sync_change_sets WHERE id=$1 AND business_id=$2 LIMIT 1`,
+      [changeSetId, businessId]
+    );
+
+    await createOutcome({
       businessId,
+      userId,
+      scope: cs?.scope || 'unknown',
       changeSetId,
-      scope: 'insumos',
-      type: 'sync_insumos_rejected',
-      title: 'Cambios rechazados (Insumos)',
+      outcome: 'rejected',
       message: `Se rechazó el change set #${changeSetId}. No se aplicaron cambios.`,
-      metadata: { outcome: 'rejected' },
     });
 
     res.json({ ok: true, notificationsResolved: affected });
-  } catch (e) { 
-    next(e); 
+  } catch (e) {
+    next(e);
   }
 });
 
-// Apply
 router.post('/change-sets/:changeSetId/apply', async (req, res, next) => {
   try {
     const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_business_id' });
-    }
+    if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const changeSetId = Number(req.params.changeSetId);
     if (!Number.isFinite(changeSetId) || changeSetId <= 0) {
@@ -288,36 +253,44 @@ router.post('/change-sets/:changeSetId/apply', async (req, res, next) => {
     }
 
     const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
-    const out = await applyInsumosChangeSet({ businessId, changeSetId, userId });
+    const { rows: [cs] } = await db.query(
+      `SELECT id, scope, status, summary FROM sync_change_sets WHERE id=$1 AND business_id=$2 LIMIT 1`,
+      [changeSetId, businessId]
+    );
 
-    // ✅ Cierra notificación original
-    const affected = await resolveNotificationsForChangeSet({
+    if (!cs) return res.status(404).json({ ok: false, error: 'change_set_not_found' });
+
+    let out;
+    if (cs.scope === 'insumos') {
+      out = await applyInsumosChangeSet({ businessId, changeSetId, userId });
+    } else if (cs.scope === 'sales_import') {
+      out = await applySalesImportChangeSet({ businessId, changeSetId, userId });
+    } else {
+      return res.status(400).json({ ok: false, error: 'unsupported_scope', scope: cs.scope });
+    }
+
+    const affected = await resolveSyncNotificationsForChangeSet({
       businessId,
       changeSetId,
       userId,
       resolutionStatus: 'applied',
     });
-    
-    console.log('[sync] Cambios aplicados', { businessId, changeSetId, notificationsResolved: affected });
 
-    // ✅ Opcional: notificación de éxito con resumen
-    const counts = out?.summary?.counts || out?.counts || {};
-    const msg = `Aplicado change set #${changeSetId}. Nuevos: ${counts.inserted ?? counts.new ?? '-'}, Actualizados: ${counts.updated ?? '-'}, Omitidos: ${counts.skipped ?? '-'}.`;
-
-    await createOutcomeNotification({
+    await createOutcome({
       businessId,
+      userId,
+      scope: cs.scope,
       changeSetId,
-      scope: 'insumos',
-      type: 'sync_insumos_applied',
-      title: 'Cambios aplicados correctamente (Insumos)',
-      message: msg,
-      metadata: { outcome: 'applied', counts },
+      outcome: 'applied',
+      message: `Se aplicó el change set #${changeSetId}.`,
+      extraMeta: { result: out },
     });
 
     res.json({ ...out, notificationsResolved: affected });
-  } catch (e) { 
-    next(e); 
+  } catch (e) {
+    next(e);
   }
 });
 

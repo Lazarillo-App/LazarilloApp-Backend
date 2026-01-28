@@ -1,7 +1,13 @@
 // services/notificationService.js
 const pool = require('../config/db');
 
-const ALLOWED_TYPES = new Set(['sync_articles', 'sync_sales', 'auto_assign', 'error']);
+const ALLOWED_TYPES = new Set([
+  'sync_articles',
+  'sync_sales',
+  'auto_assign',
+  'sales_import_overlap',
+  'error'
+]);
 
 function safeType(t) {
   const type = String(t || '').trim();
@@ -50,22 +56,61 @@ async function createSyncNotification({
   }
 }
 
+/**
+ * Notificación específica: solapamiento en importación de ventas CSV (accionable).
+ * metadata recomendado:
+ * { scope:'sales_import', change_set_id, import_id, range:{from,to}, stats:{...}, suggested_action:'replace_range' }
+ */
+async function notifySalesImportOverlap({
+  businessId,
+  userId,
+  changeSetId,
+  importId,
+  range,
+  stats
+}) {
+  const from = range?.from;
+  const to = range?.to;
+
+  const title = 'Ventas CSV: solapamiento detectado';
+
+  const deltaAmt = Number(stats?.delta_amount ?? 0);
+  const deltaQty = Number(stats?.delta_qty ?? 0);
+  const rowsChanged = Number(stats?.rows_changed ?? 0);
+  const rowsNew = Number(stats?.rows_new ?? 0);
+
+  // Mensaje corto, tipo “toast”, pero con data útil.
+  const message =
+    `Rango ${from} → ${to}. ` +
+    `Cambios: ${rowsChanged}, Nuevos: ${rowsNew}. ` +
+    `Δ$ ${deltaAmt}${Number.isFinite(deltaQty) ? `, Δqty ${deltaQty}` : ''}.`;
+
+  return createSyncNotification({
+    businessId,
+    userId,
+    type: 'sales_import_overlap',
+    title,
+    message,
+    metadata: {
+      scope: 'sales_import',
+      change_set_id: changeSetId,
+      import_id: importId,
+      range: { from, to },
+      stats: stats || {},
+      suggested_action: 'replace_range',
+    }
+  });
+}
+
 /* ============================================================
    AUTO-ASSIGN (GENÉRICO): soporta artículos y soporta insumos
-   - artículos (legacy): details con agrupacion_nombre / articulos_agregados / articulos[]
-   - insumos (nuevo):    details con group_nombre / agregados / intentados / rubro / es_elaborador / group_id
    ============================================================ */
 
-/**
- * Normaliza details de distintos "auto-assign" a un formato común:
- * [{ group_id, group_name, added, attempted, rubro, es_elaborador, items }]
- * items opcional: [{id,nombre}] si existe (caso artículos).
- */
 function normalizeAutoAssignDetails(details) {
   const arr = Array.isArray(details) ? details : [];
 
   return arr.map(d => {
-    // Caso INSUMOS (autoAssignNewInsumos)
+    // Caso INSUMOS
     if (d && (d.group_id != null || d.group_nombre != null)) {
       return {
         group_id: d.group_id ?? null,
@@ -86,27 +131,19 @@ function normalizeAutoAssignDetails(details) {
       attempted: Number(d.articulos_intentados ?? d.articulos_agregados ?? 0),
       rubro: null,
       es_elaborador: null,
-      items: Array.isArray(d.articulos) ? d.articulos : null, // puede traer {id,nombre}
+      items: Array.isArray(d.articulos) ? d.articulos : null,
     };
   }).filter(x => Number(x.added || 0) > 0);
 }
 
-/**
- * Crea notificación específica de auto-asignación (genérica).
- * - Si hay múltiples grupos, arma resumen por grupo.
- * - Si viene `items` con nombres (artículos), muestra hasta 10 por grupo.
- * - Para insumos, muestra rubro + elaborados/no elaborados en el texto si está.
- */
 async function notifyAutoAssign({ businessId, userId, result, entity = 'items' }) {
   if (!result) return null;
 
-  // soportar {assigned} (insumos) y {auto_assigned} (algunas respuestas)
   const assigned = Number(result.assigned ?? result.auto_assigned ?? 0);
   if (!Number.isFinite(assigned) || assigned <= 0) return null;
 
   const normalized = normalizeAutoAssignDetails(result.details);
 
-  // Mensaje de fallback si no hay details “presentables”
   if (!normalized.length) {
     const title = `Auto-agrupación aplicada`;
     const message = `Se auto-asignaron ${assigned} ${entity}.`;
@@ -127,7 +164,6 @@ async function notifyAutoAssign({ businessId, userId, result, entity = 'items' }
         ? ` (Rubro ${g.rubro}${g.es_elaborador ? ', elaborados' : ', no elaborados'})`
         : '';
 
-    // Si trae items con nombres (caso artículos), listamos algunos
     if (Array.isArray(g.items) && g.items.length) {
       const itemsToShow = g.items.slice(0, 10);
       const more = g.items.length > 10 ? `\n  ... y ${g.items.length - 10} más` : '';
@@ -139,14 +175,12 @@ async function notifyAutoAssign({ businessId, userId, result, entity = 'items' }
       return `• "${g.group_name}" (${g.added})${extra}:\n${list}${more}`;
     }
 
-    // Si no hay listado detallado (insumos), solo resumen
     return `• "${g.group_name}" (${g.added})${extra}`;
   }).join('\n\n');
 
   const title = `Auto-agrupación aplicada`;
   const message = `Se auto-asignaron ${assigned} ${entity}:\n\n${groupsSummary}`;
 
-  // metadata “estable” (sirve para UI futura: click -> ir al grupo)
   const metaGroups = normalized.map(g => ({
     group_id: g.group_id,
     group_name: g.group_name,
@@ -170,9 +204,6 @@ async function notifyAutoAssign({ businessId, userId, result, entity = 'items' }
   });
 }
 
-/**
- * Obtiene notificaciones de un usuario
- */
 async function getUserNotifications(userId, { businessId, limit = 20, unreadOnly = false } = {}) {
   try {
     const uid = Number(userId);
@@ -222,9 +253,6 @@ async function getUserNotifications(userId, { businessId, limit = 20, unreadOnly
   }
 }
 
-/**
- * Marca notificaciones como leídas
- */
 async function markAsRead(userId, notificationIds) {
   if (!Array.isArray(notificationIds) || notificationIds.length === 0) {
     return { updated: 0 };
@@ -254,9 +282,6 @@ async function markAsRead(userId, notificationIds) {
   }
 }
 
-/**
- * Marca todas las notificaciones como leídas
- */
 async function markAllAsRead(userId, businessId = null) {
   try {
     const uid = Number(userId);
@@ -278,9 +303,6 @@ async function markAllAsRead(userId, businessId = null) {
   }
 }
 
-/**
- * Cuenta notificaciones no leídas
- */
 async function getUnreadCount(userId, businessId = null) {
   try {
     const uid = Number(userId);
@@ -304,6 +326,7 @@ async function getUnreadCount(userId, businessId = null) {
 
 module.exports = {
   createSyncNotification,
+  notifySalesImportOverlap, // 👈 NUEVO
   notifyAutoAssign,
   getUserNotifications,
   markAsRead,

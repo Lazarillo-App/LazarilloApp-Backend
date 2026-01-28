@@ -9,7 +9,6 @@ const path = require('path');
 const fs = require('fs');
 
 const { startCron } = require('./services/cron');
-const pool = require('./config/db');
 const { runMigrations } = require('./db/migrations');
 
 // Auth middlewares
@@ -26,19 +25,20 @@ const adminRebuildAgg = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
-const divisionsRoutes = require('./routes/divisionsRoutes');  
+const divisionsRoutes = require('./routes/divisionsRoutes');
 const branchesRoutes = require('./routes/branchRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
-const salesImportRoutes = require('./routes/salesImportRoutes');
-const ventasCSVRoutes = require('./routes/ventasCSVRoutes');
-// ✅ CORREGIDO: Importar notificaciones y sync una sola vez con nombres consistentes
+
+const salesImportRoutes = require('./routes/salesImportRoutes'); // ✅ import CSV
+const ventasCSVRoutes = require('./routes/ventasCSVRoutes');     // ✅ queries solo CSV
+
 const notificationsRoutes = require('./routes/notificationsRoutes');
 const syncRoutes = require('./routes/syncRoutes');
 
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
 
-// CORS unificado con preflight cacheado
+// CORS unificado
 const corsWithCache = require('./middleware/cors');
 
 const app = express();
@@ -57,16 +57,18 @@ app.use((req, res, next) => {
   const hdrs = { ...req.headers, authorization: req.headers.authorization ? '***' : undefined };
   console.log(`➡️ [${id}] ${req.method} ${req.originalUrl}`);
   if (process.env.LOG_REQUEST_HEADERS === '1') console.log(`   [${id}] headers:`, hdrs);
-  res.on('finish', () => console.log(`⬅️ [${id}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - t0}ms)`));
+  res.on('finish', () =>
+    console.log(`⬅️ [${id}] ${res.statusCode} ${req.method} ${req.originalUrl} (${Date.now() - t0}ms)`)
+  );
   next();
 });
 
 /* ----------- parsers condicionales + logger HTTP ----------- */
-// 🆕 Skip body parser para rutas de upload (multipart/form-data)
+// Skip body parser para upload multipart
 app.use((req, res, next) => {
   if (req.path.includes('/import-csv') && req.method === 'POST') {
     console.log('⏭️ [Body Parser] Skipping JSON parser para upload');
-    return next(); // Skip JSON parser para uploads
+    return next();
   }
   express.json({ limit: '50mb' })(req, res, next);
 });
@@ -74,7 +76,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   if (req.path.includes('/import-csv') && req.method === 'POST') {
     console.log('⏭️ [Body Parser] Skipping urlencoded parser para upload');
-    return next(); // Skip urlencoded parser para uploads
+    return next();
   }
   express.urlencoded({ extended: true, limit: '50mb' })(req, res, next);
 });
@@ -113,20 +115,24 @@ app.use('/api/insumos', insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/branches', branchesRoutes);
 app.use('/api/divisions', divisionsRoutes);
+app.use('/api/ventas-csv', ventasCSVRoutes);
 
-// businesses base
+/* =========================================================
+   ✅ ORDEN IMPORTANTE EN /api/businesses
+   ========================================================= */
+
+// ✅ 1) IMPORTS CSV (más específico) primero
+app.use('/api/businesses', salesImportRoutes);
+
+// ✅ 2) businesses base después
 app.use('/api/businesses', businessRoutes);
 
-// 🔴 IMPORTANTE: rutas ESPECÍFICAS primero
+// ✅ rutas específicas con :businessId antes que la genérica
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
 app.use('/api/businesses/:businessId/sync', syncRoutes);
 
-// 🔵 GENÉRICA AL FINAL
+// ✅ genérica al final (agrupaciones, etc.)
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
-
-// otros módulos
-app.use('/api/businesses', salesImportRoutes);
-app.use('/api/ventas-csv', ventasCSVRoutes);
 
 /* util debug */
 app.get('/api/_debug/whoami', authRequired, (req, res) => {
@@ -146,7 +152,10 @@ app.use((req, res) => res.status(404).json({ error: 'not_found', path: req.origi
 app.use((err, req, res, _next) => {
   console.error('Unhandled error:', err.stack || err);
   const status = err.status || 500;
-  res.status(status).json({ error: status === 401 ? 'unauthorized' : 'internal', message: err.message || 'internal_error' });
+  res.status(status).json({
+    error: status === 401 ? 'unauthorized' : 'internal',
+    message: err.message || 'internal_error',
+  });
 });
 
 /* ----------- cron en prod ----------- */

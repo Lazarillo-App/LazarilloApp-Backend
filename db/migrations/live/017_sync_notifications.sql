@@ -15,7 +15,13 @@ CREATE TABLE IF NOT EXISTS sync_notifications (
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   
   CONSTRAINT sync_notifications_type_check 
-    CHECK (type IN ('sync_articles', 'sync_sales', 'auto_assign', 'error'))
+    ALTER TABLE sync_notifications
+  DROP CONSTRAINT IF EXISTS sync_notifications_type_check;
+
+ALTER TABLE sync_notifications
+  ADD CONSTRAINT sync_notifications_type_check
+    CHECK (type IN ('sync_articles', 'sync_sales', 'auto_assign', 'sales_import_overlap', 'error'));
+
 );
 
 CREATE INDEX idx_sync_notif_user_read ON sync_notifications(user_id, read, created_at DESC);
