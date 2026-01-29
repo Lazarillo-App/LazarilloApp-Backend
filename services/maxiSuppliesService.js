@@ -104,6 +104,48 @@ async function fetchMaxiInsumos({ businessId, req }) {
  * normalizarInsumosMaxi(items)
  * - Convierte a un shape consistente para guardar en DB
  */
+// function normalizarInsumosMaxi(items = []) {
+//   return (Array.isArray(items) ? items : [])
+//     .map((it) => {
+//       const codigo = it?.codigo;
+//       const codigoStr = codigo != null ? String(codigo).trim() : '';
+//       if (!codigoStr) return null;
+
+//       const nombre = typeof it?.nombre === 'string' ? it.nombre.trim() : '';
+//       if (!nombre) return null;
+
+//       const rubroRaw = it?.rubro;
+//       const rubroStr =
+//         rubroRaw === null || rubroRaw === undefined ? null : String(rubroRaw);
+
+//       const unidad_med =
+//         typeof it?.medida === 'string' && it.medida.trim()
+//           ? it.medida.trim()
+//           : null;
+
+//       const precio_ref = it?.precio === null || it?.precio === undefined
+//         ? null
+//         : (Number.isFinite(Number(it.precio)) ? Number(it.precio) : null);
+
+//       const maxiDis = Number(it?.discontinuado ?? it?.discontinuados ?? 0) === 1;
+
+//       return {
+//         // ✅ campos DB
+//         codigo_maxi: codigoStr,
+//         nombre,
+//         rubro: rubroStr,            // puede ser "0" y está perfecto
+//         unidad_med,
+//         precio_ref,
+//         estado: maxiDis ? 'discontinuado' : 'activo',
+//         origen: 'maxi',
+
+//         // opcional: si querés conservar raw/debug
+//         raw: it,
+//       };
+//     })
+//     .filter(Boolean);
+// }
+
 function normalizarInsumosMaxi(items = []) {
   return (Array.isArray(items) ? items : [])
     .map((it) => {

@@ -13,7 +13,8 @@ async function upsertFromMaxi(businessId, items = []) {
       const nombre = String(it.nombre ?? '').trim();
       if (!nombre) continue;
 
-      const estado = it.estado ?? 'activo';
+      // ✅ IGNORAR cualquier estado que venga de Maxi/normalizador
+      const estado = 'activo';
 
       await client.query(
         `
