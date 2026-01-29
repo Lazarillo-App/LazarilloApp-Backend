@@ -105,25 +105,41 @@ async function fetchMaxiInsumos({ businessId, req }) {
  * - Convierte a un shape consistente para guardar en DB
  */
 function normalizarInsumosMaxi(items = []) {
-  return items
+  return (Array.isArray(items) ? items : [])
     .map((it) => {
-      const codigo = Number(it.codigo);
-      if (!Number.isFinite(codigo)) return null;
+      const codigo = it?.codigo;
+      const codigoStr = codigo != null ? String(codigo).trim() : '';
+      if (!codigoStr) return null;
 
-      const maxiDis = Number(it.discontinuado ?? it.discontinuados ?? 0) === 1;
+      const nombre = typeof it?.nombre === 'string' ? it.nombre.trim() : '';
+      if (!nombre) return null;
+
+      const rubroRaw = it?.rubro;
+      const rubroStr =
+        rubroRaw === null || rubroRaw === undefined ? null : String(rubroRaw);
+
+      const unidad_med =
+        typeof it?.medida === 'string' && it.medida.trim()
+          ? it.medida.trim()
+          : null;
+
+      const precio_ref = it?.precio === null || it?.precio === undefined
+        ? null
+        : (Number.isFinite(Number(it.precio)) ? Number(it.precio) : null);
+
+      const maxiDis = Number(it?.discontinuado ?? it?.discontinuados ?? 0) === 1;
 
       return {
-        codigo,
-        nombre: typeof it.nombre === 'string' ? it.nombre.trim() : '',
-        rubro: it.rubro != null ? Number(it.rubro) : null,
-        medida: it.medida || null,
-        precio: it.precio != null ? Number(it.precio) : null,
-        iva: it.iva || '',
-        imp_int: it.imp_int != null ? Number(it.imp_int) : null,
+        // ✅ campos DB
+        codigo_maxi: codigoStr,
+        nombre,
+        rubro: rubroStr,            // puede ser "0" y está perfecto
+        unidad_med,
+        precio_ref,
+        estado: maxiDis ? 'discontinuado' : 'activo',
+        origen: 'maxi',
 
-        // ✅ conservar info, pero NO usarla para estado/agrupación
-        maxi_discontinuado: maxiDis,
-
+        // opcional: si querés conservar raw/debug
         raw: it,
       };
     })

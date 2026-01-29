@@ -7,10 +7,13 @@ async function upsertFromMaxi(businessId, items = []) {
     await client.query('BEGIN');
 
     for (const it of items) {
-      const codigo = String(it.codigo ?? it.codigoMaxi ?? '');
+      const codigo = String(it.codigo_maxi ?? it.codigo ?? it.codigoMaxi ?? '').trim();
       if (!codigo) continue;
 
-      const estado = it.discontinuado ? 'discontinuado' : 'activo';
+      const nombre = String(it.nombre ?? '').trim();
+      if (!nombre) continue;
+
+      const estado = it.estado ?? 'activo';
 
       await client.query(
         `
@@ -32,15 +35,16 @@ async function upsertFromMaxi(businessId, items = []) {
           precio_ref = EXCLUDED.precio_ref,
           rubro = EXCLUDED.rubro,
           estado = EXCLUDED.estado,
+          origen = 'maxi',
           updated_at = NOW()
         `,
         [
           businessId,
           codigo,
-          it.nombre?.trim() || '',
-          it.unidad_med || null,
-          it.precio_ref || null,
-          it.rubro || null,
+          nombre,
+          it.unidad_med ?? null,
+          it.precio_ref ?? null,
+          it.rubro ?? null,
           estado,
         ]
       );
