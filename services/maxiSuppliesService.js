@@ -107,39 +107,38 @@ async function fetchMaxiInsumos({ businessId, req }) {
 function normalizarInsumosMaxi(items = []) {
   return (Array.isArray(items) ? items : [])
     .map((it) => {
-      const codigo = it?.codigo;
-      const codigoStr = codigo != null ? String(codigo).trim() : '';
+      const codigoStr = it?.codigo != null ? String(it.codigo).trim() : '';
       if (!codigoStr) return null;
 
       const nombre = typeof it?.nombre === 'string' ? it.nombre.trim() : '';
       if (!nombre) return null;
 
-      const rubroRaw = it?.rubro;
       const rubroStr =
-        rubroRaw === null || rubroRaw === undefined ? null : String(rubroRaw);
+        it?.rubro === null || it?.rubro === undefined ? null : String(it.rubro);
 
       const unidad_med =
-        typeof it?.medida === 'string' && it.medida.trim()
-          ? it.medida.trim()
-          : null;
+        typeof it?.medida === 'string' && it.medida.trim() ? it.medida.trim() : null;
 
-      const precio_ref = it?.precio === null || it?.precio === undefined
-        ? null
-        : (Number.isFinite(Number(it.precio)) ? Number(it.precio) : null);
+      const precio_ref =
+        it?.precio === null || it?.precio === undefined
+          ? null
+          : (Number.isFinite(Number(it.precio)) ? Number(it.precio) : null);
 
-      const maxiDis = Number(it?.discontinuado ?? it?.discontinuados ?? 0) === 1;
+      const maxiDis = Number(it?.discontinuado ?? 0) === 1;
 
       return {
-        // ✅ campos DB
         codigo_maxi: codigoStr,
         nombre,
-        rubro: rubroStr,            // puede ser "0" y está perfecto
+        rubro: rubroStr,
         unidad_med,
         precio_ref,
-        estado: maxiDis ? 'discontinuado' : 'activo',
+
+        // ✅ IMPORTANTE: no separar por estado
+        estado: 'activo',
         origen: 'maxi',
 
-        // opcional: si querés conservar raw/debug
+        // ✅ conservar info de maxi (si la querés)
+        maxi_discontinuado: maxiDis,
         raw: it,
       };
     })
