@@ -110,6 +110,8 @@ function normalizarInsumosMaxi(items = []) {
       const codigo = Number(it.codigo);
       if (!Number.isFinite(codigo)) return null;
 
+      const maxiDis = Number(it.discontinuado ?? it.discontinuados ?? 0) === 1;
+
       return {
         codigo,
         nombre: typeof it.nombre === 'string' ? it.nombre.trim() : '',
@@ -118,7 +120,10 @@ function normalizarInsumosMaxi(items = []) {
         precio: it.precio != null ? Number(it.precio) : null,
         iva: it.iva || '',
         imp_int: it.imp_int != null ? Number(it.imp_int) : null,
-        discontinuado: Number(it.discontinuado) === 1,
+
+        // ✅ conservar info, pero NO usarla para estado/agrupación
+        maxi_discontinuado: maxiDis,
+
         raw: it,
       };
     })

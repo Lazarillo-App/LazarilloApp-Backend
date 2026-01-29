@@ -361,7 +361,7 @@ exports.crearManual = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
     }
 
-    const estado = b.estado === 'discontinuado' ? 'discontinuado' : 'activo';
+    const estado = 'activo';
 
     const { rows } = await pool.query(
       `
@@ -508,7 +508,7 @@ exports.bulkUpsert = async (req, res) => {
         const precio_ref = it.precioRef ?? it.precio_ref ?? null;
         const rubro = it.rubro ?? null;
         const origen = it.origen ?? 'manual';
-        const estado = it.estado === 'discontinuado' ? 'discontinuado' : 'activo';
+        const estado = 'activo';
 
         const r = await client.query(
           `INSERT INTO insumos
