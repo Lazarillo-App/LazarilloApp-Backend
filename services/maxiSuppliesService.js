@@ -251,7 +251,12 @@ function normalizarInsumosRubros(items = []) {
       const codigo = Number(it.codigo);
       if (!Number.isFinite(codigo)) return null;
 
-      const nombre = typeof it.nombre === 'string' ? it.nombre.trim() : '';
+      const nombre =
+        typeof it.nombre === 'string' ? it.nombre.trim() : '';
+
+      // 🚫 DESCARTAR rubros sin nombre
+      if (!nombre) return null;
+
       const cpto_caja = it.cptoCaja != null ? Number(it.cptoCaja) : null;
       const es_elaborador = /^elaborad/i.test(nombre);
 
