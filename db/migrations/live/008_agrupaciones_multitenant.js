@@ -5,7 +5,7 @@ module.exports.up = async function up(pool) {
     try { await q(sql, params); }
     catch (e) {
       // ya existe / duplicado / objeto ya definido / dependencias FK, etc.
-      if (['42710','42701','23505','42P07','23503'].includes(e.code)) return;
+      if (['42710', '42701', '23505', '42P07', '23503'].includes(e.code)) return;
       throw e;
     }
   };
@@ -39,8 +39,25 @@ module.exports.up = async function up(pool) {
   await safe(`UPDATE public.agrupaciones SET articulos = '[]'::jsonb WHERE articulos IS NULL;`);
   await safe(`ALTER TABLE public.agrupaciones ALTER COLUMN articulos SET NOT NULL;`);
 
-  /* 3) Columna multi-tenant + FK */
+  /* 3) Columna multi-tenant + backfill + FK */
   await safe(`ALTER TABLE public.agrupaciones ADD COLUMN IF NOT EXISTS business_id BIGINT;`);
+
+  // Backfill defensivo: asigna business_id válido a NULL o huérfanos
+  // Default business = menor id (no depende de parent_id)
+  await safe(`
+    WITH default_biz AS (
+      SELECT id
+      FROM public.app_businesses
+      ORDER BY id
+      LIMIT 1
+    )
+    UPDATE public.agrupaciones a
+    SET business_id = (SELECT id FROM default_biz)
+    WHERE a.business_id IS NULL
+       OR NOT EXISTS (SELECT 1 FROM public.app_businesses b WHERE b.id = a.business_id);
+  `);
+
+  // FK (idempotente)
   await safe(`
     DO $$
     BEGIN
@@ -78,7 +95,7 @@ module.exports.up = async function up(pool) {
   `);
 
   /* 5) Constraints/índices de unicidad y lookups */
-  // Quitamos unique anteriores conflictivos, pero NO intentamos dropear índices usados por constraints.
+  // Quitamos unique anteriores conflictivos
   await safe(`ALTER TABLE public.agrupaciones DROP CONSTRAINT IF EXISTS agrupaciones_nombre_key;`);
   await safe(`ALTER TABLE public.agrupaciones DROP CONSTRAINT IF EXISTS agrupaciones_biz_nombre_key;`);
 
@@ -131,23 +148,11 @@ module.exports.up = async function up(pool) {
     );
   `);
 
-  // Índice único compuesto (evita duplicados exactos por negocio/agrupación)
+  // Único compuesto (idempotente real): índice único en vez de constraint con DO/constraint_name
+  // Evita el 42P07 "la relación ya existe" por choques de nombres.
   await safe(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1
-        FROM information_schema.table_constraints
-        WHERE table_schema='public'
-          AND table_name='agrupacion_exclusiones'
-          AND constraint_type='UNIQUE'
-          AND constraint_name='ux_agrup_excl_unique'
-      ) THEN
-        ALTER TABLE public.agrupacion_exclusiones
-          ADD CONSTRAINT ux_agrup_excl_unique
-          UNIQUE (business_id, agrupacion_id, scope, ref_id);
-      END IF;
-    END $$;
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_agrup_excl_unique
+    ON public.agrupacion_exclusiones (business_id, agrupacion_id, scope, ref_id);
   `);
 
   // Lookup por negocio+grupo
@@ -158,3 +163,4 @@ module.exports.up = async function up(pool) {
 
   console.log('✅ 008_agrupaciones_multitenant OK');
 };
+

@@ -2,13 +2,18 @@
 const router = require('express').Router();
 const multer = require('multer');
 
-// ✅ UN SOLO CONTROLLER
+// ✅ CONTROLADOR UNIFICADO Y OPTIMIZADO
 const ctrl = require('../controllers/insumosController');
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
 });
+
+/* ================== VISTAS Y ESTADÍSTICAS (NUEVAS) ================== */
+// 🆕 Estas rutas son el espejo de agrupaciones
+router.get('/tree-view', ctrl.getTreeView);  // Vista de árbol para sidebar
+router.get('/stats', ctrl.getStats);         // Estadísticas generales
 
 /* ================== Maxi: INSUMOS ================== */
 router.post('/maxi-sync', ctrl.syncFromMaxi);
@@ -41,7 +46,8 @@ router.post('/groups/:id/exclusions', ctrl.groups_addExclusions);
 router.delete('/groups/:id/exclusions', ctrl.groups_removeExclusions);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
-router.get('/', ctrl.listar);
+router.post('/', ctrl.crearManual);  // Crear insumo manual
+router.get('/', ctrl.listar);        // Listar con filtros avanzados
 router.put('/:id', ctrl.actualizar);
 router.delete('/:id', ctrl.eliminar);
 

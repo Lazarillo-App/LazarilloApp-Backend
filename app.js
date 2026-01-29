@@ -119,7 +119,7 @@ app.use('/api/ventas-csv', ventasCSVRoutes);
 
 /* =========================================================
    ✅ ORDEN IMPORTANTE EN /api/businesses
-   ========================================================= */
+ ========================================================= */
 
 // ✅ 1) IMPORTS CSV (más específico) primero
 app.use('/api/businesses', salesImportRoutes);

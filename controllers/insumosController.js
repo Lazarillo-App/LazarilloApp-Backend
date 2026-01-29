@@ -33,10 +33,24 @@ async function assertGroup(executor, bizId, groupId) {
 }
 
 if (process.env.NODE_ENV !== 'production') {
-  console.log('💡 insumosController.js cargado (UNIFICADO)');
+  console.log('💡 insumosController.js cargado (OPTIMIZADO - ESPEJO DE AGRUPACIONES)');
 }
 
-// ===================== INSUMOS: LISTAR / CRUD BÁSICO =====================
+// ===================== INSUMOS: LISTAR OPTIMIZADO =====================
+/**
+ * Lista insumos con filtros avanzados
+ * Parámetros:
+ * - page, limit
+ * - search (nombre o código)
+ * - rubro (código del rubro)
+ * - unidadMed
+ * - origen (maxi, manual, csv)
+ * - orderBy, order
+ * - elaborados (true/false/all) - filtro especial para sidebar
+ * - estado (activo/discontinuado/all)
+ * - sinAgrupacion (true/false) - para ver insumos sin agrupar
+ * - groupId - para ver insumos de una agrupación específica
+ */
 exports.listar = async (req, res) => {
   try {
     const {
@@ -51,6 +65,7 @@ exports.listar = async (req, res) => {
       elaborados,
       estado,
       sinAgrupacion,
+      groupId, // 🆕 nuevo filtro para ver insumos de un grupo
     } = req.query;
 
     const businessId = getBusinessId(req);
@@ -64,6 +79,7 @@ exports.listar = async (req, res) => {
     params.push(businessId);
     where.push(`business_id = $${params.length}`);
 
+    // Búsqueda por nombre o código
     if (search) {
       params.push(`%${search}%`, `%${search}%`);
       where.push(
@@ -71,26 +87,46 @@ exports.listar = async (req, res) => {
       );
     }
 
+    // Filtro por rubro
     if (rubro) {
       params.push(String(rubro));
       where.push(`rubro = $${params.length}`);
     }
 
+    // Filtro por unidad de medida
     if (unidadMed) {
       params.push(unidadMed);
       where.push(`unidad_med = $${params.length}`);
     }
 
+    // Filtro por origen
     if (origen) {
       params.push(origen);
       where.push(`origen = $${params.length}`);
     }
 
+    // Filtro por estado
     if (estado && estado !== 'all') {
       params.push(estado);
       where.push(`estado = $${params.length}`);
     }
 
+    // 🆕 Filtro por agrupación específica
+    if (groupId) {
+      params.push(Number(groupId));
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM insumo_group_items gi
+          JOIN insumo_groups g ON g.id = gi.group_id
+          WHERE gi.insumo_id = insumos.id
+            AND g.id = $${params.length}
+            AND g.business_id = insumos.business_id
+        )
+      `);
+    }
+
+    // Filtro por insumos sin agrupar
     if (sinAgrupacion === 'true') {
       where.push(`
         NOT EXISTS (
@@ -103,6 +139,7 @@ exports.listar = async (req, res) => {
       `);
     }
 
+    // 🔥 Filtro por elaborados/no elaborados (para sidebar)
     if (elaborados === 'true') {
       where.push(`
         EXISTS (
@@ -137,9 +174,27 @@ exports.listar = async (req, res) => {
     const [dataRes, countRes] = await Promise.all([
       pool.query(
         `
-        SELECT *
-        FROM insumos
+        SELECT 
+          i.*,
+          ir.nombre as rubro_nombre,
+          ir.es_elaborador,
+          COALESCE(
+            json_agg(
+              DISTINCT jsonb_build_object(
+                'id', g.id,
+                'nombre', g.nombre
+              )
+            ) FILTER (WHERE g.id IS NOT NULL),
+            '[]'::json
+          ) as grupos
+        FROM insumos i
+        LEFT JOIN insumo_rubros ir 
+          ON ir.business_id = i.business_id 
+          AND ir.codigo::text = i.rubro
+        LEFT JOIN insumo_group_items gi ON gi.insumo_id = i.id
+        LEFT JOIN insumo_groups g ON g.id = gi.group_id AND g.business_id = i.business_id
         ${whereSql}
+        GROUP BY i.id, ir.nombre, ir.es_elaborador
         ORDER BY ${safeOrderBy} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}
@@ -147,7 +202,12 @@ exports.listar = async (req, res) => {
         [...params, hardLimit, offset]
       ),
       pool.query(
-        `SELECT COUNT(*)::int AS total FROM insumos ${whereSql}`,
+        `SELECT COUNT(DISTINCT i.id)::int AS total 
+         FROM insumos i
+         LEFT JOIN insumo_rubros ir 
+           ON ir.business_id = i.business_id 
+           AND ir.codigo::text = i.rubro
+         ${whereSql}`,
         params
       ),
     ]);
@@ -167,6 +227,135 @@ exports.listar = async (req, res) => {
   }
 };
 
+// ===================== VISTA DE ÁRBOL (RUBROS) =====================
+/**
+ * 🆕 Obtiene la estructura de árbol de rubros para el sidebar
+ * Similar a como agrupaciones tiene su vista de árbol
+ */
+exports.getTreeView = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    // Obtener rubros con conteo de insumos
+    const { rows: rubros } = await pool.query(
+      `
+      SELECT 
+        ir.codigo,
+        ir.nombre,
+        ir.es_elaborador,
+        COUNT(i.id)::int as count_insumos
+      FROM insumo_rubros ir
+      LEFT JOIN insumos i 
+        ON i.business_id = ir.business_id 
+        AND i.rubro = ir.codigo::text
+        AND i.estado = 'activo'
+      WHERE ir.business_id = $1
+      GROUP BY ir.codigo, ir.nombre, ir.es_elaborador
+      ORDER BY ir.nombre ASC
+      `,
+      [businessId]
+    );
+
+    // Separar por elaborados/no elaborados
+    const elaborados = rubros.filter(r => r.es_elaborador);
+    const noElaborados = rubros.filter(r => !r.es_elaborador);
+
+    // Contar insumos sin agrupar
+    const { rows: sinAgrupar } = await pool.query(
+      `
+      SELECT COUNT(*)::int as count
+      FROM insumos i
+      WHERE i.business_id = $1
+        AND i.estado = 'activo'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM insumo_group_items gi
+          JOIN insumo_groups g ON g.id = gi.group_id
+          WHERE gi.insumo_id = i.id
+            AND g.business_id = i.business_id
+        )
+      `,
+      [businessId]
+    );
+
+    res.json({
+      ok: true,
+      data: {
+        elaborados: {
+          count: elaborados.reduce((sum, r) => sum + r.count_insumos, 0),
+          rubros: elaborados,
+        },
+        no_elaborados: {
+          count: noElaborados.reduce((sum, r) => sum + r.count_insumos, 0),
+          rubros: noElaborados,
+        },
+        sin_agrupar: {
+          count: sinAgrupar[0].count,
+        },
+      },
+    });
+  } catch (e) {
+    console.error('getTreeView error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ===================== ESTADÍSTICAS DEL SIDEBAR =====================
+/**
+ * 🆕 Obtiene estadísticas para el sidebar
+ * Similar a getStats de agrupaciones
+ */
+exports.getStats = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        COUNT(*)::int as total,
+        COUNT(*) FILTER (WHERE estado = 'activo')::int as activos,
+        COUNT(*) FILTER (WHERE estado = 'discontinuado')::int as discontinuados,
+        COUNT(*) FILTER (WHERE origen = 'maxi')::int as de_maxi,
+        COUNT(*) FILTER (WHERE origen = 'manual')::int as manuales,
+        COUNT(*) FILTER (
+          WHERE EXISTS (
+            SELECT 1 FROM insumo_rubros ir
+            WHERE ir.business_id = insumos.business_id
+              AND ir.codigo::text = insumos.rubro
+              AND ir.es_elaborador = true
+          )
+        )::int as elaborados,
+        COUNT(*) FILTER (
+          WHERE NOT EXISTS (
+            SELECT 1 FROM insumo_group_items gi
+            JOIN insumo_groups g ON g.id = gi.group_id
+            WHERE gi.insumo_id = insumos.id
+              AND g.business_id = insumos.business_id
+          )
+        )::int as sin_agrupar
+      FROM insumos
+      WHERE business_id = $1
+      `,
+      [businessId]
+    );
+
+    res.json({
+      ok: true,
+      data: rows[0],
+    });
+  } catch (e) {
+    console.error('getStats error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ===================== INSUMOS: CRUD BÁSICO =====================
 exports.crearManual = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
@@ -489,14 +678,13 @@ exports.listarMaxi = async (req, res) => {
 exports.syncFromMaxi = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
-    const userId = req.user?.id; // igual que hiciste en artículos
+    const userId = req.user?.id;
 
-    // ... tu sync actual
     const raw = await fetchMaxiInsumos({ businessId, req });
     const normItems = normalizarInsumosMaxi(raw);
     const summary = await upsertFromMaxi(businessId, normItems);
 
-    // 🆕 auto-assign
+    // Auto-assign
     let auto = { assigned: 0, details: [] };
     try {
       auto = await autoAssignNewInsumos(businessId);
@@ -510,7 +698,6 @@ exports.syncFromMaxi = async (req, res) => {
         });
       }
     } catch (e) {
-      // no crítico
       console.error('[syncFromMaxi] autoAssign error:', e.message);
     }
 
@@ -576,7 +763,7 @@ exports.syncDesdeCompras = async (req, res) => {
 
 // ===================== GROUPS: LISTAR =====================
 exports.groups_list = async (req, res) => {
-  console.log('🚀🚀🚀 [UNIFICADO] groups_list called 🚀🚀🚀');
+  console.log('🚀 [groups_list] Listando agrupaciones de insumos');
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
@@ -608,7 +795,7 @@ exports.groups_list = async (req, res) => {
       [bizId]
     );
 
-    console.log('📋 [groups_list] Grupos:', rows.length);
+    console.log(`✅ [groups_list] ${rows.length} grupos encontrados`);
     return res.json({ ok: true, data: rows });
   } catch (err) {
     console.error('[groups_list] error:', err);
@@ -895,11 +1082,9 @@ exports.groups_removeItem = async (req, res) => {
   if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'ID inválido');
 
   try {
-    // Validar que el grupo pertenece al negocio
     const ok = await assertGroup(pool, bizId, groupId);
     if (!ok) return sendError(res, 404, 'not_found');
 
-    // Delete idempotente
     const r = await pool.query(
       'DELETE FROM insumo_group_items WHERE group_id = $1 AND insumo_id = $2',
       [groupId, insumoId]
