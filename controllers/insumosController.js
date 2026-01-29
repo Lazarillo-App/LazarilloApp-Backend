@@ -37,20 +37,6 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // ===================== INSUMOS: LISTAR OPTIMIZADO =====================
-/**
- * Lista insumos con filtros avanzados
- * Parámetros:
- * - page, limit
- * - search (nombre o código)
- * - rubro (código del rubro)
- * - unidadMed
- * - origen (maxi, manual, csv)
- * - orderBy, order
- * - elaborados (true/false/all) - filtro especial para sidebar
- * - estado (activo/discontinuado/all)
- * - sinAgrupacion (true/false) - para ver insumos sin agrupar
- * - groupId - para ver insumos de una agrupación específica
- */
 exports.listar = async (req, res) => {
   try {
     const {
@@ -65,7 +51,7 @@ exports.listar = async (req, res) => {
       elaborados,
       estado,
       sinAgrupacion,
-      groupId, // 🆕 nuevo filtro para ver insumos de un grupo
+      groupId,
     } = req.query;
 
     const businessId = getBusinessId(req);
@@ -76,78 +62,79 @@ exports.listar = async (req, res) => {
     const where = [];
     const params = [];
 
+    // ✅ SIEMPRE calificar con alias i.
     params.push(businessId);
-    where.push(`business_id = $${params.length}`);
+    where.push(`i.business_id = $${params.length}`);
 
-    // Búsqueda por nombre o código
+    // ✅ Búsqueda por nombre o código (también calificado)
     if (search) {
       params.push(`%${search}%`, `%${search}%`);
       where.push(
-        `(nombre ILIKE $${params.length - 1} OR codigo_maxi ILIKE $${params.length})`
+        `(i.nombre ILIKE $${params.length - 1} OR i.codigo_maxi ILIKE $${params.length})`
       );
     }
 
-    // Filtro por rubro
+    // ✅ Filtro por rubro
     if (rubro) {
       params.push(String(rubro));
-      where.push(`rubro = $${params.length}`);
+      where.push(`i.rubro = $${params.length}`);
     }
 
-    // Filtro por unidad de medida
+    // ✅ Filtro por unidad de medida
     if (unidadMed) {
       params.push(unidadMed);
-      where.push(`unidad_med = $${params.length}`);
+      where.push(`i.unidad_med = $${params.length}`);
     }
 
-    // Filtro por origen
+    // ✅ Filtro por origen
     if (origen) {
       params.push(origen);
-      where.push(`origen = $${params.length}`);
+      where.push(`i.origen = $${params.length}`);
     }
 
-    // Filtro por estado
+    // ✅ Filtro por estado
     if (estado && estado !== 'all') {
       params.push(estado);
-      where.push(`estado = $${params.length}`);
+      where.push(`i.estado = $${params.length}`);
     }
 
-    // 🆕 Filtro por agrupación específica
+    // ✅ Filtro por agrupación específica (reemplazo insumos.id -> i.id / insumos.business_id -> i.business_id)
     if (groupId) {
       params.push(Number(groupId));
       where.push(`
         EXISTS (
           SELECT 1
-          FROM insumo_group_items gi
-          JOIN insumo_groups g ON g.id = gi.group_id
-          WHERE gi.insumo_id = insumos.id
-            AND g.id = $${params.length}
-            AND g.business_id = insumos.business_id
+          FROM insumo_group_items gi2
+          JOIN insumo_groups g2 ON g2.id = gi2.group_id
+          WHERE gi2.insumo_id = i.id
+            AND g2.id = $${params.length}
+            AND g2.business_id = i.business_id
         )
       `);
     }
 
-    // Filtro por insumos sin agrupar
+    // ✅ Filtro por insumos sin agrupar
     if (sinAgrupacion === 'true') {
       where.push(`
         NOT EXISTS (
           SELECT 1
-          FROM insumo_group_items gi
-          JOIN insumo_groups g ON g.id = gi.group_id
-          WHERE gi.insumo_id = insumos.id
-            AND g.business_id = insumos.business_id
+          FROM insumo_group_items gi3
+          JOIN insumo_groups g3 ON g3.id = gi3.group_id
+          WHERE gi3.insumo_id = i.id
+            AND g3.business_id = i.business_id
         )
       `);
     }
 
-    // 🔥 Filtro por elaborados/no elaborados (para sidebar)
+    // ✅ Filtro por elaborados/no elaborados
     if (elaborados === 'true') {
       where.push(`
         EXISTS (
           SELECT 1
-          FROM insumo_rubros ir
-          WHERE ir.business_id = insumos.business_id
-            AND ir.codigo::text = insumos.rubro
-            AND ir.es_elaborador = true
+          FROM insumo_rubros ir2
+          WHERE ir2.business_id = i.business_id
+            AND ir2.codigo::text = i.rubro
+            AND ir2.es_elaborador = true
         )
       `);
     }
@@ -156,10 +143,10 @@ exports.listar = async (req, res) => {
       where.push(`
         NOT EXISTS (
           SELECT 1
-          FROM insumo_rubros ir
-          WHERE ir.business_id = insumos.business_id
-            AND ir.codigo::text = insumos.rubro
-            AND ir.es_elaborador = true
+          FROM insumo_rubros ir2
+          WHERE ir2.business_id = i.business_id
+            AND ir2.codigo::text = i.rubro
+            AND ir2.es_elaborador = true
         )
       `);
     }
@@ -170,6 +157,10 @@ exports.listar = async (req, res) => {
 
     const safeOrderBy = ALLOWED_ORDER_BY.includes(orderBy) ? orderBy : 'nombre';
     const safeOrder = order === 'DESC' ? 'DESC' : 'ASC';
+
+    // ✅ Importante: si ORDER BY usa columnas, deben ser i.<col> o un alias existente
+    // Si tu ALLOWED_ORDER_BY tiene "nombre", "estado", etc, conviene mapearlos a i.nombre, i.estado...
+    const orderBySql = safeOrderBy.includes('.') ? safeOrderBy : `i.${safeOrderBy}`;
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -195,19 +186,21 @@ exports.listar = async (req, res) => {
         LEFT JOIN insumo_groups g ON g.id = gi.group_id AND g.business_id = i.business_id
         ${whereSql}
         GROUP BY i.id, ir.nombre, ir.es_elaborador
-        ORDER BY ${safeOrderBy} ${safeOrder}
+        ORDER BY ${orderBySql} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}
       `,
         [...params, hardLimit, offset]
       ),
       pool.query(
-        `SELECT COUNT(DISTINCT i.id)::int AS total 
-         FROM insumos i
-         LEFT JOIN insumo_rubros ir 
-           ON ir.business_id = i.business_id 
-           AND ir.codigo::text = i.rubro
-         ${whereSql}`,
+        `
+        SELECT COUNT(DISTINCT i.id)::int AS total 
+        FROM insumos i
+        LEFT JOIN insumo_rubros ir 
+          ON ir.business_id = i.business_id 
+          AND ir.codigo::text = i.rubro
+        ${whereSql}
+        `,
         params
       ),
     ]);
