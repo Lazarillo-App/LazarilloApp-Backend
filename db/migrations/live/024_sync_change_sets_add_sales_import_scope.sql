@@ -1,22 +1,20 @@
--- db/migrations/live/024_sync_change_sets_add_sales_import_scope.sql
+-- db/migrations/live/024_sync_notifications_fix_check.sql
 
-DO $$
-BEGIN
-  -- si no existe la tabla, salimos sin romper el deploy
-  IF to_regclass('public.sync_change_sets') IS NULL THEN
-    RAISE NOTICE 'skip 024: table sync_change_sets does not exist';
-    RETURN;
-  END IF;
+UPDATE sync_notifications
+SET type = 'sync_insumos'
+WHERE type = 'sync_articles'
+  AND COALESCE(metadata->>'scope','') = 'insumos';
 
-  -- recreamos el check con el scope nuevo
-  ALTER TABLE public.sync_change_sets
-    DROP CONSTRAINT IF EXISTS sync_change_sets_scope_check;
+ALTER TABLE sync_notifications
+  DROP CONSTRAINT IF EXISTS sync_notifications_type_check;
 
-  ALTER TABLE public.sync_change_sets
-    ADD CONSTRAINT sync_change_sets_scope_check
-    CHECK (scope IN (
-      'articles',
-      'insumos',
-      'sales_import'  -- ✅ scope nuevo
-    ));
-END $$;
+ALTER TABLE sync_notifications
+  ADD CONSTRAINT sync_notifications_type_check
+  CHECK (type IN (
+    'sync_insumos',
+    'sync_articles',
+    'sync_sales',
+    'auto_assign',
+    'sales_import_overlap',
+    'error'
+  ));
