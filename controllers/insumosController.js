@@ -13,6 +13,9 @@ const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 const { autoAssignNewInsumos } = require('../services/autoAssignNewInsumos');
 const { notifyAutoAssign } = require('../services/notificationService');
+const {
+  createSyncNotificationForBusinessUsers
+} = require('../services/notificationService');
 
 // ===================== HELPERS COMPARTIDOS ====================
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -671,13 +674,69 @@ exports.listarMaxi = async (req, res) => {
 exports.syncFromMaxi = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
-    const userId = req.user?.id;
+    const userId = req.user?.id || null;
 
+    // 1️⃣ Fetch + normalización
     const raw = await fetchMaxiInsumos({ businessId, req });
     const normItems = normalizarInsumosMaxi(raw);
-    const summary = await upsertFromMaxi(businessId, normItems);
 
-    // Auto-assign
+    // 2️⃣ Upsert con detección de cambios
+    const summary = await upsertFromMaxi(
+      businessId,
+      normItems,
+      { useIncomingEstado: true }
+    );
+
+    // 3️⃣ 🔔 Notificación de RESUMEN (NO revisión)
+    const changedCount =
+      (summary.inserted || 0) + (summary.updated || 0);
+
+    if (changedCount > 0) {
+      await createSyncNotificationForBusinessUsers({
+        businessId,
+        type: 'sync_insumos',
+        title: 'Sincronización de insumos completada',
+        message:
+          `Insertados: ${summary.inserted || 0}, ` +
+          `Actualizados: ${summary.updated || 0}, ` +
+          `Sin cambios: ${summary.unchanged || 0}.`,
+        metadata: {
+          scope: 'insumos',
+          source: 'maxi',
+          inserted: summary.inserted || 0,
+          updated: summary.updated || 0,
+          unchanged: summary.unchanged || 0,
+        },
+        actorUserId: userId,
+      });
+    }
+
+    // 4️⃣ 🔔 Notificaciones POR ÍTEM (solo si requiere revisión)
+    for (const ch of summary.changes || []) {
+      const reviewDiffs = (ch.diffs || []).filter(d => d.policy === 'review');
+      if (!reviewDiffs.length) continue;
+
+      await createSyncNotificationForBusinessUsers({
+        businessId,
+        type: 'sync_insumos',
+        title: `Cambio en insumo ${ch.codigo_maxi} requiere revisión`,
+        message: reviewDiffs
+          .map(d => `• ${d.field}: "${d.before ?? ''}" → "${d.after ?? ''}"`)
+          .join('\n'),
+        metadata: {
+          scope: 'insumos',
+          source: 'maxi',
+          policy: 'review',
+          insumo_id: ch.insumo_id,
+          codigo_maxi: ch.codigo_maxi,
+          diffs: reviewDiffs,
+        },
+        actorUserId: userId,
+        // onlyAdmins: true  // 🔒 futuro
+      });
+    }
+
+    // 5️⃣ Auto-assign (dominio insumos)
     let auto = { assigned: 0, details: [] };
     try {
       auto = await autoAssignNewInsumos(businessId);
@@ -694,12 +753,14 @@ exports.syncFromMaxi = async (req, res) => {
       console.error('[syncFromMaxi] autoAssign error:', e.message);
     }
 
+    // 6️⃣ Respuesta técnica
     res.json({
       ok: true,
+      scope: 'insumos',
       ...summary,
       auto_assigned: auto.assigned,
-      details: auto.details,
     });
+
   } catch (e) {
     console.error('syncFromMaxi error:', e);
     res.status(500).json({ ok: false, error: e.message });

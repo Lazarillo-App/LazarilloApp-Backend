@@ -3,6 +3,7 @@ const pool = require('../config/db');
 
 const ALLOWED_TYPES = new Set([
   'sync_articles',
+  'sync_insumos',         
   'sync_sales',
   'auto_assign',
   'sales_import_overlap',
@@ -324,9 +325,83 @@ async function getUnreadCount(userId, businessId = null) {
   }
 }
 
+/**
+ * Crea la misma notificación para todos los usuarios vinculados a un negocio.
+ * Ideal para CRON (no hay req.user).
+ */
+async function createSyncNotificationForBusinessUsers({
+  businessId,
+  type = 'sync_insumos',
+  title,
+  message,
+  metadata = {},
+  onlyAdmins = false,   // por ahora false
+  actorUserId = null,
+}) {
+  const bid = Number(businessId);
+  if (!Number.isFinite(bid) || bid <= 0) throw new Error('invalid_business_id');
+
+  const t = safeType(type);
+
+  // 1) buscar usuarios del negocio (app_memberships)
+  let users = [];
+  try {
+    const q = `
+      SELECT DISTINCT m.user_id::int AS user_id
+      FROM app_memberships m
+      WHERE m.business_id = $1
+      ${onlyAdmins ? "AND m.role IN ('owner','manager')" : ''}
+    `;
+    const { rows } = await pool.query(q, [bid]);
+    users = rows.map(r => Number(r.user_id)).filter(n => Number.isFinite(n) && n > 0);
+  } catch (e) {
+    console.error('[notificationService] Error leyendo app_memberships:', e?.message);
+    users = [];
+  }
+
+  // 1.b) fallback opcional (si por algún motivo hay users en user_businesses y no en memberships)
+  if (!users.length) {
+    try {
+      const q2 = `
+        SELECT DISTINCT ub.user_id::int AS user_id
+        FROM user_businesses ub
+        WHERE ub.business_id = $1
+        ${onlyAdmins ? "AND ub.role IN ('owner','manager')" : ''}
+      `;
+      const { rows } = await pool.query(q2, [bid]);
+      users = rows.map(r => Number(r.user_id)).filter(n => Number.isFinite(n) && n > 0);
+    } catch (e2) {
+      console.error('[notificationService] Error leyendo user_businesses:', e2?.message);
+      users = [];
+    }
+  }
+
+  if (!users.length) return { created: 0 };
+
+  // 2) crear notificación por usuario
+  let created = 0;
+  for (const uid of users) {
+    await createSyncNotification({
+      businessId: bid,
+      userId: uid,
+      type: t,
+      title,
+      message,
+      metadata: {
+        ...metadata,
+        actor_user_id: actorUserId,
+      }
+    });
+    created++;
+  }
+
+  return { created };
+}
+
 module.exports = {
   createSyncNotification,
-  notifySalesImportOverlap, // 👈 NUEVO
+  createSyncNotificationForBusinessUsers, 
+  notifySalesImportOverlap,
   notifyAutoAssign,
   getUserNotifications,
   markAsRead,

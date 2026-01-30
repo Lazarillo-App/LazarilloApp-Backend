@@ -245,17 +245,21 @@ async function fetchMaxiInsumosRubros({ businessId, req }) {
  * - Convierte rubros de insumos al shape de nuestra tabla insumo_rubros
  * - Marca es_elaborador cuando el nombre empieza por "Elaborados"
  */
+/**
+ * normalizarInsumosRubros(items)
+ * - Convierte rubros de insumos al shape de nuestra tabla insumo_rubros
+ * - Marca es_elaborador cuando el nombre empieza por "Elaborados"
+ * - ✅ CORREGIDO: No descarta rubros sin nombre, les asigna nombre por defecto
+ */
 function normalizarInsumosRubros(items = []) {
   return items
     .map((it) => {
       const codigo = Number(it.codigo);
       if (!Number.isFinite(codigo)) return null;
 
-      const nombre =
-        typeof it.nombre === 'string' ? it.nombre.trim() : '';
-
-      // 🚫 DESCARTAR rubros sin nombre
-      if (!nombre) return null;
+      // ✅ CORREGIDO: Si no tiene nombre, usar "Rubro {codigo}"
+      const nombreRaw = typeof it.nombre === 'string' ? it.nombre.trim() : '';
+      const nombre = nombreRaw || `Rubro ${codigo}`;
 
       const cpto_caja = it.cptoCaja != null ? Number(it.cptoCaja) : null;
       const es_elaborador = /^elaborad/i.test(nombre);
