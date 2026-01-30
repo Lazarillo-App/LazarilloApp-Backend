@@ -14,10 +14,12 @@ function safeType(input) {
   const t = String(input || '').trim();
 
   const ALLOWED = new Set([
-    'sync_insumos',
-    'sync_articles',
-    'sync_sales',
-    'error',
+  'sync_articles',
+  'sync_insumos',         
+  'sync_sales',
+  'auto_assign',
+  'sales_import_overlap',
+  'error'
   ]);
 
   if (ALLOWED.has(t)) return t;
