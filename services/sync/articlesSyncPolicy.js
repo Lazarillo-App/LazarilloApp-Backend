@@ -33,7 +33,6 @@ async function listBusinessesWithMaxi() {
         OR props->'maxi' ? 'pass'
         OR props->'maxi' ? 'password'
       )
-      AND deleted_at IS NULL
     ORDER BY id
   `);
 
