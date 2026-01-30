@@ -277,3 +277,4 @@ module.exports = {
   fetchMaxiInsumosRubros,
   normalizarInsumosRubros,
 };
+
