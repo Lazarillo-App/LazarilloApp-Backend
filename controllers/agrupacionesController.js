@@ -85,7 +85,7 @@ const normName = (s) =>
 
 const isTodoName = (s) => {
   const n = normName(s);
-  return n === 'sin agrupacion' || n === 'sin agrupación' || n === 'todo';
+  return n === 'sin agrupacion' || n === 'sin agrupación' || n === 'sin agrupacion';
 };
 
 const isDiscontinuadosName = (s) => {
