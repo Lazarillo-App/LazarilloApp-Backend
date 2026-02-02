@@ -1,4 +1,4 @@
-// services/maxiMenuService.js
+// services/maxiMenuService.js - VERSIÓN CORREGIDA
 const fetch = require('node-fetch');
 const { getBearer } = require('./maxiSalesService');
 const pool = require('../config/db');
@@ -18,7 +18,7 @@ function buildMenuUrl({ listmode, list, id_tienda }) {
 /* ───────── Fetch del menú directo a Maxi ───────── */
 
 async function fetchMenu({ businessId, req, listmode, list, id_tienda }) {
-  const bearer = await getBearer(businessId, req); // respeta X-Maxi-Token o credenciales guardadas
+  const bearer = await getBearer(businessId, req);
   const url = buildMenuUrl({ listmode, list, id_tienda });
 
   const r = await fetch(url, {
@@ -39,18 +39,22 @@ async function fetchMenu({ businessId, req, listmode, list, id_tienda }) {
     throw e;
   }
 
-  // Devuelve array de rubros (estructura del doc)
   return j?.content || [];
 }
 
 /* ───────── Helper: aplanar árbol en artículos ───────── */
 /**
+ * ✅ VERSIÓN CORREGIDA
+ * 
  * Convierte el árbol devuelto por /menuweb/menuextendido
- * en una lista plana de artículos:
- *   { articulo_id, nombre, categoria, subrubro, precio, costo, raw }
+ * en una lista plana de artículos.
+ * 
+ * CORRECCIÓN: Solo agrega nodos con node_type === 'ARTICULO'
+ * NO agrega rubros/categorías/subrubros
  */
 function flattenMenuToArticles(menu) {
   const out = [];
+  let rubrosSkipped = 0;
 
   function walk(node, ctx) {
     if (!node || typeof node !== 'object') return;
@@ -64,22 +68,53 @@ function flattenMenuToArticles(menu) {
     // Nivel "rubro" / "categoría"
     if (nodeType === 'RUBRO' || nodeType === 'CATEGORIA') {
       if (nombre) nextCtx.categoria = nombre;
+      rubrosSkipped++;
+      // ✅ NO agregar a out, solo actualizar contexto
     }
 
     // Nivel "subrubro"
     if (nodeType === 'SUBRUBRO') {
       if (nombre) nextCtx.subrubro = nombre;
+      rubrosSkipped++;
+      // ✅ NO agregar a out, solo actualizar contexto
     }
 
-    // Nivel "artículo"
-    if (nodeType === 'ARTICULO' || (!Array.isArray(node.hijos) && !Array.isArray(node.children))) {
+    // ✅ CORRECCIÓN: Solo agregar si es ARTICULO explícitamente
+    if (nodeType === 'ARTICULO') {
       const rawId = node.id ?? node.articulo_id ?? node.codigo ?? node.code;
       const articuloId = Number(rawId);
 
-      if (!Number.isFinite(articuloId)) return;
+      if (!Number.isFinite(articuloId) || articuloId <= 0) {
+        console.warn('[flattenMenuToArticles] Artículo sin ID válido:', { nombre, rawId });
+        
+        // Continuar navegando hijos por si acaso
+        const hijos = node.hijos || node.children || [];
+        if (Array.isArray(hijos)) {
+          hijos.forEach((h) => walk(h, nextCtx));
+        }
+        return;
+      }
 
       const precio = Number(node.precio ?? node.price ?? 0) || 0;
       const costo  = Number(node.costo ?? node.cost ?? 0) || 0;
+
+      // ✅ Validación adicional: No agregar si precio = 0 Y categoria = nombre
+      // (esto captura rubros que no tienen node_type correcto)
+      if (precio === 0 && nombre && nextCtx.categoria === nombre) {
+        console.warn('[flattenMenuToArticles] Posible rubro detectado por heurística:', { 
+          articulo_id: articuloId, 
+          nombre, 
+          categoria: nextCtx.categoria 
+        });
+        rubrosSkipped++;
+        
+        // Continuar navegando hijos
+        const hijos = node.hijos || node.children || [];
+        if (Array.isArray(hijos)) {
+          hijos.forEach((h) => walk(h, nextCtx));
+        }
+        return;
+      }
 
       out.push({
         articulo_id: articuloId,
@@ -90,9 +125,17 @@ function flattenMenuToArticles(menu) {
         costo,
         raw: node,
       });
+      
+      // Los artículos normalmente NO tienen hijos, pero por si acaso
+      const hijos = node.hijos || node.children || [];
+      if (Array.isArray(hijos) && hijos.length > 0) {
+        console.warn('[flattenMenuToArticles] Artículo con hijos (inusual):', articuloId);
+        hijos.forEach((h) => walk(h, nextCtx));
+      }
       return;
     }
 
+    // Para cualquier otro tipo de nodo, seguir navegando hijos
     const hijos = node.hijos || node.children || [];
     if (Array.isArray(hijos)) {
       hijos.forEach((h) => walk(h, nextCtx));
@@ -100,6 +143,9 @@ function flattenMenuToArticles(menu) {
   }
 
   (menu || []).forEach((root) => walk(root, {}));
+  
+  console.log(`[flattenMenuToArticles] ✅ Procesados ${out.length} artículos (${rubrosSkipped} rubros/categorías omitidos)`);
+  
   return out;
 }
 
@@ -107,11 +153,8 @@ function flattenMenuToArticles(menu) {
 /**
  * Paso central del onboarding de ventas:
  *  - trae el menú desde Maxi,
- *  - llena/actualiza maxi_articles,
+ *  - llena/actualiza maxi_articles (SOLO artículos, NO rubros),
  *  - llena/actualiza maxi_article_map con external_code + title.
- *
- * NO crea todavía app_articles (eso lo puede hacer un paso separado
- * como /:businessId/rebuild-article-map).
  */
 async function importMaxiMenuForBusiness(businessId, options = {}) {
   const bizId = Number(businessId);
@@ -129,109 +172,116 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
   // 1) Traer menú crudo desde Maxi
   const menu = await fetchMenu({ businessId: bizId, req, listmode, list, id_tienda });
 
-  // 2) Aplanar en artículos
+  // 2) Aplanar en artículos (SOLO artículos, NO rubros)
   const articles = flattenMenuToArticles(menu);
+
+  if (articles.length === 0) {
+    console.warn(`[importMaxiMenuForBusiness] Business ${bizId}: No se encontraron artículos`);
+    return {
+      ok: true,
+      business_id: bizId,
+      imported_articles: 0,
+    };
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 3) maxi_articles: espejo ordenado del menú de Maxi
-    if (articles.length > 0) {
-      const values = [];
-      const params = [];
-      let i = 1;
+    // 3) maxi_articles: espejo ordenado del menú de Maxi (SOLO artículos)
+    const values = [];
+    const params = [];
+    let i = 1;
 
-      for (const a of articles) {
-        values.push(
-          `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
-        );
-        params.push(
-          bizId,                 // business_id
-          a.articulo_id,         // articulo_id
-          a.nombre,              // nombre
-          a.categoria || null,   // categoria
-          a.subrubro || null,    // subrubro
-          a.precio,              // precio
-          a.costo,               // costo
-          JSON.stringify(a.raw), // raw
-        );
-      }
-
-      await client.query(
-        `
-        INSERT INTO maxi_articles (
-          business_id,
-          articulo_id,
-          nombre,
-          categoria,
-          subrubro,
-          precio,
-          costo,
-          raw
-        )
-        VALUES
-          ${values.join(', ')}
-        ON CONFLICT (business_id, articulo_id)
-        DO UPDATE SET
-          nombre     = EXCLUDED.nombre,
-          categoria  = EXCLUDED.categoria,
-          subrubro   = EXCLUDED.subrubro,
-          precio     = EXCLUDED.precio,
-          costo      = EXCLUDED.costo,
-          raw        = EXCLUDED.raw,
-          updated_at = now()
-        `,
-        params
+    for (const a of articles) {
+      values.push(
+        `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
+      );
+      params.push(
+        bizId,                 // business_id
+        a.articulo_id,         // articulo_id
+        a.nombre,              // nombre
+        a.categoria || null,   // categoria
+        a.subrubro || null,    // subrubro
+        a.precio,              // precio
+        a.costo,               // costo
+        JSON.stringify(a.raw), // raw
       );
     }
+
+    await client.query(
+      `
+      INSERT INTO maxi_articles (
+        business_id,
+        articulo_id,
+        nombre,
+        categoria,
+        subrubro,
+        precio,
+        costo,
+        raw
+      )
+      VALUES
+        ${values.join(', ')}
+      ON CONFLICT (business_id, articulo_id)
+      DO UPDATE SET
+        nombre     = EXCLUDED.nombre,
+        categoria  = EXCLUDED.categoria,
+        subrubro   = EXCLUDED.subrubro,
+        precio     = EXCLUDED.precio,
+        costo      = EXCLUDED.costo,
+        raw        = EXCLUDED.raw,
+        updated_at = now()
+      `,
+      params
+    );
 
     // 4) maxi_article_map: base para mapping (sin tocar article_id)
-    if (articles.length > 0) {
-      const values2 = [];
-      const params2 = [];
-      let j = 1;
+    const values2 = [];
+    const params2 = [];
+    let j = 1;
 
-      for (const a of articles) {
-        values2.push(
-          `($${j++}, $${j++}, $${j++}, $${j++}, now(), $${j++}, $${j++})`
-        );
-        params2.push(
-          bizId,                  // business_id
-          a.articulo_id,          // articulo_id
-          a.categoria || null,    // categoria
-          a.subrubro || null,     // subrubro
-          String(a.articulo_id),  // external_code (codigo externo de Maxi)
-          a.nombre,               // title (nombre del artículo)
-        );
-      }
-
-      await client.query(
-        `
-        INSERT INTO maxi_article_map (
-          business_id,
-          articulo_id,
-          categoria,
-          subrubro,
-          updated_at,
-          external_code,
-          title
-        )
-        VALUES
-          ${values2.join(', ')}
-        ON CONFLICT (business_id, articulo_id)
-        DO UPDATE SET
-          categoria     = EXCLUDED.categoria,
-          subrubro      = EXCLUDED.subrubro,
-          updated_at    = now(),
-          external_code = EXCLUDED.external_code,
-          title         = EXCLUDED.title
-        `,
-        params2
+    for (const a of articles) {
+      values2.push(
+        `($${j++}, $${j++}, $${j++}, $${j++}, now(), $${j++}, $${j++})`
+      );
+      params2.push(
+        bizId,                  // business_id
+        a.articulo_id,          // articulo_id
+        a.categoria || null,    // categoria
+        a.subrubro || null,     // subrubro
+        String(a.articulo_id),  // external_code (codigo externo de Maxi)
+        a.nombre,               // title (nombre del artículo)
       );
     }
 
+    await client.query(
+      `
+      INSERT INTO maxi_article_map (
+        business_id,
+        articulo_id,
+        categoria,
+        subrubro,
+        updated_at,
+        external_code,
+        title
+      )
+      VALUES
+        ${values2.join(', ')}
+      ON CONFLICT (business_id, articulo_id)
+      DO UPDATE SET
+        categoria     = EXCLUDED.categoria,
+        subrubro      = EXCLUDED.subrubro,
+        updated_at    = now(),
+        external_code = EXCLUDED.external_code,
+        title         = EXCLUDED.title
+      `,
+      params2
+    );
+
     await client.query('COMMIT');
+
+    console.log(`[importMaxiMenuForBusiness] ✅ Business ${bizId}: ${articles.length} artículos importados`);
 
     return {
       ok: true,
@@ -240,6 +290,7 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
     };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
+    console.error(`[importMaxiMenuForBusiness] ❌ Business ${bizId} error:`, e);
     throw e;
   } finally {
     client.release();
@@ -248,5 +299,6 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
 
 module.exports = {
   fetchMenu,
+  flattenMenuToArticles, 
   importMaxiMenuForBusiness,
 };
