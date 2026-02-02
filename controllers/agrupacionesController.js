@@ -97,9 +97,9 @@ const isDiscontinuadosName = (s) => {
 
 // ============================================================================
 // GET /businesses/:businessId/agrupaciones
-// - Si NO viene X-Division-Id => devuelve agrupaciones del negocio NO asignadas a ninguna división
-// - Si viene X-Division-Id => devuelve agrupaciones asignadas a esa división
-// (usa division_agrupacion_assignments)
+// ✅ FILTRADO POR DIVISIÓN:
+// - Si NO viene X-Division-Id => PRINCIPAL (solo NO asignadas)
+// - Si viene X-Division-Id => DIVISIÓN (solo asignadas, SIN TODO ni Discontinuados)
 // ============================================================================
 exports.obtenerAgrupaciones = async (req, res) => {
   try {
@@ -113,7 +113,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
       hdr == null || hdr === '' || hdr === 'null' ? null : Number(hdr);
 
     // ─────────────────────────────────────────────
-    // PRINCIPAL (sin división): agrupaciones NO asignadas a ninguna división del negocio
+    // PRINCIPAL (sin división): agrupaciones NO asignadas + TODO + Discontinuados
     // ─────────────────────────────────────────────
     if (!Number.isFinite(divisionId)) {
       const { rows } = await pool.query(
@@ -133,6 +133,12 @@ exports.obtenerAgrupaciones = async (req, res) => {
         `,
         [businessId]
       );
+
+      console.log('[obtenerAgrupaciones] Principal:', {
+        businessId,
+        total: rows.length,
+        grupos: rows.map(r => r.nombre),
+      });
 
       return res.json({
         ok: true,
@@ -155,6 +161,7 @@ exports.obtenerAgrupaciones = async (req, res) => {
         .json({ ok: false, error: 'División no encontrada para este negocio' });
     }
 
+    // ✅ FILTRADO ESTRICTO: SOLO asignadas, SIN TODO ni Discontinuados
     const { rows } = await pool.query(
       `
       SELECT a.id, a.nombre, a.business_id,
@@ -163,10 +170,24 @@ exports.obtenerAgrupaciones = async (req, res) => {
       JOIN division_agrupacion_assignments daa ON daa.agrupacion_id = a.id
       WHERE a.business_id = $1
         AND daa.division_id = $2
+        AND LOWER(TRIM(
+          TRANSLATE(
+            a.nombre,
+            'áéíóúÁÉÍÓÚñÑ',
+            'aeiouAEIOUnn'
+          )
+        )) NOT IN ('sin agrupacion', 'sin agrupación', 'todo', 'discontinuados', 'descontinuados')
       ORDER BY a.id ASC
       `,
       [businessId, divisionId]
     );
+
+    console.log('[obtenerAgrupaciones] División:', {
+      businessId,
+      divisionId,
+      total: rows.length,
+      grupos: rows.map(r => r.nombre),
+    });
 
     return res.json({
       ok: true,
@@ -995,7 +1016,7 @@ exports.assignAgrupacionToDivision = async (req, res) => {
       return res.status(403).json({ ok: false, error: 'Agrupación no pertenece a este negocio' });
     }
 
-    // 2) si divisionId es null => “volver a principal”
+    // 2) si divisionId es null => "volver a principal"
     if (!Number.isFinite(divisionId)) {
       await pool.query(
         `
