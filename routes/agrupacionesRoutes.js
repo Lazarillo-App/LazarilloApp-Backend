@@ -71,4 +71,63 @@ router.post('/agrupaciones/auto-from-taxonomy', async (req, res, next) => {
   }
 });
 
+router.get('/agrupaciones', async (req, res) => {
+  try {
+    const businessId = req.headers['x-business-id'];
+    const divisionId = req.headers['x-division-id']; // ✅ NUEVO
+    
+    if (!businessId) {
+      return res.status(400).json({ error: 'businessId requerido' });
+    }
+
+    // Obtener todas las agrupaciones del negocio
+    const agrupaciones = await db.query(
+      `SELECT * FROM agrupaciones WHERE business_id = $1 ORDER BY nombre`,
+      [businessId]
+    );
+
+    let result = agrupaciones.rows;
+    let filteredByDivision = false;
+
+    // ✅ FILTRADO POR DIVISIÓN
+    if (divisionId && divisionId !== 'null' && divisionId !== 'undefined') {
+      filteredByDivision = true;
+
+      // Obtener grupos asignados a esta división
+      const assignedGroups = await db.query(
+        `SELECT group_id FROM division_group_assignments 
+         WHERE division_id = $1 AND scope = 'articulos'`,
+        [divisionId]
+      );
+
+      const assignedIds = new Set(assignedGroups.rows.map(r => Number(r.group_id)));
+
+      // Filtrar: SOLO grupos asignados (sin TODO ni Discontinuados)
+      result = result.filter(g => {
+        const nombre = String(g.nombre || '').toLowerCase().trim();
+        
+        // ❌ Excluir TODO y Discontinuados de divisiones
+        const isTodo = nombre === 'todo' || nombre === 'sin agrupacion' || nombre === 'sin agrupación';
+        const isDisc = nombre === 'discontinuados' || nombre === 'descontinuados';
+        
+        if (isTodo || isDisc) return false;
+        
+        // ✅ Incluir solo si está asignado
+        return assignedIds.has(Number(g.id));
+      });
+    }
+
+    res.json({
+      agrupaciones: result,
+      total: result.length,
+      filtered_by_division: filteredByDivision,
+      division_id: divisionId || null,
+    });
+
+  } catch (error) {
+    console.error('Error en /agrupaciones:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;
