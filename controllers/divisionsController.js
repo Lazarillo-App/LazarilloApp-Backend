@@ -638,22 +638,23 @@ exports.unassignGroupFromDivision = async (req, res) => {
     await client.query('BEGIN');
 
     const groupId = num(req.body?.groupId ?? req.body?.group_id);
+
     if (!groupId) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'group_id requerido' });
     }
 
-    // (Opcional pero recomendable) verificar que el grupo exista
-    const { rows: gRows } = await client.query(
+    // verificar que exista
+    const { rows: groupRows } = await client.query(
       `SELECT id FROM business_groups WHERE id=$1`,
       [groupId]
     );
-    if (!gRows.length) {
+    if (!groupRows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    // ✅ desasignar: borrar relación(es)
+    // borrar asignaciones (vuelve a Principal)
     const { rowCount } = await client.query(
       `DELETE FROM division_group_assignments WHERE group_id=$1`,
       [groupId]

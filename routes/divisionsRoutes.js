@@ -51,12 +51,12 @@ router.get('/:divisionId/articles', ctrl.getArticlesByDivision);
 router.get('/:divisionId/groups', ctrl.getGroupsByDivision);
 
 // Asignar un grupo a una división
-router.post('/:divisionId/assign-group', ctrl.assignGroupToDivision)
+router.post('/:divisionId/assign-group', ctrl.assignGroupToDivision);
 
-// Volver a "Principal" (desasignar: eliminar relación)
-router.post('/:divisionId/unassign-group', ctrl.unassignGroupFromDivision);
+// Volver a Principal (desasignar)
+router.post('/unassign-group', ctrl.unassignGroupFromDivision);
 
-// Remover grupo de una división
+// Remover grupo de una división (por division+group)
 router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
 
 module.exports = router;
