@@ -626,3 +626,46 @@ exports.getDivisionStats = async (req, res) => {
     res.status(500).json({ ok: false, error: 'internal_error' });
   }
 };
+
+/**
+ * POST /api/divisions/unassign-group
+ * Body: { groupId: number } (o group_id)
+ * Quita el grupo de cualquier división (vuelve a Principal)
+ */
+exports.unassignGroupFromDivision = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const groupId = num(req.body?.groupId ?? req.body?.group_id);
+    if (!groupId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'group_id requerido' });
+    }
+
+    // (Opcional pero recomendable) verificar que el grupo exista
+    const { rows: gRows } = await client.query(
+      `SELECT id FROM business_groups WHERE id=$1`,
+      [groupId]
+    );
+    if (!gRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'group_not_found' });
+    }
+
+    // ✅ desasignar: borrar relación(es)
+    const { rowCount } = await client.query(
+      `DELETE FROM division_group_assignments WHERE group_id=$1`,
+      [groupId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, group_id: groupId, unassigned: true, deleted: rowCount });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] unassignGroupFromDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  } finally {
+    client.release();
+  }
+};
