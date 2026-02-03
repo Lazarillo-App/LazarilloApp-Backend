@@ -1,9 +1,7 @@
 /**
- * Controller de divisiones (subnegocios) - MODELO DE FILTROS
- * ✅ Las divisiones solo definen QUÉ GRUPOS mostrar
- * ✅ Los artículos permanecen en el negocio principal
- * ✅ Los insumos permanecen en el negocio principal
- * ✅ Las ventas se guardan con business_id del principal
+ * divisionsController.js — OPCIÓN A (MODELO DE FILTROS)
+ * ✅ Las divisiones solo definen QUÉ business_groups mostrar
+ * ✅ Los artículos/insumos/ventas quedan en el negocio principal
  */
 
 const pool = require('../config/db');
@@ -88,7 +86,6 @@ exports.getDivisionsByBusiness = async (req, res) => {
 
 /**
  * GET /api/divisions/business/:businessId/main
- * Devuelve la división principal del negocio
  */
 exports.getMainDivision = async (req, res) => {
   try {
@@ -109,8 +106,8 @@ exports.getMainDivision = async (req, res) => {
 
     res.json({ ok: true, division: rows[0] });
   } catch (e) {
-    console.error('[divisions] getMainDivision', e);
-    res.status(500).json({ ok: false, error: 'error_getting_main_division' });
+    console.error('[divisions] getMainDivision error:', e);
+    res.status(500).json({ ok: false, error: 'internal_error' });
   }
 };
 
@@ -168,7 +165,6 @@ exports.createDivision = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'nombre requerido' });
     }
 
-    // si isMain=true, desmarcar otras principales
     if (isMain) {
       await client.query(
         `UPDATE business_divisions SET is_main=false WHERE business_id=$1 AND is_main=true`,
@@ -317,12 +313,12 @@ exports.deleteDivision = async (req, res) => {
 };
 
 // ============================================================================
-// GESTIÓN DE GRUPOS EN DIVISIONES
+// GESTIÓN DE GRUPOS (business_groups) EN DIVISIONES
 // ============================================================================
 
 /**
  * GET /api/divisions/:divisionId/groups
- * (En realidad devuelve AGRUPACIONES asignadas a esa división)
+ * Obtiene business_groups asignados a una división
  */
 exports.getGroupsByDivision = async (req, res) => {
   try {
@@ -331,20 +327,23 @@ exports.getGroupsByDivision = async (req, res) => {
 
     const { rows } = await pool.query(
       `
-      SELECT
-        a.id,
-        a.nombre as name,
-        a.business_id,
-        daa.created_at as assigned_at,
-        COALESCE((
-          SELECT COUNT(*)
-          FROM agrupacion_articulos aa
-          WHERE aa.agrupacion_id = a.id
-        ), 0)::integer as article_count
-      FROM division_agrupacion_assignments daa
-      JOIN agrupaciones a ON a.id = daa.agrupacion_id
-      WHERE daa.division_id = $1
-      ORDER BY a.nombre ASC
+      SELECT 
+        bg.id,
+        bg.business_id,
+        bg.name,
+        bg.description,
+        bg.config,
+        dga.is_customized,
+        dga.custom_config,
+        dga.created_at as assigned_at,
+        COALESCE(
+          (SELECT COUNT(*) FROM article_groups ag WHERE ag.group_id = bg.id),
+          0
+        )::integer as article_count
+      FROM division_group_assignments dga
+      JOIN business_groups bg ON bg.id = dga.group_id
+      WHERE dga.division_id = $1
+      ORDER BY bg.name ASC
       `,
       [divisionId]
     );
@@ -357,29 +356,21 @@ exports.getGroupsByDivision = async (req, res) => {
 };
 
 /**
- * POST /api/divisions/:divisionId/assign-agrupacion
- * Body: { agrupacionId: number }  (o { groupId } si querés compat)
- * Asigna una agrupación (tabla agrupaciones) a una división.
+ * POST /api/divisions/:divisionId/assign-group
+ * Body: { groupId: number }  (también acepta group_id)
+ * Asigna un business_group a una división (solo relación)
  */
-
-exports.assignAgrupacionToDivision = async (req, res) => {
+exports.assignGroupToDivision = async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const divisionId = num(req.params.divisionId);
+    const groupId = num(req.body?.groupId ?? req.body?.group_id);
 
-    // acepto varios nombres para evitarte bugs de front
-    const agrupacionId = num(
-      req.body?.agrupacionId ??
-      req.body?.agrupacion_id ??
-      req.body?.groupId ??
-      req.body?.group_id
-    );
-
-    if (!divisionId || !agrupacionId) {
+    if (!divisionId || !groupId) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ ok: false, error: 'division_id y agrupacion_id requeridos' });
+      return res.status(400).json({ ok: false, error: 'division_id y group_id requeridos' });
     }
 
     // 1) división existe
@@ -392,37 +383,37 @@ exports.assignAgrupacionToDivision = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'division_not_found' });
     }
 
-    // 2) agrupación existe
-    const { rows: agrRows } = await client.query(
-      `SELECT id, business_id FROM agrupaciones WHERE id=$1`,
-      [agrupacionId]
+    // 2) grupo existe
+    const { rows: groupRows } = await client.query(
+      `SELECT id, business_id FROM business_groups WHERE id=$1`,
+      [groupId]
     );
-    if (!agrRows.length) {
+    if (!groupRows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, error: 'agrupacion_not_found' });
+      return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
     // 3) mismo negocio
-    if (Number(agrRows[0].business_id) !== Number(divRows[0].business_id)) {
+    if (Number(groupRows[0].business_id) !== Number(divRows[0].business_id)) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ ok: false, error: 'agrupacion_business_mismatch' });
+      return res.status(400).json({ ok: false, error: 'group_business_mismatch' });
     }
 
     // 4) insertar relación
     await client.query(
       `
-      INSERT INTO division_agrupacion_assignments (division_id, agrupacion_id)
-      VALUES ($1, $2)
-      ON CONFLICT (division_id, agrupacion_id) DO NOTHING
+      INSERT INTO division_group_assignments (division_id, group_id, is_customized)
+      VALUES ($1, $2, false)
+      ON CONFLICT (division_id, group_id) DO NOTHING
       `,
-      [divisionId, agrupacionId]
+      [divisionId, groupId]
     );
 
     await client.query('COMMIT');
-    return res.json({ ok: true, division_id: divisionId, agrupacion_id: agrupacionId });
+    return res.json({ ok: true, division_id: divisionId, group_id: groupId });
   } catch (e) {
     await client.query('ROLLBACK');
-    console.error('[divisions] assignAgrupacionToDivision error:', e);
+    console.error('[divisions] assignGroupToDivision error:', e);
     return res.status(500).json({ ok: false, error: 'internal_error' });
   } finally {
     client.release();
@@ -431,7 +422,7 @@ exports.assignAgrupacionToDivision = async (req, res) => {
 
 /**
  * DELETE /api/divisions/:divisionId/groups/:groupId
- * Remueve la asignación de un grupo a una división
+ * Remueve la asignación (el grupo vuelve a Principal)
  */
 exports.removeGroupFromDivision = async (req, res) => {
   const client = await pool.connect();
@@ -465,7 +456,7 @@ exports.removeGroupFromDivision = async (req, res) => {
 /**
  * POST /api/divisions/create-from-group
  * Body: { businessId, groupId, name? }
- * Crea una división nueva y le asigna un grupo específico
+ * Crea una división y asigna un grupo específico
  */
 exports.createDivisionFromGroup = async (req, res) => {
   const client = await pool.connect();
@@ -473,7 +464,7 @@ exports.createDivisionFromGroup = async (req, res) => {
     await client.query('BEGIN');
 
     const businessId = num(req.body?.businessId);
-    const groupId = num(req.body?.groupId);
+    const groupId = num(req.body?.groupId ?? req.body?.group_id);
     let name = req.body?.name ? String(req.body.name).trim() : null;
 
     if (!businessId || !groupId) {
@@ -481,7 +472,6 @@ exports.createDivisionFromGroup = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'businessId y groupId requeridos' });
     }
 
-    // Obtener info del grupo
     const { rows: groupRows } = await client.query(
       `SELECT id, name, business_id FROM business_groups WHERE id=$1`,
       [groupId]
@@ -491,19 +481,15 @@ exports.createDivisionFromGroup = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    if (groupRows[0].business_id !== businessId) {
+    if (Number(groupRows[0].business_id) !== Number(businessId)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'group_business_mismatch' });
     }
 
-    // Si no viene nombre, usar el del grupo
-    if (!name) {
-      name = groupRows[0].name;
-    }
+    if (!name) name = groupRows[0].name;
 
     const code = await ensureUniqueCode(client, businessId, name);
 
-    // Crear la división
     const { rows: divRows } = await client.query(
       `
       INSERT INTO business_divisions (business_id, name, code, is_main, is_active, source_group_id)
@@ -515,11 +501,11 @@ exports.createDivisionFromGroup = async (req, res) => {
 
     const newDivision = divRows[0];
 
-    // Asignar el grupo a la nueva división
     await client.query(
       `
       INSERT INTO division_group_assignments (division_id, group_id, is_customized)
       VALUES ($1, $2, false)
+      ON CONFLICT (division_id, group_id) DO NOTHING
       `,
       [newDivision.id, groupId]
     );
@@ -540,7 +526,7 @@ exports.createDivisionFromGroup = async (req, res) => {
 };
 
 // ============================================================================
-// OBTENER ARTÍCULOS DE UNA DIVISIÓN (FILTRADOS)
+// ARTÍCULOS FILTRADOS POR DIVISIÓN
 // ============================================================================
 
 /**
@@ -552,7 +538,6 @@ exports.getArticlesByDivision = async (req, res) => {
     const divisionId = num(req.params.divisionId);
     if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
 
-    // 1. Obtener grupos asignados
     const { rows: assignments } = await pool.query(
       `SELECT group_id FROM division_group_assignments WHERE division_id = $1`,
       [divisionId]
@@ -564,7 +549,6 @@ exports.getArticlesByDivision = async (req, res) => {
       return res.json({ ok: true, division_id: divisionId, articles: [] });
     }
 
-    // 2. Traer artículos de esos grupos
     const { rows: articles } = await pool.query(
       `
       SELECT DISTINCT
@@ -603,14 +587,12 @@ exports.getArticlesByDivision = async (req, res) => {
 
 /**
  * GET /api/divisions/:divisionId/stats
- * Estadísticas de una división (artículos, grupos)
  */
 exports.getDivisionStats = async (req, res) => {
   try {
     const divisionId = num(req.params.divisionId);
     if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
 
-    // Grupos asignados
     const { rows: groups } = await pool.query(
       `SELECT group_id FROM division_group_assignments WHERE division_id = $1`,
       [divisionId]
@@ -644,48 +626,3 @@ exports.getDivisionStats = async (req, res) => {
     res.status(500).json({ ok: false, error: 'internal_error' });
   }
 };
-
-exports.moveAgrupacionComplete = async (req, res) => {
-  try {
-    const divisionIdRaw = req.body.divisionId;
-    const groupId = Number(req.body.groupId);
-
-    const divisionId =
-      divisionIdRaw === null || divisionIdRaw === undefined || divisionIdRaw === ''
-        ? null
-        : Number(divisionIdRaw);
-
-    if (!Number.isFinite(groupId) || groupId <= 0) {
-      return res.status(400).json({ ok: false, error: 'groupId inválido' });
-    }
-
-    // Si vuelve al "Principal" => quitamos asignación
-    if (divisionId === null) {
-      await pool.query(
-        `DELETE FROM division_group_assignments
-         WHERE group_id = $1`,
-        [groupId]
-      );
-
-      return res.json({ ok: true, assigned: false, groupId });
-    }
-
-    if (!Number.isFinite(divisionId) || divisionId <= 0) {
-      return res.status(400).json({ ok: false, error: 'divisionId inválido' });
-    }
-
-    // Asignar (si ya existía en otra división, se reemplaza)
-    await pool.query(
-      `INSERT INTO division_group_assignments (division_id, group_id)
-       VALUES ($1, $2)
-       ON CONFLICT (group_id)
-       DO UPDATE SET division_id = EXCLUDED.division_id`,
-      [divisionId, groupId]
-    );
-
-    return res.json({ ok: true, assigned: true, divisionId, groupId });
-  } catch (e) {
-    console.error('moveAgrupacionComplete error', e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-}

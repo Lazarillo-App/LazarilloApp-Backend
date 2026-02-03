@@ -22,8 +22,6 @@ router.get('/business/:businessId/main', ctrl.getMainDivision);
 router.post('/', ctrl.createDivision);
 
 // Crear división desde un grupo existente
-console.log('moveAgrupacionComplete typeof =', typeof ctrl.moveAgrupacionComplete);
-
 router.post('/create-from-group', ctrl.createDivisionFromGroup);
 
 // Obtener una división específica
@@ -34,9 +32,6 @@ router.put('/:divisionId', ctrl.updateDivision);
 
 // Eliminar división
 router.delete('/:divisionId', ctrl.deleteDivision);
-
-// Mover división
-router.post('/move-agrupacion-complete', ctrl.moveAgrupacionComplete);
 
 // ============================================================================
 // ESTADÍSTICAS Y CONTENIDO
@@ -56,7 +51,7 @@ router.get('/:divisionId/articles', ctrl.getArticlesByDivision);
 router.get('/:divisionId/groups', ctrl.getGroupsByDivision);
 
 // Asignar un grupo a una división
-router.post('/:divisionId/assign-group', ctrl.assignAgrupacionToDivision);
+router.post('/:divisionId/assign-group', ctrl.assignGroupToDivision)
 
 // Remover grupo de una división
 router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
