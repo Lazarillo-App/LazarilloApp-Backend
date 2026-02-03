@@ -356,20 +356,34 @@ exports.getGroupsByDivision = async (req, res) => {
 
 /**
  * POST /api/divisions/:divisionId/assign-group
- * Body: { groupId: number }
+ * Body soportado:
+ *  - { groupId: number }   (camelCase)
+ *  - { group_id: number }  (snake_case)
+ *
  * Asigna un grupo a una división (solo crea la relación, NO mueve datos)
  */
 exports.assignGroupToDivision = async (req, res) => {
   const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
     const divisionId = num(req.params.divisionId);
-    const groupId = num(req.body?.groupId);
+
+    // ✅ Soporta ambos formatos
+    const rawGroupId = req.body?.groupId ?? req.body?.group_id;
+    const groupId = num(rawGroupId);
 
     if (!divisionId || !groupId) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ ok: false, error: 'division_id y group_id requeridos' });
+      return res.status(400).json({
+        ok: false,
+        error: 'division_id y group_id requeridos',
+        details: {
+          divisionId: req.params.divisionId ?? null,
+          groupId: rawGroupId ?? null,
+        },
+      });
     }
 
     // Verificar que la división existe
@@ -392,7 +406,7 @@ exports.assignGroupToDivision = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    if (groupRows[0].business_id !== divRows[0].business_id) {
+    if (Number(groupRows[0].business_id) !== Number(divRows[0].business_id)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'group_business_mismatch' });
     }
@@ -408,11 +422,11 @@ exports.assignGroupToDivision = async (req, res) => {
     );
 
     await client.query('COMMIT');
-    res.json({ ok: true, division_id: divisionId, group_id: groupId });
+    return res.json({ ok: true, division_id: divisionId, group_id: groupId });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('[divisions] assignGroupToDivision error:', e);
-    res.status(500).json({ ok: false, error: 'internal_error' });
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   } finally {
     client.release();
   }
