@@ -97,10 +97,8 @@ const isDiscontinuadosName = (s) => {
 
 // ============================================================================
 // GET /businesses/:businessId/agrupaciones
-// ✅ FILTRADO POR DIVISIÓN:
-// - Si NO viene X-Division-Id => PRINCIPAL (solo NO asignadas)
-// - Si viene X-Division-Id => DIVISIÓN (solo asignadas, SIN TODO ni Discontinuados)
-// ============================================================================
+// ✅ SIEMPRE devuelve TODAS las agrupaciones del negocio
+// ✅ Sin filtrado por división
 exports.obtenerAgrupaciones = async (req, res) => {
   try {
     const businessId = Number(req.params.businessId);
@@ -108,92 +106,21 @@ exports.obtenerAgrupaciones = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'businessId inválido' });
     }
 
-    const hdr = req.header('X-Division-Id') || req.headers['x-division-id'] || null;
-    const divisionId =
-      hdr == null || hdr === '' || hdr === 'null' ? null : Number(hdr);
-
-    // ─────────────────────────────────────────────
-    // PRINCIPAL (sin división): agrupaciones NO asignadas + TODO + Discontinuados
-    // ─────────────────────────────────────────────
-    if (!Number.isFinite(divisionId)) {
-      const { rows } = await pool.query(
-        `
-        SELECT a.id, a.nombre, a.business_id,
-               COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
-        FROM agrupaciones a
-        WHERE a.business_id = $1
-          AND NOT EXISTS (
-            SELECT 1
-            FROM division_agrupacion_assignments daa
-            JOIN business_divisions bd ON bd.id = daa.division_id
-            WHERE bd.business_id = $1
-              AND daa.agrupacion_id = a.id
-          )
-        ORDER BY a.id ASC
-        `,
-        [businessId]
-      );
-
-      console.log('[obtenerAgrupaciones] Principal:', {
-        businessId,
-        total: rows.length,
-        grupos: rows.map(r => r.nombre),
-      });
-
-      return res.json({
-        ok: true,
-        agrupaciones: rows || [],
-        filtered_by_division: false,
-        division_id: null,
-      });
-    }
-
-    // ─────────────────────────────────────────────
-    // DIVISIÓN: validar que exista y sea del negocio
-    // ─────────────────────────────────────────────
-    const chk = await pool.query(
-      `SELECT id FROM business_divisions WHERE id = $1 AND business_id = $2 LIMIT 1`,
-      [divisionId, businessId]
-    );
-    if (!chk.rows?.length) {
-      return res
-        .status(404)
-        .json({ ok: false, error: 'División no encontrada para este negocio' });
-    }
-
-    // ✅ FILTRADO ESTRICTO: SOLO asignadas, SIN TODO ni Discontinuados
+    // ✅ SIMPLE: todas las agrupaciones del negocio
     const { rows } = await pool.query(
       `
       SELECT a.id, a.nombre, a.business_id,
              COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
       FROM agrupaciones a
-      JOIN division_agrupacion_assignments daa ON daa.agrupacion_id = a.id
       WHERE a.business_id = $1
-        AND daa.division_id = $2
-        AND LOWER(TRIM(
-          TRANSLATE(
-            a.nombre,
-            'áéíóúÁÉÍÓÚñÑ',
-            'aeiouAEIOUnn'
-          )
-        )) NOT IN ('sin agrupacion', 'sin agrupación', 'todo', 'discontinuados', 'descontinuados')
       ORDER BY a.id ASC
       `,
-      [businessId, divisionId]
+      [businessId]
     );
-
-    console.log('[obtenerAgrupaciones] División:', {
-      businessId,
-      divisionId,
-      total: rows.length,
-      grupos: rows.map(r => r.nombre),
-    });
 
     return res.json({
       ok: true,
       agrupaciones: rows || [],
-      filtered_by_division: true,
-      division_id: divisionId,
     });
   } catch (e) {
     console.error('obtenerAgrupaciones error', e);
