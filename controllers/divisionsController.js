@@ -322,7 +322,7 @@ exports.deleteDivision = async (req, res) => {
 
 /**
  * GET /api/divisions/:divisionId/groups
- * Obtiene grupos asignados a una división
+ * (En realidad devuelve AGRUPACIONES asignadas a esa división)
  */
 exports.getGroupsByDivision = async (req, res) => {
   try {
@@ -331,18 +331,20 @@ exports.getGroupsByDivision = async (req, res) => {
 
     const { rows } = await pool.query(
       `
-      SELECT 
-        bg.id,
-        bg.name,
-        bg.description,
-        bg.config,
-        dga.is_customized,
-        dga.created_at as assigned_at,
-        COALESCE((SELECT COUNT(*) FROM article_groups ag WHERE ag.group_id = bg.id),0)::integer as article_count
-      FROM division_group_assignments dga
-      JOIN business_groups bg ON bg.id = dga.group_id
-      WHERE dga.division_id = $1
-      ORDER BY bg.name ASC
+      SELECT
+        a.id,
+        a.nombre as name,
+        a.business_id,
+        daa.created_at as assigned_at,
+        COALESCE((
+          SELECT COUNT(*)
+          FROM agrupacion_articulos aa
+          WHERE aa.agrupacion_id = a.id
+        ), 0)::integer as article_count
+      FROM division_agrupacion_assignments daa
+      JOIN agrupaciones a ON a.id = daa.agrupacion_id
+      WHERE daa.division_id = $1
+      ORDER BY a.nombre ASC
       `,
       [divisionId]
     );
@@ -354,11 +356,13 @@ exports.getGroupsByDivision = async (req, res) => {
   }
 };
 
+
 /**
  * POST /api/divisions/:divisionId/assign-agrupacion
  * Body: { agrupacionId: number }  (o { groupId } si querés compat)
  * Asigna una agrupación (tabla agrupaciones) a una división.
  */
+
 exports.assignAgrupacionToDivision = async (req, res) => {
   const client = await pool.connect();
   try {
