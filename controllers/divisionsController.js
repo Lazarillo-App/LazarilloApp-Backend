@@ -355,38 +355,31 @@ exports.getGroupsByDivision = async (req, res) => {
 };
 
 /**
- * POST /api/divisions/:divisionId/assign-group
- * Body soportado:
- *  - { groupId: number }   (camelCase)
- *  - { group_id: number }  (snake_case)
- *
- * Asigna un grupo a una división (solo crea la relación, NO mueve datos)
+ * POST /api/divisions/:divisionId/assign-agrupacion
+ * Body: { agrupacionId: number }  (o { groupId } si querés compat)
+ * Asigna una agrupación (tabla agrupaciones) a una división.
  */
-exports.assignGroupToDivision = async (req, res) => {
+exports.assignAgrupacionToDivision = async (req, res) => {
   const client = await pool.connect();
-
   try {
     await client.query('BEGIN');
 
     const divisionId = num(req.params.divisionId);
 
-    // ✅ Soporta ambos formatos
-    const rawGroupId = req.body?.groupId ?? req.body?.group_id;
-    const groupId = num(rawGroupId);
+    // acepto varios nombres para evitarte bugs de front
+    const agrupacionId = num(
+      req.body?.agrupacionId ??
+      req.body?.agrupacion_id ??
+      req.body?.groupId ??
+      req.body?.group_id
+    );
 
-    if (!divisionId || !groupId) {
+    if (!divisionId || !agrupacionId) {
       await client.query('ROLLBACK');
-      return res.status(400).json({
-        ok: false,
-        error: 'division_id y group_id requeridos',
-        details: {
-          divisionId: req.params.divisionId ?? null,
-          groupId: rawGroupId ?? null,
-        },
-      });
+      return res.status(400).json({ ok: false, error: 'division_id y agrupacion_id requeridos' });
     }
 
-    // Verificar que la división existe
+    // 1) división existe
     const { rows: divRows } = await client.query(
       `SELECT id, business_id FROM business_divisions WHERE id=$1`,
       [divisionId]
@@ -396,46 +389,41 @@ exports.assignGroupToDivision = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'division_not_found' });
     }
 
-    // Verificar que el grupo existe y pertenece al mismo negocio
-    const { rows: groupRows } = await client.query(
-      `SELECT id, business_id FROM business_groups WHERE id=$1`,
-      [groupId]
+    // 2) agrupación existe
+    const { rows: agrRows } = await client.query(
+      `SELECT id, business_id FROM agrupaciones WHERE id=$1`,
+      [agrupacionId]
     );
-    if (!groupRows.length) {
+    if (!agrRows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, error: 'group_not_found' });
+      return res.status(404).json({ ok: false, error: 'agrupacion_not_found' });
     }
 
-    if (Number(groupRows[0].business_id) !== Number(divRows[0].business_id)) {
+    // 3) mismo negocio
+    if (Number(agrRows[0].business_id) !== Number(divRows[0].business_id)) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ ok: false, error: 'group_business_mismatch' });
+      return res.status(400).json({ ok: false, error: 'agrupacion_business_mismatch' });
     }
 
-    // Crear la asignación (solo la relación, no movemos datos)
+    // 4) insertar relación
     await client.query(
       `
-      INSERT INTO division_group_assignments (division_id, group_id, is_customized)
-      VALUES ($1, $2, false)
-      ON CONFLICT (division_id, group_id) DO NOTHING
+      INSERT INTO division_agrupacion_assignments (division_id, agrupacion_id)
+      VALUES ($1, $2)
+      ON CONFLICT (division_id, agrupacion_id) DO NOTHING
       `,
-      [divisionId, groupId]
+      [divisionId, agrupacionId]
     );
 
     await client.query('COMMIT');
-    return res.json({ ok: true, division_id: divisionId, group_id: groupId });
+    return res.json({ ok: true, division_id: divisionId, agrupacion_id: agrupacionId });
   } catch (e) {
     await client.query('ROLLBACK');
-    console.error('[divisions] assignGroupToDivision error:', e);
+    console.error('[divisions] assignAgrupacionToDivision error:', e);
     return res.status(500).json({ ok: false, error: 'internal_error' });
   } finally {
     client.release();
   }
-  console.log('[assignGroupToDivision]', {
-  divisionId: req.params.divisionId,
-  body: req.body,
-  parsedGroupId: num(req.body?.groupId ?? req.body?.group_id),
-});
-
 };
 
 /**
