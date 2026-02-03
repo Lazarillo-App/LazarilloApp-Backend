@@ -367,6 +367,15 @@ exports.assignGroupToDivision = async (req, res) => {
 
     const divisionId = num(req.params.divisionId);
     const groupId = num(req.body?.groupId ?? req.body?.group_id);
+    console.log('[assign-group] params/body', {
+  params: req.params,
+  body: req.body,
+  headers: {
+    xBusinessId: req.headers['x-business-id'],
+    xDivisionId: req.headers['x-division-id'],
+  },
+});
+
 
     if (!divisionId || !groupId) {
       await client.query('ROLLBACK');
