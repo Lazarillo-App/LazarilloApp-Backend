@@ -59,4 +59,7 @@ router.post('/unassign-group', ctrl.unassignGroupFromDivision);
 // Remover grupo de una división (por division+group)
 router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
 
+// Grupos visibles en Principal (no asignados a ninguna división)
+router.get('/business/:businessId/principal-groups', ctrl.getPrincipalGroupsByBusiness);
+
 module.exports = router;

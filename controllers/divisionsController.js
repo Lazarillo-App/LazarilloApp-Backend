@@ -670,3 +670,48 @@ exports.unassignGroupFromDivision = async (req, res) => {
     client.release();
   }
 };
+
+/**
+ * GET /api/divisions/business/:businessId/principal-groups
+ * Devuelve los business_groups del negocio que NO están asignados a ninguna división.
+ */
+exports.getPrincipalGroupsByBusiness = async (req, res) => {
+  try {
+    const businessId = num(req.params.businessId);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        bg.id,
+        bg.business_id,
+        bg.name,
+        bg.description,
+        bg.config,
+        bg.created_at,
+        bg.updated_at,
+        COALESCE((
+          SELECT COUNT(*)
+          FROM article_groups ag
+          WHERE ag.group_id = bg.id
+        ), 0)::integer AS article_count
+      FROM business_groups bg
+      WHERE bg.business_id = $1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM division_group_assignments dga
+          JOIN business_divisions bd ON bd.id = dga.division_id
+          WHERE dga.group_id = bg.id
+            AND bd.business_id = $1
+        )
+      ORDER BY bg.name ASC
+      `,
+      [businessId]
+    );
+
+    return res.json({ ok: true, business_id: businessId, groups: rows });
+  } catch (e) {
+    console.error('[divisions] getPrincipalGroupsByBusiness error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+};
