@@ -356,7 +356,6 @@ exports.getGroupsByDivision = async (req, res) => {
   }
 };
 
-
 /**
  * POST /api/divisions/:divisionId/assign-agrupacion
  * Body: { agrupacionId: number }  (o { groupId } si querés compat)
@@ -646,7 +645,7 @@ exports.getDivisionStats = async (req, res) => {
   }
 };
 
-async function moveAgrupacionComplete(req, res) {
+exports.moveAgrupacionComplete = async (req, res) => {
   try {
     const divisionIdRaw = req.body.divisionId;
     const groupId = Number(req.body.groupId);
@@ -690,28 +689,3 @@ async function moveAgrupacionComplete(req, res) {
     res.status(500).json({ ok: false, error: e.message });
   }
 }
-
-// ============================================================================
-// EXPORT
-// ============================================================================
-
-module.exports = {
-  // CRUD divisiones
-  getDivisionsByBusiness: exports.getDivisionsByBusiness,
-  getMainDivision: exports.getMainDivision,
-  getDivisionById: exports.getDivisionById,
-  createDivision: exports.createDivision,
-  updateDivision: exports.updateDivision,
-  deleteDivision: exports.deleteDivision,
-   moveAgrupacionComplete,
-
-  // Grupos en divisiones
-  getGroupsByDivision: exports.getGroupsByDivision,
-  assignGroupToDivision: exports.assignGroupToDivision,
-  removeGroupFromDivision: exports.removeGroupFromDivision,
-  createDivisionFromGroup: exports.createDivisionFromGroup,
-
-  // Artículos filtrados
-  getArticlesByDivision: exports.getArticlesByDivision,
-  getDivisionStats: exports.getDivisionStats,
-};
