@@ -430,6 +430,12 @@ exports.assignGroupToDivision = async (req, res) => {
   } finally {
     client.release();
   }
+  console.log('[assignGroupToDivision]', {
+  divisionId: req.params.divisionId,
+  body: req.body,
+  parsedGroupId: num(req.body?.groupId ?? req.body?.group_id),
+});
+
 };
 
 /**
