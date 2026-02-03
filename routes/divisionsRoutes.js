@@ -54,7 +54,7 @@ router.get('/:divisionId/groups', ctrl.getGroupsByDivision);
 router.post('/:divisionId/assign-group', ctrl.assignGroupToDivision)
 
 // Volver a "Principal" (desasignar: eliminar relación)
-router.post('/unassign-group', ctrl.unassignGroupFromDivision);
+router.post('/:divisionId/unassign-group', ctrl.unassignGroupFromDivision);
 
 // Remover grupo de una división
 router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
