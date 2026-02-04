@@ -139,27 +139,25 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_division_id' });
     }
 
-    const divisionKey = divisionId == null ? 0 : Number(divisionId);
+    const divisionKey = divisionId == null ? 0 : Number(divisionIdRaw);
 
     const groupIdNum = Number(agrupacionId);
 
     await client.query('BEGIN');
 
-    // borrar favorita SOLO de ese scope + division
-    await client.query(
-      `INSERT INTO app_user_group_favs
-     (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
-   VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-      [user.id, biz.id, groupIdNum, scope, divisionId, divisionKey]
-    );
-
-    // si viene null -> queda borrada y listo
+    // ✅ borrar favorita para ese scope+division
     if (!Number.isFinite(groupIdNum)) {
+      await client.query(
+        `DELETE FROM app_user_group_favs
+         WHERE user_id = $1 AND business_id = $2 AND scope = $3 AND division_key = $4`,
+        [user.id, biz.id, scope, divisionKey]
+      );
+
       await client.query('COMMIT');
       return res.json({ ok: true, favoriteGroupId: null, scope, divisionId });
     }
 
-    // validar existencia
+    // ✅ validar existencia
     const tableName = scope === 'articulo' ? 'agrupaciones' : 'insumo_groups';
     const { rows: checkRows } = await client.query(
       `SELECT id FROM ${tableName} WHERE id = $1 AND business_id = $2 LIMIT 1`,
@@ -171,18 +169,23 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    // insertar favorita
+    // ✅ UPSERT por (user_id, business_id, scope, division_key)
     await client.query(
       `INSERT INTO app_user_group_favs
-     (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
-   VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+         (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (user_id, business_id, scope, division_key)
+       DO UPDATE SET
+         agrupacion_id = EXCLUDED.agrupacion_id,
+         division_id = EXCLUDED.division_id,
+         updated_at = NOW()`,
       [user.id, biz.id, groupIdNum, scope, divisionId, divisionKey]
     );
 
     await client.query('COMMIT');
-    res.json({ ok: true, favoriteGroupId: groupIdNum, scope, divisionId });
+    return res.json({ ok: true, favoriteGroupId: groupIdNum, scope, divisionId });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { }
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('saveFavoriteGroup error:', e);
     next(e);
   } finally {
