@@ -147,9 +147,10 @@ exports.saveFavoriteGroup = async (req, res, next) => {
 
     // borrar favorita SOLO de ese scope + division
     await client.query(
-      `DELETE FROM app_user_group_favs
-       WHERE user_id = $1 AND business_id = $2 AND scope = $3 AND division_key = $4`,
-      [user.id, biz.id, scope, divisionKey]
+      `INSERT INTO app_user_group_favs
+     (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
+   VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [user.id, biz.id, groupIdNum, scope, divisionId, divisionKey]
     );
 
     // si viene null -> queda borrada y listo
@@ -173,15 +174,15 @@ exports.saveFavoriteGroup = async (req, res, next) => {
     // insertar favorita
     await client.query(
       `INSERT INTO app_user_group_favs
-        (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
+     (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
+   VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [user.id, biz.id, groupIdNum, scope, divisionId, divisionKey]
     );
 
     await client.query('COMMIT');
     res.json({ ok: true, favoriteGroupId: groupIdNum, scope, divisionId });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('saveFavoriteGroup error:', e);
     next(e);
   } finally {
