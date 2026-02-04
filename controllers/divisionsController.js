@@ -821,3 +821,68 @@ exports.unassignAgrupacion = async (req, res) => {
   }
 };
 
+exports.getAgrupacionesByDivision = async (req, res) => {
+  try {
+    const divisionId = num(req.params.divisionId);
+    if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+
+    console.log('[divisions] getAgrupacionesByDivision', { divisionId });
+
+    const { rows } = await pool.query(
+      `
+      SELECT 
+        a.id,
+        a.business_id,
+        a.nombre,
+        a.created_at,
+        a.updated_at
+      FROM division_agrupacion_assignments daa
+      JOIN agrupaciones a ON a.id = daa.agrupacion_id
+      WHERE daa.division_id = $1
+      ORDER BY a.nombre ASC
+      `,
+      [divisionId]
+    );
+
+    return res.json({ ok: true, division_id: divisionId, agrupaciones: rows });
+  } catch (e) {
+    console.error('[divisions] getAgrupacionesByDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+};
+
+exports.getPrincipalAgrupacionesByBusiness = async (req, res) => {
+  try {
+    const businessId = num(req.params.businessId);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    console.log('[divisions] getPrincipalAgrupacionesByBusiness', { businessId });
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        a.id,
+        a.business_id,
+        a.nombre,
+        a.created_at,
+        a.updated_at
+      FROM agrupaciones a
+      WHERE a.business_id = $1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM division_agrupacion_assignments daa
+          JOIN business_divisions bd ON bd.id = daa.division_id
+          WHERE bd.business_id = $1
+            AND daa.agrupacion_id = a.id
+        )
+      ORDER BY a.nombre ASC
+      `,
+      [businessId]
+    );
+
+    return res.json({ ok: true, business_id: businessId, agrupaciones: rows });
+  } catch (e) {
+    console.error('[divisions] getPrincipalAgrupacionesByBusiness error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+};
