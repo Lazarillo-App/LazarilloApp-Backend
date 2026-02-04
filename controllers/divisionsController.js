@@ -724,3 +724,100 @@ exports.getPrincipalGroupsByBusiness = async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 };
+
+exports.assignAgrupacionToDivision = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const divisionId = num(req.params.divisionId);
+    const agrupacionId = num(req.body?.agrupacionId ?? req.body?.agrupacion_id);
+
+    if (!divisionId || !agrupacionId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'division_id y agrupacion_id requeridos' });
+    }
+
+    // 1) división existe
+    const { rows: divRows } = await client.query(
+      `SELECT id, business_id FROM business_divisions WHERE id=$1`,
+      [divisionId]
+    );
+    if (!divRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'division_not_found' });
+    }
+
+    // 2) agrupación existe
+    const { rows: agrRows } = await client.query(
+      `SELECT id, business_id FROM agrupaciones WHERE id=$1`,
+      [agrupacionId]
+    );
+    if (!agrRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'agrupacion_not_found' });
+    }
+
+    // 3) mismo negocio
+    if (Number(agrRows[0].business_id) !== Number(divRows[0].business_id)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'agrupacion_business_mismatch' });
+    }
+
+    // 4) insertar relación
+    await client.query(
+      `
+      INSERT INTO division_agrupacion_assignments (division_id, agrupacion_id)
+      VALUES ($1, $2)
+      ON CONFLICT (division_id, agrupacion_id) DO NOTHING
+      `,
+      [divisionId, agrupacionId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, division_id: divisionId, agrupacion_id: agrupacionId });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] assignAgrupacionToDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  } finally {
+    client.release();
+  }
+};
+
+exports.unassignAgrupacion = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const agrupacionId = num(req.body?.agrupacionId ?? req.body?.agrupacion_id);
+    const businessId = num(req.body?.businessId ?? req.body?.business_id);
+
+    if (!agrupacionId || !businessId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'business_id y agrupacion_id requeridos' });
+    }
+
+    // Borra asignaciones de esa agrupación en ese negocio (por si estaba en alguna división)
+    await client.query(
+      `
+      DELETE FROM division_agrupacion_assignments d
+      USING business_divisions bd
+      WHERE d.division_id = bd.id
+        AND bd.business_id = $1
+        AND d.agrupacion_id = $2
+      `,
+      [businessId, agrupacionId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, agrupacion_id: agrupacionId });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] unassignAgrupacion error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  } finally {
+    client.release();
+  }
+};
+

@@ -52,9 +52,11 @@ router.get('/:divisionId/groups', ctrl.getGroupsByDivision);
 
 // Asignar un grupo a una división
 router.post('/:divisionId/assign-group', ctrl.assignGroupToDivision);
+router.post('/:divisionId/assign-agrupacion', ctrl.assignAgrupacionToDivision);
 
 // Volver a Principal (desasignar)
 router.post('/unassign-group', ctrl.unassignGroupFromDivision);
+router.post('/unassign-agrupacion', ctrl.unassignAgrupacion);
 
 // Remover grupo de una división (por division+group)
 router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
