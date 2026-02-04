@@ -78,33 +78,40 @@ exports.saveViewPref = async (req, res, next) => {
    POST /api/businesses/:id/fav-group
    ========================================================= */
 
-// controllers/viewPrefsController.js
-
 exports.getFavoriteGroup = async (req, res, next) => {
   try {
     const biz = req.business;
     const user = req.user;
+
     const scope = req.query.scope || 'articulo';
     const divisionIdRaw = req.query.divisionId;
-    const divisionId = divisionIdRaw == null || divisionIdRaw === '' ? null : Number(divisionIdRaw);
 
-    if (divisionId !== null && !Number.isFinite(divisionId)) {
+    if (!biz?.id || !user?.id) {
+      return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
+    }
+    if (!['articulo', 'insumo'].includes(scope)) {
+      return res.status(400).json({ ok: false, error: 'invalid_scope' });
+    }
+
+    const divNum =
+      divisionIdRaw == null || divisionIdRaw === '' ? null : Number(divisionIdRaw);
+
+    if (divNum !== null && !Number.isFinite(divNum)) {
       return res.status(400).json({ ok: false, error: 'invalid_division_id' });
     }
 
+    const divisionKey = Number.isFinite(divNum) && divNum > 0 ? divNum : 0;
+
     const { rows } = await pool.query(
       `SELECT agrupacion_id
-   FROM app_user_group_favs
-   WHERE business_id = $1
-     AND user_id = $2
-     AND scope = $3
-     AND COALESCE(division_id, -1) = COALESCE($4, -1)
-   LIMIT 1`,
-      [biz.id, user.id, scope, divisionId]
+       FROM app_user_group_favs
+       WHERE business_id = $1 AND user_id = $2 AND scope = $3 AND division_key = $4
+       LIMIT 1`,
+      [biz.id, user.id, scope, divisionKey]
     );
 
     const favoriteGroupId = rows.length ? Number(rows[0].agrupacion_id) : null;
-    res.json({ ok: true, favoriteGroupId, scope, divisionId });
+    res.json({ ok: true, favoriteGroupId, scope, divisionId: divNum, divisionKey });
   } catch (e) {
     console.error('getFavoriteGroup error:', e);
     next(e);
@@ -112,7 +119,6 @@ exports.getFavoriteGroup = async (req, res, next) => {
 };
 
 exports.saveFavoriteGroup = async (req, res, next) => {
-  const client = await pool.connect();
   try {
     const biz = req.business;
     const user = req.user;
@@ -120,84 +126,67 @@ exports.saveFavoriteGroup = async (req, res, next) => {
     const {
       agrupacionId,
       scope = 'articulo',
-      divisionId: divisionIdRaw = null, // 🆕 viene del front
+      divisionId: divisionIdRaw = null,
     } = req.body || {};
 
     if (!biz?.id || !user?.id) {
       return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
     }
-
-    // ✅ Validar scope
     if (!['articulo', 'insumo'].includes(scope)) {
       return res.status(400).json({ ok: false, error: 'invalid_scope' });
     }
 
-    // ✅ Normalizar divisionId (null = Principal)
-    const divisionId =
-      divisionIdRaw === null || divisionIdRaw === undefined || divisionIdRaw === ''
-        ? null
-        : Number(divisionIdRaw);
+    const divNum =
+      divisionIdRaw == null || divisionIdRaw === '' ? null : Number(divisionIdRaw);
 
-    if (divisionId !== null && !Number.isFinite(divisionId)) {
+    if (divNum !== null && !Number.isFinite(divNum)) {
       return res.status(400).json({ ok: false, error: 'invalid_division_id' });
     }
 
+    const divisionKey = Number.isFinite(divNum) && divNum > 0 ? divNum : 0;
+
     const groupIdNum = Number(agrupacionId);
 
-    // ✅ Si es null/undefined/NaN → borrar favorita SOLO en ese scope+division
+    // borrar favorita (solo en ese scope + division_key)
     if (!Number.isFinite(groupIdNum)) {
-      await client.query(
+      await pool.query(
         `DELETE FROM app_user_group_favs
-         WHERE user_id = $1
-           AND business_id = $2
-           AND scope = $3
-           AND COALESCE(division_id, -1) = COALESCE($4, -1)`,
-        [user.id, biz.id, scope, divisionId]
+         WHERE user_id = $1 AND business_id = $2 AND scope = $3 AND division_key = $4`,
+        [user.id, biz.id, scope, divisionKey]
       );
-      return res.json({ ok: true, favoriteGroupId: null, scope, divisionId });
+      return res.json({ ok: true, favoriteGroupId: null, scope, divisionId: divNum, divisionKey });
     }
 
-    // 🆕 Validar que el grupo existe según el scope
+    // validar existencia
     const tableName = scope === 'articulo' ? 'agrupaciones' : 'insumo_groups';
-    const checkQuery = `SELECT id FROM ${tableName} WHERE id = $1 AND business_id = $2 LIMIT 1`;
-    const { rows: checkRows } = await client.query(checkQuery, [groupIdNum, biz.id]);
-
+    const { rows: checkRows } = await pool.query(
+      `SELECT id FROM ${tableName} WHERE id = $1 AND business_id = $2 LIMIT 1`,
+      [groupIdNum, biz.id]
+    );
     if (!checkRows.length) {
       return res.status(404).json({
         ok: false,
         error: 'group_not_found',
-        message: `No se encontró ${scope === 'articulo' ? 'agrupación' : 'grupo'} con id ${groupIdNum}`
+        message: `No se encontró ${scope === 'articulo' ? 'agrupación' : 'grupo'} con id ${groupIdNum}`,
       });
     }
 
-    await client.query('BEGIN');
-
-    // ✅ Borra favorita anterior de ese scope+division
-    await client.query(
-      `DELETE FROM app_user_group_favs
-       WHERE user_id = $1
-         AND business_id = $2
-         AND scope = $3
-         AND COALESCE(division_id, -1) = COALESCE($4, -1)`,
-      [user.id, biz.id, scope, divisionId]
-    );
-
-    // ✅ Inserta nueva favorita
-    await client.query(
+    // upsert correcto según unique nuevo
+    await pool.query(
       `INSERT INTO app_user_group_favs
-         (user_id, business_id, agrupacion_id, scope, division_id, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [user.id, biz.id, groupIdNum, scope, divisionId]
+         (user_id, business_id, scope, division_id, division_key, agrupacion_id, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (user_id, business_id, scope, division_key)
+       DO UPDATE SET
+         agrupacion_id = EXCLUDED.agrupacion_id,
+         division_id   = EXCLUDED.division_id,
+         updated_at    = NOW()`,
+      [user.id, biz.id, scope, divNum, divisionKey, groupIdNum]
     );
 
-    await client.query('COMMIT');
-
-    res.json({ ok: true, favoriteGroupId: groupIdNum, scope, divisionId });
+    res.json({ ok: true, favoriteGroupId: groupIdNum, scope, divisionId: divNum, divisionKey });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
     console.error('saveFavoriteGroup error:', e);
     next(e);
-  } finally {
-    client.release();
   }
 };
