@@ -64,10 +64,10 @@ router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
 // Grupos visibles en Principal (no asignados a ninguna división)
 router.get('/business/:businessId/principal-groups', ctrl.getPrincipalGroupsByBusiness);
 
-router.get('/divisions/:divisionId/agrupaciones', ctrl.getAgrupacionesByDivision);
+router.get('/:divisionId/agrupaciones', ctrl.getAgrupacionesByDivision);
 
 router.get(
-  '/divisions/business/:businessId/principal-agrupaciones',
+  '/business/:businessId/principal-agrupaciones',
   ctrl.getPrincipalAgrupacionesByBusiness
 );
 
