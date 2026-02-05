@@ -88,9 +88,9 @@ router.get(
 // ============================================================================
 // LEGACY (agrupaciones) 
 // ============================================================================
-// router.post('/:divisionId/assign-agrupacion', ctrl.assignAgrupacionToDivision);
-// router.post('/unassign-agrupacion', ctrl.unassignAgrupacion);
-// router.get('/:divisionId/agrupaciones', ctrl.getAgrupacionesByDivision);
-// router.get('/business/:businessId/principal-agrupaciones', ctrl.getPrincipalAgrupacionesByBusiness);
+router.post('/:divisionId/assign-agrupacion', ctrl.assignAgrupacionToDivision);
+router.post('/unassign-agrupacion', ctrl.unassignAgrupacion);
+router.get('/:divisionId/agrupaciones', ctrl.getAgrupacionesByDivision);
+router.get('/business/:businessId/principal-agrupaciones', ctrl.getPrincipalAgrupacionesByBusiness);
 
 module.exports = router;
