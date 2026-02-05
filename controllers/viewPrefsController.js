@@ -4,8 +4,8 @@ const pool = require('../config/db');
 const VALID_MODES = ['by-subrubro', 'by-categoria'];
 
 /**
- * GET /api/businesses/:id/view-prefs
- * Devuelve todas las vistas guardadas para el usuario en ese negocio
+ * GET /api/businesses/:id/view-prefs?divisionId=X
+ * Devuelve todas las vistas guardadas para el usuario en ese negocio + división
  * resp: { ok: true, byGroup: { [agrupacionId]: 'by-subrubro' | 'by-categoria' } }
  */
 exports.getViewPrefs = async (req, res, next) => {
@@ -17,11 +17,25 @@ exports.getViewPrefs = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
     }
 
+    // ✅ NUEVO: Parsear divisionId del query string
+    const divisionIdRaw = req.query.divisionId;
+    const divisionId =
+      divisionIdRaw == null || divisionIdRaw === '' ? null : Number(divisionIdRaw);
+
+    if (divisionId !== null && !Number.isFinite(divisionId)) {
+      return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+    }
+
+    const divisionKey = divisionId == null ? 0 : Number(divisionId);
+
+    // ✅ NUEVO: Filtrar por division_key
     const { rows } = await pool.query(
       `SELECT agrupacion_id, view_mode
        FROM app_user_group_view_prefs
-       WHERE business_id = $1 AND user_id = $2`,
-      [biz.id, user.id]
+       WHERE business_id = $1 
+         AND user_id = $2 
+         AND division_key = $3`,
+      [biz.id, user.id, divisionKey]
     );
 
     const byGroup = {};
@@ -38,13 +52,13 @@ exports.getViewPrefs = async (req, res, next) => {
 
 /**
  * POST /api/businesses/:id/view-prefs
- * body: { agrupacionId, viewMode }
+ * body: { agrupacionId, viewMode, divisionId }
  */
 exports.saveViewPref = async (req, res, next) => {
   try {
     const biz = req.business;
     const user = req.user;
-    const { agrupacionId, viewMode } = req.body || {};
+    const { agrupacionId, viewMode, divisionId: divisionIdRaw = null } = req.body || {};
 
     const groupIdNum = Number(agrupacionId);
 
@@ -55,14 +69,28 @@ exports.saveViewPref = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_view_mode' });
     }
 
+    // ✅ NUEVO: Parsear divisionId
+    const divisionId =
+      divisionIdRaw === null || divisionIdRaw === undefined || divisionIdRaw === ''
+        ? null
+        : Number(divisionIdRaw);
+
+    if (divisionId !== null && !Number.isFinite(divisionId)) {
+      return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+    }
+
+    const divisionKey = divisionId == null ? 0 : Number(divisionId);
+
+    // ✅ NUEVO: Incluir division_key en el UPSERT
     await pool.query(
-      `INSERT INTO app_user_group_view_prefs (user_id, business_id, agrupacion_id, view_mode, updated_at)
-       VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (user_id, business_id, agrupacion_id)
+      `INSERT INTO app_user_group_view_prefs 
+         (user_id, business_id, agrupacion_id, view_mode, division_id, division_key, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (user_id, business_id, agrupacion_id, division_key)
        DO UPDATE SET
          view_mode = EXCLUDED.view_mode,
          updated_at = NOW()`,
-      [user.id, biz.id, groupIdNum, viewMode]
+      [user.id, biz.id, groupIdNum, viewMode, divisionId, divisionKey]
     );
 
     res.json({ ok: true });
@@ -139,7 +167,6 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_division_id' });
     }
 
-    // ✅ CORREGIDO: division_key debe ser el ID numérico o 0
     const divisionKey = divisionId == null ? 0 : Number(divisionId);
 
     const groupIdNum = Number(agrupacionId);
@@ -170,8 +197,7 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    // ✅ CRITICAL FIX: Primero eliminar cualquier favorita existente para esta combinación
-    // Esto evita el error de duplicate key
+    // ✅ Primero eliminar cualquier favorita existente para esta combinación
     await client.query(
       `DELETE FROM app_user_group_favs
        WHERE user_id = $1 
