@@ -40,8 +40,9 @@ router.delete('/:divisionId', ctrl.deleteDivision);
 // Estadísticas de una división (grupos, artículos)
 router.get('/:divisionId/stats', ctrl.getDivisionStats);
 
-// Obtener artículos de una división (FILTRADOS por grupos asignados)
+// Obtener artículos e insumos de una división (FILTRADOS por grupos asignados)
 router.get('/:divisionId/articles', ctrl.getArticlesByDivision);
+router.get('/:divisionId/insumos', ctrl.getInsumosByDivision);
 
 // ============================================================================
 // GESTIÓN DE GRUPOS

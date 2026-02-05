@@ -595,6 +595,69 @@ exports.getArticlesByDivision = async (req, res) => {
 };
 
 /**
+ * GET /api/divisions/:divisionId/insumos
+ * Devuelve insumos que están en las agrupaciones asignadas a esta división
+ * (modelo filtro: división -> agrupaciones -> agrupacion_insumos -> insumos)
+ */
+/**
+ * GET /api/divisions/:divisionId/insumos
+ * Devuelve insumos que están en las agrupaciones asignadas a esta división
+ */
+exports.getInsumosByDivision = async (req, res) => {
+  try {
+    const divisionId = num(req.params.divisionId);
+    if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+
+    const { rows: insumos } = await pool.query(
+      `
+      SELECT
+        i.id,
+        i.business_id,
+        i.codigo_maxi,
+        i.nombre,
+        i.unidad_med,
+        i.precio_ref,
+        i.rubro,
+        i.envase,
+        i.vencimiento,
+        i.resumen,
+        i.cant_ingredientes,
+        i.agrupacion_base,
+        i.costo_ref,
+        i.nota,
+        i.origen,
+        i.activo,
+        i.estado,
+        i.created_at,
+        i.updated_at,
+        json_agg(DISTINCT jsonb_build_object(
+          'id', a.id,
+          'nombre', a.nombre
+        )) FILTER (WHERE a.id IS NOT NULL) AS agrupaciones
+      FROM division_agrupacion_assignments daa
+      JOIN agrupacion_insumos ai ON ai.agrupacion_id = daa.agrupacion_id
+      JOIN insumos i ON i.id = ai.insumo_id
+      JOIN agrupaciones a ON a.id = daa.agrupacion_id
+      WHERE daa.division_id = $1
+      GROUP BY i.id
+      ORDER BY i.nombre ASC
+      `,
+      [divisionId]
+    );
+
+    return res.json({
+      ok: true,
+      division_id: divisionId,
+      insumo_count: insumos.length,
+      insumos
+    });
+  } catch (e) {
+    console.error('[divisions] getInsumosByDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+};
+
+/**
  * GET /api/divisions/:divisionId/stats
  */
 exports.getDivisionStats = async (req, res) => {
