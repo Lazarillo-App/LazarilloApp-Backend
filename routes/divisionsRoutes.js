@@ -37,15 +37,15 @@ router.delete('/:divisionId', ctrl.deleteDivision);
 // ESTADÍSTICAS Y CONTENIDO
 // ============================================================================
 
-// Estadísticas de una división (grupos, artículos)
+// Estadísticas de una división (grupos, artículos, insumo_groups, insumos)
 router.get('/:divisionId/stats', ctrl.getDivisionStats);
 
-// Obtener artículos e insumos de una división (FILTRADOS por grupos asignados)
+// Contenido filtrado por asignaciones
 router.get('/:divisionId/articles', ctrl.getArticlesByDivision);
 router.get('/:divisionId/insumos', ctrl.getInsumosByDivision);
 
 // ============================================================================
-// GESTIÓN DE GRUPOS
+// GESTIÓN DE GRUPOS DE ARTÍCULOS (business_groups)
 // ============================================================================
 
 // Listar grupos asignados a una división
@@ -53,23 +53,44 @@ router.get('/:divisionId/groups', ctrl.getGroupsByDivision);
 
 // Asignar un grupo a una división
 router.post('/:divisionId/assign-group', ctrl.assignGroupToDivision);
-router.post('/:divisionId/assign-agrupacion', ctrl.assignAgrupacionToDivision);
-
-// Volver a Principal (desasignar)
-router.post('/unassign-group', ctrl.unassignGroupFromDivision);
-router.post('/unassign-agrupacion', ctrl.unassignAgrupacion);
 
 // Remover grupo de una división (por division+group)
 router.delete('/:divisionId/groups/:groupId', ctrl.removeGroupFromDivision);
 
+// Volver a Principal (desasignar global)
+router.post('/unassign-group', ctrl.unassignGroupFromDivision);
+
 // Grupos visibles en Principal (no asignados a ninguna división)
 router.get('/business/:businessId/principal-groups', ctrl.getPrincipalGroupsByBusiness);
 
-router.get('/:divisionId/agrupaciones', ctrl.getAgrupacionesByDivision);
+// ============================================================================
+// GESTIÓN DE GRUPOS DE INSUMOS (insumo_groups)  ✅ ESPEJO DE ARTÍCULOS
+// ============================================================================
 
+// Listar insumo_groups asignados a una división
+router.get('/:divisionId/insumo-groups', ctrl.getInsumoGroupsByDivision);
+
+// Asignar un insumo_group a una división
+router.post('/:divisionId/assign-insumo-group', ctrl.assignInsumoGroupToDivision);
+
+// Remover insumo_group de una división (por division+insumo_group)
+router.delete('/:divisionId/insumo-groups/:insumoGroupId', ctrl.removeInsumoGroupFromDivision);
+
+// Volver a Principal (desasignar global)
+router.post('/unassign-insumo-group', ctrl.unassignInsumoGroup);
+
+// insumo_groups visibles en Principal (no asignados a ninguna división)
 router.get(
-  '/business/:businessId/principal-agrupaciones',
-  ctrl.getPrincipalAgrupacionesByBusiness
+  '/business/:businessId/principal-insumo-groups',
+  ctrl.getPrincipalInsumoGroupsByBusiness
 );
+
+// ============================================================================
+// LEGACY (agrupaciones) 
+// ============================================================================
+// router.post('/:divisionId/assign-agrupacion', ctrl.assignAgrupacionToDivision);
+// router.post('/unassign-agrupacion', ctrl.unassignAgrupacion);
+// router.get('/:divisionId/agrupaciones', ctrl.getAgrupacionesByDivision);
+// router.get('/business/:businessId/principal-agrupaciones', ctrl.getPrincipalAgrupacionesByBusiness);
 
 module.exports = router;

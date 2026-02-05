@@ -67,9 +67,9 @@ exports.getDivisionsByBusiness = async (req, res) => {
         bd.created_at,
         bd.updated_at,
         COALESCE(
-          (SELECT COUNT(*) FROM division_group_assignments dga WHERE dga.division_id = bd.id),
-          0
-        )::integer as assigned_groups_count
+        (SELECT COUNT(*) FROM division_insumo_group_assignments diga WHERE diga.division_id = bd.id),
+        0
+        )::integer as assigned_insumo_groups_count
       FROM business_divisions bd
       WHERE bd.business_id = $1
       ORDER BY bd.is_main DESC, bd.display_order ASC, bd.name ASC
@@ -368,13 +368,13 @@ exports.assignGroupToDivision = async (req, res) => {
     const divisionId = num(req.params.divisionId);
     const groupId = num(req.body?.groupId ?? req.body?.group_id);
     console.log('[assign-group] params/body', {
-  params: req.params,
-  body: req.body,
-  headers: {
-    xBusinessId: req.headers['x-business-id'],
-    xDivisionId: req.headers['x-division-id'],
-  },
-});
+      params: req.params,
+      body: req.body,
+      headers: {
+        xBusinessId: req.headers['x-business-id'],
+        xDivisionId: req.headers['x-division-id'],
+      },
+    });
 
 
     if (!divisionId || !groupId) {
@@ -594,11 +594,82 @@ exports.getArticlesByDivision = async (req, res) => {
   }
 };
 
-/**
- * GET /api/divisions/:divisionId/insumos
- * Devuelve insumos que están en las agrupaciones asignadas a esta división
- * (modelo filtro: división -> agrupaciones -> agrupacion_insumos -> insumos)
- */
+exports.getInsumoGroupsByDivision = async (req, res) => {
+  try {
+    const divisionId = num(req.params.divisionId);
+    if (!divisionId) return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        ig.id,
+        ig.business_id,
+        ig.nombre,
+        ig.descripcion,
+        ig.es_favorita,
+        diga.created_at AS assigned_at,
+        COALESCE((
+          SELECT COUNT(*)
+          FROM insumo_group_items igi
+          WHERE igi.group_id = ig.id
+        ), 0)::integer AS insumo_count
+      FROM division_insumo_group_assignments diga
+      JOIN insumo_groups ig ON ig.id = diga.insumo_group_id
+      WHERE diga.division_id = $1
+      ORDER BY ig.nombre ASC
+      `,
+      [divisionId]
+    );
+
+    return res.json({ ok: true, division_id: divisionId, insumo_groups: rows });
+  } catch (e) {
+    console.error('[divisions] getInsumoGroupsByDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+};
+
+/** GET principal-insumo-groups por negocio */
+exports.getPrincipalInsumoGroupsByBusiness = async (req, res) => {
+  try {
+    const businessId = num(req.params.businessId);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        ig.id,
+        ig.business_id,
+        ig.nombre,
+        ig.descripcion,
+        ig.es_favorita,
+        ig.created_at,
+        ig.updated_at,
+        COALESCE((
+          SELECT COUNT(*)
+          FROM insumo_group_items igi
+          WHERE igi.group_id = ig.id
+        ), 0)::integer AS insumo_count
+      FROM insumo_groups ig
+      WHERE ig.business_id = $1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM division_insumo_group_assignments diga
+          JOIN business_divisions bd ON bd.id = diga.division_id
+          WHERE diga.insumo_group_id = ig.id
+            AND bd.business_id = $1
+        )
+      ORDER BY ig.nombre ASC
+      `,
+      [businessId]
+    );
+
+    return res.json({ ok: true, business_id: businessId, insumo_groups: rows });
+  } catch (e) {
+    console.error('[divisions] getPrincipalInsumoGroupsByBusiness error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+};
+
 /**
  * GET /api/divisions/:divisionId/insumos
  * Devuelve insumos que están en las agrupaciones asignadas a esta división
@@ -630,15 +701,19 @@ exports.getInsumosByDivision = async (req, res) => {
         i.estado,
         i.created_at,
         i.updated_at,
-        json_agg(DISTINCT jsonb_build_object(
-          'id', a.id,
-          'nombre', a.nombre
-        )) FILTER (WHERE a.id IS NOT NULL) AS agrupaciones
-      FROM division_agrupacion_assignments daa
-      JOIN agrupacion_insumos ai ON ai.agrupacion_id = daa.agrupacion_id
-      JOIN insumos i ON i.id = ai.insumo_id
-      JOIN agrupaciones a ON a.id = daa.agrupacion_id
-      WHERE daa.division_id = $1
+       json_agg(DISTINCT jsonb_build_object(
+        'id', ig.id,
+        'nombre', ig.nombre
+        )) FILTER (WHERE ig.id IS NOT NULL) AS grupos,
+
+      array_agg(DISTINCT ig.id)
+      FILTER (WHERE ig.id IS NOT NULL) AS grupo_ids
+
+      FROM division_insumo_group_assignments diga
+      JOIN insumo_groups ig ON ig.id = diga.insumo_group_id
+      JOIN insumo_group_items igi ON igi.group_id = ig.id
+      JOIN insumos i ON i.id = igi.insumo_id
+      WHERE diga.division_id = $1
       GROUP BY i.id
       ORDER BY i.nombre ASC
       `,
@@ -685,17 +760,68 @@ exports.getDivisionStats = async (req, res) => {
       articleCount = rows[0]?.count || 0;
     }
 
+    const { rows: insGrpRows } = await pool.query(
+      `SELECT insumo_group_id FROM division_insumo_group_assignments WHERE division_id = $1`,
+      [divisionId]
+    );
+    const insumoGroupIds = insGrpRows.map(r => r.insumo_group_id);
+
+    let insumoCount = 0;
+    if (insumoGroupIds.length > 0) {
+      const { rows } = await pool.query(
+        `
+    SELECT COUNT(DISTINCT insumo_id)::integer AS count
+    FROM insumo_group_items
+    WHERE group_id = ANY($1::int[])
+    `,
+        [insumoGroupIds]
+      );
+      insumoCount = rows[0]?.count || 0;
+    }
+
     res.json({
       ok: true,
       division_id: divisionId,
       stats: {
         assigned_groups: groupIds.length,
-        total_articles: articleCount
+        total_articles: articleCount,
+        assigned_insumo_groups: insumoGroupIds.length,
+        total_insumos: insumoCount
       }
     });
   } catch (e) {
     console.error('[divisions] getDivisionStats error:', e);
     res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+};
+
+/** DELETE insumo-group de división */
+exports.removeInsumoGroupFromDivision = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const divisionId = num(req.params.divisionId);
+    const insumoGroupId = num(req.params.insumoGroupId);
+
+    if (!divisionId || !insumoGroupId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'division_id y insumo_group_id requeridos' });
+    }
+
+    await client.query(
+      `DELETE FROM division_insumo_group_assignments WHERE division_id=$1 AND insumo_group_id=$2`,
+      [divisionId, insumoGroupId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, division_id: divisionId, insumo_group_id: insumoGroupId });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] removeInsumoGroupFromDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  } finally {
+    client.release();
   }
 };
 
@@ -728,15 +854,51 @@ exports.unassignGroupFromDivision = async (req, res) => {
 
     // borrar asignaciones (vuelve a Principal)
     const { rowCount } = await client.query(
-      `DELETE FROM division_group_assignments WHERE group_id=$1`,
-      [groupId]
+      `DELETE FROM division_insumo_group_assignments WHERE division_id=$1 AND insumo_group_id=$2`,
+      [divisionId, insumoGroupId]
     );
 
     await client.query('COMMIT');
-    return res.json({ ok: true, group_id: groupId, unassigned: true, deleted: rowCount });
+    return res.json({ ok:true, division_id: divisionId, insumo_group_id: insumoGroupId, deleted: rowCount });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('[divisions] unassignGroupFromDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  } finally {
+    client.release();
+  }
+};
+
+/** POST unassign-insumo-group (global) */
+
+exports.unassignInsumoGroup = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const insumoGroupId = num(req.body?.insumoGroupId ?? req.body?.insumo_group_id);
+    if (!insumoGroupId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'insumo_group_id requerido' });
+    }
+
+    // existe?
+    const { rows } = await client.query(`SELECT id FROM insumo_groups WHERE id=$1`, [insumoGroupId]);
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'insumo_group_not_found' });
+    }
+
+    const { rowCount } = await client.query(
+      `DELETE FROM division_insumo_group_assignments WHERE insumo_group_id=$1`,
+      [insumoGroupId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, insumo_group_id: insumoGroupId, unassigned: true, deleted: rowCount });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] unassignInsumoGroupFromDivision error:', e);
     return res.status(500).json({ ok: false, error: 'internal_error' });
   } finally {
     client.release();
@@ -842,6 +1004,68 @@ exports.assignAgrupacionToDivision = async (req, res) => {
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('[divisions] assignAgrupacionToDivision error:', e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  } finally {
+    client.release();
+  }
+};
+
+exports.assignInsumoGroupToDivision = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const divisionId = num(req.params.divisionId);
+    const insumoGroupId = num(req.body?.insumoGroupId ?? req.body?.insumo_group_id);
+
+    if (!divisionId || !insumoGroupId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'division_id y insumo_group_id requeridos' });
+    }
+
+    // división existe
+    const { rows: divRows } = await client.query(
+      `SELECT id, business_id FROM business_divisions WHERE id=$1`,
+      [divisionId]
+    );
+    if (!divRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'division_not_found' });
+    }
+
+    // grupo existe
+    const { rows: grpRows } = await client.query(
+      `SELECT id, business_id FROM insumo_groups WHERE id=$1`,
+      [insumoGroupId]
+    );
+    if (!grpRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'insumo_group_not_found' });
+    }
+
+    // mismo negocio (ojo: insumo_groups.business_id puede ser NULL según tu schema)
+    const divBiz = Number(divRows[0].business_id);
+    const grpBiz = grpRows[0].business_id == null ? null : Number(grpRows[0].business_id);
+
+    if (grpBiz != null && grpBiz !== divBiz) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'insumo_group_business_mismatch' });
+    }
+
+    await client.query(
+      `
+      INSERT INTO division_insumo_group_assignments (division_id, insumo_group_id)
+      VALUES ($1, $2)
+      ON CONFLICT (division_id, insumo_group_id) DO NOTHING
+      `,
+      [divisionId, insumoGroupId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, division_id: divisionId, insumo_group_id: insumoGroupId });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[divisions] assignInsumoGroupToDivision error:', e);
     return res.status(500).json({ ok: false, error: 'internal_error' });
   } finally {
     client.release();
