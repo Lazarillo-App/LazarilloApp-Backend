@@ -73,7 +73,7 @@ exports.saveViewPref = async (req, res, next) => {
 };
 
 /* =========================================================
-   FAVORITA POR USUARIO + NEGOCIO
+   FAVORITA POR USUARIO + NEGOCIO + DIVISIÓN
    GET  /api/businesses/:id/fav-group
    POST /api/businesses/:id/fav-group
    ========================================================= */
@@ -139,7 +139,8 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_division_id' });
     }
 
-    const divisionKey = divisionId == null ? 0 : Number(divisionIdRaw);
+    // ✅ CORREGIDO: division_key debe ser el ID numérico o 0
+    const divisionKey = divisionId == null ? 0 : Number(divisionId);
 
     const groupIdNum = Number(agrupacionId);
 
@@ -169,16 +170,22 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    // ✅ UPSERT por (user_id, business_id, scope, division_key)
+    // ✅ CRITICAL FIX: Primero eliminar cualquier favorita existente para esta combinación
+    // Esto evita el error de duplicate key
+    await client.query(
+      `DELETE FROM app_user_group_favs
+       WHERE user_id = $1 
+         AND business_id = $2 
+         AND scope = $3 
+         AND division_key = $4`,
+      [user.id, biz.id, scope, divisionKey]
+    );
+
+    // ✅ Ahora insertar la nueva favorita
     await client.query(
       `INSERT INTO app_user_group_favs
          (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (user_id, business_id, scope, division_key)
-       DO UPDATE SET
-         agrupacion_id = EXCLUDED.agrupacion_id,
-         division_id = EXCLUDED.division_id,
-         updated_at = NOW()`,
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [user.id, biz.id, groupIdNum, scope, divisionId, divisionKey]
     );
 
