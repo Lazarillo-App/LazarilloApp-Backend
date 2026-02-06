@@ -49,8 +49,51 @@ async function parseFile(filePath, fileType) {
       defval: null,
     });
 
-    const headers = Object.keys(rows[0] || {});
-    return { headers, rows };
+    // ✅ FILTRAR columnas que empiezan con "Import_" o "__EMPTY" (autogeneradas por Excel)
+    const cleanedRows = rows.map(row => {
+      const cleaned = {};
+      for (const key of Object.keys(row)) {
+        const keyLower = String(key).toLowerCase().trim();
+        // Ignorar SOLO columnas autogeneradas por Excel/XLSX
+        if (keyLower.startsWith('import_') || 
+            keyLower.startsWith('__empty') ||
+            keyLower === 'import #') {
+          continue;
+        }
+        cleaned[key] = row[key];
+      }
+      return cleaned;
+    });
+
+    const headers = Object.keys(cleanedRows[0] || {});
+    
+    if (VERBOSE_IMPORT_LOGS) {
+      console.log('[CSV Parse] Headers detectados:', headers);
+      console.log('[CSV Parse] Primera fila limpia:', cleanedRows[0]);
+    }
+
+    // ✅ VALIDACIÓN ESTRICTA: Solo permitir columnas conocidas
+    const allowedColumns = [
+      'codigo', 'fecha', 'unidades', 'importe', 'nombre', // formato MaxiRest
+      'costo', 'p_total', 'neto', 'tipo_iva',             // columnas opcionales de MaxiRest
+      'article_id', 'date', 'qty', 'amount', 'article_name', // formato básico
+    ];
+
+    const allowedLower = allowedColumns.map(c => c.toLowerCase());
+    const unknownColumns = headers.filter(h => {
+      const lower = String(h).toLowerCase().trim();
+      return !allowedLower.includes(lower);
+    });
+
+    if (unknownColumns.length > 0) {
+      throw new Error(
+        `Archivo contiene columnas no permitidas: ${unknownColumns.join(', ')}. ` +
+        `Solo se permiten: ${allowedColumns.slice(0, 5).join(', ')}, etc. ` +
+        `Asegurate de exportar el archivo correcto desde MaxiRest.`
+      );
+    }
+
+    return { headers, rows: cleanedRows };
   } catch (error) {
     throw new Error(`Error parseando archivo: ${error.message}`);
   }
@@ -148,6 +191,7 @@ function normalizeDate(dateValue) {
 
 /**
  * Valida y normaliza una fila
+ * ✅ ACTUALIZADO: Acepta article_id = 0
  */
 function normalizeRow(row, format = 'maxi_export', rowNumber) {
   const normalized = {
@@ -180,9 +224,12 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
       throw new Error(`Fecha inválida o faltante: "${dateField}"`);
     }
 
-    normalized.article_id = parseInt(String(idField ?? '').trim(), 10);
+    // ✅ CAMBIO: Aceptar article_id = 0 (artículos sin código)
+    const rawId = String(idField ?? '').trim();
+    normalized.article_id = rawId === '' ? 0 : parseInt(rawId, 10);
+    
     if (!Number.isFinite(normalized.article_id) || normalized.article_id < 0) {
-      throw new Error(`ID de artículo inválido: "${idField}"`);
+      throw new Error(`ID de artículo inválido: "${idField}" (debe ser número >= 0)`);
     }
 
     normalized.qty = parseFloat(String(qtyField ?? '').replace(',', '.'));
@@ -300,12 +347,10 @@ async function applyReplaceRange(client, { businessId, from, to, importId }) {
   // Reemplazo por rango solo para source='csv'
   await client.query(`
     DELETE FROM sales_daily_items
-    WHERE import_id = $1
-      AND business_id = $2
-      AND day BETWEEN $3::date AND $4::date
+    WHERE business_id = $1
       AND source='csv'
       AND day BETWEEN $2::date AND $3::date
-  `, [importId, businessId, from, to]);
+  `, [businessId, from, to]);
 
   const ins = await client.query(`
     INSERT INTO sales_daily_items
@@ -379,7 +424,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     const format = detectFormat(headers);
     if (!format) {
       throw new Error(
-        `Formato no reconocido. Columnas: ${headers.join(', ')}. Esperadas: fecha, codigo, unidades, importe`
+        `Formato no reconocido. Columnas detectadas: ${headers.join(', ')}. Se esperan: fecha, codigo, unidades, importe`
       );
     }
 
@@ -468,20 +513,20 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     let diffStats = null;
 
     if (!hasOverlap) {
-  appliedRows = await applyReplaceRange(client, {
-    businessId,
-    from: minDate,
-    to: maxDate,
-    importId
-  });
+      appliedRows = await applyReplaceRange(client, {
+        businessId,
+        from: minDate,
+        to: maxDate,
+        importId
+      });
 
-  // ✅ NUEVO: reconstruir sales_daily desde sales_daily_items (prefiere csv)
-  await rebuildSalesDailyRange({
-    businessId,
-    from: minDate,
-    to: maxDate,
-    client, // misma transacción
-  });
+      // ✅ NUEVO: reconstruir sales_daily desde sales_daily_items (prefiere csv)
+      await rebuildSalesDailyRange({
+        businessId,
+        from: minDate,
+        to: maxDate,
+        client, // misma transacción
+      });
 
       // Marcar import como completed
       await client.query(`
@@ -491,7 +536,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
           row_count = $3,
           date_from = $4::date,
           date_to = $5::date,
-          rows_inserted = $6,  -- aquí usamos rows_inserted como "aplicadas"
+          rows_inserted = $6,
           rows_updated = 0,
           rows_failed = $7,
           error_log = $8::jsonb,
@@ -562,7 +607,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
       const createdNotif = await notifService.createSyncNotification({
         businessId,
         userId,
-        type: 'sales_import_overlap', // 👈 asegurate de permitirlo en ALLOWED_TYPES
+        type: 'sales_import_overlap',
         title,
         message,
         metadata: {
@@ -583,6 +628,10 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
 
     // 7) limpiar temp
     try { fs.unlinkSync(filePath); } catch { }
+
+    if (VERBOSE_IMPORT_LOGS) {
+      console.log(`[CSV Import] Completado #${importId}: mode=${mode}, rows=${appliedRows}`);
+    }
 
     return {
       ok: true,
