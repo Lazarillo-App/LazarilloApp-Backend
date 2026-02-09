@@ -63,48 +63,41 @@ router.param('id', requireBusinessAccessParam);
 router.use('/:id/sync', syncRoutes);
 
 /* ───────── Logo: subir archivo ───────── */
-const uploadFields = upload.fields([
-  { name: 'file', maxCount: 1 },
-  { name: 'logo', maxCount: 1 },
-  { name: 'image', maxCount: 1 },
-]);
-router.post('/:id/logo', (req, res, next) => {
-  uploadFields(req, res, (err) => {
-    if (err) {
-      const status = (err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE') ? 400 : 500;
-      return res.status(status).json({
-        error:
-          err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large' :
-            err.code === 'UNSUPPORTED_TYPE' ? 'unsupported_file_type' :
-              'upload_error',
-      });
-    }
-    
-    // 🔍 DEBUG: Ver qué está llegando
-    console.log('🔍 Backend recibió:', {
-      hasReqFiles: !!req.files,
-      filesKeys: req.files ? Object.keys(req.files) : [],
-      hasReqFile: !!req.file,
-      hasBodyUrl: !!req.body?.url,
-      contentType: req.headers['content-type'],
-    });
-    
-    const files = req.files || {};
-    req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
-
-    if (!req.file && !req.body?.url) {
-      return res.status(400).json({ 
-        error: 'missing_file', 
-        accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
-        max_mb: 2,
-        debug: { // 🔍 Info de debug
-          receivedFiles: files ? Object.keys(files) : [],
-          receivedBody: Object.keys(req.body || {}),
-        }
-      });
-    }
-    return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
+router.post('/:id/logo', upload.any(), (req, res, next) => {
+  // Buscar el archivo en cualquier campo
+  const file = req.files?.find(f => 
+    f.fieldname === 'file' || 
+    f.fieldname === 'logo' || 
+    f.fieldname === 'image'
+  );
+  
+  req.file = file || null;
+  
+  console.log('🔍 Multer procesó:', {
+    hasFiles: !!req.files,
+    filesCount: req.files?.length || 0,
+    fileFields: req.files?.map(f => f.fieldname) || [],
+    selectedFile: req.file ? {
+      fieldname: req.file.fieldname,
+      originalname: req.file.originalname,
+      size: req.file.size
+    } : null,
+    hasBodyUrl: !!req.body?.url,
   });
+
+  if (!req.file && !req.body?.url) {
+    return res.status(400).json({ 
+      error: 'missing_file', 
+      accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
+      max_mb: 2,
+      debug: {
+        receivedFields: req.files?.map(f => f.fieldname) || [],
+        bodyKeys: Object.keys(req.body || {}),
+      }
+    });
+  }
+  
+  return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
 });
 
 /* ───────── Diagnóstico artículos directo desde Maxi ───────── */
