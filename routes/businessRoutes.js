@@ -47,12 +47,27 @@ const storage = multer.diskStorage({
     cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
   },
 });
+
 const upload = multer({
   storage,
   limits: { fileSize: 2 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
+  fileFilter: (req, file, cb) => {
+    console.log('🔍 Multer fileFilter:', {
+      fieldname: file.fieldname,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+    });
+    
     const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
-    cb(ok ? null : Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
+    
+    if (!ok) {
+      console.error('❌ Multer rechazó archivo:', file.mimetype);
+      return cb(Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
+    }
+    
+    console.log('✅ Multer aceptó archivo');
+    cb(null, true);
   },
 });
 
