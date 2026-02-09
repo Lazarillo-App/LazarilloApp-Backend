@@ -66,16 +66,26 @@ app.use((req, res, next) => {
 /* ----------- parsers condicionales + logger HTTP ----------- */
 // Skip body parser para upload multipart
 app.use((req, res, next) => {
-  if (req.path.includes('/import-csv') && req.method === 'POST') {
-    console.log('⏭️ [Body Parser] Skipping JSON parser para upload');
+  const isMultipartUpload = 
+    req.headers['content-type']?.includes('multipart/form-data') ||
+    req.path.includes('/import-csv') ||
+    req.path.endsWith('/logo');
+    
+  if (isMultipartUpload && req.method === 'POST') {
+    console.log('⏭️ [Body Parser] Skipping JSON parser para upload:', req.path);
     return next();
   }
   express.json({ limit: '50mb' })(req, res, next);
 });
 
 app.use((req, res, next) => {
-  if (req.path.includes('/import-csv') && req.method === 'POST') {
-    console.log('⏭️ [Body Parser] Skipping urlencoded parser para upload');
+  const isMultipartUpload = 
+    req.headers['content-type']?.includes('multipart/form-data') ||
+    req.path.includes('/import-csv') ||
+    req.path.endsWith('/logo');
+    
+  if (isMultipartUpload && req.method === 'POST') {
+    console.log('⏭️ [Body Parser] Skipping urlencoded parser para upload:', req.path);
     return next();
   }
   express.urlencoded({ extended: true, limit: '50mb' })(req, res, next);
