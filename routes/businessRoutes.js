@@ -79,11 +79,29 @@ router.post('/:id/logo', (req, res, next) => {
               'upload_error',
       });
     }
+    
+    // 🔍 DEBUG: Ver qué está llegando
+    console.log('🔍 Backend recibió:', {
+      hasReqFiles: !!req.files,
+      filesKeys: req.files ? Object.keys(req.files) : [],
+      hasReqFile: !!req.file,
+      hasBodyUrl: !!req.body?.url,
+      contentType: req.headers['content-type'],
+    });
+    
     const files = req.files || {};
     req.file = (files.file?.[0]) || (files.logo?.[0]) || (files.image?.[0]) || null;
 
     if (!req.file && !req.body?.url) {
-      return res.status(400).json({ error: 'missing_file', accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], max_mb: 2 });
+      return res.status(400).json({ 
+        error: 'missing_file', 
+        accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
+        max_mb: 2,
+        debug: { // 🔍 Info de debug
+          receivedFiles: files ? Object.keys(files) : [],
+          receivedBody: Object.keys(req.body || {}),
+        }
+      });
     }
     return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
   });
