@@ -50,7 +50,7 @@ router.get('/', authRequired, async (req, res, next) => {
 /**
  * GET /unread-count
  */
-router.get('/unread-count', authRequired, async (req, res, next) => {
+router.get('/unread-count', authRequired, async (req, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ ok: false, error: 'unauthorized' });
@@ -63,9 +63,10 @@ router.get('/unread-count', authRequired, async (req, res, next) => {
       (Number.isFinite(businessIdFromQuery) && businessIdFromQuery > 0 ? businessIdFromQuery : null);
 
     const count = await notifService.getUnreadCount(userId, businessId);
-    res.json({ ok: true, count });
+    return res.json({ ok: true, count });
   } catch (e) {
-    next(e);
+    console.error('[notificationsRoutes] unread-count error:', e);
+    return res.json({ ok: true, count: 0 }); // ✅ fallback
   }
 });
 

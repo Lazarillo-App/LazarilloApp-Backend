@@ -131,17 +131,17 @@ app.use('/api/ventas-csv', ventasCSVRoutes);
    ✅ ORDEN IMPORTANTE EN /api/businesses
  ========================================================= */
 
-// ✅ 1) IMPORTS CSV (más específico) primero
+// 1) IMPORTS CSV (más específico) primero
 app.use('/api/businesses', salesImportRoutes);
 
-// ✅ 2) businesses base después
-app.use('/api/businesses', businessRoutes);
-
-// ✅ rutas específicas con :businessId antes que la genérica
+// 2) rutas específicas por businessId
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
 app.use('/api/businesses/:businessId/sync', syncRoutes);
 
-// ✅ genérica al final (agrupaciones, etc.)
+// 3) businesses base después
+app.use('/api/businesses', businessRoutes);
+
+// 4) genérica al final
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
 /* util debug */

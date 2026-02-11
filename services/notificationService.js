@@ -3,7 +3,7 @@ const pool = require('../config/db');
 
 const ALLOWED_TYPES = new Set([
   'sync_articles',
-  'sync_insumos',         
+  'sync_insumos',
   'sync_sales',
   'auto_assign',
   'sales_import_overlap',
@@ -319,15 +319,20 @@ async function getUnreadCount(userId, businessId = null) {
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) return 0;
 
-    let query = 'SELECT COUNT(*)::int AS count FROM sync_notifications WHERE user_id = $1 AND ($2::int IS NULL OR business_id = $2) AND read = false';
-    const params = [uid];
+    const bid = businessId == null ? null : Number(businessId);
+    if (bid !== null && (!Number.isFinite(bid) || bid <= 0)) return 0;
 
-    if (businessId) {
-      query += ' AND business_id = $2';
-      params.push(Number(businessId));
-    }
+    const { rows } = await pool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM sync_notifications
+      WHERE user_id = $1
+        AND ($2::int IS NULL OR business_id = $2)
+        AND read = false
+      `,
+      [uid, bid] // ✅ siempre 2 params
+    );
 
-    const { rows } = await pool.query(query, params);
     return Number(rows[0]?.count || 0);
   } catch (error) {
     console.error('[notificationService] Error contando no leídas:', error);
@@ -410,7 +415,7 @@ async function createSyncNotificationForBusinessUsers({
 
 module.exports = {
   createSyncNotification,
-  createSyncNotificationForBusinessUsers, 
+  createSyncNotificationForBusinessUsers,
   notifySalesImportOverlap,
   notifyAutoAssign,
   getUserNotifications,
