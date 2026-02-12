@@ -9,13 +9,25 @@ CREATE TABLE IF NOT EXISTS app_user_group_view_prefs (
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 
+-- ✅ Normalizar data antes del CHECK (si la tabla ya tenía filas viejas)
+UPDATE app_user_group_view_prefs
+SET view_mode = 'by-subrubro'
+WHERE view_mode IS NULL
+   OR view_mode NOT IN ('by-subrubro','by-categoria','elaborados','no-elaborados');
+
 -- asegurar constraint de valores permitidos (idempotente)
 ALTER TABLE app_user_group_view_prefs
   DROP CONSTRAINT IF EXISTS app_user_group_view_prefs_view_mode_check;
 
+-- ✅ SUPerset: artículos + insumos
 ALTER TABLE app_user_group_view_prefs
   ADD CONSTRAINT app_user_group_view_prefs_view_mode_check
-  CHECK (view_mode IN ('by-subrubro', 'by-categoria'));
+  CHECK (view_mode IN (
+    'by-subrubro',
+    'by-categoria',
+    'elaborados',
+    'no-elaborados'
+  ));
 
 -- asegurar unique (idempotente)
 CREATE UNIQUE INDEX IF NOT EXISTS app_user_group_view_prefs_uq
