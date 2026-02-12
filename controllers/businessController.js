@@ -351,12 +351,24 @@ exports.maxiStatus = async (req, res) => {
 exports.maxiSave = async (req, res) => {
   const uid = req.user?.id;
   const bizId = Number(req.params?.id);
+  
   if (!uid) return res.status(401).json({ error: 'unauthorized' });
-  if (!bizId || Number.isNaN(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
+  if (!bizId || Number.isNaN(bizId)) {
+    return res.status(400).json({ error: 'invalid_business_id' });
+  }
 
   const { email, codcli } = req.body || {};
-  const password = (req.body?.password ?? req.body?.pass)?.toString().trim();
+  const password = (req.body?.password ?? req.body?.pass)?.toString().trim() || '';
 
+  console.log('🔐 [maxiSave] Request:', {
+    bizId,
+    hasEmail: !!email,
+    hasCodcli: !!codcli,
+    hasPassword: !!password,
+    bodyKeys: Object.keys(req.body || {}),
+  });
+
+  // ✅ Validar permisos
   const { rows: belongs } = await pool.query(
     `SELECT 1
        FROM app_businesses b
@@ -365,10 +377,53 @@ exports.maxiSave = async (req, res) => {
       LIMIT 1`,
     [bizId, uid]
   );
-  if (!belongs.length) return res.status(404).json({ error: 'not_found' });
-  if (!email || !password || !codcli) return res.status(400).json({ error: 'missing_fields' });
+  
+  if (!belongs.length) {
+    return res.status(404).json({ error: 'not_found' });
+  }
 
-  const maxi = { email: String(email).trim(), codcli: String(codcli).trim(), pass_enc: encryptSecret(password) };
+  // ✅ Obtener maxi actual
+  const { rows: [biz] } = await pool.query(
+    'SELECT props FROM app_businesses WHERE id = $1',
+    [bizId]
+  );
+  
+  const currentMaxi = biz?.props?.maxi || {};
+  
+  // ✅ Construir objeto maxi
+  const maxi = {
+    email: email ? String(email).trim() : currentMaxi.email,
+    codcli: codcli ? String(codcli).trim() : currentMaxi.codcli,
+  };
+
+  // ✅ Password: nueva o preservar existente
+  if (password && password.length > 0) {
+    maxi.pass_enc = encryptSecret(password);
+  } else if (currentMaxi.pass_enc) {
+    maxi.pass_enc = currentMaxi.pass_enc;
+  }
+
+  // ✅ Validación final: debe tener al menos email Y codcli
+  if (!maxi.email || !maxi.codcli) {
+    return res.status(400).json({ 
+      error: 'missing_fields',
+      required: ['email', 'codcli'],
+      current: {
+        hasEmail: !!maxi.email,
+        hasCodcli: !!maxi.codcli,
+        hasPassword: !!maxi.pass_enc,
+      },
+    });
+  }
+
+  console.log('💾 [maxiSave] Guardando:', {
+    email: maxi.email,
+    codcli: maxi.codcli,
+    hasPassword: !!maxi.pass_enc,
+    passwordUpdated: !!password,
+  });
+
+  // ✅ Actualizar en DB
   await pool.query(
     `UPDATE app_businesses
         SET props = jsonb_set(COALESCE(props,'{}'::jsonb), '{maxi}', $2::jsonb, true),
@@ -376,7 +431,16 @@ exports.maxiSave = async (req, res) => {
       WHERE id = $1`,
     [bizId, maxi]
   );
-  res.json({ ok: true, maxi: { email: maxi.email, codcli: maxi.codcli, configured: true } });
+
+  res.json({ 
+    ok: true, 
+    maxi: { 
+      email: maxi.email, 
+      codcli: maxi.codcli, 
+      configured: true,
+      password_updated: !!password,
+    } 
+  });
 };
 
 /* ───────────────── Subida de logo (POST /:id/logo) ───────────────── */
