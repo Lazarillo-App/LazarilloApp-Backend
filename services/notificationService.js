@@ -20,46 +20,40 @@ const ALLOWED_TYPES = new Set([
   'move',
 ]);
 
+function safeType(type) {
+  const t = String(type || '').trim();
+  if (ALLOWED_TYPES.has(t)) return t;
+  return 'ui_action';
+}
+
 /**
  * Crea una notificación de sync
  */
-async function createSyncNotification({
-  businessId,
-  userId,
-  type = 'sync_articles',
-  title,
-  message,
-  metadata = {}
-}) {
-  try {
-    const bid = Number(businessId);
-    const uid = Number(userId);
+async function createSyncNotification({ businessId, userId, type = 'sync_articles', title, message, metadata = {} }) {
+  const bid = Number(businessId);
+  const uid = Number(userId);
 
-    if (!Number.isFinite(bid) || bid <= 0) throw new Error('invalid_business_id');
-    if (!Number.isFinite(uid) || uid <= 0) throw new Error('invalid_user_id');
+  if (!Number.isFinite(bid) || bid <= 0) throw new Error('invalid_business_id');
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error('invalid_user_id');
 
-    const t = safeType(type);
-    const ttl = String(title || '').trim();
-    if (!ttl) throw new Error('title_required');
+  const t = safeType(type);
+  const ttl = String(title || '').trim();
+  if (!ttl) throw new Error('title_required');
 
-    const msg = message == null ? null : String(message);
-    const meta = (metadata && typeof metadata === 'object') ? metadata : {};
+  const msg = message == null ? null : String(message);
+  const meta = (metadata && typeof metadata === 'object') ? metadata : {};
 
-    const { rows } = await pool.query(
-      `
-      INSERT INTO sync_notifications
-        (business_id, user_id, type, title, message, metadata, created_at, read)
-      VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), false)
-      RETURNING id, created_at, type
-      `,
-      [bid, uid, t, ttl, msg, JSON.stringify(meta)]
-    );
+  const { rows } = await pool.query(
+    `
+    INSERT INTO sync_notifications
+      (business_id, user_id, type, title, message, metadata, created_at, read)
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), false)
+    RETURNING *
+    `,
+    [bid, uid, t, ttl, msg, JSON.stringify(meta)]
+  );
 
-    return rows[0];
-  } catch (error) {
-    console.error('[notificationService] Error creando notificación:', error);
-    return null;
-  }
+  return rows[0] ?? null;
 }
 
 /**
