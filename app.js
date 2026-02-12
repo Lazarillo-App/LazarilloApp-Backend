@@ -159,6 +159,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 /* 404 + errores */
 app.use((req, res) => res.status(404).json({ error: 'not_found', path: req.originalUrl }));
+
 app.use((err, req, res, _next) => {
   console.error('Unhandled error:', err.stack || err);
   const status = err.status || 500;
