@@ -2,29 +2,18 @@
 const pool = require('../config/db');
 
 const ALLOWED_TYPES = new Set([
-  'sync_articles',
   'sync_insumos',
+  'sync_articles',
   'sync_sales',
   'auto_assign',
   'sales_import_overlap',
-  'ui_action',         
-  'error'
+  'ui_action',
+  'error',
 ]);
 
 function safeType(input) {
   const t = String(input || '').trim();
-
-  const ALLOWED = new Set([
-    'sync_insumos',
-    'sync_articles',
-    'sync_sales',
-    'auto_assign',
-    'sales_import_overlap',
-    'ui_action',       
-    'error',
-  ]);
-
-  return ALLOWED.has(t) ? t : 'error';
+  return ALLOWED_TYPES.has(t) ? t : 'error';
 }
 
 /**
@@ -57,7 +46,7 @@ async function createSyncNotification({
       INSERT INTO sync_notifications
         (business_id, user_id, type, title, message, metadata, created_at, read)
       VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), false)
-      RETURNING id, created_at
+      RETURNING id, created_at, type
       `,
       [bid, uid, t, ttl, msg, JSON.stringify(meta)]
     );
