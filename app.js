@@ -29,8 +29,8 @@ const divisionsRoutes = require('./routes/divisionsRoutes');
 const branchesRoutes = require('./routes/branchRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 
-const salesImportRoutes = require('./routes/salesImportRoutes'); // ✅ import CSV
-const ventasCSVRoutes = require('./routes/ventasCSVRoutes');     // ✅ queries solo CSV
+const salesImportRoutes = require('./routes/salesImportRoutes');
+const ventasCSVRoutes = require('./routes/ventasCSVRoutes');    
 
 const notificationsRoutes = require('./routes/notificationsRoutes');
 const syncRoutes = require('./routes/syncRoutes');

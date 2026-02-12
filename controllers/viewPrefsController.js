@@ -132,6 +132,7 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_scope' });
     }
 
+    // ✅ Normalizar divisionId
     const divisionId =
       divisionIdRaw === null || divisionIdRaw === undefined || divisionIdRaw === ''
         ? null
@@ -141,28 +142,44 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_division_id' });
     }
 
+    // ✅ division_key: 0 para principal, número para divisiones
     const divisionKey = divisionId == null ? 0 : Number(divisionId);
 
     const groupIdNum = Number(agrupacionId);
 
+    console.log('💾 [saveFavoriteGroup]', {
+      userId: user.id,
+      businessId: biz.id,
+      scope,
+      divisionId,
+      divisionKey,
+      groupId: groupIdNum,
+    });
+
     await client.query('BEGIN');
 
-    // ✅ borrar favorita para ese scope+division
+    // ✅ Si groupId es null o inválido → BORRAR favorita
     if (!Number.isFinite(groupIdNum)) {
       await client.query(
         `DELETE FROM app_user_group_favs
-         WHERE user_id = $1 AND business_id = $2 AND scope = $3 AND division_key = $4`,
+         WHERE user_id = $1 
+           AND business_id = $2 
+           AND scope = $3 
+           AND division_key = $4`,
         [user.id, biz.id, scope, divisionKey]
       );
 
       await client.query('COMMIT');
+      console.log('✅ Favorita eliminada');
       return res.json({ ok: true, favoriteGroupId: null, scope, divisionId });
     }
 
-    // ✅ validar existencia
+    // ✅ Validar que el grupo exista
     const tableName = scope === 'articulo' ? 'agrupaciones' : 'insumo_groups';
     const { rows: checkRows } = await client.query(
-      `SELECT id FROM ${tableName} WHERE id = $1 AND business_id = $2 LIMIT 1`,
+      `SELECT id FROM ${tableName} 
+       WHERE id = $1 AND business_id = $2 
+       LIMIT 1`,
       [groupIdNum, biz.id]
     );
 
@@ -171,29 +188,25 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    // ✅ Primero eliminar cualquier favorita existente para esta combinación
-    await client.query(
-      `DELETE FROM app_user_group_favs
-       WHERE user_id = $1 
-         AND business_id = $2 
-         AND scope = $3 
-         AND division_key = $4`,
-      [user.id, biz.id, scope, divisionKey]
-    );
-
-    // ✅ Ahora insertar la nueva favorita
+    // ✅ UPSERT: eliminar anterior e insertar nueva (o usar ON CONFLICT)
     await client.query(
       `INSERT INTO app_user_group_favs
          (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (user_id, business_id, scope, division_key)
+       DO UPDATE SET
+         agrupacion_id = EXCLUDED.agrupacion_id,
+         division_id = EXCLUDED.division_id,
+         updated_at = NOW()`,
       [user.id, biz.id, groupIdNum, scope, divisionId, divisionKey]
     );
 
     await client.query('COMMIT');
+    console.log('✅ Favorita guardada');
     return res.json({ ok: true, favoriteGroupId: groupIdNum, scope, divisionId });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
-    console.error('saveFavoriteGroup error:', e);
+    console.error('❌ saveFavoriteGroup error:', e);
     next(e);
   } finally {
     client.release();
