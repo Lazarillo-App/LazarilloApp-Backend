@@ -9,26 +9,28 @@ CREATE TABLE IF NOT EXISTS app_user_group_view_prefs (
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 
--- ✅ Normalizar data antes del CHECK (si la tabla ya tenía filas viejas)
+-- Normalizar data antes del CHECK
 UPDATE app_user_group_view_prefs
 SET view_mode = 'by-subrubro'
 WHERE view_mode IS NULL
    OR view_mode NOT IN ('by-subrubro','by-categoria','elaborados','no-elaborados');
 
--- asegurar constraint de valores permitidos (idempotente)
+-- ✅ DEDUPE antes del UNIQUE (evita 23505)
+DELETE FROM app_user_group_view_prefs t
+USING app_user_group_view_prefs d
+WHERE t.user_id = d.user_id
+  AND t.business_id = d.business_id
+  AND t.agrupacion_id = d.agrupacion_id
+  AND t.id < d.id;
+
+-- CHECK superset
 ALTER TABLE app_user_group_view_prefs
   DROP CONSTRAINT IF EXISTS app_user_group_view_prefs_view_mode_check;
 
--- ✅ SUPerset: artículos + insumos
 ALTER TABLE app_user_group_view_prefs
   ADD CONSTRAINT app_user_group_view_prefs_view_mode_check
-  CHECK (view_mode IN (
-    'by-subrubro',
-    'by-categoria',
-    'elaborados',
-    'no-elaborados'
-  ));
+  CHECK (view_mode IN ('by-subrubro','by-categoria','elaborados','no-elaborados'));
 
--- asegurar unique (idempotente)
+-- UNIQUE
 CREATE UNIQUE INDEX IF NOT EXISTS app_user_group_view_prefs_uq
   ON app_user_group_view_prefs (user_id, business_id, agrupacion_id);
