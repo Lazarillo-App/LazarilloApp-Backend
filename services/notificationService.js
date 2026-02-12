@@ -449,6 +449,7 @@ async function createUiNotification({
   });
 };
 
+
 module.exports = {
   createSyncNotification,
   createSyncNotificationForBusinessUsers,

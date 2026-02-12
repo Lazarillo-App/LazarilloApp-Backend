@@ -444,6 +444,7 @@ exports.maxiSave = async (req, res) => {
 };
 
 /* ───────────────── Subida de logo (POST /:id/logo) ───────────────── */
+/* ───────────────── Subida de logo (POST /:id/logo) ───────────────── */
 exports.uploadLogo = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -452,12 +453,37 @@ exports.uploadLogo = async (req, res, next) => {
     const urlFromBody = (req.body?.url || '').trim();
     let publicUrl = urlFromBody || null;
 
-    if (req.file && req.file.filename) {
-      publicUrl = `/uploads/logos/${req.file.filename}`;
+    // ✅ Cloudinary devuelve la URL en req.file.path
+    if (req.file && req.file.path) {
+      publicUrl = req.file.path; // ✅ URL completa de Cloudinary
+      console.log('✅ Logo subido a Cloudinary:', publicUrl);
     }
 
     if (!publicUrl) {
       return res.status(400).json({ error: 'missing_file_or_url' });
+    }
+
+    // ✅ Opcional: Borrar logo anterior de Cloudinary
+    try {
+      const { rows: prevRows } = await pool.query(
+        `SELECT props->'branding'->>'logo_url' AS prev_logo 
+         FROM app_businesses WHERE id = $1`,
+        [biz.id]
+      );
+
+      const prevLogo = prevRows[0]?.prev_logo;
+      
+      if (prevLogo && prevLogo.includes('cloudinary.com')) {
+        // Extraer public_id de la URL de Cloudinary
+        const matches = prevLogo.match(/\/([^\/]+)\.[^.]+$/);
+        if (matches && matches[1]) {
+          const publicId = `lazarillo/business-logos/${matches[1]}`;
+          await cloudinary.uploader.destroy(publicId);
+          console.log('🗑️ Logo anterior borrado:', publicId);
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ Error borrando logo anterior:', err);
     }
 
     await pool.query(`
@@ -473,9 +499,11 @@ exports.uploadLogo = async (req, res, next) => {
     `, [biz.id, publicUrl]);
 
     res.json({ ok: true, business_id: biz.id, logo_url: publicUrl });
-  } catch (e) { next(e); }
+  } catch (e) { 
+    console.error('❌ Error uploadLogo:', e);
+    next(e); 
+  }
 };
-
 /* ───────────────── Maxi: helpers para endpoints públicos de prueba ───────────────── */
 async function maxiLogin({ email, pass, codcli }) {
   const res = await fetch(`${MAXI_BASE}/login`, {

@@ -4,7 +4,6 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs');
-const multer = require('multer');
 
 const businesses = require('../controllers/businessController');
 const {
@@ -26,37 +25,29 @@ const syncRoutes = require('./syncRoutes');
 // 🔴 ÚNICA importación del controlador de ventas
 const sales = require('../controllers/salesSyncController');
 
-/* ───────── Helper anti-crash ───────── */
-function ensureFn(name, fn) {
-  if (typeof fn !== 'function') {
-    console.warn(`[routes/businesses] Handler faltante: ${name} -> responderá 501`);
-    return (_req, res) => res.status(501).json({ error: 'not_implemented', handler: name });
-  }
-  return fn;
-}
+const multer = require('multer');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
 
-/* ───────── /uploads/logos ───────── */
-const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
-fs.mkdirSync(logosDir, { recursive: true });
-
-/* ───────── Multer ───────── */
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, logosDir),
-  filename: (req, file, cb) => {
-    const ext = (path.extname(file.originalname || '') || '.png').toLowerCase();
-    cb(null, `biz_${req.params.id}_${Date.now()}${ext}`);
+/* ───────── Cloudinary Storage ───────── */
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'lazarillo/business-logos', // ✅ Carpeta en Cloudinary
+    allowed_formats: ['jpg', 'png', 'jpeg', 'webp', 'gif', 'svg'],
+    transformation: [{ width: 500, height: 500, crop: 'limit' }], // ✅ Resize automático
+    public_id: (req, file) => `biz_${req.params.id}_${Date.now()}`, // ✅ Nombre único
   },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: 2 * 1024 * 1024 },
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
   fileFilter: (req, file, cb) => {
     console.log('🔍 Multer fileFilter:', {
       fieldname: file.fieldname,
       originalname: file.originalname,
       mimetype: file.mimetype,
-      size: file.size,
     });
     
     const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
@@ -70,6 +61,53 @@ const upload = multer({
     cb(null, true);
   },
 });
+
+/* ───────── Logo: subir archivo ───────── */
+router.post('/:id/logo', upload.any(), (req, res, next) => {
+  // Buscar el archivo en cualquier campo
+  const file = req.files?.find(f => 
+    f.fieldname === 'file' || 
+    f.fieldname === 'logo' || 
+    f.fieldname === 'image'
+  );
+  
+  req.file = file || null;
+  
+  console.log('🔍 Multer procesó:', {
+    hasFiles: !!req.files,
+    filesCount: req.files?.length || 0,
+    fileFields: req.files?.map(f => f.fieldname) || [],
+    selectedFile: req.file ? {
+      fieldname: req.file.fieldname,
+      originalname: req.file.originalname,
+      size: req.file.size,
+      cloudinaryUrl: req.file.path, // ✅ URL de Cloudinary
+    } : null,
+  });
+
+  if (!req.file && !req.body?.url) {
+    return res.status(400).json({ 
+      error: 'missing_file', 
+      accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
+      max_mb: 2,
+    });
+  }
+  
+  return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
+});
+
+/* ───────── Helper anti-crash ───────── */
+function ensureFn(name, fn) {
+  if (typeof fn !== 'function') {
+    console.warn(`[routes/businesses] Handler faltante: ${name} -> responderá 501`);
+    return (_req, res) => res.status(501).json({ error: 'not_implemented', handler: name });
+  }
+  return fn;
+}
+
+/* ───────── /uploads/logos ───────── */
+const logosDir = path.join(__dirname, '..', 'uploads', 'logos');
+fs.mkdirSync(logosDir, { recursive: true });
 
 /* ───────── Auth + param :id ───────── */
 router.use(authRequired);
