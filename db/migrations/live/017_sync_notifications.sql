@@ -44,6 +44,7 @@ WHERE type = 'sync_insumo';
 ALTER TABLE sync_notifications
   DROP CONSTRAINT IF EXISTS sync_notifications_type_check;
 
+-- ✅ IMPORTANTE: que sea SUPERSET de prod
 ALTER TABLE sync_notifications
   ADD CONSTRAINT sync_notifications_type_check
   CHECK (type IN (
@@ -52,6 +53,7 @@ ALTER TABLE sync_notifications
     'sync_sales',
     'auto_assign',
     'sales_import_overlap',
+    'ui_action',
     'error'
   ));
 
