@@ -9,12 +9,16 @@ const ALLOWED_TYPES = new Set([
   'sales_import_overlap',
   'ui_action',
   'error',
+  // ✅ NUEVOS tipos para acciones UI
+  'group_create',
+  'group_rename',
+  'group_delete',
+  'group_move_division',
+  'group_favorite',
+  'group_unfavorite',
+  'discontinue',
+  'move',
 ]);
-
-function safeType(input) {
-  const t = String(input || '').trim();
-  return ALLOWED_TYPES.has(t) ? t : 'error';
-}
 
 /**
  * Crea una notificación de sync
@@ -404,26 +408,46 @@ async function createSyncNotificationForBusinessUsers({
   return { created };
 }
 
+/**
+ * Crea notificación de acción UI (persiste en DB para historial)
+ * Usado cuando el usuario hace algo en la UI que queremos trackear
+ */
 async function createUiNotification({
   businessId,
   userId,
+  kind,           // ✅ 'group_create', 'discontinue', etc.
   title,
   message = null,
   metadata = {},
+  scope = 'ui_action', // ✅ 'articulo' o 'insumo'
 }) {
+  // ✅ Mapear kind a type permitido
+  const typeMap = {
+    group_create: 'group_create',
+    group_rename: 'group_rename',
+    group_delete: 'group_delete',
+    group_move_division: 'group_move_division',
+    group_favorite: 'group_favorite',
+    group_unfavorite: 'group_unfavorite',
+    discontinue: 'discontinue',
+    move: 'move',
+  };
+
+  const type = typeMap[kind] || 'ui_action';
+
   return createSyncNotification({
     businessId,
     userId,
-    type: 'ui_action',
+    type,
     title,
     message,
     metadata: {
-      scope: 'ui_action',
+      kind,
+      scope,
       ...metadata,
     },
   });
-}
-
+};
 
 module.exports = {
   createSyncNotification,

@@ -72,8 +72,13 @@ router.get('/unread-count', authRequired, async (req, res) => {
 
 /**
  * POST /
- * body: { type?: 'ui_action', title: string, message?: string, metadata?: object }
- * Nota: por seguridad, desde front solo permitimos ui_action
+ * body: { 
+ *   kind: 'group_create' | 'discontinue' | etc., 
+ *   title: string, 
+ *   message?: string, 
+ *   metadata?: object,
+ *   scope?: 'articulo' | 'insumo'
+ * }
  */
 router.post('/', authRequired, async (req, res, next) => {
   try {
@@ -83,24 +88,36 @@ router.post('/', authRequired, async (req, res, next) => {
     const businessId = getBusinessIdParam(req);
     if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
-    const { title, message, metadata, type } = req.body || {};
+    const { kind, title, message, metadata, scope } = req.body || {};
 
     const ttl = String(title || '').trim();
     if (!ttl) return res.status(400).json({ ok: false, error: 'title_required' });
 
-    // ✅ solo permitimos ui_action desde UI
-    const finalType = String(type || 'ui_action').trim();
-    if (finalType !== 'ui_action') {
-      return res.status(400).json({ ok: false, error: 'type_not_allowed' });
+    // ✅ Validar kinds permitidos desde UI
+    const allowedKinds = new Set([
+      'group_create',
+      'group_rename',
+      'group_delete',
+      'group_move_division',
+      'group_favorite',
+      'group_unfavorite',
+      'discontinue',
+      'move',
+    ]);
+
+    const k = String(kind || 'ui_action').trim();
+    if (!allowedKinds.has(k)) {
+      return res.status(400).json({ ok: false, error: 'kind_not_allowed' });
     }
 
-    const created = await notifService.createSyncNotification({
+    const created = await notifService.createUiNotification({
       businessId,
       userId,
-      type: 'ui_action',
+      kind: k,
       title: ttl,
       message: message == null ? null : String(message),
       metadata: (metadata && typeof metadata === 'object') ? metadata : {},
+      scope: scope || 'ui_action',
     });
 
     return res.json({ ok: true, notification: created });
