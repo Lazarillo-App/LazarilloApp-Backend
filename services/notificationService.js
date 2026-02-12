@@ -413,6 +413,27 @@ async function createSyncNotificationForBusinessUsers({
   return { created };
 }
 
+async function createUiNotification({
+  businessId,
+  userId,
+  title,
+  message = null,
+  metadata = {},
+}) {
+  return createSyncNotification({
+    businessId,
+    userId,
+    type: 'ui_action',
+    title,
+    message,
+    metadata: {
+      scope: 'ui_action',
+      ...metadata,
+    },
+  });
+}
+
+
 module.exports = {
   createSyncNotification,
   createSyncNotificationForBusinessUsers,
@@ -421,5 +442,6 @@ module.exports = {
   getUserNotifications,
   markAsRead,
   markAllAsRead,
-  getUnreadCount
+  getUnreadCount,
+  createUiNotification
 };

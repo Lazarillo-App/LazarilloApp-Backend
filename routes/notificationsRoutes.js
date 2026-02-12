@@ -71,6 +71,45 @@ router.get('/unread-count', authRequired, async (req, res) => {
 });
 
 /**
+ * POST /
+ * body: { type?: 'ui_action', title: string, message?: string, metadata?: object }
+ * Nota: por seguridad, desde front solo permitimos ui_action
+ */
+router.post('/', authRequired, async (req, res, next) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ ok: false, error: 'unauthorized' });
+
+    const businessId = getBusinessIdParam(req);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const { title, message, metadata, type } = req.body || {};
+
+    const ttl = String(title || '').trim();
+    if (!ttl) return res.status(400).json({ ok: false, error: 'title_required' });
+
+    // ✅ solo permitimos ui_action desde UI
+    const finalType = String(type || 'ui_action').trim();
+    if (finalType !== 'ui_action') {
+      return res.status(400).json({ ok: false, error: 'type_not_allowed' });
+    }
+
+    const created = await notifService.createSyncNotification({
+      businessId,
+      userId,
+      type: 'ui_action',
+      title: ttl,
+      message: message == null ? null : String(message),
+      metadata: (metadata && typeof metadata === 'object') ? metadata : {},
+    });
+
+    return res.json({ ok: true, notification: created });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
  * POST /mark-read
  * body: { notification_ids: number[] }
  */
