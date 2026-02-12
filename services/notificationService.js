@@ -7,6 +7,7 @@ const ALLOWED_TYPES = new Set([
   'sync_sales',
   'auto_assign',
   'sales_import_overlap',
+  'ui_action',         
   'error'
 ]);
 
@@ -19,6 +20,7 @@ function safeType(input) {
     'sync_sales',
     'auto_assign',
     'sales_import_overlap',
+    'ui_action',       
     'error',
   ]);
 
