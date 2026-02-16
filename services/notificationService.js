@@ -9,7 +9,7 @@ const ALLOWED_TYPES = new Set([
   'sales_import_overlap',
   'ui_action',
   'error',
-  // ✅ Tipos para acciones UI
+  // ✅ NUEVOS tipos para acciones UI
   'group_create',
   'group_rename',
   'group_delete',
@@ -26,49 +26,10 @@ function safeType(type) {
   return 'ui_action';
 }
 
-// ✅ NUEVO: Helper para convertir notificación DB a formato UI event
-function toUiEvent(notif) {
-  const scope = notif?.metadata?.scope || 
-                (notif.type === 'sync_insumos' ? 'insumo' : 
-                 notif.type === 'sync_articles' ? 'articulo' : null);
-  
-  // ✅ Mapear tipo DB a kind UI
-  const kindMap = {
-    sync_insumos: 'sync',
-    sync_articles: 'sync',
-    auto_assign: 'auto_assign',
-    error: 'error',
-  };
-  
-  const kind = kindMap[notif.type] || notif.type;
-  
-  return {
-    businessId: notif.business_id,
-    kind,
-    scope,
-    title: notif.title,
-    message: notif.message,
-    createdAt: notif.created_at,
-    payload: {
-      ...(notif.metadata || {}),
-      notificationId: notif.id, // ✅ Para sincronizar estado read
-      source: 'backend',
-    },
-  };
-}
-
 /**
- * Crea una notificación de sync Y emite evento UI si es aplicable
+ * Crea una notificación de sync
  */
-async function createSyncNotification({ 
-  businessId, 
-  userId, 
-  type = 'sync_articles', 
-  title, 
-  message, 
-  metadata = {},
-  emitUiEvent = true, // ✅ NUEVO: opción para emitir evento
-}) {
+async function createSyncNotification({ businessId, userId, type = 'sync_articles', title, message, metadata = {} }) {
   const bid = Number(businessId);
   const uid = Number(userId);
 
@@ -92,34 +53,13 @@ async function createSyncNotification({
     [bid, uid, t, ttl, msg, JSON.stringify(meta)]
   );
 
-  const created = rows[0] ?? null;
-  
-  // ✅ NUEVO: Emitir evento UI para que el panel lo capture
-  if (created && emitUiEvent) {
-    try {
-      const uiEvent = toUiEvent(created);
-      
-      // Log para debug
-      console.log('📤 [notificationService] Emitiendo evento UI:', {
-        type: created.type,
-        title: created.title,
-        businessId: created.business_id,
-      });
-      
-      // ✅ En producción, esto podría ser un WebSocket o SSE
-      // Por ahora, guardar en una tabla temporal para que el frontend lo consulte
-      // O usar un mecanismo de push real
-      
-    } catch (err) {
-      console.warn('[notificationService] Error emitiendo evento UI:', err);
-    }
-  }
-
-  return created;
+  return rows[0] ?? null;
 }
 
 /**
  * Notificación específica: solapamiento en importación de ventas CSV (accionable).
+ * metadata recomendado:
+ * { scope:'sales_import', change_set_id, import_id, range:{from,to}, stats:{...}, suggested_action:'replace_range' }
  */
 async function notifySalesImportOverlap({
   businessId,
@@ -139,6 +79,7 @@ async function notifySalesImportOverlap({
   const rowsChanged = Number(stats?.rows_changed ?? 0);
   const rowsNew = Number(stats?.rows_new ?? 0);
 
+  // Mensaje corto, tipo “toast”, pero con data útil.
   const message =
     `Rango ${from} → ${to}. ` +
     `Cambios: ${rowsChanged}, Nuevos: ${rowsNew}. ` +
@@ -378,7 +319,7 @@ async function getUnreadCount(userId, businessId = null) {
         AND ($2::int IS NULL OR business_id = $2)
         AND read = false
       `,
-      [uid, bid]
+      [uid, bid] // ✅ siempre 2 params
     );
 
     return Number(rows[0]?.count || 0);
@@ -398,7 +339,7 @@ async function createSyncNotificationForBusinessUsers({
   title,
   message,
   metadata = {},
-  onlyAdmins = false,
+  onlyAdmins = false,   // por ahora false
   actorUserId = null,
 }) {
   const bid = Number(businessId);
@@ -422,7 +363,7 @@ async function createSyncNotificationForBusinessUsers({
     users = [];
   }
 
-  // 1.b) fallback opcional
+  // 1.b) fallback opcional (si por algún motivo hay users en user_businesses y no en memberships)
   if (!users.length) {
     try {
       const q2 = `
@@ -453,8 +394,7 @@ async function createSyncNotificationForBusinessUsers({
       metadata: {
         ...metadata,
         actor_user_id: actorUserId,
-      },
-      emitUiEvent: true, // ✅ Emitir evento para que el frontend lo capture
+      }
     });
     created++;
   }
@@ -464,16 +404,18 @@ async function createSyncNotificationForBusinessUsers({
 
 /**
  * Crea notificación de acción UI (persiste en DB para historial)
+ * Usado cuando el usuario hace algo en la UI que queremos trackear
  */
 async function createUiNotification({
   businessId,
   userId,
-  kind,
+  kind,           // ✅ 'group_create', 'discontinue', etc.
   title,
   message = null,
   metadata = {},
-  scope = 'ui_action',
+  scope = 'ui_action', // ✅ 'articulo' o 'insumo'
 }) {
+  // ✅ Mapear kind a type permitido
   const typeMap = {
     group_create: 'group_create',
     group_rename: 'group_rename',
@@ -498,9 +440,8 @@ async function createUiNotification({
       scope,
       ...metadata,
     },
-    emitUiEvent: false, // ✅ UI notifs no necesitan re-emitirse
   });
-}
+};
 
 
 module.exports = {
@@ -512,6 +453,5 @@ module.exports = {
   markAsRead,
   markAllAsRead,
   getUnreadCount,
-  createUiNotification,
-  toUiEvent, // ✅ Exportar para usar en endpoints
+  createUiNotification
 };

@@ -71,60 +71,6 @@ router.get('/unread-count', authRequired, async (req, res) => {
 });
 
 /**
- * GET /api/notifications/ui-events
- * Devuelve notificaciones backend recientes en formato de eventos UI
- * para que el panel las muestre junto con las notificaciones locales
- */
-router.get('/ui-events', authRequired, async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: 'unauthorized' });
-    }
-
-    const businessId = req.query.businessId ? Number(req.query.businessId) : null;
-    const since = req.query.since; // ISO timestamp para polling incremental
-
-    // Obtener notificaciones recientes
-    const notifications = await getUserNotifications(userId, {
-      businessId,
-      limit: 50,
-      unreadOnly: false,
-    });
-
-    // Filtrar por timestamp si viene 'since'
-    let filtered = notifications;
-    if (since) {
-      const sinceDate = new Date(since);
-      if (!isNaN(sinceDate.getTime())) {
-        filtered = notifications.filter(n => 
-          new Date(n.created_at) > sinceDate
-        );
-      }
-    }
-
-    // Convertir a formato UI event
-    const { toUiEvent } = require('../services/notificationService');
-    const uiEvents = filtered.map(toUiEvent);
-
-    res.json({
-      ok: true,
-      events: uiEvents,
-      count: uiEvents.length,
-      timestamp: new Date().toISOString(),
-    });
-
-  } catch (error) {
-    console.error('[GET /notifications/ui-events] Error:', error);
-    res.status(500).json({ 
-      ok: false, 
-      error: error.message || 'internal_error' 
-    });
-  }
-});
-
-
-/**
  * POST /
  * body: { 
  *   kind: 'group_create' | 'discontinue' | etc., 
