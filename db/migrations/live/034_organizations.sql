@@ -1,31 +1,31 @@
--- 034_organizations.sql
--- Crea la tabla organizations que agrupa sub-negocios bajo un paraguas común.
--- Las credenciales MaxiRest siguen viviendo en app_businesses.props.maxi
--- La organización solo provee nombre editable y agrupación lógica.
+-- 034_organizations.sql (CORREGIDO según feedback PDF)
+-- Tabla de organizaciones con código MaxiRest
 
--- 1) Tabla principal
 CREATE TABLE IF NOT EXISTS organizations (
   id           BIGSERIAL PRIMARY KEY,
   name         TEXT NOT NULL,
   display_name TEXT,
+  maxi_codcli  TEXT,        -- ✅ NUEVO: código cliente MaxiRest de la organización
   settings     JSONB NOT NULL DEFAULT '{}',
   created_by   BIGINT REFERENCES app_users(id) ON DELETE SET NULL,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS ix_organizations_created_by
-  ON organizations(created_by);
-
--- 2) Trigger updated_at (reutiliza set_updated_at si ya existe, la crea si no)
+-- Trigger para updated_at
 CREATE OR REPLACE FUNCTION set_updated_at()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS TRIGGER AS $$
 BEGIN
-  NEW.updated_at := NOW();
+  NEW.updated_at = NOW();
   RETURN NEW;
-END $$;
+END;
+$$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_organizations_updated ON organizations;
 CREATE TRIGGER trg_organizations_updated
   BEFORE UPDATE ON organizations
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Índice por maxi_codcli para búsquedas rápidas
+CREATE INDEX IF NOT EXISTS idx_organizations_maxi_codcli
+  ON organizations(maxi_codcli)
+  WHERE maxi_codcli IS NOT NULL;
