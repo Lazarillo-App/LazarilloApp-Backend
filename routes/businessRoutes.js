@@ -42,7 +42,7 @@ const storage = new CloudinaryStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB  
   fileFilter: (req, file, cb) => {
     console.log('🔍 Multer fileFilter:', {
       fieldname: file.fieldname,
@@ -89,7 +89,7 @@ router.post('/:id/logo', upload.any(), (req, res, next) => {
     return res.status(400).json({ 
       error: 'missing_file', 
       accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
-      max_mb: 2,
+      max_mb: 5,
     });
   }
   
@@ -142,7 +142,7 @@ router.post('/:id/logo', upload.any(), (req, res, next) => {
     return res.status(400).json({ 
       error: 'missing_file', 
       accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
-      max_mb: 2,
+      max_mb: 5,
       debug: {
         receivedFields: req.files?.map(f => f.fieldname) || [],
         bodyKeys: Object.keys(req.body || {}),

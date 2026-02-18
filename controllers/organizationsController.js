@@ -1,4 +1,4 @@
-// controllers/organizationsController.js (CORREGIDO según feedback PDF)
+// controllers/organizationsController.js (FIXED FINAL)
 const pool = require('../config/db');
 
 /* ══════════════════════════════════════════════════════════
@@ -150,11 +150,7 @@ exports.updateOrganization = async (req, res, next) => {
 /* ══════════════════════════════════════════════════════════
    POST /api/organizations/:orgId/businesses/from-group
    
-   CAMBIO CRÍTICO según feedback PDF:
-   - Los artículos llegan a "Sin Agrupación" del SUB-NEGOCIO
-   - Esta "Sin Agrupación" es TEMPORAL (is_temporary = true)
-   - Una vez que el usuario los organiza → desaparece
-   - NO es la "Sin Agrupación" global de la organización
+   ✅ FIX: Usa app_articles_ids si existe, sino articulos
 ══════════════════════════════════════════════════════════ */
 exports.createBusinessFromGroup = async (req, res, next) => {
   const client = await pool.connect();
@@ -172,6 +168,11 @@ exports.createBusinessFromGroup = async (req, res, next) => {
       name,
       colorHex,
       maxiCodCliOverride,
+      branding,
+      contact,
+      description,
+      address,
+      social,
     } = req.body || {};
 
     if (!sourceGroupId || !Number.isFinite(Number(sourceGroupId))) {
@@ -187,7 +188,7 @@ exports.createBusinessFromGroup = async (req, res, next) => {
 
     // 1) Obtener agrupación origen con sus artículos
     const { rows: groupRows } = await client.query(
-      `SELECT id, nombre, articulos, business_id
+      `SELECT id, nombre, articulos, app_articles_ids, business_id
          FROM agrupaciones
         WHERE id = $1 LIMIT 1`,
       [groupId]
@@ -198,25 +199,48 @@ exports.createBusinessFromGroup = async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
 
-    const group  = groupRows[0];
-    const artIds = Array.isArray(group.articulos)
-      ? group.articulos.map(Number).filter(Boolean)
-      : [];
+    const group = groupRows[0];
+
+    // ✅ Priorizar app_articles_ids sobre articulos
+    const artIds = Array.isArray(group.app_articles_ids)
+      ? group.app_articles_ids.map(Number).filter(Boolean)
+      : Array.isArray(group.articulos)
+        ? group.articulos.map(Number).filter(Boolean)
+        : [];
 
     console.log(`🏗️ [createBusinessFromGroup] Org=${orgId} | Grupo="${group.nombre}" | ${artIds.length} artículos`);
+    console.log(`📋 IDs de artículos a copiar:`, artIds);
 
     // 2) Slug único
     const baseSlug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const slug     = `${baseSlug}-${Date.now().toString(36)}`;
 
-    // 3) Crear el nuevo negocio (SIN parent_id, todos son hermanos)
+    // 3) Crear el nuevo negocio
+    const propsObj = {
+      branding: branding || {},
+      contact: contact || {},
+      address: address || {},
+      social: social || {},
+    };
+
     const { rows: bizRows } = await client.query(
       `INSERT INTO app_businesses
          (organization_id, owner_id, name, slug, color_hex, brand_logo_url,
-          maxi_codcli_override, created_from, source_group_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NULL, $6, 'from_group', $7, NOW(), NOW())
+          maxi_codcli_override, created_from, source_group_id, description, props,
+          created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NULL, $6, 'from_group', $7, $8, $9, NOW(), NOW())
        RETURNING *`,
-      [orgId, uid, name.trim(), slug, colorHex || null, maxiCodCliOverride?.trim() || null, groupId]
+      [
+        orgId,
+        uid,
+        name.trim(),
+        slug,
+        colorHex || null,
+        maxiCodCliOverride?.trim() || null,
+        groupId,
+        description?.trim() || null,
+        JSON.stringify(propsObj),
+      ]
     );
 
     const newBiz = bizRows[0];
@@ -231,11 +255,10 @@ exports.createBusinessFromGroup = async (req, res, next) => {
     );
 
     // 5) Crear agrupación "Sin Agrupación" TEMPORAL en el nuevo negocio
-    //    con todos los artículos de la agrupación origen
     const sinAgrupacionNombre = 'Sin Agrupación';
     const { rows: sinAgrRows } = await client.query(
-      `INSERT INTO agrupaciones (business_id, nombre, articulos, is_temporary, created_at, updated_at)
-       VALUES ($1, $2, $3::jsonb, TRUE, NOW(), NOW())
+      `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
+       VALUES ($1, $2, '[]'::jsonb, $3::jsonb, TRUE, NOW(), NOW())
        RETURNING id`,
       [newBiz.id, sinAgrupacionNombre, JSON.stringify(artIds)]
     );
@@ -269,14 +292,10 @@ exports.createBusinessFromGroup = async (req, res, next) => {
   }
 };
 
-// ══════════════════════════════════════════════════════════
-// POST /api/organizations
-// FIX FINAL: NO usa ensure_org_special_groups() porque esa función
-// intenta insertar con business_id = NULL.
-// 
-// Solución: crear las agrupaciones especiales ANCLADAS al bizId
-// directamente en el controller.
-// ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
+   POST /api/organizations
+   Onboarding: crear organización y vincularla a un negocio existente
+══════════════════════════════════════════════════════════ */
 exports.createOrganization = async (req, res, next) => {
   const client = await pool.connect();
   try {
@@ -293,7 +312,7 @@ exports.createOrganization = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // 1) Verificar acceso al negocio
+    // Verificar acceso al negocio
     const { rows: bizCheck } = await client.query(
       `SELECT id, organization_id FROM app_businesses
         WHERE id = $1
@@ -318,7 +337,7 @@ exports.createOrganization = async (req, res, next) => {
       });
     }
 
-    // 2) Crear organización
+    // Crear organización
     const { rows: orgRows } = await client.query(
       `INSERT INTO organizations (name, display_name, created_by, created_at, updated_at)
        VALUES ($1, $1, $2, NOW(), NOW())
@@ -329,7 +348,7 @@ exports.createOrganization = async (req, res, next) => {
 
     console.log(`✅ [createOrganization] Org creada ID=${org.id} "${org.name}"`);
 
-    // 3) Vincular negocio a la org
+    // Vincular negocio a la org
     await client.query(
       `UPDATE app_businesses SET organization_id = $1 WHERE id = $2`,
       [org.id, bizId]
@@ -337,9 +356,8 @@ exports.createOrganization = async (req, res, next) => {
 
     console.log(`✅ [createOrganization] Business ${bizId} vinculado a org ${org.id}`);
 
-    // 4) Crear agrupaciones especiales ANCLADAS al bizId (NO NULL)
+    // Crear agrupaciones especiales ANCLADAS al bizId (NO NULL)
     const ensureSpecialGroup = async (nombre) => {
-      // Verificar si ya existe
       const { rows: existing } = await client.query(
         `SELECT id FROM agrupaciones
           WHERE business_id = $1 AND LOWER(nombre) = LOWER($2)
@@ -352,7 +370,6 @@ exports.createOrganization = async (req, res, next) => {
         return existing[0].id;
       }
 
-      // Crear nueva
       const { rows: inserted } = await client.query(
         `INSERT INTO agrupaciones (business_id, nombre, articulos, created_at, updated_at)
          VALUES ($1, $2, '[]'::jsonb, NOW(), NOW())
@@ -367,7 +384,7 @@ exports.createOrganization = async (req, res, next) => {
     const sinAgrupId  = await ensureSpecialGroup('Sin Agrupación');
     const discontinId = await ensureSpecialGroup('Discontinuados');
 
-    // 5) Registrar en organization_special_groups (si la tabla existe)
+    // Registrar en organization_special_groups
     try {
       await client.query(
         `INSERT INTO organization_special_groups
@@ -379,10 +396,9 @@ exports.createOrganization = async (req, res, next) => {
            updated_at = NOW()`,
         [org.id, sinAgrupId, discontinId]
       );
-      console.log(`✅ [createOrganization] Special groups registradas en organization_special_groups`);
+      console.log(`✅ [createOrganization] Special groups registradas`);
     } catch (eTable) {
-      // Si la tabla no existe en prod, no bloquear
-      console.warn('[createOrganization] ⚠️  organization_special_groups no existe o falló:', eTable.message);
+      console.warn('[createOrganization] ⚠️  organization_special_groups no existe:', eTable.message);
     }
 
     await client.query('COMMIT');
@@ -393,7 +409,6 @@ exports.createOrganization = async (req, res, next) => {
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
     console.error('[createOrganization] ❌ ERROR:', e);
-    console.error('[createOrganization] Stack:', e.stack);
     next(e);
   } finally {
     client.release();
