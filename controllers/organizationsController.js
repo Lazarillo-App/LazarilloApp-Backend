@@ -269,25 +269,31 @@ exports.createBusinessFromGroup = async (req, res, next) => {
   }
 };
 
-/* ══════════════════════════════════════════════════════════
-   POST /api/organizations
-   Onboarding: crear organización y vincularla a un negocio existente
-══════════════════════════════════════════════════════════ */
+// ══════════════════════════════════════════════════════════
+// POST /api/organizations
+// FIX FINAL: NO usa ensure_org_special_groups() porque esa función
+// intenta insertar con business_id = NULL.
+// 
+// Solución: crear las agrupaciones especiales ANCLADAS al bizId
+// directamente en el controller.
+// ══════════════════════════════════════════════════════════
 exports.createOrganization = async (req, res, next) => {
   const client = await pool.connect();
   try {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
-    const { name, businessId } = req.body || {};
+    const { name, businessId, maxiCodCli } = req.body || {};
     if (!name?.trim()) return res.status(400).json({ ok: false, error: 'name_required' });
 
     const bizId = Number(businessId);
-    if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'business_id_required' });
+    if (!Number.isFinite(bizId)) {
+      return res.status(400).json({ ok: false, error: 'business_id_required' });
+    }
 
     await client.query('BEGIN');
 
-    // Verificar acceso al negocio
+    // 1) Verificar acceso al negocio
     const { rows: bizCheck } = await client.query(
       `SELECT id, organization_id FROM app_businesses
         WHERE id = $1
@@ -312,7 +318,7 @@ exports.createOrganization = async (req, res, next) => {
       });
     }
 
-    // Crear organización (sin maxi_codcli: columna puede no existir en prod)
+    // 2) Crear organización
     const { rows: orgRows } = await client.query(
       `INSERT INTO organizations (name, display_name, created_by, created_at, updated_at)
        VALUES ($1, $1, $2, NOW(), NOW())
@@ -321,58 +327,73 @@ exports.createOrganization = async (req, res, next) => {
     );
     const org = orgRows[0];
 
-    // Vincular negocio
+    console.log(`✅ [createOrganization] Org creada ID=${org.id} "${org.name}"`);
+
+    // 3) Vincular negocio a la org
     await client.query(
       `UPDATE app_businesses SET organization_id = $1 WHERE id = $2`,
       [org.id, bizId]
     );
 
-    // Crear agrupaciones especiales ancladas al bizId del negocio principal.
-    // NO usamos ensure_org_special_groups porque esa función intenta insertar
-    // con business_id = NULL y la columna tiene NOT NULL en prod.
+    console.log(`✅ [createOrganization] Business ${bizId} vinculado a org ${org.id}`);
+
+    // 4) Crear agrupaciones especiales ANCLADAS al bizId (NO NULL)
     const ensureSpecialGroup = async (nombre) => {
-      // Buscar si ya existe para este negocio
+      // Verificar si ya existe
       const { rows: existing } = await client.query(
-        `SELECT id FROM agrupaciones WHERE business_id = $1 AND LOWER(nombre) = LOWER($2) LIMIT 1`,
+        `SELECT id FROM agrupaciones
+          WHERE business_id = $1 AND LOWER(nombre) = LOWER($2)
+          LIMIT 1`,
         [bizId, nombre]
       );
-      if (existing.length) return existing[0].id;
 
+      if (existing.length) {
+        console.log(`   ℹ️  "${nombre}" ya existe: ID=${existing[0].id}`);
+        return existing[0].id;
+      }
+
+      // Crear nueva
       const { rows: inserted } = await client.query(
         `INSERT INTO agrupaciones (business_id, nombre, articulos, created_at, updated_at)
          VALUES ($1, $2, '[]'::jsonb, NOW(), NOW())
          RETURNING id`,
         [bizId, nombre]
       );
+
+      console.log(`   ✅ "${nombre}" creada: ID=${inserted[0].id}`);
       return inserted[0].id;
     };
 
-    const sinAgrupId   = await ensureSpecialGroup('Sin Agrupación');
-    const discontinId  = await ensureSpecialGroup('Discontinuados');
+    const sinAgrupId  = await ensureSpecialGroup('Sin Agrupación');
+    const discontinId = await ensureSpecialGroup('Discontinuados');
 
-    // Registrar en organization_special_groups si la tabla existe
-    await client.query(
-      `INSERT INTO organization_special_groups
-         (organization_id, sin_agrupacion_id, discontinuados_id, created_at, updated_at)
-       VALUES ($1, $2, $3, NOW(), NOW())
-       ON CONFLICT (organization_id) DO UPDATE SET
-         sin_agrupacion_id = COALESCE(EXCLUDED.sin_agrupacion_id, organization_special_groups.sin_agrupacion_id),
-         discontinuados_id = COALESCE(EXCLUDED.discontinuados_id, organization_special_groups.discontinuados_id),
-         updated_at = NOW()`,
-      [org.id, sinAgrupId, discontinId]
-    ).catch((e) => {
-      // Si la tabla aún no existe en prod, no bloquear
-      console.warn('[createOrganization] organization_special_groups insert skipped:', e.message);
-    });
+    // 5) Registrar en organization_special_groups (si la tabla existe)
+    try {
+      await client.query(
+        `INSERT INTO organization_special_groups
+           (organization_id, sin_agrupacion_id, discontinuados_id, created_at, updated_at)
+         VALUES ($1, $2, $3, NOW(), NOW())
+         ON CONFLICT (organization_id) DO UPDATE SET
+           sin_agrupacion_id = COALESCE(EXCLUDED.sin_agrupacion_id, organization_special_groups.sin_agrupacion_id),
+           discontinuados_id = COALESCE(EXCLUDED.discontinuados_id, organization_special_groups.discontinuados_id),
+           updated_at = NOW()`,
+        [org.id, sinAgrupId, discontinId]
+      );
+      console.log(`✅ [createOrganization] Special groups registradas en organization_special_groups`);
+    } catch (eTable) {
+      // Si la tabla no existe en prod, no bloquear
+      console.warn('[createOrganization] ⚠️  organization_special_groups no existe o falló:', eTable.message);
+    }
 
     await client.query('COMMIT');
-
-    console.log(`✅ [createOrganization] Org ID=${org.id} "${org.name}" → Business ID=${bizId}`);
+    console.log(`🎉 [createOrganization] COMMIT exitoso`);
 
     return res.status(201).json({ ok: true, organization: org });
+
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
-    console.error('[createOrganization]', e);
+    console.error('[createOrganization] ❌ ERROR:', e);
+    console.error('[createOrganization] Stack:', e.stack);
     next(e);
   } finally {
     client.release();

@@ -1,5 +1,4 @@
--- 038_agrupaciones_add_is_temporary.sql
--- Agrega flag is_temporary para "Sin Agrupación" temporales en sub-negocios
+-- 038_agrupaciones_add_is_temporary.sql (FINAL - idempotente)
 
 ALTER TABLE agrupaciones
   ADD COLUMN IF NOT EXISTS is_temporary BOOLEAN NOT NULL DEFAULT FALSE;
