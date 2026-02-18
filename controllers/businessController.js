@@ -331,8 +331,8 @@ exports.maxiStatus = async (req, res) => {
     if (!Number.isFinite(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
 
     const { rows: access } = await pool.query(`
-      SELECT b.props
-        FROM app_businesses b
+  SELECT b.props, b.created_from
+    FROM app_businesses b
         LEFT JOIN user_businesses ub ON ub.business_id=b.id AND ub.user_id=$2
        WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id IS NOT NULL)
        LIMIT 1`, [bizId, uid]);
@@ -341,7 +341,7 @@ exports.maxiStatus = async (req, res) => {
     const props = access[0].props || {};
     const mx = props.maxi || {};
     const configured = !!(mx.email && mx.codcli && (mx.pass_enc || mx.password));
-    res.json({ ok: true, business_id: bizId, configured, email: mx.email || null, codcli: mx.codcli || null });
+    res.json({ ok: true, business_id: bizId, configured, created_from: access[0].created_from || null, email: mx.email || null, codcli: mx.codcli || null });
   } catch (e) {
     console.error('GET /:id/maxi-status error:', e);
     res.status(500).json({ error: 'internal' });
@@ -351,7 +351,7 @@ exports.maxiStatus = async (req, res) => {
 exports.maxiSave = async (req, res) => {
   const uid = req.user?.id;
   const bizId = Number(req.params?.id);
-  
+
   if (!uid) return res.status(401).json({ error: 'unauthorized' });
   if (!bizId || Number.isNaN(bizId)) {
     return res.status(400).json({ error: 'invalid_business_id' });
@@ -377,7 +377,7 @@ exports.maxiSave = async (req, res) => {
       LIMIT 1`,
     [bizId, uid]
   );
-  
+
   if (!belongs.length) {
     return res.status(404).json({ error: 'not_found' });
   }
@@ -387,9 +387,9 @@ exports.maxiSave = async (req, res) => {
     'SELECT props FROM app_businesses WHERE id = $1',
     [bizId]
   );
-  
+
   const currentMaxi = biz?.props?.maxi || {};
-  
+
   // ✅ Construir objeto maxi
   const maxi = {
     email: email ? String(email).trim() : currentMaxi.email,
@@ -405,7 +405,7 @@ exports.maxiSave = async (req, res) => {
 
   // ✅ Validación final: debe tener al menos email Y codcli
   if (!maxi.email || !maxi.codcli) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       error: 'missing_fields',
       required: ['email', 'codcli'],
       current: {
@@ -432,14 +432,14 @@ exports.maxiSave = async (req, res) => {
     [bizId, maxi]
   );
 
-  res.json({ 
-    ok: true, 
-    maxi: { 
-      email: maxi.email, 
-      codcli: maxi.codcli, 
+  res.json({
+    ok: true,
+    maxi: {
+      email: maxi.email,
+      codcli: maxi.codcli,
       configured: true,
       password_updated: !!password,
-    } 
+    }
   });
 };
 
@@ -472,7 +472,7 @@ exports.uploadLogo = async (req, res, next) => {
       );
 
       const prevLogo = prevRows[0]?.prev_logo;
-      
+
       if (prevLogo && prevLogo.includes('cloudinary.com')) {
         // Extraer public_id de la URL de Cloudinary
         const matches = prevLogo.match(/\/([^\/]+)\.[^.]+$/);
@@ -499,9 +499,9 @@ exports.uploadLogo = async (req, res, next) => {
     `, [biz.id, publicUrl]);
 
     res.json({ ok: true, business_id: biz.id, logo_url: publicUrl });
-  } catch (e) { 
+  } catch (e) {
     console.error('❌ Error uploadLogo:', e);
-    next(e); 
+    next(e);
   }
 };
 /* ───────────────── Maxi: helpers para endpoints públicos de prueba ───────────────── */
