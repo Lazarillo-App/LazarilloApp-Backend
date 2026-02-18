@@ -1,4 +1,4 @@
-// controllers/organizationsController.js (FIXED FINAL)
+// controllers/organizationsController.js
 const pool = require('../config/db');
 
 /* ══════════════════════════════════════════════════════════
@@ -149,8 +149,6 @@ exports.updateOrganization = async (req, res, next) => {
 
 /* ══════════════════════════════════════════════════════════
    POST /api/organizations/:orgId/businesses/from-group
-   
-   ✅ FIX: Usa app_articles_ids si existe, sino articulos
 ══════════════════════════════════════════════════════════ */
 exports.createBusinessFromGroup = async (req, res, next) => {
   const client = await pool.connect();
@@ -200,13 +198,17 @@ exports.createBusinessFromGroup = async (req, res, next) => {
     }
 
     const group = groupRows[0];
+    const sourceBizId = Number(group.business_id);
 
-    // ✅ Priorizar app_articles_ids sobre articulos
-    const artIds = Array.isArray(group.app_articles_ids)
-      ? group.app_articles_ids.map(Number).filter(Boolean)
-      : Array.isArray(group.articulos)
-        ? group.articulos.map(Number).filter(Boolean)
-        : [];
+    // Priorizar app_articles_ids; si está vacío, extraer IDs de articulos (objetos con {id})
+    let artIds = [];
+    if (Array.isArray(group.app_articles_ids) && group.app_articles_ids.length > 0) {
+      artIds = group.app_articles_ids.map(Number).filter(Boolean);
+    } else if (Array.isArray(group.articulos) && group.articulos.length > 0) {
+      artIds = group.articulos
+        .map(a => Number(a?.id ?? a))
+        .filter(n => Number.isFinite(n) && n > 0);
+    }
 
     console.log(`🏗️ [createBusinessFromGroup] Org=${orgId} | Grupo="${group.nombre}" | ${artIds.length} artículos`);
     console.log(`📋 IDs de artículos a copiar:`, artIds);
@@ -218,9 +220,9 @@ exports.createBusinessFromGroup = async (req, res, next) => {
     // 3) Crear el nuevo negocio
     const propsObj = {
       branding: branding || {},
-      contact: contact || {},
-      address: address || {},
-      social: social || {},
+      contact:  contact  || {},
+      address:  address  || {},
+      social:   social   || {},
     };
 
     const { rows: bizRows } = await client.query(
@@ -254,24 +256,79 @@ exports.createBusinessFromGroup = async (req, res, next) => {
       [uid, newBiz.id]
     );
 
-    // 5) Crear agrupación "Sin Agrupación" TEMPORAL en el nuevo negocio
-    const sinAgrupacionNombre = 'Sin Agrupación';
+    // 5) Crear agrupación "Sin Agrupación" en el nuevo negocio con los artículos
     const { rows: sinAgrRows } = await client.query(
       `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
-       VALUES ($1, $2, '[]'::jsonb, $3::jsonb, TRUE, NOW(), NOW())
+       VALUES ($1, 'Sin Agrupación', $2::jsonb, $3::jsonb, TRUE, NOW(), NOW())
        RETURNING id`,
-      [newBiz.id, sinAgrupacionNombre, JSON.stringify(artIds)]
+      [
+        newBiz.id,
+        // articulos como array de objetos {id}
+        JSON.stringify(artIds.map(id => ({ id }))),
+        // app_articles_ids como array plano de números
+        JSON.stringify(artIds),
+      ]
+    );
+    console.log(`📁 [createBusinessFromGroup] "Sin Agrupación" ID=${sinAgrRows[0].id} con ${artIds.length} artículos`);
+
+    // 6) Crear agrupación "Discontinuados" vacía en el nuevo negocio
+    await client.query(
+      `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
+       VALUES ($1, 'Discontinuados', '[]'::jsonb, '[]'::jsonb, FALSE, NOW(), NOW())
+       ON CONFLICT (business_id, nombre) DO NOTHING`,
+      [newBiz.id]
     );
 
-    console.log(`📁 [createBusinessFromGroup] "Sin Agrupación" temporal ID=${sinAgrRows[0].id} con ${artIds.length} artículos`);
-
-    // 6) Registrar en business_agrupaciones la agrupación origen
+    // 7) Registrar relación con la agrupación origen
     await client.query(
       `INSERT INTO business_agrupaciones (business_id, agrupacion_id, created_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (business_id, agrupacion_id) DO NOTHING`,
       [newBiz.id, groupId]
     );
+
+    // 8) Copiar artículos a maxi_articles del nuevo negocio
+    //    (el frontend necesita estos registros para mostrar nombre, precio, categoría, etc.)
+    if (artIds.length > 0) {
+      await client.query(
+        `INSERT INTO maxi_articles
+           (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at)
+         SELECT
+           $1, articulo_id, nombre, categoria, subrubro, precio, costo, raw, NOW()
+         FROM maxi_articles
+         WHERE business_id = $2
+           AND articulo_id = ANY($3::int[])
+         ON CONFLICT (business_id, articulo_id) DO UPDATE SET
+           nombre     = EXCLUDED.nombre,
+           categoria  = EXCLUDED.categoria,
+           subrubro   = EXCLUDED.subrubro,
+           precio     = EXCLUDED.precio,
+           costo      = EXCLUDED.costo,
+           raw        = EXCLUDED.raw,
+           updated_at = NOW()`,
+        [newBiz.id, sourceBizId, artIds]
+      );
+      console.log(`📦 [createBusinessFromGroup] maxi_articles copiados al negocio ${newBiz.id}`);
+
+      // 9) Copiar también maxi_article_map
+      await client.query(
+        `INSERT INTO maxi_article_map
+           (business_id, articulo_id, categoria, subrubro, external_code, title, updated_at)
+         SELECT
+           $1, articulo_id, categoria, subrubro, external_code, title, NOW()
+         FROM maxi_article_map
+         WHERE business_id = $2
+           AND articulo_id = ANY($3::int[])
+         ON CONFLICT (business_id, articulo_id) DO UPDATE SET
+           categoria     = EXCLUDED.categoria,
+           subrubro      = EXCLUDED.subrubro,
+           external_code = EXCLUDED.external_code,
+           title         = EXCLUDED.title,
+           updated_at    = NOW()`,
+        [newBiz.id, sourceBizId, artIds]
+      );
+      console.log(`🗺️  [createBusinessFromGroup] maxi_article_map copiados al negocio ${newBiz.id}`);
+    }
 
     await client.query('COMMIT');
 
@@ -345,7 +402,6 @@ exports.createOrganization = async (req, res, next) => {
       [name.trim(), uid]
     );
     const org = orgRows[0];
-
     console.log(`✅ [createOrganization] Org creada ID=${org.id} "${org.name}"`);
 
     // Vincular negocio a la org
@@ -353,10 +409,9 @@ exports.createOrganization = async (req, res, next) => {
       `UPDATE app_businesses SET organization_id = $1 WHERE id = $2`,
       [org.id, bizId]
     );
-
     console.log(`✅ [createOrganization] Business ${bizId} vinculado a org ${org.id}`);
 
-    // Crear agrupaciones especiales ANCLADAS al bizId (NO NULL)
+    // Crear agrupaciones especiales
     const ensureSpecialGroup = async (nombre) => {
       const { rows: existing } = await client.query(
         `SELECT id FROM agrupaciones
@@ -376,7 +431,6 @@ exports.createOrganization = async (req, res, next) => {
          RETURNING id`,
         [bizId, nombre]
       );
-
       console.log(`   ✅ "${nombre}" creada: ID=${inserted[0].id}`);
       return inserted[0].id;
     };
@@ -384,7 +438,6 @@ exports.createOrganization = async (req, res, next) => {
     const sinAgrupId  = await ensureSpecialGroup('Sin Agrupación');
     const discontinId = await ensureSpecialGroup('Discontinuados');
 
-    // Registrar en organization_special_groups
     try {
       await client.query(
         `INSERT INTO organization_special_groups
