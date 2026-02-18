@@ -72,7 +72,7 @@ exports.getMyOrganization = async (req, res, next) => {
 ══════════════════════════════════════════════════════════ */
 exports.getOrganization = async (req, res, next) => {
   try {
-    const uid   = req.user?.id;
+    const uid = req.user?.id;
     const orgId = Number(req.params.orgId);
     if (!orgId) return res.status(400).json({ ok: false, error: 'invalid_org_id' });
 
@@ -117,7 +117,7 @@ exports.getOrganization = async (req, res, next) => {
 ══════════════════════════════════════════════════════════ */
 exports.updateOrganization = async (req, res, next) => {
   try {
-    const uid   = req.user?.id;
+    const uid = req.user?.id;
     const orgId = Number(req.params.orgId);
     if (!orgId) return res.status(400).json({ ok: false, error: 'invalid_org_id' });
 
@@ -153,7 +153,7 @@ exports.updateOrganization = async (req, res, next) => {
 exports.createBusinessFromGroup = async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const uid   = req.user?.id;
+    const uid = req.user?.id;
     const orgId = Number(req.params.orgId);
 
     if (!orgId) return res.status(400).json({ ok: false, error: 'invalid_org_id' });
@@ -215,14 +215,14 @@ exports.createBusinessFromGroup = async (req, res, next) => {
 
     // 2) Slug único
     const baseSlug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const slug     = `${baseSlug}-${Date.now().toString(36)}`;
+    const slug = `${baseSlug}-${Date.now().toString(36)}`;
 
     // 3) Crear el nuevo negocio
     const propsObj = {
       branding: branding || {},
-      contact:  contact  || {},
-      address:  address  || {},
-      social:   social   || {},
+      contact: contact || {},
+      address: address || {},
+      social: social || {},
     };
 
     const { rows: bizRows } = await client.query(
@@ -247,7 +247,16 @@ exports.createBusinessFromGroup = async (req, res, next) => {
 
     const newBiz = bizRows[0];
     console.log(`✅ [createBusinessFromGroup] Nuevo negocio ID=${newBiz.id} "${newBiz.name}"`);
+    // Marcar la agrupación como "movida"
+    await client.query(
+      `UPDATE agrupaciones
+      SET moved_to_business_id = $1,
+          updated_at = NOW()
+    WHERE id = $2`,
+      [newBiz.id, groupId]
+    );
 
+    console.log(`📦 [createBusinessFromGroup] Agrupación ${groupId} marcada como movida a negocio ${newBiz.id}`);
     // 4) Dar acceso al usuario
     await client.query(
       `INSERT INTO user_businesses (user_id, business_id, role, created_at)
@@ -341,7 +350,7 @@ exports.createBusinessFromGroup = async (req, res, next) => {
       },
     });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[createBusinessFromGroup]', e);
     next(e);
   } finally {
@@ -435,7 +444,7 @@ exports.createOrganization = async (req, res, next) => {
       return inserted[0].id;
     };
 
-    const sinAgrupId  = await ensureSpecialGroup('Sin Agrupación');
+    const sinAgrupId = await ensureSpecialGroup('Sin Agrupación');
     const discontinId = await ensureSpecialGroup('Discontinuados');
 
     try {
@@ -460,7 +469,7 @@ exports.createOrganization = async (req, res, next) => {
     return res.status(201).json({ ok: true, organization: org });
 
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[createOrganization] ❌ ERROR:', e);
     next(e);
   } finally {
