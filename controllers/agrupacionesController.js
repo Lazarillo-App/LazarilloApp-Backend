@@ -110,7 +110,10 @@ exports.obtenerAgrupaciones = async (req, res) => {
     const { rows } = await pool.query(
       `
       SELECT a.id, a.nombre, a.business_id,
-             COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos
+             COALESCE(NULLIF(a.articulos::text,'')::jsonb,'[]'::jsonb) AS articulos,
+             a.app_articles_ids,
+             a.is_temporary,
+             a.moved_to_business_id
       FROM agrupaciones a
       WHERE a.business_id = $1
       ORDER BY a.id ASC
