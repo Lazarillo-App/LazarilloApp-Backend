@@ -279,7 +279,7 @@ exports.createOrganization = async (req, res, next) => {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
-    const { name, businessId, maxiCodCli } = req.body || {};
+    const { name, businessId } = req.body || {};
     if (!name?.trim()) return res.status(400).json({ ok: false, error: 'name_required' });
 
     const bizId = Number(businessId);
@@ -312,12 +312,12 @@ exports.createOrganization = async (req, res, next) => {
       });
     }
 
-    // Crear organización
+    // Crear organización (sin maxi_codcli: columna puede no existir en prod)
     const { rows: orgRows } = await client.query(
-      `INSERT INTO organizations (name, display_name, maxi_codcli, created_by, created_at, updated_at)
-       VALUES ($1, $1, $2, $3, NOW(), NOW())
+      `INSERT INTO organizations (name, display_name, created_by, created_at, updated_at)
+       VALUES ($1, $1, $2, NOW(), NOW())
        RETURNING *`,
-      [name.trim(), maxiCodCli?.trim() || null, uid]
+      [name.trim(), uid]
     );
     const org = orgRows[0];
 
@@ -327,8 +327,43 @@ exports.createOrganization = async (req, res, next) => {
       [org.id, bizId]
     );
 
-    // Crear agrupaciones especiales de la org (Sin Agrupación y Discontinuados globales)
-    await client.query('SELECT ensure_org_special_groups($1)', [org.id]);
+    // Crear agrupaciones especiales ancladas al bizId del negocio principal.
+    // NO usamos ensure_org_special_groups porque esa función intenta insertar
+    // con business_id = NULL y la columna tiene NOT NULL en prod.
+    const ensureSpecialGroup = async (nombre) => {
+      // Buscar si ya existe para este negocio
+      const { rows: existing } = await client.query(
+        `SELECT id FROM agrupaciones WHERE business_id = $1 AND LOWER(nombre) = LOWER($2) LIMIT 1`,
+        [bizId, nombre]
+      );
+      if (existing.length) return existing[0].id;
+
+      const { rows: inserted } = await client.query(
+        `INSERT INTO agrupaciones (business_id, nombre, articulos, created_at, updated_at)
+         VALUES ($1, $2, '[]'::jsonb, NOW(), NOW())
+         RETURNING id`,
+        [bizId, nombre]
+      );
+      return inserted[0].id;
+    };
+
+    const sinAgrupId   = await ensureSpecialGroup('Sin Agrupación');
+    const discontinId  = await ensureSpecialGroup('Discontinuados');
+
+    // Registrar en organization_special_groups si la tabla existe
+    await client.query(
+      `INSERT INTO organization_special_groups
+         (organization_id, sin_agrupacion_id, discontinuados_id, created_at, updated_at)
+       VALUES ($1, $2, $3, NOW(), NOW())
+       ON CONFLICT (organization_id) DO UPDATE SET
+         sin_agrupacion_id = COALESCE(EXCLUDED.sin_agrupacion_id, organization_special_groups.sin_agrupacion_id),
+         discontinuados_id = COALESCE(EXCLUDED.discontinuados_id, organization_special_groups.discontinuados_id),
+         updated_at = NOW()`,
+      [org.id, sinAgrupId, discontinId]
+    ).catch((e) => {
+      // Si la tabla aún no existe en prod, no bloquear
+      console.warn('[createOrganization] organization_special_groups insert skipped:', e.message);
+    });
 
     await client.query('COMMIT');
 
