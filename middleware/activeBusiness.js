@@ -14,7 +14,7 @@ async function loadActiveBusiness(req, res, next) {
 
     // 2) Traer negocio
     const biz = await pool.query(
-      `SELECT id, name, props, status FROM app_businesses WHERE id = $1`,
+      `SELECT id, name, props, status, created_from, organization_id FROM app_businesses WHERE id = $1`,
       [businessId]
     );
     if (biz.rowCount === 0) {
