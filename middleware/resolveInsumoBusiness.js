@@ -20,6 +20,7 @@ async function resolveInsumoBusiness(req, res, next) {
     if (!biz?.id) return next();
 
     // Solo redirigir subnegocios (created_from = 'from_group')
+    console.log(`[resolveInsumoBusiness] biz.id=${biz.id} created_from=${biz.created_from}`);
     if (biz.created_from !== 'from_group') return next();
 
     const subBizId = biz.id;

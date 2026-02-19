@@ -54,6 +54,22 @@ exports.saveViewPref = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_view_mode' });
     }
 
+    // Verificar que el grupo existe en este negocio antes de guardar
+    // (evita FK violation cuando el grupo pertenece a otro business)
+    const { rows: groupCheck } = await pool.query(
+      `SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2
+       UNION ALL
+       SELECT 1 FROM agrupaciones WHERE id = $1 AND business_id = $2
+       LIMIT 1`,
+      [groupIdNum, biz.id]
+    );
+
+    if (!groupCheck.length) {
+      // Grupo no pertenece a este negocio — ignorar silenciosamente
+      console.warn(`[saveViewPref] Grupo ${groupIdNum} no encontrado en business ${biz.id}, ignorando`);
+      return res.json({ ok: true, skipped: true });
+    }
+
     await pool.query(
       `
       INSERT INTO app_user_group_view_prefs
@@ -174,11 +190,22 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.json({ ok: true, favoriteGroupId: null, scope, divisionId });
     }
 
-    // ✅ Validar que el grupo exista
+    // ✅ Validar que el grupo exista — buscar también en el principal de la org
+    // (para insumos, el grupo puede pertenecer al negocio principal cuando se accede desde subnegocio)
     const tableName = scope === 'articulo' ? 'agrupaciones' : 'insumo_groups';
     const { rows: checkRows } = await client.query(
-      `SELECT id FROM ${tableName} 
-       WHERE id = $1 AND business_id = $2 
+      `SELECT id, business_id FROM ${tableName} 
+       WHERE id = $1
+         AND (
+           business_id = $2
+           OR business_id IN (
+             SELECT b2.id FROM app_businesses b2
+             WHERE b2.organization_id = (
+               SELECT organization_id FROM app_businesses WHERE id = $2
+             )
+             AND b2.created_from != 'from_group'
+           )
+         )
        LIMIT 1`,
       [groupIdNum, biz.id]
     );
@@ -187,6 +214,9 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
+    
+    // Usar el business_id real del grupo (puede ser el principal)
+    const realBizId = checkRows[0].business_id;
 
     // ✅ UPSERT: eliminar anterior e insertar nueva (o usar ON CONFLICT)
     await client.query(
@@ -198,7 +228,7 @@ exports.saveFavoriteGroup = async (req, res, next) => {
          agrupacion_id = EXCLUDED.agrupacion_id,
          division_id = EXCLUDED.division_id,
          updated_at = NOW()`,
-      [user.id, biz.id, groupIdNum, scope, divisionId, divisionKey]
+      [user.id, realBizId, groupIdNum, scope, divisionId, divisionKey]
     );
 
     await client.query('COMMIT');
