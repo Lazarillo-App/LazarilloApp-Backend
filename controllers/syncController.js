@@ -374,12 +374,56 @@ exports.syncNow = async (req, res) => {
   exports.listArticlesFromDB = async (req, res) => {
     const biz = req.business;
     if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+
+    // Si el negocio tiene agrupaciones movidas (es principal/organización),
+    // devolver solo los artículos de las agrupaciones activas restantes
+    const { rows: movedCheck } = await pool.query(
+      `SELECT 1 FROM agrupaciones WHERE business_id = $1 AND moved_to_business_id IS NOT NULL LIMIT 1`,
+      [biz.id]
+    );
+    const hasMovedGroups = movedCheck.length > 0;
+
+    if (hasMovedGroups) {
+      // Recopilar IDs activos de agrupaciones sin moved_to_business_id
+      const { rows: agRows } = await pool.query(
+        `SELECT articulos, app_articles_ids FROM agrupaciones
+         WHERE business_id = $1 AND moved_to_business_id IS NULL`,
+        [biz.id]
+      );
+      const activeIds = new Set();
+      for (const ag of agRows) {
+        const arts = Array.isArray(ag.articulos) ? ag.articulos :
+          (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids :
+          (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+        for (const a of arts) {
+          const id = Number(a?.id ?? a?.articulo_id ?? a);
+          if (id > 0) activeIds.add(id);
+        }
+        for (const id of appIds) {
+          const n = Number(typeof id === 'string' ? id.replace(/"/g, '') : id);
+          if (n > 0) activeIds.add(n);
+        }
+      }
+      if (activeIds.size === 0) return res.json({ items: [] });
+
+      const idList = Array.from(activeIds);
+      const { rows } = await pool.query(`
+        SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+        FROM public.maxi_articles
+        WHERE business_id = $1 AND articulo_id = ANY($2::int[])
+        ORDER BY categoria, subrubro, nombre
+      `, [biz.id, idList]);
+      return res.json({ items: rows });
+    }
+
+    // Negocio normal: devolver todos sus artículos
     const { rows } = await pool.query(`
-    SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
-    FROM public.maxi_articles
-    WHERE business_id = $1
-    ORDER BY categoria, subrubro, nombre
-  `, [biz.id]);
+      SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+      FROM public.maxi_articles
+      WHERE business_id = $1
+      ORDER BY categoria, subrubro, nombre
+    `, [biz.id]);
     res.json({ items: rows });
   };
 
