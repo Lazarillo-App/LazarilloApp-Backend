@@ -34,6 +34,7 @@ async function autoAssignNewArticles(businessId) {
         LATERAL jsonb_array_elements(ag.articulos) AS elem
         WHERE ag.business_id = $1
           AND LOWER(ag.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'discontinuados')
+          AND ag.moved_to_business_id IS NULL
       )
       SELECT DISTINCT
         ai.articulo_id,
@@ -162,12 +163,22 @@ async function autoAssignNewArticles(businessId) {
 
       const articlesMap = new Map(articleNames.map(a => [a.articulo_id, a.nombre]));
 
+      // Solo asignar si la agrupación no fue movida a un subnegocio
+      const { rows: agCheck } = await client.query(
+        `SELECT moved_to_business_id FROM agrupaciones WHERE id = $1`,
+        [groupId]
+      );
+      if (agCheck[0]?.moved_to_business_id) {
+        console.log(`⏭️ [auto-assign] Saltando grupo ${groupId} "${nombre}" - movido a subnegocio ${agCheck[0].moved_to_business_id}`);
+        continue;
+      }
+
       await client.query(`
         UPDATE agrupaciones
         SET 
           articulos = articulos || $2::jsonb,
           updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND moved_to_business_id IS NULL
       `, [
         groupId,
         JSON.stringify(ids.map(id => ({ id })))

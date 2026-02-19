@@ -307,6 +307,44 @@ exports.remove = async (req, res) => {
       return res.status(404).json({ error: 'not_found' });
     }
 
+    // Si el negocio borrado era un subnegocio (creado desde una agrupación),
+    // restaurar la agrupación original: limpiar moved_to_business_id
+    // y repoblar sus artículos desde la agrupación "Sin Agrupacion" del subnegocio
+    const { rows: origAgRows } = await client.query(
+      `SELECT id, business_id FROM agrupaciones WHERE moved_to_business_id = $1 LIMIT 1`,
+      [bizId]
+    );
+
+    if (origAgRows.length > 0) {
+      const origAg = origAgRows[0];
+
+      // Obtener los artículos que tenía el subnegocio en su Sin Agrupacion
+      const { rows: subArtRows } = await client.query(
+        `SELECT articulos, app_articles_ids
+         FROM agrupaciones
+         WHERE business_id = $1
+           AND LOWER(REPLACE(nombre, 'ó', 'o')) IN ('sin agrupacion', 'sin agrupación')
+         LIMIT 1`,
+        [bizId]
+      );
+
+      const subArts = subArtRows[0]?.articulos ?? '[]';
+      const subAppIds = subArtRows[0]?.app_articles_ids ?? '[]';
+
+      // Restaurar agrupación original con los artículos del subnegocio
+      await client.query(
+        `UPDATE agrupaciones
+         SET moved_to_business_id = NULL,
+             articulos = $2::jsonb,
+             app_articles_ids = $3::jsonb,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [origAg.id, subArts, subAppIds]
+      );
+
+      console.log(`♻️ [remove business] Agrupación ${origAg.id} restaurada con artículos del subnegocio ${bizId}`);
+    }
+
     await client.query('COMMIT');
     res.status(204).end();
   } catch (e) {
