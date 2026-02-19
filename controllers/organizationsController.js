@@ -247,10 +247,13 @@ exports.createBusinessFromGroup = async (req, res, next) => {
 
     const newBiz = bizRows[0];
     console.log(`✅ [createBusinessFromGroup] Nuevo negocio ID=${newBiz.id} "${newBiz.name}"`);
-    // Marcar la agrupación como "movida"
+    // Marcar la agrupación como "movida" y vaciar sus artículos
+    // (los artículos ya están en el nuevo subnegocio)
     await client.query(
       `UPDATE agrupaciones
       SET moved_to_business_id = $1,
+          articulos = '[]'::jsonb,
+          app_articles_ids = '[]'::jsonb,
           updated_at = NOW()
     WHERE id = $2`,
       [newBiz.id, groupId]
@@ -279,6 +282,14 @@ exports.createBusinessFromGroup = async (req, res, next) => {
       ]
     );
     console.log(`📁 [createBusinessFromGroup] "Sin Agrupación" ID=${sinAgrRows[0].id} con ${artIds.length} artículos`);
+
+    // 6) Crear agrupación "Discontinuados" vacía en el nuevo negocio
+    await client.query(
+      `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
+       VALUES ($1, 'Discontinuados', '[]'::jsonb, '[]'::jsonb, FALSE, NOW(), NOW())
+       ON CONFLICT (business_id, nombre) DO NOTHING`,
+      [newBiz.id]
+    );
 
     // 7) Registrar relación con la agrupación origen
     await client.query(
