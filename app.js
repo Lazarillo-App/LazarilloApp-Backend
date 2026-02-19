@@ -25,6 +25,7 @@ const adminRebuildAgg = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
+const { resolveInsumoBusiness } = require('./middleware/resolveInsumoBusiness');
 const divisionsRoutes = require('./routes/divisionsRoutes');
 const branchesRoutes = require('./routes/branchRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
@@ -122,7 +123,7 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 app.use('/api', authRequired, loadActiveBusiness);
 
 // módulos sin :businessId en la URL
-app.use('/api/insumos', insumosRoutes);
+app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/branches', branchesRoutes);
 app.use('/api/divisions', divisionsRoutes);
