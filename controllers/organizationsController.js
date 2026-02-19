@@ -280,14 +280,6 @@ exports.createBusinessFromGroup = async (req, res, next) => {
     );
     console.log(`📁 [createBusinessFromGroup] "Sin Agrupación" ID=${sinAgrRows[0].id} con ${artIds.length} artículos`);
 
-    // 6) Crear agrupación "Discontinuados" vacía en el nuevo negocio
-    await client.query(
-      `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
-       VALUES ($1, 'Discontinuados', '[]'::jsonb, '[]'::jsonb, FALSE, NOW(), NOW())
-       ON CONFLICT (business_id, nombre) DO NOTHING`,
-      [newBiz.id]
-    );
-
     // 7) Registrar relación con la agrupación origen
     await client.query(
       `INSERT INTO business_agrupaciones (business_id, agrupacion_id, created_at)

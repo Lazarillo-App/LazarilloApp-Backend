@@ -106,7 +106,6 @@ exports.obtenerAgrupaciones = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'businessId inválido' });
     }
 
-    // ✅ SIMPLE: todas las agrupaciones del negocio
     const { rows } = await pool.query(
       `
       SELECT a.id, a.nombre, a.business_id,
@@ -121,17 +120,38 @@ exports.obtenerAgrupaciones = async (req, res) => {
       [businessId]
     );
 
-    return res.json({
-      ok: true,
-      agrupaciones: rows || [],
-    });
+    // ¿Es un subnegocio creado desde agrupación?
+    const { rows: bizRows } = await pool.query(
+      'SELECT created_from FROM app_businesses WHERE id = $1',
+      [businessId]
+    );
+    const isSubBusiness = bizRows[0]?.created_from === 'from_group';
+
+    let agrupaciones = rows || [];
+
+    if (isSubBusiness) {
+      agrupaciones = agrupaciones.filter(ag => {
+        // Nunca mostrar Discontinuados en subnegocios
+        if (isDiscontinuadosName(ag.nombre)) return false;
+        // Ocultar Sin Agrupación cuando está vacía
+        if (isTodoName(ag.nombre)) {
+          const arts = Array.isArray(ag.articulos) ? ag.articulos : [];
+          const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids : [];
+          if (arts.length === 0 && appIds.length === 0) return false;
+        }
+        // Ocultar movidas a otro subnegocio
+        if (ag.moved_to_business_id) return false;
+        return true;
+      });
+    } else {
+      // Negocio principal: ocultar las movidas a subnegocios
+      agrupaciones = agrupaciones.filter(ag => !ag.moved_to_business_id);
+    }
+
+    return res.json({ ok: true, agrupaciones });
   } catch (e) {
     console.error('obtenerAgrupaciones error', e);
-    return res.status(500).json({
-      ok: false,
-      error: 'Error obteniendo agrupaciones',
-      detail: e.message,
-    });
+    return res.status(500).json({ ok: false, error: 'Error obteniendo agrupaciones', detail: e.message });
   }
 };
 
@@ -489,7 +509,7 @@ function extractArticuloId(a) {
 }
 
 exports.createOrMoveAgrupacion = async (req, res) => {
-  const businessId = getBusinessId(req);
+  let businessId = getBusinessId(req);
   const nombre = String(req.body?.nombre || '').trim();
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
     .map(Number)
@@ -497,6 +517,32 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 
   if (!Number.isFinite(businessId) || !nombre || !ids.length) {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+  }
+
+  // Si el destino es "Discontinuados" y es subnegocio,
+  // redirigir al Discontinuados del negocio principal de la org
+  if (isDiscontinuadosName(nombre)) {
+    const { rows: bizRows } = await pool.query(
+      `SELECT b.created_from, b.organization_id
+         FROM app_businesses b
+        WHERE b.id = $1`,
+      [businessId]
+    );
+    const biz = bizRows[0];
+    if (biz?.created_from === 'from_group' && biz?.organization_id) {
+      // Buscar el negocio más antiguo de la org (el principal)
+      const { rows: orgBiz } = await pool.query(
+        `SELECT id FROM app_businesses
+          WHERE organization_id = $1
+          ORDER BY created_at ASC
+          LIMIT 1`,
+        [biz.organization_id]
+      );
+      if (orgBiz[0]?.id) {
+        businessId = orgBiz[0].id;
+        console.log(`[createOrMoveAgrupacion] Redirigiendo Discontinuados al negocio principal ${businessId}`);
+      }
+    }
   }
 
   const idsSet = new Set(ids);
@@ -637,15 +683,23 @@ exports.ensureTodoAgrupacion = async (req, res) => {
       )).rows[0];
     }
 
+    // Solo crear Discontinuados en el negocio principal (no en subnegocios)
     if (!discRow) {
-      try {
-        await pool.query(
-          `INSERT INTO agrupaciones (business_id, nombre, articulos)
-           VALUES ($1, $2, '[]'::jsonb)
-           ON CONFLICT (business_id, nombre) DO NOTHING`,
-          [businessId, DISC_NAME]
-        );
-      } catch (_) {}
+      const { rows: bizCheck } = await pool.query(
+        'SELECT created_from FROM app_businesses WHERE id = $1',
+        [businessId]
+      );
+      const isSub = bizCheck[0]?.created_from === 'from_group';
+      if (!isSub) {
+        try {
+          await pool.query(
+            `INSERT INTO agrupaciones (business_id, nombre, articulos)
+             VALUES ($1, $2, '[]'::jsonb)
+             ON CONFLICT (business_id, nombre) DO NOTHING`,
+            [businessId, DISC_NAME]
+          );
+        } catch (_) {}
+      }
     }
 
     return res.json(todoRow);
