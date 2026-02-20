@@ -11,6 +11,56 @@ const pad2 = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 const addDaysUTC = (d, n) => new Date(d.getTime() + n * 86400000);
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * resolveSalesBusiness(biz)
+ *
+ * Los subnegocios (created_from = 'from_group') NO tienen filas propias en
+ * sales_daily_items — las ventas están guardadas con el business_id del negocio
+ * principal (raíz de la organización).
+ *
+ * Esta función devuelve:
+ *   - salesBizId   : el business_id donde realmente están las ventas
+ *   - articleIds   : array de IDs de artículos del subnegocio (para filtrar),
+ *                    o null si hay que traer todos (caso negocio principal)
+ * ───────────────────────────────────────────────────────────────────────── */
+async function resolveSalesBusiness(biz) {
+  // Si el negocio no es un subnegocio creado desde grupo, devolvemos tal cual
+  if (biz.created_from !== 'from_group' || !biz.organization_id) {
+    return { salesBizId: biz.id, articleIds: null };
+  }
+
+  // Es un subnegocio — buscar el negocio raíz de la organización
+  // (el que NO fue creado desde grupo, es decir el negocio principal)
+  const { rows: rootRows } = await pool.query(
+    `SELECT id FROM app_businesses
+      WHERE organization_id = $1
+        AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
+      ORDER BY id ASC
+      LIMIT 1`,
+    [biz.organization_id]
+  );
+
+  const salesBizId = rootRows[0]?.id ?? biz.id;
+
+  // Obtener los article_id que pertenecen a este subnegocio
+  // (los artículos están en maxi_articles con el business_id del subnegocio)
+  const { rows: artRows } = await pool.query(
+    `SELECT DISTINCT articulo_id AS article_id FROM maxi_articles WHERE business_id = $1
+     UNION
+     SELECT DISTINCT id AS article_id FROM app_articles WHERE business_id = $1`,
+    [biz.id]
+  );
+
+  const articleIds = artRows.map(r => Number(r.article_id)).filter(n => Number.isFinite(n) && n > 0);
+
+  console.log(`[resolveSalesBusiness] Subnegocio ${biz.id} → salesBizId=${salesBizId}, artículos=${articleIds.length}`);
+
+  return {
+    salesBizId,
+    articleIds: articleIds.length > 0 ? articleIds : null,
+  };
+}
+
 function parseDate(zd, fb) {
   if (!zd) return fb;
   const d = zd instanceof Date ? zd : new Date(zd);
@@ -307,14 +357,21 @@ exports.listDailyItems = async (req, res, next) => {
       });
     }
 
-    const params = [biz.id, from, to];
+    // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
+    const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
+
+    const params = [salesBizId, from, to];
     let whereClause = '';
     let groupFilter = '';
 
-    // Filtro por artículo específico
+    // Filtro por artículo específico (tiene prioridad sobre filtro de subnegocio)
     if (articleId) {
       params.push(Number(articleId));
       whereClause = `AND sdi.article_id = $${params.length}`;
+    } else if (subBizArticleIds) {
+      // Filtro automático por artículos del subnegocio
+      params.push(subBizArticleIds);
+      whereClause = `AND sdi.article_id = ANY($${params.length})`;
     }
 
     // Filtro por source
@@ -339,6 +396,14 @@ exports.listDailyItems = async (req, res, next) => {
       }
     }
 
+    // JOIN de nombres: buscar en salesBizId y biz.id (subnegocio tiene artículos copiados)
+    const nameBizIds = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
+    params.push(nameBizIds);
+    const nameBizParam = `$${params.length}`;
+
+    // Para el sqlTotals usamos los mismos params excepto el último (nameBizIds)
+    const paramsTotals = params.slice(0, params.length - 1);
+
     // Query principal
     const sql = `
       SELECT
@@ -353,11 +418,11 @@ exports.listDailyItems = async (req, res, next) => {
         SUM(sdi.amount)::numeric AS amount
       FROM sales_daily_items sdi
       LEFT JOIN maxi_articles ma
-        ON ma.business_id = sdi.business_id 
-        AND ma.articulo_id = sdi.article_id
+        ON ma.articulo_id = sdi.article_id
+        AND ma.business_id = ANY(${nameBizParam})
       LEFT JOIN app_articles aa
-        ON aa.business_id = sdi.business_id
-        AND aa.id = sdi.article_id
+        ON aa.id = sdi.article_id
+        AND aa.business_id = ANY(${nameBizParam})
       WHERE sdi.business_id = $1
         AND sdi.day BETWEEN $2::date AND $3::date
         ${whereClause}
@@ -368,7 +433,7 @@ exports.listDailyItems = async (req, res, next) => {
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
-    // Query de totales
+    // Query de totales (sin el nameBizParam)
     const sqlTotals = `
       SELECT
         COUNT(DISTINCT sdi.article_id) AS rows_total,
@@ -384,7 +449,7 @@ exports.listDailyItems = async (req, res, next) => {
 
     const [rows, totals] = await Promise.all([
       pool.query(sql, params).then(r => r.rows),
-      pool.query(sqlTotals, params).then(r => r.rows[0]),
+      pool.query(sqlTotals, paramsTotals).then(r => r.rows[0]),
     ]);
 
     res.json({
@@ -645,12 +710,21 @@ exports.salesSummary = async (req, res, next) => {
       });
     }
 
-    const params = [biz.id, from, to, source];
+    // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
+    const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
+
+    const params = [salesBizId, from, to, source];
     let articleFilter = '';
     let groupFilter = '';
 
-    // Filtro por artículos específicos
-    if (articleIds) {
+    // Filtro automático por artículos del subnegocio
+    if (subBizArticleIds) {
+      params.push(subBizArticleIds);
+      articleFilter = `AND sdi.article_id = ANY($${params.length})`;
+    }
+
+    // Filtro por artículos específicos (del query, override del subnegocio)
+    if (articleIds && !subBizArticleIds) {
       const ids = String(articleIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
         params.push(ids);
@@ -673,6 +747,12 @@ exports.salesSummary = async (req, res, next) => {
       }
     }
 
+    // Para el JOIN de nombres: buscamos en salesBizId Y en biz.id (por si los artículos
+    // están copiados en el subnegocio con su propio business_id)
+    const nameBizIds = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
+    params.push(nameBizIds);
+    const nameBizParam = `$${params.length}`;
+
     const sql = `
       SELECT
         sdi.article_id,
@@ -688,11 +768,11 @@ exports.salesSummary = async (req, res, next) => {
         MAX(sdi.day)::date AS last_sale
       FROM sales_daily_items sdi
       LEFT JOIN maxi_articles ma
-        ON ma.business_id = sdi.business_id 
-        AND ma.articulo_id = sdi.article_id
+        ON ma.articulo_id = sdi.article_id
+        AND ma.business_id = ANY(${nameBizParam})
       LEFT JOIN app_articles aa
-        ON aa.business_id = sdi.business_id
-        AND aa.id = sdi.article_id
+        ON aa.id = sdi.article_id
+        AND aa.business_id = ANY(${nameBizParam})
       WHERE sdi.business_id = $1
         AND sdi.day BETWEEN $2::date AND $3::date
         AND sdi.source = $4
