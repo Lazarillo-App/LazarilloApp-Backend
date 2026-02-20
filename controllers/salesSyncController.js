@@ -30,7 +30,6 @@ async function resolveSalesBusiness(biz) {
   }
 
   // Es un subnegocio — buscar el negocio raíz de la organización
-  // (el que NO fue creado desde grupo, es decir el negocio principal)
   const { rows: rootRows } = await pool.query(
     `SELECT id FROM app_businesses
       WHERE organization_id = $1
@@ -42,19 +41,31 @@ async function resolveSalesBusiness(biz) {
 
   const salesBizId = rootRows[0]?.id ?? biz.id;
 
-  // Obtener los article_id que pertenecen a este subnegocio
-  // (los artículos están en maxi_articles con el business_id del subnegocio)
+  // Obtener los article_id del subnegocio desde sus agrupaciones
+  // Leemos de la columna "articulos" (jsonb de objetos {id, nombre...}) porque
+  // app_articles_ids no siempre está sincronizado cuando se mueven artículos
   const { rows: artRows } = await pool.query(
-    `SELECT DISTINCT articulo_id AS article_id FROM maxi_articles WHERE business_id = $1
-     UNION
-     SELECT DISTINCT id AS article_id FROM app_articles WHERE business_id = $1`,
+    `SELECT DISTINCT (elem->>'id')::bigint AS article_id
+       FROM agrupaciones,
+            jsonb_array_elements(articulos::jsonb) AS elem
+      WHERE business_id = $1
+        AND articulos IS NOT NULL
+        AND articulos != '[]'::jsonb
+        AND (elem->>'id') IS NOT NULL
+      UNION
+     SELECT DISTINCT articulo_id AS article_id
+       FROM maxi_articles
+      WHERE business_id = $1`,
     [biz.id]
   );
 
-  const articleIds = artRows.map(r => Number(r.article_id)).filter(n => Number.isFinite(n) && n > 0);
+  const articleIds = artRows
+    .map(r => Number(r.article_id))
+    .filter(n => Number.isFinite(n) && n > 0);
 
   console.log(`[resolveSalesBusiness] Subnegocio ${biz.id} → salesBizId=${salesBizId}, artículos=${articleIds.length}`);
 
+  // Si no encontramos artículos, devolvemos null para NO filtrar (mejor mostrar todo que nada)
   return {
     salesBizId,
     articleIds: articleIds.length > 0 ? articleIds : null,
