@@ -367,7 +367,6 @@ exports.listDailyItems = async (req, res, next) => {
         message: 'from y to son requeridos (YYYY-MM-DD)'
       });
     }
-    console.log("[DEBUG salesSummary] biz.id=", biz.id, "created_from=", biz.created_from, "org_id=", biz.organization_id);
     // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
 
@@ -720,7 +719,7 @@ exports.salesSummary = async (req, res, next) => {
         message: 'from y to son requeridos (YYYY-MM-DD)'
       });
     }
-
+    console.log("[DEBUG salesSummary] biz.id=", biz.id, "created_from=", biz.created_from, "org_id=", biz.organization_id);
     // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
 
