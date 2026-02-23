@@ -15,7 +15,8 @@ async function requireBusinessAccess(req, res, next, rawId) {
     // ✅ app_admin: no exigir pertenencia, solo que el negocio exista
     if (role === 'app_admin') {
       const { rows } = await pool.query(
-        `SELECT id, owner_id, name, slug, color_hex, brand_logo_url, brand_font, props
+        `SELECT id, owner_id, name, slug, color_hex, brand_logo_url, brand_font, props,
+                created_from, organization_id
            FROM app_businesses
           WHERE id = $1
           LIMIT 1`,
@@ -30,7 +31,8 @@ async function requireBusinessAccess(req, res, next, rawId) {
 
     // Usuarios no-admin: exigir pertenencia
     const { rows } = await pool.query(
-      `SELECT b.id, b.owner_id, b.name, b.slug, b.color_hex, b.brand_logo_url, b.brand_font, b.props
+      `SELECT b.id, b.owner_id, b.name, b.slug, b.color_hex, b.brand_logo_url, b.brand_font, b.props,
+              b.created_from, b.organization_id
          FROM app_businesses b
     LEFT JOIN user_businesses ub ON ub.business_id=b.id
         WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)

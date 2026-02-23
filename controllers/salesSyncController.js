@@ -90,12 +90,12 @@ function clampToYesterday(a, b) {
 exports.maxiPing = async (req, res) => {
   try {
     const biz = req.business;
-
+    
     // Si hay credenciales en DB o header X-Maxi-Token, esto devuelve token válido o lanza
     const token = await getBearer(biz.id, req);
     const props = biz?.props || {};
     const mx = props.maxi || props.maxi_credentials || {};
-
+    
     return res.json({
       ok: true,
       configured: !!(mx?.email && (mx?.codcli || mx?.cod_cli)),
@@ -104,11 +104,11 @@ exports.maxiPing = async (req, res) => {
       codcli: mx?.codcli || mx?.cod_cli || null,
     });
   } catch (e) {
-    return res.json({
-      ok: false,
-      configured: false,
-      connected: false,
-      error: e.message || 'ping_failed'
+    return res.json({ 
+      ok: false, 
+      configured: false, 
+      connected: false, 
+      error: e.message || 'ping_failed' 
     });
   }
 };
@@ -316,7 +316,7 @@ exports.reconcileAndRebuild = async (req, res, next) => {
   try {
     const biz = req.business;
     const { from, to } = req.body || {};
-
+    
     const client = await require('../config/db').connect();
     try {
       await client.query('BEGIN');
@@ -329,7 +329,7 @@ exports.reconcileAndRebuild = async (req, res, next) => {
     } finally {
       client.release();
     }
-
+    
     await require('../services/salesStore').upsertDailyAggregates(biz.id, from, to);
     res.json({ ok: true, business_id: String(biz.id), from, to, reconciled: true, rebuilt: true });
   } catch (e) { next(e); }
@@ -367,6 +367,7 @@ exports.listDailyItems = async (req, res, next) => {
         message: 'from y to son requeridos (YYYY-MM-DD)'
       });
     }
+
     // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
 
@@ -719,7 +720,7 @@ exports.salesSummary = async (req, res, next) => {
         message: 'from y to son requeridos (YYYY-MM-DD)'
       });
     }
-    console.log("[DEBUG salesSummary] biz.id=", biz.id, "created_from=", biz.created_from, "org_id=", biz.organization_id);
+
     // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
 
@@ -835,6 +836,6 @@ module.exports = {
   reconcileAndRebuild: exports.reconcileAndRebuild,
   listDailyItems: exports.listDailyItems,
   exportSalesCsv: exports.exportSalesCsv,
-  diagnosticRaw: exports.diagnosticRaw,
+  diagnosticRaw: exports.diagnosticRaw, 
   salesSummary: exports.salesSummary,
 };
