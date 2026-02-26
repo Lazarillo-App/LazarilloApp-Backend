@@ -675,7 +675,7 @@ LIMIT ${lim};
    *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
    * }
    */
-  async function salesSeriesFromDB(req, res, next) {
+ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
   try {
     const businessId = parseInt(req.params.id, 10);
     const articuloId = parseInt(req.params.articuloId, 10);
@@ -785,7 +785,7 @@ LIMIT ${lim};
     console.error('[salesSeriesFromDB] Error:', err);
     return next(err);
   }
-}
+} 
 
 // ============================ CHANGE SETS (INSUMOS) ============================
 
