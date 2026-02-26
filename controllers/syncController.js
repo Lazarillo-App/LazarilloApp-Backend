@@ -15,6 +15,8 @@ const BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.a
 const FETCH_TIMEOUT_MS = Number(process.env.MAXI_FETCH_TIMEOUT_MS || 30000);
 const FETCH_RETRIES = Number(process.env.MAXI_FETCH_RETRIES || 2);
 
+const { query } = require('../config/db');
+
 /* ======================= Utils básicos ======================= */
 function simpleHash(str = '') {
   let h = 0;
@@ -676,56 +678,84 @@ LIMIT ${lim};
  * }
  */
 exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
-  try {
+    try {
     const businessId = parseInt(req.params.id, 10);
     const articuloId = parseInt(req.params.articuloId, 10);
     const { from, to, groupBy = 'day' } = req.query;
 
+    // Validaciones
     if (!businessId || !articuloId || !from || !to) {
-      return res.status(400).json({
+      return res.status(400).json({ 
         error: 'missing_params',
         required: ['businessId', 'articuloId', 'from', 'to']
       });
     }
 
-    // ✅ PASO 1: Obtener el CÓDIGO del artículo
+    console.log('[salesSeriesFromDB] 📊 Consultando ventas:', {
+      businessId,
+      articuloId,
+      from,
+      to,
+      groupBy
+    });
+
+    // ✅ PASO 1: Obtener el CÓDIGO del artículo desde app_articles
     const articleResult = await query(
-      `SELECT id, codigo, nombre
-       FROM articulos
+      `SELECT 
+        id,
+        codigo,
+        nombre
+       FROM app_articles
        WHERE id = $1 AND business_id = $2`,
       [articuloId, businessId]
     );
 
     if (articleResult.rows.length === 0) {
-      return res.json({ total: 0, items: [] });
+      console.warn('[salesSeriesFromDB] ⚠️ Artículo no encontrado:', { articuloId, businessId });
+      return res.json({ 
+        total: 0, 
+        items: [],
+        message: 'article_not_found'
+      });
     }
 
     const article = articleResult.rows[0];
-    const codigo = articleResult.rows[0].codigo;
+    const codigo = article.codigo;
 
     if (!codigo) {
-      return res.json({ total: 0, items: [] });
+      console.warn('[salesSeriesFromDB] ⚠️ Artículo sin código:', article);
+      return res.json({ 
+        total: 0, 
+        items: [],
+        message: 'article_without_code'
+      });
     }
 
-    // ✅ PASO 2: Buscar ventas por CÓDIGO
+    console.log('[salesSeriesFromDB] ✅ Artículo encontrado:', {
+      id: article.id,
+      codigo: article.codigo,
+      nombre: article.nombre
+    });
+
+    // ✅ PASO 2: Buscar ventas por CÓDIGO usando app_articles
     let salesQuery;
     let queryParams;
 
     if (groupBy === 'day') {
       salesQuery = `
-       SELECT 
-    sdi.day::text as label,
-    SUM(sdi.qty) as qty,
-    SUM(sdi.amount) as amount
-  FROM sales_daily_items sdi
-  JOIN app_articles a ON sdi.article_id = a.id 
-                      AND sdi.business_id = a.business_id
-  WHERE sdi.business_id = $1
-    AND a.codigo = $2
-    AND sdi.day >= $3::date
-    AND sdi.day <= $4::date
-  GROUP BY sdi.day
-  ORDER BY sdi.day
+        SELECT 
+          sdi.day::text as label,
+          SUM(sdi.qty) as qty,
+          SUM(sdi.amount) as amount
+        FROM sales_daily_items sdi
+        JOIN app_articles a ON sdi.article_id = a.id 
+                            AND sdi.business_id = a.business_id
+        WHERE sdi.business_id = $1
+          AND a.codigo = $2
+          AND sdi.day >= $3::date
+          AND sdi.day <= $4::date
+        GROUP BY sdi.day
+        ORDER BY sdi.day
       `;
       queryParams = [businessId, codigo, from, to];
     } else if (groupBy === 'week') {
@@ -735,8 +765,8 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
           SUM(sdi.qty) as qty,
           SUM(sdi.amount) as amount
         FROM sales_daily_items sdi
-        JOIN articulos a ON sdi.article_id = a.id 
-                        AND sdi.business_id = a.business_id
+        JOIN app_articles a ON sdi.article_id = a.id 
+                            AND sdi.business_id = a.business_id
         WHERE sdi.business_id = $1
           AND a.codigo = $2
           AND sdi.day >= $3::date
@@ -752,8 +782,8 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
           SUM(sdi.qty) as qty,
           SUM(sdi.amount) as amount
         FROM sales_daily_items sdi
-        JOIN articulos a ON sdi.article_id = a.id 
-                        AND sdi.business_id = a.business_id
+        JOIN app_articles a ON sdi.article_id = a.id 
+                            AND sdi.business_id = a.business_id
         WHERE sdi.business_id = $1
           AND a.codigo = $2
           AND sdi.day >= $3::date
@@ -763,7 +793,7 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
       `;
       queryParams = [businessId, codigo, from, to];
     } else {
-      return res.status(400).json({
+      return res.status(400).json({ 
         error: 'invalid_group_by',
         valid_values: ['day', 'week', 'month']
       });
@@ -771,6 +801,7 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
 
     const salesResult = await query(salesQuery, queryParams);
 
+    // Procesar resultados
     const items = salesResult.rows.map(row => ({
       label: row.label,
       qty: parseInt(row.qty || 0, 10),
@@ -779,10 +810,31 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
 
     const total = items.reduce((sum, item) => sum + item.qty, 0);
 
-    return res.json({ total, items });
+    console.log('[salesSeriesFromDB] ✅ Resultados:', {
+      codigo,
+      itemsCount: items.length,
+      total,
+      firstItem: items[0],
+      lastItem: items[items.length - 1]
+    });
+
+    return res.json({
+      total,
+      items,
+      // Metadata útil para debugging
+      meta: {
+        article_id: articuloId,
+        article_codigo: codigo,
+        article_nombre: article.nombre,
+        business_id: businessId,
+        from,
+        to,
+        groupBy
+      }
+    });
 
   } catch (err) {
-    console.error('[salesSeriesFromDB] Error:', err);
+    console.error('[salesSeriesFromDB] ❌ Error:', err);
     return next(err);
   }
 }
