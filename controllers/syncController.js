@@ -675,70 +675,117 @@ LIMIT ${lim};
    *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
    * }
    */
-  exports.salesSeriesFromDB = async (req, res, next) => {
-    try {
-      const biz = req.business;
-      const articuloId = Number(req.params.articuloId);
-      const fromRaw = String(req.query.from || '').slice(0, 10);
-      const toRaw = String(req.query.to || '').slice(0, 10);
-      const groupBy = (req.query.groupBy || 'day').toLowerCase();
+  async function salesSeriesFromDB(req, res, next) {
+  try {
+    const businessId = parseInt(req.params.id, 10);
+    const articuloId = parseInt(req.params.articuloId, 10);
+    const { from, to, groupBy = 'day' } = req.query;
 
-      if (!Number.isFinite(articuloId) || articuloId <= 0) {
-        return res
-          .status(400)
-          .json({ ok: false, error: 'invalid_articulo_id' });
-      }
-      if (!fromRaw || !toRaw) {
-        return res
-          .status(400)
-          .json({ ok: false, error: 'from_to_required' });
-      }
-
-      if (groupBy !== 'day') {
-        return res
-          .status(400)
-          .json({ ok: false, error: 'unsupported_group_by', allowed: ['day'] });
-      }
-
-      const sql = `
-      SELECT
-        to_char(sdi.day::date, 'YYYY-MM-DD') AS label,
-        COALESCE(SUM(sdi.qty),    0)::numeric   AS qty,
-        COALESCE(SUM(sdi.amount), 0)::numeric   AS amount
-      FROM sales_daily_items sdi
-      WHERE sdi.business_id = $1
-        AND sdi.article_id  = $2
-        AND sdi.day BETWEEN $3::date AND $4::date
-      GROUP BY sdi.day
-      ORDER BY sdi.day
-    `;
-
-      const rows = await pool
-        .query(sql, [biz.id, articuloId, fromRaw, toRaw])
-        .then(r => r.rows);
-
-      const items = rows.map(r => ({
-        label: r.label,
-        qty: Number(r.qty || 0),
-        amount: Number(r.amount || 0),
-      }));
-
-      const total = items.reduce((acc, it) => acc + (Number(it.qty) || 0), 0);
-
-      return res.json({
-        ok: true,
-        business_id: biz.id,
-        articulo_id: articuloId,
-        from: fromRaw,
-        to: toRaw,
-        groupBy: 'day',
-        total,
-        items,
+    if (!businessId || !articuloId || !from || !to) {
+      return res.status(400).json({ 
+        error: 'missing_params',
+        required: ['businessId', 'articuloId', 'from', 'to']
       });
-    } catch (e) {
-      next(e);
     }
-  };
+
+    // ✅ PASO 1: Obtener el CÓDIGO del artículo
+    const articleResult = await query(
+      `SELECT id, codigo, nombre
+       FROM articulos
+       WHERE id = $1 AND business_id = $2`,
+      [articuloId, businessId]
+    );
+
+    if (articleResult.rows.length === 0) {
+      return res.json({ total: 0, items: [] });
+    }
+
+    const article = articleResult.rows[0];
+    const codigo = article.codigo;
+
+    if (!codigo) {
+      return res.json({ total: 0, items: [] });
+    }
+
+    // ✅ PASO 2: Buscar ventas por CÓDIGO
+    let salesQuery;
+    let queryParams;
+
+    if (groupBy === 'day') {
+      salesQuery = `
+        SELECT 
+          sdi.day::text as label,
+          SUM(sdi.qty) as qty,
+          SUM(sdi.amount) as amount
+        FROM sales_daily_items sdi
+        JOIN articulos a ON sdi.article_id = a.id 
+                        AND sdi.business_id = a.business_id
+        WHERE sdi.business_id = $1
+          AND a.codigo = $2
+          AND sdi.day >= $3::date
+          AND sdi.day <= $4::date
+        GROUP BY sdi.day
+        ORDER BY sdi.day
+      `;
+      queryParams = [businessId, codigo, from, to];
+    } else if (groupBy === 'week') {
+      salesQuery = `
+        SELECT 
+          date_trunc('week', sdi.day)::date::text as label,
+          SUM(sdi.qty) as qty,
+          SUM(sdi.amount) as amount
+        FROM sales_daily_items sdi
+        JOIN articulos a ON sdi.article_id = a.id 
+                        AND sdi.business_id = a.business_id
+        WHERE sdi.business_id = $1
+          AND a.codigo = $2
+          AND sdi.day >= $3::date
+          AND sdi.day <= $4::date
+        GROUP BY date_trunc('week', sdi.day)
+        ORDER BY date_trunc('week', sdi.day)
+      `;
+      queryParams = [businessId, codigo, from, to];
+    } else if (groupBy === 'month') {
+      salesQuery = `
+        SELECT 
+          date_trunc('month', sdi.day)::date::text as label,
+          SUM(sdi.qty) as qty,
+          SUM(sdi.amount) as amount
+        FROM sales_daily_items sdi
+        JOIN articulos a ON sdi.article_id = a.id 
+                        AND sdi.business_id = a.business_id
+        WHERE sdi.business_id = $1
+          AND a.codigo = $2
+          AND sdi.day >= $3::date
+          AND sdi.day <= $4::date
+        GROUP BY date_trunc('month', sdi.day)
+        ORDER BY date_trunc('month', sdi.day)
+      `;
+      queryParams = [businessId, codigo, from, to];
+    } else {
+      return res.status(400).json({ 
+        error: 'invalid_group_by',
+        valid_values: ['day', 'week', 'month']
+      });
+    }
+
+    const salesResult = await query(salesQuery, queryParams);
+
+    const items = salesResult.rows.map(row => ({
+      label: row.label,
+      qty: parseInt(row.qty || 0, 10),
+      amount: parseFloat(row.amount || 0)
+    }));
+
+    const total = items.reduce((sum, item) => sum + item.qty, 0);
+
+    return res.json({ total, items });
+
+  } catch (err) {
+    console.error('[salesSeriesFromDB] Error:', err);
+    return next(err);
+  }
+}
 
 // ============================ CHANGE SETS (INSUMOS) ============================
 
