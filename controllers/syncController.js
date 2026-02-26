@@ -254,7 +254,7 @@ async function upsertArticles({ client, businessId, items }) {
 exports.syncNow = async (req, res) => {
   const biz = req.business;
   const userId = req.user?.id; // 🆕 Capturamos el user_id
-  
+
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
   const { scope = 'articles', from, to } = req.body || {};
@@ -351,7 +351,7 @@ exports.syncNow = async (req, res) => {
       cacheHash,
       auto_assigned: autoAssigned // 🆕
     });
-    
+
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     const msg = String(e?.message || '');
@@ -368,29 +368,92 @@ exports.syncNow = async (req, res) => {
   }
 };
 
-  /**
-   * GET /businesses/:id/articles (lista plana)
-   */
-  exports.listArticlesFromDB = async (req, res) => {
-    const biz = req.business;
-    if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+/**
+ * GET /businesses/:id/articles (lista plana)
+ */
+exports.listArticlesFromDB = async (req, res) => {
+  const biz = req.business;
+  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
-    // Si el negocio tiene agrupaciones movidas (es principal/organización),
-    // devolver solo los artículos de las agrupaciones activas restantes
-    const { rows: movedCheck } = await pool.query(
-      `SELECT 1 FROM agrupaciones WHERE business_id = $1 AND moved_to_business_id IS NOT NULL LIMIT 1`,
+  // Si el negocio tiene agrupaciones movidas (es principal/organización),
+  // devolver solo los artículos de las agrupaciones activas restantes
+  const { rows: movedCheck } = await pool.query(
+    `SELECT 1 FROM agrupaciones WHERE business_id = $1 AND moved_to_business_id IS NOT NULL LIMIT 1`,
+    [biz.id]
+  );
+  const hasMovedGroups = movedCheck.length > 0;
+
+  if (hasMovedGroups) {
+    // Recopilar IDs activos de agrupaciones sin moved_to_business_id
+    const { rows: agRows } = await pool.query(
+      `SELECT articulos, app_articles_ids FROM agrupaciones
+         WHERE business_id = $1 AND moved_to_business_id IS NULL`,
       [biz.id]
     );
-    const hasMovedGroups = movedCheck.length > 0;
+    const activeIds = new Set();
+    for (const ag of agRows) {
+      const arts = Array.isArray(ag.articulos) ? ag.articulos :
+        (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids :
+        (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+      for (const a of arts) {
+        const id = Number(a?.id ?? a?.articulo_id ?? a);
+        if (id > 0) activeIds.add(id);
+      }
+      for (const id of appIds) {
+        const n = Number(typeof id === 'string' ? id.replace(/"/g, '') : id);
+        if (n > 0) activeIds.add(n);
+      }
+    }
+    if (activeIds.size === 0) return res.json({ items: [] });
 
+    const idList = Array.from(activeIds);
+    const { rows } = await pool.query(`
+        SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+        FROM public.maxi_articles
+        WHERE business_id = $1 AND articulo_id = ANY($2::int[])
+        ORDER BY categoria, subrubro, nombre
+      `, [biz.id, idList]);
+    return res.json({ items: rows });
+  }
+
+  // Negocio normal: devolver todos sus artículos
+  const { rows } = await pool.query(`
+      SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+      FROM public.maxi_articles
+      WHERE business_id = $1
+      ORDER BY categoria, subrubro, nombre
+    `, [biz.id]);
+  res.json({ items: rows });
+};
+
+/**
+ * GET /businesses/:id/articles/tree (subrubro > categoría > artículos)
+ */
+exports.listArticlesTreeFromDB = async (req, res) => {
+  const biz = req.business;
+  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+  try {
+    // Si el negocio tiene agrupaciones con moved_to_business_id (es organización principal
+    // cuyos grupos fueron convertidos a subnegocios), solo mostrar artículos de
+    // agrupaciones activas (sin moved_to_business_id). Si no tiene ninguna activa
+    // con artículos, devolver tree vacío — el contenido vive en los subnegocios.
+    const { rows: agRows } = await pool.query(`
+        SELECT id, nombre, articulos, app_articles_ids
+        FROM agrupaciones
+        WHERE business_id = $1 AND moved_to_business_id IS NULL
+      `, [biz.id]);
+
+    const hasMovedGroups = (await pool.query(
+      `SELECT 1 FROM agrupaciones WHERE business_id = $1 AND moved_to_business_id IS NOT NULL LIMIT 1`,
+      [biz.id]
+    )).rows.length > 0;
+
+    // Si tiene agrupaciones movidas (es negocio principal/organización),
+    // construir el tree solo con los artículos de las agrupaciones activas restantes
     if (hasMovedGroups) {
-      // Recopilar IDs activos de agrupaciones sin moved_to_business_id
-      const { rows: agRows } = await pool.query(
-        `SELECT articulos, app_articles_ids FROM agrupaciones
-         WHERE business_id = $1 AND moved_to_business_id IS NULL`,
-        [biz.id]
-      );
-      const activeIds = new Set();
+      // Recopilar IDs de artículos en agrupaciones activas
+      const activeArticleIds = new Set();
       for (const ag of agRows) {
         const arts = Array.isArray(ag.articulos) ? ag.articulos :
           (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
@@ -398,120 +461,27 @@ exports.syncNow = async (req, res) => {
           (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
         for (const a of arts) {
           const id = Number(a?.id ?? a?.articulo_id ?? a);
-          if (id > 0) activeIds.add(id);
+          if (id > 0) activeArticleIds.add(id);
         }
         for (const id of appIds) {
-          const n = Number(typeof id === 'string' ? id.replace(/"/g, '') : id);
-          if (n > 0) activeIds.add(n);
+          const n = Number(id);
+          if (n > 0) activeArticleIds.add(n);
         }
       }
-      if (activeIds.size === 0) return res.json({ items: [] });
 
-      const idList = Array.from(activeIds);
+      if (activeArticleIds.size === 0) {
+        // Negocio principal completamente vacío → devolver tree vacío
+        return res.json({ ok: true, resumen: { subrubros: 0, categorias: 0, articulos: 0 }, tree: [] });
+      }
+
+      // Solo cargar artículos que están en agrupaciones activas
+      const idList = Array.from(activeArticleIds);
       const { rows } = await pool.query(`
-        SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
-        FROM public.maxi_articles
-        WHERE business_id = $1 AND articulo_id = ANY($2::int[])
-        ORDER BY categoria, subrubro, nombre
-      `, [biz.id, idList]);
-      return res.json({ items: rows });
-    }
-
-    // Negocio normal: devolver todos sus artículos
-    const { rows } = await pool.query(`
-      SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
-      FROM public.maxi_articles
-      WHERE business_id = $1
-      ORDER BY categoria, subrubro, nombre
-    `, [biz.id]);
-    res.json({ items: rows });
-  };
-
-  /**
-   * GET /businesses/:id/articles/tree (subrubro > categoría > artículos)
-   */
-  exports.listArticlesTreeFromDB = async (req, res) => {
-    const biz = req.business;
-    if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
-    try {
-      // Si el negocio tiene agrupaciones con moved_to_business_id (es organización principal
-      // cuyos grupos fueron convertidos a subnegocios), solo mostrar artículos de
-      // agrupaciones activas (sin moved_to_business_id). Si no tiene ninguna activa
-      // con artículos, devolver tree vacío — el contenido vive en los subnegocios.
-      const { rows: agRows } = await pool.query(`
-        SELECT id, nombre, articulos, app_articles_ids
-        FROM agrupaciones
-        WHERE business_id = $1 AND moved_to_business_id IS NULL
-      `, [biz.id]);
-
-      const hasMovedGroups = (await pool.query(
-        `SELECT 1 FROM agrupaciones WHERE business_id = $1 AND moved_to_business_id IS NOT NULL LIMIT 1`,
-        [biz.id]
-      )).rows.length > 0;
-
-      // Si tiene agrupaciones movidas (es negocio principal/organización),
-      // construir el tree solo con los artículos de las agrupaciones activas restantes
-      if (hasMovedGroups) {
-        // Recopilar IDs de artículos en agrupaciones activas
-        const activeArticleIds = new Set();
-        for (const ag of agRows) {
-          const arts = Array.isArray(ag.articulos) ? ag.articulos :
-            (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
-          const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids :
-            (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
-          for (const a of arts) {
-            const id = Number(a?.id ?? a?.articulo_id ?? a);
-            if (id > 0) activeArticleIds.add(id);
-          }
-          for (const id of appIds) {
-            const n = Number(id);
-            if (n > 0) activeArticleIds.add(n);
-          }
-        }
-
-        if (activeArticleIds.size === 0) {
-          // Negocio principal completamente vacío → devolver tree vacío
-          return res.json({ ok: true, resumen: { subrubros: 0, categorias: 0, articulos: 0 }, tree: [] });
-        }
-
-        // Solo cargar artículos que están en agrupaciones activas
-        const idList = Array.from(activeArticleIds);
-        const { rows } = await pool.query(`
           SELECT articulo_id, nombre, categoria, subrubro, precio
           FROM public.maxi_articles
           WHERE business_id = $1 AND articulo_id = ANY($2::int[])
           ORDER BY subrubro, categoria, nombre
         `, [biz.id, idList]);
-
-        const bySub = new Map();
-        for (const r of rows) {
-          const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
-          const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
-          if (!bySub.has(sub)) bySub.set(sub, new Map());
-          const byCat = bySub.get(sub);
-          if (!byCat.has(cat)) byCat.set(cat, []);
-          byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
-        }
-
-        const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
-          subrubro,
-          categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos })),
-        }));
-        const resumen = {
-          subrubros: tree.length,
-          categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
-          articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
-        };
-        return res.json({ ok: true, resumen, tree });
-      }
-
-      // Negocio normal (sin subnegocios): devolver todos sus artículos
-      const { rows } = await pool.query(`
-        SELECT articulo_id, nombre, categoria, subrubro, precio
-        FROM public.maxi_articles
-        WHERE business_id = $1
-        ORDER BY subrubro, categoria, nombre
-      `, [biz.id]);
 
       const bySub = new Map();
       for (const r of rows) {
@@ -532,61 +502,91 @@ exports.syncNow = async (req, res) => {
         categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
         articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
       };
-      res.json({ ok: true, resumen, tree });
-    } catch (e) {
-      console.error('listArticlesTreeFromDB error:', e);
-      res.status(500).json({ error: 'internal', detail: e.message });
+      return res.json({ ok: true, resumen, tree });
     }
-  };
 
-  /**
-   * GET /businesses/:id/maxi-articles-proxy?from=YYYY-MM-DD&to=YYYY-MM-DD
-   */
-  exports.maxiArticlesProxy = async (req, res) => {
+    // Negocio normal (sin subnegocios): devolver todos sus artículos
+    const { rows } = await pool.query(`
+        SELECT articulo_id, nombre, categoria, subrubro, precio
+        FROM public.maxi_articles
+        WHERE business_id = $1
+        ORDER BY subrubro, categoria, nombre
+      `, [biz.id]);
+
+    const bySub = new Map();
+    for (const r of rows) {
+      const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
+      const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
+      if (!bySub.has(sub)) bySub.set(sub, new Map());
+      const byCat = bySub.get(sub);
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
+    }
+
+    const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
+      subrubro,
+      categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos })),
+    }));
+    const resumen = {
+      subrubros: tree.length,
+      categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
+      articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
+    };
+    res.json({ ok: true, resumen, tree });
+  } catch (e) {
+    console.error('listArticlesTreeFromDB error:', e);
+    res.status(500).json({ error: 'internal', detail: e.message });
+  }
+};
+
+/**
+ * GET /businesses/:id/maxi-articles-proxy?from=YYYY-MM-DD&to=YYYY-MM-DD
+ */
+exports.maxiArticlesProxy = async (req, res) => {
+  const biz = req.business;
+  if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+
+  const today = new Date();
+  const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
+  const from = ymd(parseDate(req.query.from, startOfMonth));
+  const to = ymd(parseDate(req.query.to, yesterday));
+
+  try {
+    const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
+    const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || mx.pass || '');
+    if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+
+    const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
+    const { items } = await fetchMaxiArticles({ token, from, to });
+    res.json({ from, to, items });
+  } catch (e) {
+    console.error('maxiArticlesProxy error:', e);
+    res.status(500).json({ error: 'internal', detail: e.message });
+  }
+};
+
+// controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
+
+/* salesSummaryFromDB - versión top-N agregada (usa columnas reales) */
+exports.salesSummaryFromDB = async (req, res, next) => {
+  try {
     const biz = req.business;
-    if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
+    const { from, to, limit = 50, q } = req.query;
 
-    const today = new Date();
-    const startOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-    const yesterday = addDays(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())), -1);
-    const from = ymd(parseDate(req.query.from, startOfMonth));
-    const to = ymd(parseDate(req.query.to, yesterday));
 
-    try {
-      const mx = (biz?.props || {}).maxi || (biz?.props || {}).maxi_credentials || {};
-      const password = mx.pass_enc ? decryptSecretCompat(mx.pass_enc) : (mx.password || mx.pass || '');
-      if (!(mx.email && password && mx.codcli)) return res.status(400).json({ error: 'maxi_not_configured' });
+    const fromYmd = String(from || '').slice(0, 10);
+    const toYmd = String(to || '').slice(0, 10);
 
-      const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
-      const { items } = await fetchMaxiArticles({ token, from, to });
-      res.json({ from, to, items });
-    } catch (e) {
-      console.error('maxiArticlesProxy error:', e);
-      res.status(500).json({ error: 'internal', detail: e.message });
+    if (!fromYmd || !toYmd) {
+      return res.status(400).json({ ok: false, error: 'from_to_required' });
     }
-  };
 
-  // controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
+    const lim = Number(limit) || 50;
+    const search = (q && String(q).trim()) || null;
 
-  /* salesSummaryFromDB - versión top-N agregada (usa columnas reales) */
-  exports.salesSummaryFromDB = async (req, res, next) => {
-    try {
-      const biz = req.business;
-      const { from, to, limit = 50, q } = req.query;
-
-
-      const fromYmd = String(from || '').slice(0, 10);
-      const toYmd = String(to || '').slice(0, 10);
-
-      if (!fromYmd || !toYmd) {
-        return res.status(400).json({ ok: false, error: 'from_to_required' });
-      }
-
-      const lim = Number(limit) || 50;
-      const search = (q && String(q).trim()) || null;
-
-      /* Totales por día desde sales_daily */
-      const sqlTotals = `
+    /* Totales por día desde sales_daily */
+    const sqlTotals = `
   SELECT
     COALESCE(SUM(total), 0)::numeric AS total,
     COALESCE(SUM(tx_count), 0)::int  AS tx_count
@@ -594,25 +594,25 @@ exports.syncNow = async (req, res) => {
   WHERE business_id = $1
     AND day BETWEEN $2::date AND $3::date
 `;
-      const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
-      const total = Number(totRows[0]?.total || 0);
-      const txCount = Number(totRows[0]?.tx_count || 0);
+    const { rows: totRows } = await pool.query(sqlTotals, [biz.id, fromYmd, toYmd]);
+    const total = Number(totRows[0]?.total || 0);
+    const txCount = Number(totRows[0]?.tx_count || 0);
 
-      const params = [biz.id, fromYmd, toYmd];
-      let whereExtra = '';
+    const params = [biz.id, fromYmd, toYmd];
+    let whereExtra = '';
 
-      if (search) {
-        params.push(`%${search}%`);
-        const pIdx = params.length;
-        whereExtra = `
+    if (search) {
+      params.push(`%${search}%`);
+      const pIdx = params.length;
+      whereExtra = `
     AND (
       COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text))
       ILIKE $${pIdx}
     )
   `;
-      }
+    }
 
-      const sqlItems = `
+    const sqlItems = `
 
 
 SELECT
@@ -638,51 +638,51 @@ LIMIT ${lim};
 `;
 
 
-      const { rows } = await pool.query(sqlItems, params);
+    const { rows } = await pool.query(sqlItems, params);
 
-      return res.json({
-        ok: true,
-        business_id: biz.id,
-        from: fromYmd,
-        to: toYmd,
-        total,
-        tx_count: txCount,
-        limit: lim,
-        items: rows.map((r) => ({
-          article_id: r.article_id,
-          article_title: r.nombre || '',
-          rubro: r.rubro || '',
-          subrubro: r.subrubro || '',
-          qty: Number(r.qty || 0),
-          amount: Number(r.amount || 0),
-        })),
-      });
-
-
-    } catch (e) {
-      next(e);
-    }
-  };
+    return res.json({
+      ok: true,
+      business_id: biz.id,
+      from: fromYmd,
+      to: toYmd,
+      total,
+      tx_count: txCount,
+      limit: lim,
+      items: rows.map((r) => ({
+        article_id: r.article_id,
+        article_title: r.nombre || '',
+        rubro: r.rubro || '',
+        subrubro: r.subrubro || '',
+        qty: Number(r.qty || 0),
+        amount: Number(r.amount || 0),
+      })),
+    });
 
 
-  /**
-   * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
-   *
-   * Serie por ARTÍCULO usando sales_daily_items:
-   * {
-   *   ok, business_id, articulo_id, from, to, groupBy,
-   *   total,
-   *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
-   * }
-   */
- exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
+  } catch (e) {
+    next(e);
+  }
+};
+
+
+/**
+ * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
+ *
+ * Serie por ARTÍCULO usando sales_daily_items:
+ * {
+ *   ok, business_id, articulo_id, from, to, groupBy,
+ *   total,
+ *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
+ * }
+ */
+exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
   try {
     const businessId = parseInt(req.params.id, 10);
     const articuloId = parseInt(req.params.articuloId, 10);
     const { from, to, groupBy = 'day' } = req.query;
 
     if (!businessId || !articuloId || !from || !to) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'missing_params',
         required: ['businessId', 'articuloId', 'from', 'to']
       });
@@ -701,7 +701,7 @@ LIMIT ${lim};
     }
 
     const article = articleResult.rows[0];
-    const codigo = article.codigo;
+    const codigo = articleResult.rows[0].codigo;
 
     if (!codigo) {
       return res.json({ total: 0, items: [] });
@@ -713,19 +713,19 @@ LIMIT ${lim};
 
     if (groupBy === 'day') {
       salesQuery = `
-        SELECT 
-          sdi.day::text as label,
-          SUM(sdi.qty) as qty,
-          SUM(sdi.amount) as amount
-        FROM sales_daily_items sdi
-        JOIN articulos a ON sdi.article_id = a.id 
-                        AND sdi.business_id = a.business_id
-        WHERE sdi.business_id = $1
-          AND a.codigo = $2
-          AND sdi.day >= $3::date
-          AND sdi.day <= $4::date
-        GROUP BY sdi.day
-        ORDER BY sdi.day
+       SELECT 
+    sdi.day::text as label,
+    SUM(sdi.qty) as qty,
+    SUM(sdi.amount) as amount
+  FROM sales_daily_items sdi
+  JOIN app_articles a ON sdi.article_id = a.id 
+                      AND sdi.business_id = a.business_id
+  WHERE sdi.business_id = $1
+    AND a.codigo = $2
+    AND sdi.day >= $3::date
+    AND sdi.day <= $4::date
+  GROUP BY sdi.day
+  ORDER BY sdi.day
       `;
       queryParams = [businessId, codigo, from, to];
     } else if (groupBy === 'week') {
@@ -763,7 +763,7 @@ LIMIT ${lim};
       `;
       queryParams = [businessId, codigo, from, to];
     } else {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'invalid_group_by',
         valid_values: ['day', 'week', 'month']
       });
@@ -785,7 +785,7 @@ LIMIT ${lim};
     console.error('[salesSeriesFromDB] Error:', err);
     return next(err);
   }
-} 
+}
 
 // ============================ CHANGE SETS (INSUMOS) ============================
 
@@ -910,7 +910,7 @@ exports.detectInsumosChanges = async (req, res) => {
       summary: cs.summary,
     });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[detectInsumosChanges] error:', e);
     return res.status(500).json({ error: 'internal', detail: e.message });
   } finally {
