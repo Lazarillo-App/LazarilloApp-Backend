@@ -577,100 +577,141 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const { from, to, limit = 50, q } = req.query;
 
     const fromYmd = String(from || '').slice(0, 10);
-    const toYmd   = String(to   || '').slice(0, 10);
+    const toYmd = String(to || '').slice(0, 10);
 
     if (!fromYmd || !toYmd) {
       return res.status(400).json({ ok: false, error: 'from_to_required' });
     }
 
-    const lim    = Number(limit) || 50;
+    const lim = Number(limit) || 50;
     const search = (q && String(q).trim()) || null;
 
-    // ✅ Si es subnegocio (from_group), leer ventas del negocio raíz
+    // ── Resolver negocio raíz si es subnegocio (from_group) ──────────────────
     let salesBizId = biz.id;
+    let subArticleIds = null; // null = sin filtro (negocio principal)
+
     if (biz.created_from === 'from_group' && biz.organization_id) {
       const { rows: rootRows } = await pool.query(
         `SELECT id FROM app_businesses
-          WHERE organization_id = $1
-            AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-          ORDER BY id ASC LIMIT 1`,
+         WHERE organization_id = $1
+           AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
+         ORDER BY id ASC LIMIT 1`,
         [biz.organization_id]
       );
       if (rootRows.length) {
         salesBizId = rootRows[0].id;
-        console.log(`[salesSummaryFromDB] Subnegocio ${biz.id} → ventas del negocio raíz ${salesBizId}`);
+        console.log(`[salesSummaryFromDB] Subnegocio ${biz.id} → ventas en negocio raíz ${salesBizId}`);
       }
+
+      // Obtener los article_ids de las agrupaciones de este subnegocio
+      const { rows: agrupRows } = await pool.query(
+        `SELECT articulos FROM agrupaciones WHERE business_id = $1`,
+        [biz.id]
+      );
+      const ids = new Set();
+      for (const row of agrupRows) {
+        const arr = Array.isArray(row.articulos)
+          ? row.articulos
+          : (typeof row.articulos === 'string' ? JSON.parse(row.articulos) : []);
+        for (const item of arr) {
+          const id = Number(item?.id ?? item);
+          if (Number.isFinite(id) && id > 0) ids.add(id);
+        }
+      }
+      subArticleIds = ids.size > 0 ? Array.from(ids) : [];
+      console.log(`[salesSummaryFromDB] Subnegocio ${biz.id} filtra ${subArticleIds.length} artículos`);
     }
 
-    /* Totales desde sales_daily (usando salesBizId) */
-    const { rows: totRows } = await pool.query(`
-      SELECT
-        COALESCE(SUM(total),    0)::numeric AS total,
-        COALESCE(SUM(tx_count), 0)::int     AS tx_count
-      FROM sales_daily
-      WHERE business_id = $1
-        AND day BETWEEN $2::date AND $3::date
-    `, [salesBizId, fromYmd, toYmd]);
-
-    const total   = Number(totRows[0]?.total    || 0);
+    /* Totales por día desde sales_daily */
+    const { rows: totRows } = await pool.query(
+      `SELECT
+        COALESCE(SUM(total), 0)::numeric AS total,
+        COALESCE(SUM(tx_count), 0)::int  AS tx_count
+       FROM sales_daily
+       WHERE business_id = $1
+         AND day BETWEEN $2::date AND $3::date`,
+      [salesBizId, fromYmd, toYmd]
+    );
+    const total = Number(totRows[0]?.total || 0);
     const txCount = Number(totRows[0]?.tx_count || 0);
 
-    // $1=salesBizId (ventas), $2/$3=fechas, $4=biz.id (nombres/categorías del subnegocio)
-    const params = [salesBizId, fromYmd, toYmd, biz.id];
+    const params = [salesBizId, fromYmd, toYmd];
     let whereExtra = '';
+
+    // Filtro por artículos del subnegocio
+    if (subArticleIds !== null) {
+      if (subArticleIds.length === 0) {
+        // Subnegocio sin artículos asignados → devolver vacío
+        return res.json({
+          ok: true,
+          business_id: biz.id,
+          sales_biz_id: salesBizId,
+          from: fromYmd,
+          to: toYmd,
+          total: 0,
+          tx_count: 0,
+          limit: lim,
+          items: [],
+        });
+      }
+      params.push(subArticleIds);
+      whereExtra += `\nAND s.article_id = ANY($${params.length}::int[])`;
+    }
 
     if (search) {
       params.push(`%${search}%`);
-      whereExtra = `
-        AND (
-          COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text))
-          ILIKE $${params.length}
-        )
-      `;
+      whereExtra += `
+    AND (
+      COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text))
+      ILIKE $${params.length}
+    )`;
     }
 
     const sqlItems = `
-      SELECT
-        s.article_id,
-        COALESCE(MAX(ma.nombre),    MAX(a.name),        'Artículo #' || s.article_id::text) AS nombre,
-        COALESCE(MAX(ma.categoria), MAX(m.categoria), MAX(c.nombre), '[PENDIENTE]')         AS rubro,
-        COALESCE(MAX(ma.subrubro),  MAX(m.subrubro),  MAX(sr.nombre), '[PENDIENTE]')        AS subrubro,
-        SUM(s.qty)::numeric    AS qty,
-        SUM(s.amount)::numeric AS amount
-      FROM sales_daily_items s
-      LEFT JOIN maxi_articles    ma ON ma.business_id = $4 AND ma.articulo_id = s.article_id
-      LEFT JOIN maxi_article_map m  ON  m.business_id = $4 AND  m.articulo_id = s.article_id
-      LEFT JOIN app_articles     a  ON  a.business_id = $4 AND  a.id          = s.article_id
-      LEFT JOIN categorias       c  ON  c.id = a.categoria_id
-      LEFT JOIN subrubros        sr ON sr.id = a.subrubro_id
-      WHERE s.business_id = $1
-        AND s.day BETWEEN $2::date AND $3::date
-        AND COALESCE(NULLIF(s.article_id::text,''), '0')::bigint <> 0
-      ${whereExtra}
-      GROUP BY s.article_id
-      ORDER BY qty DESC
-      LIMIT ${lim}
-    `;
+SELECT
+  s.article_id,
+  COALESCE(MAX(ma.nombre), MAX(a.name), 'Artículo #' || s.article_id::text) AS nombre,
+  COALESCE(MAX(ma.categoria), MAX(m.categoria), MAX(c.nombre), '[PENDIENTE]') AS rubro,
+  COALESCE(MAX(ma.subrubro), MAX(m.subrubro), MAX(sr.nombre), '[PENDIENTE]') AS subrubro,
+  SUM(s.qty)::numeric    AS qty,
+  SUM(s.amount)::numeric AS amount
+FROM sales_daily_items s
+LEFT JOIN maxi_articles   ma ON ma.business_id = s.business_id AND ma.articulo_id = s.article_id
+LEFT JOIN maxi_article_map m  ON m.business_id  = s.business_id AND m.articulo_id  = s.article_id
+LEFT JOIN app_articles     a  ON a.business_id  = s.business_id AND a.id           = s.article_id
+LEFT JOIN categorias       c  ON c.id = a.categoria_id
+LEFT JOIN subrubros        sr ON sr.id = a.subrubro_id
+WHERE s.business_id = $1
+  AND s.day BETWEEN $2::date AND $3::date
+  AND COALESCE(NULLIF(s.article_id::text,''), '0')::bigint <> 0
+${whereExtra}
+GROUP BY s.article_id
+ORDER BY qty DESC
+LIMIT ${lim};
+`;
+
 
     const { rows } = await pool.query(sqlItems, params);
 
     return res.json({
       ok: true,
       business_id: biz.id,
+      sales_biz_id: salesBizId,
       from: fromYmd,
-      to:   toYmd,
+      to: toYmd,
       total,
       tx_count: txCount,
       limit: lim,
-      items: rows.map(r => ({
-        article_id:    r.article_id,
-        article_title: r.nombre   || '',
-        rubro:         r.rubro    || '',
-        subrubro:      r.subrubro || '',
-        qty:           Number(r.qty    || 0),
-        amount:        Number(r.amount || 0),
+      items: rows.map((r) => ({
+        article_id: r.article_id,
+        article_title: r.nombre || '',
+        rubro: r.rubro || '',
+        subrubro: r.subrubro || '',
+        qty: Number(r.qty || 0),
+        amount: Number(r.amount || 0),
       })),
     });
+
 
   } catch (e) {
     next(e);
@@ -681,8 +722,12 @@ exports.salesSummaryFromDB = async (req, res, next) => {
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
  *
- * Serie por ARTÍCULO usando sales_daily_items (maxi_articles).
- * Si el negocio es un subnegocio (from_group), redirige al negocio raíz para las ventas.
+ * Serie por ARTÍCULO usando sales_daily_items:
+ * {
+ *   ok, business_id, articulo_id, from, to, groupBy,
+ *   total,
+ *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
+ * }
  */
 exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
   try {
@@ -699,12 +744,15 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
 
     console.log('[salesSeriesFromDB] 📊 Consultando ventas:', { businessId, articuloId, from, to, groupBy });
 
-    // PASO 1: Resolver en qué negocio están las ventas
+    // PASO 1: Resolver en qué negocio están realmente las ventas.
+    // Si es un subnegocio (from_group), las ventas están en el negocio raíz de la organización.
     const { rows: bizRows } = await pool.query(
       `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`,
       [businessId]
     );
-    if (!bizRows.length) return res.status(404).json({ error: 'business_not_found' });
+    if (!bizRows.length) {
+      return res.status(404).json({ error: 'business_not_found' });
+    }
     const biz = bizRows[0];
 
     let salesBizId = businessId;
@@ -722,7 +770,9 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
       }
     }
 
-    // PASO 2: Nombre del artículo desde maxi_articles (buscamos en ambos negocios)
+    // PASO 2: Obtener el nombre del artículo desde maxi_articles.
+    // Buscamos en el negocio donde están las ventas (salesBizId) y también en el negocio
+    // original (businessId) por si los artículos están cargados con otro business_id.
     const { rows: artRows } = await pool.query(
       `SELECT articulo_id AS id, nombre
        FROM maxi_articles
@@ -731,18 +781,28 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
        LIMIT 1`,
       [articuloId, [salesBizId, businessId]]
     );
+
     const articleNombre = artRows[0]?.nombre || `#${articuloId}`;
-    console.log(`[salesSeriesFromDB] ✅ Artículo ${articuloId}: "${articleNombre}", ventas en negocio ${salesBizId}`);
+    console.log(`[salesSeriesFromDB] ✅ Artículo ${articuloId}: "${articleNombre}", buscando ventas en negocio ${salesBizId}`);
 
-    // PASO 3: GROUP BY según parámetro
+    // PASO 3: Construir el GROUP BY según el parámetro
     let dateTrunc;
-    if      (groupBy === 'day')   dateTrunc = 'sdi.day::text';
-    else if (groupBy === 'week')  dateTrunc = `date_trunc('week',  sdi.day)::date::text`;
-    else if (groupBy === 'month') dateTrunc = `date_trunc('month', sdi.day)::date::text`;
-    else return res.status(400).json({ error: 'invalid_group_by', valid_values: ['day', 'week', 'month'] });
+    if (groupBy === 'day') {
+      dateTrunc = 'sdi.day::text';
+    } else if (groupBy === 'week') {
+      dateTrunc = `date_trunc('week', sdi.day)::date::text`;
+    } else if (groupBy === 'month') {
+      dateTrunc = `date_trunc('month', sdi.day)::date::text`;
+    } else {
+      return res.status(400).json({
+        error: 'invalid_group_by',
+        valid_values: ['day', 'week', 'month']
+      });
+    }
 
-    // PASO 4: Ventas por articulo_id directo en el negocio raíz
-    const { rows } = await pool.query(`
+    // PASO 4: Buscar ventas directamente por article_id en el negocio donde están las ventas.
+    // No hace falta ningún JOIN — article_id en sales_daily_items ES el articulo_id de maxi_articles.
+    const salesQuery = `
       SELECT
         ${dateTrunc} AS label,
         SUM(qty)     AS qty,
@@ -754,7 +814,9 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
         AND sdi.day <= $4::date
       GROUP BY label
       ORDER BY label
-    `, [salesBizId, articuloId, from, to]);
+    `;
+
+    const { rows } = await pool.query(salesQuery, [salesBizId, articuloId, from, to]);
 
     const items = rows.map(row => ({
       label:  row.label,
@@ -784,7 +846,7 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
     console.error('[salesSeriesFromDB] ❌ Error:', err);
     return next(err);
   }
-};
+}
 
 // ============================ CHANGE SETS (INSUMOS) ============================
 
