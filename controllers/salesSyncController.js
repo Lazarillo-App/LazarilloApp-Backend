@@ -41,9 +41,10 @@ async function resolveSalesBusiness(biz) {
 
   const salesBizId = rootRows[0]?.id ?? biz.id;
 
-  // Obtener los article_id del subnegocio desde sus agrupaciones
-  // Leemos de la columna "articulos" (jsonb de objetos {id, nombre...}) porque
-  // app_articles_ids no siempre está sincronizado cuando se mueven artículos
+  // Obtener los article_id del subnegocio SOLO desde sus agrupaciones.
+  // NO incluimos maxi_articles porque esa tabla tiene todos los artículos copiados
+  // del negocio raíz — usarla como filtro haría que se muestren TODAS las ventas
+  // del principal en vez de solo las del subnegocio.
   const { rows: artRows } = await pool.query(
     `SELECT DISTINCT (elem->>'id')::bigint AS article_id
        FROM agrupaciones,
@@ -51,11 +52,7 @@ async function resolveSalesBusiness(biz) {
       WHERE business_id = $1
         AND articulos IS NOT NULL
         AND articulos != '[]'::jsonb
-        AND (elem->>'id') IS NOT NULL
-      UNION
-     SELECT DISTINCT articulo_id AS article_id
-       FROM maxi_articles
-      WHERE business_id = $1`,
+        AND (elem->>'id') IS NOT NULL`,
     [biz.id]
   );
 
