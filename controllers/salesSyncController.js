@@ -41,10 +41,9 @@ async function resolveSalesBusiness(biz) {
 
   const salesBizId = rootRows[0]?.id ?? biz.id;
 
-  // Obtener los article_id del subnegocio SOLO desde sus agrupaciones.
-  // NO incluimos maxi_articles porque esa tabla tiene todos los artículos copiados
-  // del negocio raíz — usarla como filtro haría que se muestren TODAS las ventas
-  // del principal en vez de solo las del subnegocio.
+  // Obtener los article_id del subnegocio desde sus agrupaciones
+  // Leemos de la columna "articulos" (jsonb de objetos {id, nombre...}) porque
+  // app_articles_ids no siempre está sincronizado cuando se mueven artículos
   const { rows: artRows } = await pool.query(
     `SELECT DISTINCT (elem->>'id')::bigint AS article_id
        FROM agrupaciones,
@@ -52,7 +51,11 @@ async function resolveSalesBusiness(biz) {
       WHERE business_id = $1
         AND articulos IS NOT NULL
         AND articulos != '[]'::jsonb
-        AND (elem->>'id') IS NOT NULL`,
+        AND (elem->>'id') IS NOT NULL
+      UNION
+     SELECT DISTINCT articulo_id AS article_id
+       FROM maxi_articles
+      WHERE business_id = $1`,
     [biz.id]
   );
 
@@ -552,10 +555,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       GROUP BY sdi.day::date, sdi.article_id 
       ORDER BY sdi.day ASC, sdi.article_id ASC;
     `;
-console.log('[salesSummary DEBUG] articleFilter:', articleFilter);
-console.log('[salesSummary DEBUG] subBizArticleIds length:', subBizArticleIds?.length);
-console.log('[salesSummary DEBUG] params count:', params.length);
-console.log('[salesSummary DEBUG] params[4] sample:', Array.isArray(params[4]) ? params[4].slice(0,5) : params[4]);
+
     const { rows } = await pool.query(sql, params);
 
     // Headers CSV
@@ -729,9 +729,13 @@ exports.salesSummary = async (req, res, next) => {
     let groupFilter = '';
 
     // Filtro automático por artículos del subnegocio
-    if (subBizArticleIds) {
-      params.push(subBizArticleIds);
-      articleFilter = `AND sdi.article_id = ANY($${params.length})`;
+    // Expandimos los IDs como parámetros individuales en un IN(...)
+    // porque pg no siempre tipa bien un array JS pasado como ANY($N)
+    if (subBizArticleIds && subBizArticleIds.length > 0) {
+      const startIdx = params.length + 1;
+      subBizArticleIds.forEach(id => params.push(id));
+      const paramList = subBizArticleIds.map((_, i) => `$${startIdx + i}`).join(',');
+      articleFilter = `AND sdi.article_id IN (${paramList})`;
     }
 
     // Filtro por artículos específicos (del query, override del subnegocio)
@@ -793,10 +797,7 @@ exports.salesSummary = async (req, res, next) => {
       HAVING SUM(sdi.qty) > 0
       ORDER BY SUM(sdi.qty) DESC
     `;
-console.log('[salesSummary DEBUG] articleFilter:', articleFilter);
-console.log('[salesSummary DEBUG] subBizArticleIds length:', subBizArticleIds?.length);
-console.log('[salesSummary DEBUG] params count:', params.length);
-console.log('[salesSummary DEBUG] params[4] sample:', Array.isArray(params[4]) ? params[4].slice(0,5) : params[4]);
+
     const { rows } = await pool.query(sql, params);
 
     // Calcular totales globales
