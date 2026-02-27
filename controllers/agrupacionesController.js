@@ -122,27 +122,63 @@ exports.obtenerAgrupaciones = async (req, res) => {
 
     // ¿Es un subnegocio creado desde agrupación?
     const { rows: bizRows } = await pool.query(
-      'SELECT created_from FROM app_businesses WHERE id = $1',
+      'SELECT created_from, organization_id FROM app_businesses WHERE id = $1',
       [businessId]
     );
     const isSubBusiness = bizRows[0]?.created_from === 'from_group';
+    const organizationId = bizRows[0]?.organization_id;
 
     let agrupaciones = rows || [];
 
     if (isSubBusiness) {
+      // Filtrar las propias del subnegocio: sin Discontinuados, sin Sin Agrupación, sin movidas
       agrupaciones = agrupaciones.filter(ag => {
-        // Nunca mostrar Discontinuados en subnegocios
         if (isDiscontinuadosName(ag.nombre)) return false;
-        // Ocultar Sin Agrupación cuando está vacía
-        if (isTodoName(ag.nombre)) {
-          const arts = Array.isArray(ag.articulos) ? ag.articulos : [];
-          const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids : [];
-          if (arts.length === 0 && appIds.length === 0) return false;
-        }
-        // Ocultar movidas a otro subnegocio
+        if (isTodoName(ag.nombre)) return false;
         if (ag.moved_to_business_id) return false;
         return true;
       });
+
+      // Inyectar Sin Agrupación y Discontinuados del negocio principal de la org
+      if (organizationId) {
+        const { rows: principalRows } = await pool.query(
+          `SELECT id FROM app_businesses
+            WHERE organization_id = $1
+            ORDER BY created_at ASC
+            LIMIT 1`,
+          [organizationId]
+        );
+        const principalId = principalRows[0]?.id;
+
+        if (principalId && principalId !== businessId) {
+          const { rows: globalGroups } = await pool.query(
+            `SELECT id, nombre, business_id,
+                    COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos,
+                    app_articles_ids, is_temporary, moved_to_business_id
+               FROM agrupaciones
+              WHERE business_id = $1
+                AND (
+                  nombre ILIKE 'Sin Agrupac%'
+                  OR nombre ILIKE 'Sin Agrupar%'
+                  OR nombre ILIKE 'Discontinuados'
+                  OR nombre ILIKE 'Descontinuados'
+                )`,
+            [principalId]
+          );
+
+          // Marcar como global_from_principal para que el frontend lo sepa
+          const globalMarked = globalGroups.map(g => ({
+            ...g,
+            global_from_principal: true,
+            principal_business_id: principalId,
+          }));
+
+          // Agregar al inicio: primero Sin Agrupación, luego Discontinuados
+          const globalTodo = globalMarked.filter(g => isTodoName(g.nombre));
+          const globalDisc = globalMarked.filter(g => isDiscontinuadosName(g.nombre));
+          agrupaciones = [...globalTodo, ...agrupaciones, ...globalDisc];
+        }
+      }
     } else {
       // Negocio principal: ocultar las movidas a subnegocios
       agrupaciones = agrupaciones.filter(ag => !ag.moved_to_business_id);
