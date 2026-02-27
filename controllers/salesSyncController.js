@@ -552,7 +552,10 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       GROUP BY sdi.day::date, sdi.article_id 
       ORDER BY sdi.day ASC, sdi.article_id ASC;
     `;
-
+console.log('[salesSummary DEBUG] articleFilter:', articleFilter);
+console.log('[salesSummary DEBUG] subBizArticleIds length:', subBizArticleIds?.length);
+console.log('[salesSummary DEBUG] params count:', params.length);
+console.log('[salesSummary DEBUG] params[4] sample:', Array.isArray(params[4]) ? params[4].slice(0,5) : params[4]);
     const { rows } = await pool.query(sql, params);
 
     // Headers CSV
@@ -790,7 +793,10 @@ exports.salesSummary = async (req, res, next) => {
       HAVING SUM(sdi.qty) > 0
       ORDER BY SUM(sdi.qty) DESC
     `;
-
+console.log('[salesSummary DEBUG] articleFilter:', articleFilter);
+console.log('[salesSummary DEBUG] subBizArticleIds length:', subBizArticleIds?.length);
+console.log('[salesSummary DEBUG] params count:', params.length);
+console.log('[salesSummary DEBUG] params[4] sample:', Array.isArray(params[4]) ? params[4].slice(0,5) : params[4]);
     const { rows } = await pool.query(sql, params);
 
     // Calcular totales globales
