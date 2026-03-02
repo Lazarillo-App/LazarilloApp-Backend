@@ -51,4 +51,18 @@ function cacheJson(ttlSeconds = 60) {
   };
 }
 
-module.exports = { cacheJson };
+/**
+ * Invalida todas las entradas del caché que contengan el bizId en su key.
+ * Llamar después de operaciones que modifican artículos o agrupaciones.
+ */
+function invalidateCacheForBiz(bizId) {
+  if (!bizId) return;
+  const id = String(bizId);
+  for (const key of store.keys()) {
+    if (key.includes(`:${id}:`)) {
+      store.delete(key);
+    }
+  }
+}
+
+module.exports = { cacheJson, invalidateCacheForBiz };

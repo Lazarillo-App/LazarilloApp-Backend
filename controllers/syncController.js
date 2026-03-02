@@ -377,49 +377,9 @@ exports.listArticlesFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
-  // Si el negocio tiene agrupaciones movidas (es principal/organización),
-  // devolver solo los artículos de las agrupaciones activas restantes
-  const { rows: movedCheck } = await pool.query(
-    `SELECT 1 FROM agrupaciones WHERE business_id = $1 AND moved_to_business_id IS NOT NULL LIMIT 1`,
-    [biz.id]
-  );
-  const hasMovedGroups = movedCheck.length > 0;
-
-  if (hasMovedGroups) {
-    // Recopilar IDs activos de agrupaciones sin moved_to_business_id
-    const { rows: agRows } = await pool.query(
-      `SELECT articulos, app_articles_ids FROM agrupaciones
-         WHERE business_id = $1 AND moved_to_business_id IS NULL`,
-      [biz.id]
-    );
-    const activeIds = new Set();
-    for (const ag of agRows) {
-      const arts = Array.isArray(ag.articulos) ? ag.articulos :
-        (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
-      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids :
-        (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
-      for (const a of arts) {
-        const id = Number(a?.id ?? a?.articulo_id ?? a);
-        if (id > 0) activeIds.add(id);
-      }
-      for (const id of appIds) {
-        const n = Number(typeof id === 'string' ? id.replace(/"/g, '') : id);
-        if (n > 0) activeIds.add(n);
-      }
-    }
-    if (activeIds.size === 0) return res.json({ items: [] });
-
-    const idList = Array.from(activeIds);
-    const { rows } = await pool.query(`
-        SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
-        FROM public.maxi_articles
-        WHERE business_id = $1 AND articulo_id = ANY($2::int[])
-        ORDER BY categoria, subrubro, nombre
-      `, [biz.id, idList]);
-    return res.json({ items: rows });
-  }
-
-  // Negocio normal: devolver todos sus artículos
+  // Siempre devolver TODOS los artículos del negocio desde maxi_articles.
+  // El frontend calcula cuáles van en "Sin Agrupación" restando los que están
+  // en agrupaciones activas — no es responsabilidad del backend filtrar aquí.
   const { rows } = await pool.query(`
       SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
       FROM public.maxi_articles
@@ -436,78 +396,8 @@ exports.listArticlesTreeFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
   try {
-    // Si el negocio tiene agrupaciones con moved_to_business_id (es organización principal
-    // cuyos grupos fueron convertidos a subnegocios), solo mostrar artículos de
-    // agrupaciones activas (sin moved_to_business_id). Si no tiene ninguna activa
-    // con artículos, devolver tree vacío — el contenido vive en los subnegocios.
-    const { rows: agRows } = await pool.query(`
-        SELECT id, nombre, articulos, app_articles_ids
-        FROM agrupaciones
-        WHERE business_id = $1 AND moved_to_business_id IS NULL
-      `, [biz.id]);
-
-    const hasMovedGroups = (await pool.query(
-      `SELECT 1 FROM agrupaciones WHERE business_id = $1 AND moved_to_business_id IS NOT NULL LIMIT 1`,
-      [biz.id]
-    )).rows.length > 0;
-
-    // Si tiene agrupaciones movidas (es negocio principal/organización),
-    // construir el tree solo con los artículos de las agrupaciones activas restantes
-    if (hasMovedGroups) {
-      // Recopilar IDs de artículos en agrupaciones activas
-      const activeArticleIds = new Set();
-      for (const ag of agRows) {
-        const arts = Array.isArray(ag.articulos) ? ag.articulos :
-          (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
-        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids :
-          (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
-        for (const a of arts) {
-          const id = Number(a?.id ?? a?.articulo_id ?? a);
-          if (id > 0) activeArticleIds.add(id);
-        }
-        for (const id of appIds) {
-          const n = Number(id);
-          if (n > 0) activeArticleIds.add(n);
-        }
-      }
-
-      if (activeArticleIds.size === 0) {
-        // Negocio principal completamente vacío → devolver tree vacío
-        return res.json({ ok: true, resumen: { subrubros: 0, categorias: 0, articulos: 0 }, tree: [] });
-      }
-
-      // Solo cargar artículos que están en agrupaciones activas
-      const idList = Array.from(activeArticleIds);
-      const { rows } = await pool.query(`
-          SELECT articulo_id, nombre, categoria, subrubro, precio
-          FROM public.maxi_articles
-          WHERE business_id = $1 AND articulo_id = ANY($2::int[])
-          ORDER BY subrubro, categoria, nombre
-        `, [biz.id, idList]);
-
-      const bySub = new Map();
-      for (const r of rows) {
-        const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
-        const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
-        if (!bySub.has(sub)) bySub.set(sub, new Map());
-        const byCat = bySub.get(sub);
-        if (!byCat.has(cat)) byCat.set(cat, []);
-        byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
-      }
-
-      const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
-        subrubro,
-        categorias: Array.from(byCat.entries()).map(([categoria, articulos]) => ({ categoria, articulos })),
-      }));
-      const resumen = {
-        subrubros: tree.length,
-        categorias: tree.reduce((a, s) => a + (s.categorias?.length || 0), 0),
-        articulos: tree.reduce((a, s) => a + s.categorias.reduce((x, c) => x + (c.articulos?.length || 0), 0), 0),
-      };
-      return res.json({ ok: true, resumen, tree });
-    }
-
-    // Negocio normal (sin subnegocios): devolver todos sus artículos
+    // Siempre devolver TODOS los artículos del negocio.
+    // El frontend calcula qué va en Sin Agrupación restando los de agrupaciones activas.
     const { rows } = await pool.query(`
         SELECT articulo_id, nombre, categoria, subrubro, precio
         FROM public.maxi_articles

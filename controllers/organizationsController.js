@@ -1,5 +1,6 @@
 // controllers/organizationsController.js
 const pool = require('../config/db');
+const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 /* ══════════════════════════════════════════════════════════
    HELPERS
@@ -343,6 +344,11 @@ exports.createBusinessFromGroup = async (req, res, next) => {
     }
 
     await client.query('COMMIT');
+
+    // Invalidar caché del negocio principal y del nuevo subnegocio
+    invalidateCacheForBiz(sourceBizId);
+    invalidateCacheForBiz(newBiz.id);
+    console.log(`🗑️  [createBusinessFromGroup] Caché invalidada para negocio ${sourceBizId} y ${newBiz.id}`);
 
     return res.status(201).json({
       ok: true,
