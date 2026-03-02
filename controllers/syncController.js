@@ -377,15 +377,69 @@ exports.listArticlesFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
-  // Siempre devolver TODOS los artículos del negocio desde maxi_articles.
-  // El frontend calcula cuáles van en "Sin Agrupación" restando los que están
-  // en agrupaciones activas — no es responsabilidad del backend filtrar aquí.
-  const { rows } = await pool.query(`
-      SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
-      FROM public.maxi_articles
-      WHERE business_id = $1
-      ORDER BY categoria, subrubro, nombre
-    `, [biz.id]);
+  let articleIds = null; // null = todos
+
+  if (biz.created_from === 'from_group') {
+    // Subnegocio: solo artículos de sus propias agrupaciones
+    const { rows: agRows } = await pool.query(
+      `SELECT articulos, app_articles_ids FROM agrupaciones
+        WHERE business_id = $1 AND moved_to_business_id IS NULL`, [biz.id]
+    );
+    articleIds = new Set();
+    for (const ag of agRows) {
+      const arts = Array.isArray(ag.articulos) ? ag.articulos
+        : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+        : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+      for (const a of arts) { const id = Number(a?.id ?? a?.articulo_id ?? a); if (id > 0) articleIds.add(id); }
+      for (const id of appIds) { const n = Number(id); if (n > 0) articleIds.add(n); }
+    }
+  } else {
+    // Principal: excluir artículos que ya viven en subnegocios de la org
+    const { rows: subRows } = await pool.query(
+      `SELECT ag.articulos, ag.app_articles_ids
+         FROM agrupaciones ag
+         JOIN app_businesses sb ON sb.id = ag.business_id
+        WHERE sb.organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1)
+          AND sb.created_from = 'from_group'
+          AND ag.moved_to_business_id IS NULL`, [biz.id]
+    );
+    if (subRows.length > 0) {
+      const inSub = new Set();
+      for (const ag of subRows) {
+        const arts = Array.isArray(ag.articulos) ? ag.articulos
+          : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+          : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+        for (const a of arts) { const id = Number(a?.id ?? a?.articulo_id ?? a); if (id > 0) inSub.add(id); }
+        for (const id of appIds) { const n = Number(id); if (n > 0) inSub.add(n); }
+      }
+      const { rows: allIds } = await pool.query(
+        `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`, [biz.id]
+      );
+      articleIds = new Set(allIds.map(r => r.articulo_id).filter(id => !inSub.has(id)));
+    }
+  }
+
+  let rows;
+  if (articleIds === null) {
+    const r = await pool.query(
+      `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+         FROM public.maxi_articles WHERE business_id = $1
+         ORDER BY categoria, subrubro, nombre`, [biz.id]
+    );
+    rows = r.rows;
+  } else if (articleIds.size === 0) {
+    rows = [];
+  } else {
+    const r = await pool.query(
+      `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+         FROM public.maxi_articles
+        WHERE business_id = $1 AND articulo_id = ANY($2::int[])
+        ORDER BY categoria, subrubro, nombre`, [biz.id, Array.from(articleIds)]
+    );
+    rows = r.rows;
+  }
   res.json({ items: rows });
 };
 
@@ -396,14 +450,77 @@ exports.listArticlesTreeFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
   try {
-    // Siempre devolver TODOS los artículos del negocio.
-    // El frontend calcula qué va en Sin Agrupación restando los de agrupaciones activas.
-    const { rows } = await pool.query(`
-        SELECT articulo_id, nombre, categoria, subrubro, precio
-        FROM public.maxi_articles
-        WHERE business_id = $1
-        ORDER BY subrubro, categoria, nombre
-      `, [biz.id]);
+    let articleIds = null; // null = todos, Set = filtro
+
+    if (biz.created_from === 'from_group') {
+      // ── SUBNEGOCIO: solo artículos de sus propias agrupaciones ──
+      const { rows: agRows } = await pool.query(
+        `SELECT articulos, app_articles_ids FROM agrupaciones
+          WHERE business_id = $1 AND moved_to_business_id IS NULL`,
+        [biz.id]
+      );
+      articleIds = new Set();
+      for (const ag of agRows) {
+        const arts = Array.isArray(ag.articulos) ? ag.articulos
+          : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+          : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+        for (const a of arts) { const id = Number(a?.id ?? a?.articulo_id ?? a); if (id > 0) articleIds.add(id); }
+        for (const id of appIds) { const n = Number(id); if (n > 0) articleIds.add(n); }
+      }
+    } else {
+      // ── PRINCIPAL: excluir artículos que ya viven en subnegocios ──
+      const { rows: subRows } = await pool.query(
+        `SELECT ag.articulos, ag.app_articles_ids
+           FROM agrupaciones ag
+           JOIN app_businesses sb ON sb.id = ag.business_id
+          WHERE sb.organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1)
+            AND sb.created_from = 'from_group'
+            AND ag.moved_to_business_id IS NULL`,
+        [biz.id]
+      );
+      const inSubBiz = new Set();
+      for (const ag of subRows) {
+        const arts = Array.isArray(ag.articulos) ? ag.articulos
+          : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+          : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+        for (const a of arts) { const id = Number(a?.id ?? a?.articulo_id ?? a); if (id > 0) inSubBiz.add(id); }
+        for (const id of appIds) { const n = Number(id); if (n > 0) inSubBiz.add(n); }
+      }
+      // articleIds = null si no hay org/subnegocios (devuelve todo), sino excluye los del sub
+      if (subRows.length > 0) {
+        // Obtener todos los IDs del principal y filtrar los que están en sub
+        const { rows: allIds } = await pool.query(
+          `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`, [biz.id]
+        );
+        articleIds = new Set(allIds.map(r => r.articulo_id).filter(id => !inSubBiz.has(id)));
+      }
+    }
+
+    // Construir la query con el filtro
+    let rows;
+    if (articleIds === null) {
+      // Sin filtro — todos los artículos
+      const r = await pool.query(
+        `SELECT articulo_id, nombre, categoria, subrubro, precio
+           FROM public.maxi_articles WHERE business_id = $1
+           ORDER BY subrubro, categoria, nombre`, [biz.id]
+      );
+      rows = r.rows;
+    } else if (articleIds.size === 0) {
+      rows = [];
+    } else {
+      const idList = Array.from(articleIds);
+      const r = await pool.query(
+        `SELECT articulo_id, nombre, categoria, subrubro, precio
+           FROM public.maxi_articles
+          WHERE business_id = $1 AND articulo_id = ANY($2::int[])
+          ORDER BY subrubro, categoria, nombre`, [biz.id, idList]
+      );
+      rows = r.rows;
+    }
+
 
     const bySub = new Map();
     for (const r of rows) {
