@@ -28,6 +28,8 @@ exports.getMyOrganization = async (req, res, next) => {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
+    // Buscar la org a partir de CUALQUIER negocio del usuario que tenga organization_id
+    // (no solo el activo, para evitar que falle si el activo es un negocio sin org aún)
     const { rows } = await pool.query(
       `SELECT
          o.id,
@@ -50,14 +52,15 @@ exports.getMyOrganization = async (req, res, next) => {
              'created_at',           b.created_at
            ) ORDER BY b.created_at ASC
          ) AS businesses
-       FROM app_users u
-       JOIN app_businesses ab ON ab.id = u.active_business_id
-       JOIN organizations o   ON o.id  = ab.organization_id
-       JOIN app_businesses b  ON b.organization_id = o.id
+       FROM organizations o
+       -- Todos los negocios de la org que le pertenecen al usuario
+       JOIN app_businesses b ON b.organization_id = o.id
        LEFT JOIN user_businesses ub ON ub.business_id = b.id AND ub.user_id = $1
-       WHERE u.id = $1
-         AND (b.owner_id = $1 OR ub.user_id IS NOT NULL)
-       GROUP BY o.id`,
+       WHERE (b.owner_id = $1 OR ub.user_id IS NOT NULL)
+       GROUP BY o.id
+       -- Si tiene múltiples orgs, tomar la más reciente
+       ORDER BY o.created_at DESC
+       LIMIT 1`,
       [uid]
     );
 
