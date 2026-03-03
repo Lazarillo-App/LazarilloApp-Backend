@@ -101,7 +101,7 @@ exports.listar = async (req, res) => {
       where.push(`i.estado = $${params.length}`);
     }
 
-    // ✅ Filtro por agrupación específica (reemplazo insumos.id -> i.id / insumos.business_id -> i.business_id)
+    // ✅ Filtro por agrupación específica
     if (groupId) {
       params.push(Number(groupId));
       where.push(`

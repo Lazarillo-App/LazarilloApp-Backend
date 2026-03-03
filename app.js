@@ -123,6 +123,9 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 app.use('/api', authRequired, loadActiveBusiness);
 
 // módulos sin :businessId en la URL
+// Insumos: resolveInsumoBusiness redirige al principal para datos globales
+// Los grupos usan X-Business-Id header directamente (getBusinessId lo lee primero)
+// así que cada negocio opera sobre sus propios grupos sin problema
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/branches', branchesRoutes);
