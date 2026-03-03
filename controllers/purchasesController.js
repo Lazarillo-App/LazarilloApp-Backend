@@ -14,13 +14,18 @@ async function resolvePurchaseBusiness(bizId) {
   );
   const biz = rows[0];
   if (!biz) return bizId;
+  // Si no es subnegocio, es el principal directamente
   if (biz.created_from !== 'from_group' || !biz.organization_id) return bizId;
+  // Igual que resolveInsumoBusiness: principal = más antiguo con created_from != 'from_group'
   const { rows: rootRows } = await pool.query(
     `SELECT id FROM app_businesses
-       WHERE organization_id = $1
-         AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-       ORDER BY id ASC LIMIT 1`,
-    [biz.organization_id]
+       WHERE organization_id = (
+         SELECT organization_id FROM app_businesses WHERE id = $1
+       )
+       AND created_from != 'from_group'
+       ORDER BY created_at ASC
+       LIMIT 1`,
+    [bizId]
   );
   return rootRows[0]?.id ?? bizId;
 }
