@@ -134,6 +134,7 @@ exports.list = async (req, res, next) => {
       pool.query(
         `SELECT
            pi.id, pi.fecha,
+           pi.insumo_id,
            p.factura_key         AS factura,
            s.nombre              AS proveedor_nombre,
            s.cuit                AS proveedor_cuit,
