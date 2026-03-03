@@ -197,6 +197,12 @@ router.get(
   ensureFn('sales.salesSummary', sales.salesSummary)
 );
 
+/* ───────── Ventas: primera fecha con datos (para Histórico) ───────── */
+router.get(
+  '/:id/sales/first-date',
+  ensureFn('sales.getFirstSaleDate', sales.getFirstSaleDate)
+);
+
 /* ───────── Ventas legacy lectura (serie por artículo) ───────── */
 function requireNumericParam(paramName) {
   return (req, res, next) => {

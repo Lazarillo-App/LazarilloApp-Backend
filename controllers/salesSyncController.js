@@ -854,3 +854,30 @@ module.exports = {
   diagnosticRaw: exports.diagnosticRaw, 
   salesSummary: exports.salesSummary,
 };
+
+/* ══════════════════════════════════════════════════════════
+   GET /api/businesses/:id/sales/first-date
+   Devuelve la primera fecha con ventas del negocio (o del principal si es subnegocio).
+   Usado por el selector de calendario para el rango "Histórico".
+══════════════════════════════════════════════════════════ */
+exports.getFirstSaleDate = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    if (!biz?.id) return res.status(400).json({ error: 'no_business' });
+
+    const { salesBizId } = await resolveSalesBusiness(biz);
+
+    const { rows } = await pool.query(
+      `SELECT MIN(day)::date AS first_date
+         FROM sales_daily_items
+        WHERE business_id = $1`,
+      [salesBizId]
+    );
+
+    const firstDate = rows[0]?.first_date || null;
+
+    return res.json({ ok: true, first_date: firstDate, sales_biz_id: salesBizId });
+  } catch (e) {
+    next(e);
+  }
+};
