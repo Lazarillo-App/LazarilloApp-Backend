@@ -382,14 +382,37 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     await client.query('BEGIN');
     txOpen = true;
 
-    // 1) Crear registro importación
+    // Resolver subnegocio → principal para que las ventas siempre
+    // queden en el business_id correcto (donde las busca resolveSalesBusiness)
+    const { rows: bizRows } = await client.query(
+      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
+    );
+    const biz = bizRows[0] || { id: businessId, created_from: null, organization_id: null };
+    let salesBusinessId = businessId; // default: usar el que viene
+
+    if (biz.created_from === 'from_group' && biz.organization_id) {
+      const { rows: rootRows } = await client.query(
+        `SELECT id FROM app_businesses
+          WHERE organization_id = $1
+            AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
+          ORDER BY id ASC LIMIT 1`,
+        [biz.organization_id]
+      );
+      if (rootRows[0]?.id) {
+        salesBusinessId = rootRows[0].id;
+        console.log(`[CSV Import] Subnegocio ${businessId} → guardando ventas en principal ${salesBusinessId}`);
+      }
+    }
+
+    // 1) Crear registro importación (con el businessId original para trazabilidad,
+    //    pero las ventas en staging van con salesBusinessId)
     const { rows: [importRecord] } = await client.query(`
       INSERT INTO sales_csv_imports
         (business_id, user_id, filename, original_name, file_size, file_type, status)
       VALUES ($1, $2, $3, $4, $5, $6, 'processing')
       RETURNING id
     `, [
-      businessId,
+      salesBusinessId,
       userId,
       path.basename(filePath),
       originalName,
@@ -398,6 +421,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     ]);
 
     importId = importRecord.id;
+    businessId = salesBusinessId; // usar el principal para todo el resto del proceso
 
     if (VERBOSE_IMPORT_LOGS) {
       console.log(`[CSV Import] Iniciando importación #${importId} para business ${businessId}`);

@@ -41,21 +41,28 @@ async function resolveSalesBusiness(biz) {
 
   const salesBizId = rootRows[0]?.id ?? biz.id;
 
-  // Obtener los article_id del subnegocio desde sus agrupaciones
-  // Leemos de la columna "articulos" (jsonb de objetos {id, nombre...}) porque
-  // app_articles_ids no siempre está sincronizado cuando se mueven artículos
+  // Obtener los article_id del subnegocio SOLO desde sus agrupaciones.
+  // NO usar maxi_articles del subnegocio porque tiene copia completa del catálogo
+  // y causaría que se muestren todas las ventas del principal en el subnegocio.
+  // Las ventas de un subnegocio = únicamente artículos en sus agrupaciones propias.
   const { rows: artRows } = await pool.query(
     `SELECT DISTINCT (elem->>'id')::bigint AS article_id
        FROM agrupaciones,
-            jsonb_array_elements(articulos::jsonb) AS elem
+            jsonb_array_elements(
+              CASE WHEN articulos IS NOT NULL AND articulos::text != 'null'
+                   THEN articulos::jsonb ELSE '[]'::jsonb END
+            ) AS elem
       WHERE business_id = $1
-        AND articulos IS NOT NULL
-        AND articulos != '[]'::jsonb
+        AND moved_to_business_id IS NULL
         AND (elem->>'id') IS NOT NULL
+        AND (elem->>'id')::bigint > 0
       UNION
-     SELECT DISTINCT articulo_id AS article_id
-       FROM maxi_articles
-      WHERE business_id = $1`,
+     SELECT DISTINCT unnest(app_articles_ids) AS article_id
+       FROM agrupaciones
+      WHERE business_id = $1
+        AND moved_to_business_id IS NULL
+        AND app_articles_ids IS NOT NULL
+        AND array_length(app_articles_ids, 1) > 0`,
     [biz.id]
   );
 
@@ -496,10 +503,10 @@ exports.listDailyItems = async (req, res, next) => {
  */
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
   try {
-    const businessId = Number(req.params.id);
+    const rawBizId = Number(req.params.id);
     const { from, to, groupIds } = req.query;
 
-    if (!Number.isFinite(businessId)) {
+    if (!Number.isFinite(rawBizId)) {
       return res.status(400).json({ error: 'businessId inválido' });
     }
     if (!from || !to) {
@@ -508,10 +515,24 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       });
     }
 
-    const params = [businessId, from, to];
+    // Resolver subnegocio → principal (igual que listDailyItems)
+    const bizRow = await pool.query(
+      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`, [rawBizId]
+    );
+    const biz = bizRow.rows[0] || { id: rawBizId };
+    const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
+
+    const params = [salesBizId, from, to];
+    let articleFilter = '';
     let groupFilter = '';
 
-    // 🆕 Filtro por grupos si viene
+    // Filtro por artículos del subnegocio
+    if (subBizArticleIds) {
+      params.push(subBizArticleIds);
+      articleFilter = `AND sdi.article_id = ANY($${params.length})`;
+    }
+
+    // Filtro por grupos si viene
     if (groupIds) {
       const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
@@ -549,8 +570,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         ON aa.business_id = sdi.business_id
         AND aa.id = sdi.article_id
       WHERE sdi.business_id = $1
-        AND sdi.source = 'csv'
         AND sdi.day BETWEEN $2::date AND $3::date
+        ${articleFilter}
         ${groupFilter}
       GROUP BY sdi.day::date, sdi.article_id 
       ORDER BY sdi.day ASC, sdi.article_id ASC;
@@ -729,13 +750,9 @@ exports.salesSummary = async (req, res, next) => {
     let groupFilter = '';
 
     // Filtro automático por artículos del subnegocio
-    // Expandimos los IDs como parámetros individuales en un IN(...)
-    // porque pg no siempre tipa bien un array JS pasado como ANY($N)
-    if (subBizArticleIds && subBizArticleIds.length > 0) {
-      const startIdx = params.length + 1;
-      subBizArticleIds.forEach(id => params.push(id));
-      const paramList = subBizArticleIds.map((_, i) => `$${startIdx + i}`).join(',');
-      articleFilter = `AND sdi.article_id IN (${paramList})`;
+    if (subBizArticleIds) {
+      params.push(subBizArticleIds);
+      articleFilter = `AND sdi.article_id = ANY($${params.length})`;
     }
 
     // Filtro por artículos específicos (del query, override del subnegocio)

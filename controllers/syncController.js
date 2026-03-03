@@ -560,20 +560,25 @@ exports.salesSummaryFromDB = async (req, res, next) => {
         console.log(`[salesSummaryFromDB] Subnegocio ${biz.id} → ventas en negocio raíz ${salesBizId}`);
       }
 
-      // Obtener los article_ids de las agrupaciones de este subnegocio
+      // Obtener article_ids del subnegocio SOLO desde agrupaciones (no maxi_articles)
       const { rows: agrupRows } = await pool.query(
-        `SELECT articulos FROM agrupaciones WHERE business_id = $1`,
+        `SELECT articulos, app_articles_ids FROM agrupaciones
+          WHERE business_id = $1 AND moved_to_business_id IS NULL`,
         [biz.id]
       );
       const ids = new Set();
       for (const row of agrupRows) {
         const arr = Array.isArray(row.articulos)
           ? row.articulos
-          : (typeof row.articulos === 'string' ? JSON.parse(row.articulos) : []);
+          : (typeof row.articulos === 'string' ? JSON.parse(row.articulos || '[]') : []);
         for (const item of arr) {
-          const id = Number(item?.id ?? item);
+          const id = Number(item?.id ?? item?.articulo_id ?? item);
           if (Number.isFinite(id) && id > 0) ids.add(id);
         }
+        // También incluir app_articles_ids si existe
+        const appIds = Array.isArray(row.app_articles_ids) ? row.app_articles_ids
+          : (typeof row.app_articles_ids === 'string' ? JSON.parse(row.app_articles_ids || '[]') : []);
+        for (const id of appIds) { const n = Number(id); if (n > 0) ids.add(n); }
       }
       subArticleIds = ids.size > 0 ? Array.from(ids) : [];
       console.log(`[salesSummaryFromDB] Subnegocio ${biz.id} filtra ${subArticleIds.length} artículos`);

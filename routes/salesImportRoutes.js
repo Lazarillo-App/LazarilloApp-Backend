@@ -22,7 +22,6 @@ const { authRequired } = require('../middleware/authMiddleware');
 
 // ---------- helpers ----------
 const getBusinessIdParam = (req) => {
-  // soporta: /:businessId/... o si viene desde router padre /api/businesses/:businessId
   const raw = req.params.businessId ?? req.params.id;
   const bid = Number(raw);
   if (!Number.isFinite(bid) || bid <= 0) return NaN;
@@ -30,6 +29,26 @@ const getBusinessIdParam = (req) => {
 };
 
 const getUserId = (req) => req.user?.id;
+
+// Resuelve subnegocio → principal (ventas siempre en el principal)
+async function resolveSalesBizId(rawId) {
+  if (!Number.isFinite(rawId) || rawId <= 0) return rawId;
+  const { rows: bizRows } = await pool.query(
+    `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [rawId]
+  );
+  const biz = bizRows[0] || {};
+  if (biz.created_from === 'from_group' && biz.organization_id) {
+    const { rows: rootRows } = await pool.query(
+      `SELECT id FROM app_businesses
+        WHERE organization_id = $1
+          AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
+        ORDER BY id ASC LIMIT 1`,
+      [biz.organization_id]
+    );
+    if (rootRows[0]?.id) return rootRows[0].id;
+  }
+  return rawId;
+}
 
 // ---------- uploads ----------
 const uploadsDir = path.join(__dirname, '../uploads/csv-temp');
@@ -114,10 +133,11 @@ router.post('/:businessId/sales/import-csv', authRequired, requireBiz, upload.si
  */
 router.get('/:businessId/sales/imports', authRequired, async (req, res, next) => {
   try {
-    const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
+    const rawId = getBusinessIdParam(req);
+    if (!Number.isFinite(rawId)) {
       return res.status(400).json({ ok: false, error: 'invalid_business_id' });
     }
+    const businessId = await resolveSalesBizId(rawId);
 
     const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 200);
     const imports = await listImports(businessId, { limit });
@@ -133,10 +153,11 @@ router.get('/:businessId/sales/imports', authRequired, async (req, res, next) =>
  */
 router.get('/:businessId/sales/imports/:importId', authRequired, async (req, res, next) => {
   try {
-    const businessId = getBusinessIdParam(req);
-    if (!Number.isFinite(businessId)) {
+    const rawId = getBusinessIdParam(req);
+    if (!Number.isFinite(rawId)) {
       return res.status(400).json({ ok: false, error: 'invalid_business_id' });
     }
+    const businessId = await resolveSalesBizId(rawId);
 
     const importId = Number(req.params.importId);
     if (!Number.isFinite(importId) || importId <= 0) {
@@ -203,14 +224,31 @@ router.get('/:businessId/sales/imports/:importId/items', authRequired, async (re
 router.post('/:businessId/sales/imports/:importId/apply', authRequired, async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const businessId = getBusinessIdParam(req);
+    const rawBusinessId = getBusinessIdParam(req);
     const importId = Number(req.params.importId);
     const userId = getUserId(req);
 
-    if (!Number.isFinite(businessId) || !Number.isFinite(importId) || importId <= 0) {
+    if (!Number.isFinite(rawBusinessId) || !Number.isFinite(importId) || importId <= 0) {
       return res.status(400).json({ ok: false, error: 'invalid_params' });
     }
     if (!userId) return res.status(401).json({ ok: false, error: 'unauthorized' });
+
+    // Resolver subnegocio → principal (las ventas siempre se guardan en el principal)
+    const { rows: bizRows } = await pool.query(
+      `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [rawBusinessId]
+    );
+    const biz = bizRows[0] || {};
+    let businessId = rawBusinessId;
+    if (biz.created_from === 'from_group' && biz.organization_id) {
+      const { rows: rootRows } = await pool.query(
+        `SELECT id FROM app_businesses
+          WHERE organization_id = $1
+            AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
+          ORDER BY id ASC LIMIT 1`,
+        [biz.organization_id]
+      );
+      if (rootRows[0]?.id) businessId = rootRows[0].id;
+    }
 
     await client.query('BEGIN');
 
