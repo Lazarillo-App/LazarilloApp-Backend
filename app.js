@@ -25,6 +25,7 @@ const adminRebuildAgg = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
+const purchasesRoutes = require('./routes/purchasesRoutes');
 const { resolveInsumoBusiness } = require('./middleware/resolveInsumoBusiness');
 const divisionsRoutes = require('./routes/divisionsRoutes');
 const branchesRoutes = require('./routes/branchRoutes');
@@ -128,6 +129,7 @@ app.use('/api', authRequired, loadActiveBusiness);
 // así que cada negocio opera sobre sus propios grupos sin problema
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
+app.use('/api/purchases', authRequired, purchasesRoutes);
 app.use('/api/branches', branchesRoutes);
 app.use('/api/divisions', divisionsRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
