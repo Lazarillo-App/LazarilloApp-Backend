@@ -55,14 +55,8 @@ async function resolveSalesBusiness(biz) {
       WHERE business_id = $1
         AND moved_to_business_id IS NULL
         AND (elem->>'id') IS NOT NULL
-        AND (elem->>'id')::bigint > 0
-      UNION
-     SELECT DISTINCT unnest(app_articles_ids) AS article_id
-       FROM agrupaciones
-      WHERE business_id = $1
-        AND moved_to_business_id IS NULL
-        AND app_articles_ids IS NOT NULL
-        AND array_length(app_articles_ids, 1) > 0`,
+        AND (elem->>'id') ~ '^[0-9]+$'
+        AND (elem->>'id')::bigint > 0`,
     [biz.id]
   );
 
