@@ -417,31 +417,49 @@ exports.listDailyItems = async (req, res, next) => {
     const paramsTotals = params.slice(0, params.length - 1);
 
     // Query principal
+    // IMPORTANTE: el JOIN de nombres se hace DESPUÉS del GROUP BY para evitar
+    // que maxi_articles con múltiples business_id duplique filas y multiplique qty/amount
     const sql = `
+      WITH agg AS (
+        SELECT
+          sdi.day::date AS day,
+          sdi.article_id,
+          SUM(sdi.qty)::numeric    AS qty,
+          SUM(sdi.amount)::numeric AS amount
+        FROM sales_daily_items sdi
+        WHERE sdi.business_id = $1
+          AND sdi.day BETWEEN $2::date AND $3::date
+          ${whereClause}
+          ${sourceFilter}
+          ${groupFilter}
+        GROUP BY sdi.day::date, sdi.article_id
+      )
       SELECT
-        sdi.day::date AS day,
-        sdi.article_id,
+        agg.day,
+        agg.article_id,
         COALESCE(
-          NULLIF(TRIM(MAX(ma.nombre)), ''),
-          NULLIF(TRIM(MAX(aa.name)), ''),
-          '#' || sdi.article_id::text
+          NULLIF(TRIM(ma.nombre), ''),
+          NULLIF(TRIM(aa.name), ''),
+          '#' || agg.article_id::text
         ) AS title,
-        SUM(sdi.qty)::numeric AS qty,
-        SUM(sdi.amount)::numeric AS amount
-      FROM sales_daily_items sdi
-      LEFT JOIN maxi_articles ma
-        ON ma.articulo_id = sdi.article_id
-        AND ma.business_id = ANY(${nameBizParam})
-      LEFT JOIN app_articles aa
-        ON aa.id = sdi.article_id
-        AND aa.business_id = ANY(${nameBizParam})
-      WHERE sdi.business_id = $1
-        AND sdi.day BETWEEN $2::date AND $3::date
-        ${whereClause}
-        ${sourceFilter}
-        ${groupFilter}
-      GROUP BY sdi.day::date, sdi.article_id
-      ORDER BY sdi.day DESC, sdi.article_id
+        agg.qty,
+        agg.amount
+      FROM agg
+      LEFT JOIN LATERAL (
+        SELECT nombre FROM maxi_articles
+        WHERE articulo_id = agg.article_id
+          AND business_id = ANY(${nameBizParam})
+          AND nombre IS NOT NULL AND TRIM(nombre) <> ''
+        LIMIT 1
+      ) ma ON true
+      LEFT JOIN LATERAL (
+        SELECT name FROM app_articles
+        WHERE id = agg.article_id
+          AND business_id = ANY(${nameBizParam})
+          AND name IS NOT NULL AND TRIM(name) <> ''
+        LIMIT 1
+      ) aa ON true
+      ORDER BY agg.day DESC, agg.article_id
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
@@ -779,34 +797,54 @@ exports.salesSummary = async (req, res, next) => {
     params.push(nameBizIds);
     const nameBizParam = `$${params.length}`;
 
+    // IMPORTANTE: igual que listDailyItems, separamos el JOIN de nombres del SUM
+    // para evitar que maxi_articles con múltiples business_id duplique qty/amount
     const sql = `
+      WITH agg AS (
+        SELECT
+          sdi.article_id,
+          SUM(sdi.qty)::numeric         AS total_qty,
+          SUM(sdi.amount)::numeric      AS total_amount,
+          COUNT(DISTINCT sdi.day)       AS days_with_sales,
+          MIN(sdi.day)::date            AS first_sale,
+          MAX(sdi.day)::date            AS last_sale
+        FROM sales_daily_items sdi
+        WHERE sdi.business_id = $1
+          AND sdi.day BETWEEN $2::date AND $3::date
+          AND sdi.source = $4
+          ${articleFilter}
+          ${groupFilter}
+        GROUP BY sdi.article_id
+        HAVING SUM(sdi.qty) > 0
+      )
       SELECT
-        sdi.article_id,
+        agg.article_id,
         COALESCE(
-          NULLIF(TRIM(MAX(ma.nombre)), ''),
-          NULLIF(TRIM(MAX(aa.name)), ''),
-          '#' || sdi.article_id::text
+          NULLIF(TRIM(ma.nombre), ''),
+          NULLIF(TRIM(aa.name), ''),
+          '#' || agg.article_id::text
         ) AS title,
-        SUM(sdi.qty)::numeric AS total_qty,
-        SUM(sdi.amount)::numeric AS total_amount,
-        COUNT(DISTINCT sdi.day) AS days_with_sales,
-        MIN(sdi.day)::date AS first_sale,
-        MAX(sdi.day)::date AS last_sale
-      FROM sales_daily_items sdi
-      LEFT JOIN maxi_articles ma
-        ON ma.articulo_id = sdi.article_id
-        AND ma.business_id = ANY(${nameBizParam})
-      LEFT JOIN app_articles aa
-        ON aa.id = sdi.article_id
-        AND aa.business_id = ANY(${nameBizParam})
-      WHERE sdi.business_id = $1
-        AND sdi.day BETWEEN $2::date AND $3::date
-        AND sdi.source = $4
-        ${articleFilter}
-        ${groupFilter}
-      GROUP BY sdi.article_id
-      HAVING SUM(sdi.qty) > 0
-      ORDER BY SUM(sdi.qty) DESC
+        agg.total_qty,
+        agg.total_amount,
+        agg.days_with_sales,
+        agg.first_sale,
+        agg.last_sale
+      FROM agg
+      LEFT JOIN LATERAL (
+        SELECT nombre FROM maxi_articles
+        WHERE articulo_id = agg.article_id
+          AND business_id = ANY(${nameBizParam})
+          AND nombre IS NOT NULL AND TRIM(nombre) <> ''
+        LIMIT 1
+      ) ma ON true
+      LEFT JOIN LATERAL (
+        SELECT name FROM app_articles
+        WHERE id = agg.article_id
+          AND business_id = ANY(${nameBizParam})
+          AND name IS NOT NULL AND TRIM(name) <> ''
+        LIMIT 1
+      ) aa ON true
+      ORDER BY agg.total_qty DESC
     `;
 
     const { rows } = await pool.query(sql, params);
@@ -853,6 +891,7 @@ module.exports = {
   exportSalesCsv: exports.exportSalesCsv,
   diagnosticRaw: exports.diagnosticRaw, 
   salesSummary: exports.salesSummary,
+  getFirstSaleDate: exports.getFirstSaleDate,
 };
 
 /* ══════════════════════════════════════════════════════════
