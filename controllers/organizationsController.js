@@ -274,31 +274,20 @@ exports.createBusinessFromGroup = async (req, res, next) => {
       [uid, newBiz.id]
     );
 
-    // 5a) Crear la agrupación real con el nombre de la agrupación origen y los artículos.
-    //     Los artículos van acá, NO en Sin Agrupación, para no mezclarse con los
-    //     artículos sin asignar del negocio principal.
-    const { rows: namedGroupRows } = await client.query(
+    // 5) Crear agrupación "Sin Agrupación" en el nuevo negocio con los artículos
+    const { rows: sinAgrRows } = await client.query(
       `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
-       VALUES ($1, $2, $3::jsonb, $4::jsonb, FALSE, NOW(), NOW())
+       VALUES ($1, 'Sin Agrupación', $2::jsonb, $3::jsonb, TRUE, NOW(), NOW())
        RETURNING id`,
       [
         newBiz.id,
-        group.nombre,
+        // articulos como array de objetos {id}
         JSON.stringify(artIds.map(id => ({ id }))),
+        // app_articles_ids como array plano de números
         JSON.stringify(artIds),
       ]
     );
-    console.log(`📁 [createBusinessFromGroup] Agrupación "${group.nombre}" ID=${namedGroupRows[0].id} con ${artIds.length} artículos`);
-
-    // 5b) Crear "Sin Agrupación" VACÍA — recibirá solo artículos nuevos que lleguen
-    //     por sincronización futura y aún no estén asignados a ningún subnegocio.
-    const { rows: sinAgrRows } = await client.query(
-      `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
-       VALUES ($1, 'Sin Agrupación', '[]'::jsonb, '[]'::jsonb, TRUE, NOW(), NOW())
-       RETURNING id`,
-      [newBiz.id]
-    );
-    console.log(`📁 [createBusinessFromGroup] "Sin Agrupación" ID=${sinAgrRows[0].id} creada vacía`);
+    console.log(`📁 [createBusinessFromGroup] "Sin Agrupación" ID=${sinAgrRows[0].id} con ${artIds.length} artículos`);
 
     // 6) Crear agrupación "Discontinuados" vacía en el nuevo negocio
     await client.query(
