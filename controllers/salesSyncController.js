@@ -369,21 +369,16 @@ exports.listDailyItems = async (req, res, next) => {
       });
     }
 
-    // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
-    const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
+    // Cada negocio tiene sus propias ventas — sin redirección al principal
+    const salesBizId = biz.id;
 
     const params = [salesBizId, from, to];
     let whereClause = '';
     let groupFilter = '';
 
-    // Filtro por artículo específico (tiene prioridad sobre filtro de subnegocio)
     if (articleId) {
       params.push(Number(articleId));
-      whereClause = `AND sdi.article_id = $${params.length}`;
-    } else if (subBizArticleIds) {
-      // Filtro automático por artículos del subnegocio
-      params.push(subBizArticleIds);
-      whereClause = `AND sdi.article_id = ANY($${params.length})`;
+      whereClause = `AND sdi.article_id = ${params.length}`;
     }
 
     // Filtro por source
@@ -408,8 +403,7 @@ exports.listDailyItems = async (req, res, next) => {
       }
     }
 
-    // JOIN de nombres: buscar en salesBizId y biz.id (subnegocio tiene artículos copiados)
-    const nameBizIds = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
+    const nameBizIds = [salesBizId];
     params.push(nameBizIds);
     const nameBizParam = `$${params.length}`;
 
@@ -509,22 +503,12 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       });
     }
 
-    // Resolver subnegocio → principal (igual que listDailyItems)
-    const bizRow = await pool.query(
-      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`, [rawBizId]
-    );
-    const biz = bizRow.rows[0] || { id: rawBizId };
-    const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
+    // Cada negocio tiene sus propias ventas — sin redirección al principal
+    const salesBizId = rawBizId;
 
     const params = [salesBizId, from, to];
     let articleFilter = '';
     let groupFilter = '';
-
-    // Filtro por artículos del subnegocio
-    if (subBizArticleIds) {
-      params.push(subBizArticleIds);
-      articleFilter = `AND sdi.article_id = ANY($${params.length})`;
-    }
 
     // Filtro por grupos si viene
     if (groupIds) {
@@ -577,7 +561,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="ventas_${businessId}_${from}_a_${to}.csv"`
+      `attachment; filename="ventas_${rawBizId}_${from}_a_${to}.csv"`
     );
 
     // BOM UTF-8 para Excel
@@ -736,21 +720,14 @@ exports.salesSummary = async (req, res, next) => {
       });
     }
 
-    // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
-    const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
+    // Cada negocio tiene sus propias ventas — sin redirección al principal
+    const salesBizId = biz.id;
 
     const params = [salesBizId, from, to, source];
     let articleFilter = '';
     let groupFilter = '';
 
-    // Filtro automático por artículos del subnegocio
-    if (subBizArticleIds) {
-      params.push(subBizArticleIds);
-      articleFilter = `AND sdi.article_id = ANY($${params.length})`;
-    }
-
-    // Filtro por artículos específicos (del query, override del subnegocio)
-    if (articleIds && !subBizArticleIds) {
+    if (articleIds) {
       const ids = String(articleIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
         params.push(ids);
@@ -773,9 +750,7 @@ exports.salesSummary = async (req, res, next) => {
       }
     }
 
-    // Para el JOIN de nombres: buscamos en salesBizId Y en biz.id (por si los artículos
-    // están copiados en el subnegocio con su propio business_id)
-    const nameBizIds = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
+    const nameBizIds = [salesBizId];
     params.push(nameBizIds);
     const nameBizParam = `$${params.length}`;
 
@@ -865,7 +840,7 @@ exports.getFirstSaleDate = async (req, res, next) => {
     const biz = req.business;
     if (!biz?.id) return res.status(400).json({ error: 'no_business' });
 
-    const { salesBizId } = await resolveSalesBusiness(biz);
+    const salesBizId = biz.id;
 
     const { rows } = await pool.query(
       `SELECT MIN(day)::date AS first_date
