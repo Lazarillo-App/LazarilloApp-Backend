@@ -9,6 +9,7 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
   let inserted = 0, updated = 0, totalItems = 0;
   try {
     await client.query('BEGIN');
+    const ultimoPrecioMap = new Map(); // insumoId → { precio, fecha }
     for (const factura of facturas) {
       if (!factura) continue; // MaxiRest puede mandar nulls en el array
       const facturaKey = String(factura.numero ?? '').trim();
@@ -57,6 +58,9 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
       for (const it of items) {
         const codigoMaxi = it.insumo != null ? Number(it.insumo) : null;
         const insumoId   = codigoMaxi != null ? (insumoMap.get(codigoMaxi) ?? null) : null;
+        const itemFecha  = it.fecha ?? fecha;
+        const itemPrecio = Number(it.precio ?? 0);
+
         await client.query(
           `INSERT INTO purchase_items
              (purchase_id, business_id, insumo_id, fecha,
@@ -65,18 +69,41 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
               imp_int, imp_int_total, orden_compra, cpto_caja, referencia)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
           [purchaseId, businessId, insumoId,
-           it.fecha ?? fecha,
+           itemFecha,
            it.sucursal ?? 0, it.cantidad ?? 0, it.neto ?? 0,
-           it.precio ?? 0, it.preciotot ?? 0,
+           itemPrecio, it.preciotot ?? 0,
            it.iva_tasa ?? 0, it.iva ?? 0, it.iva_total ?? 0,
            it.imp_int ?? 0, it.imp_inttot ?? 0,
            it.orden_compra ?? 0, it.cptoCaja ?? 0, it.referencia ?? '']
         );
         totalItems++;
+
+        // Rastrear último precio por insumo (quedarse con el de fecha más reciente)
+        if (insumoId && itemPrecio > 0 && itemFecha) {
+          const prev = ultimoPrecioMap.get(insumoId);
+          if (!prev || itemFecha >= prev.fecha) {
+            ultimoPrecioMap.set(insumoId, { precio: itemPrecio, fecha: itemFecha });
+          }
+        }
       }
     }
+
+    // Actualizar precio_ref en insumos con el último precio pagado
+    let preciosActualizados = 0;
+    for (const [insumoId, { precio }] of ultimoPrecioMap.entries()) {
+      await client.query(
+        `UPDATE insumos SET precio_ref = $1, updated_at = NOW()
+         WHERE id = $2 AND business_id = $3`,
+        [precio.toFixed(4), insumoId, businessId]
+      );
+      preciosActualizados++;
+    }
+    if (preciosActualizados > 0) {
+      console.log(`[purchases.store] precio_ref actualizado en ${preciosActualizados} insumos`);
+    }
+
     await client.query('COMMIT');
-    return { inserted, updated, items: totalItems };
+    return { inserted, updated, items: totalItems, preciosActualizados };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;

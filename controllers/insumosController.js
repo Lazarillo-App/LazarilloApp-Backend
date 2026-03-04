@@ -172,6 +172,25 @@ exports.listar = async (req, res) => {
           i.*,
           ir.nombre as rubro_nombre,
           ir.es_elaborador,
+          -- Precio promedio de compras (últimos 90 días)
+          (
+            SELECT ROUND(AVG(pi2.precio)::numeric, 4)
+            FROM purchase_items pi2
+            WHERE pi2.insumo_id = i.id
+              AND pi2.business_id = i.business_id
+              AND pi2.precio > 0
+              AND pi2.fecha >= CURRENT_DATE - INTERVAL '90 days'
+          ) AS precio_promedio,
+          -- Precio de la última compra
+          (
+            SELECT pi3.precio
+            FROM purchase_items pi3
+            WHERE pi3.insumo_id = i.id
+              AND pi3.business_id = i.business_id
+              AND pi3.precio > 0
+            ORDER BY pi3.fecha DESC
+            LIMIT 1
+          ) AS precio_ultima_compra,
           COALESCE(
             json_agg(
               DISTINCT jsonb_build_object(
