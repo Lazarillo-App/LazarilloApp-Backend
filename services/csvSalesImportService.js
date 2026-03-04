@@ -3,8 +3,8 @@ const pool = require('../config/db');
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
-const notifService = require('./notificationService'); 
-const { rebuildSalesDailyRange } = require('./salesDailyRebuildService'); 
+const notifService = require('./notificationService');
+const { rebuildSalesDailyRange } = require('./salesDailyRebuildService');
 const { VERBOSE_IMPORT_LOGS, MAX_IMPORT_ROWS } = require('../config/features');
 
 /**
@@ -28,14 +28,13 @@ function getByKeysCI(obj, keys) {
 
 /**
  * Parsea archivo Excel (XLS/XLSX) o CSV
- * Nota: XLSX puede leer CSV también.
  */
 async function parseFile(filePath, fileType) {
   try {
     const readOpts = {
       type: 'file',
-      cellDates: true, // traer Date cuando Excel es fecha
-      raw: true,       // no formatear strings ambiguos
+      cellDates: true,
+      raw: true,
     };
 
     const workbook = XLSX.readFile(filePath, readOpts);
@@ -49,13 +48,12 @@ async function parseFile(filePath, fileType) {
       defval: null,
     });
 
-    // ✅ FILTRAR columnas que empiezan con "Import_" o "__EMPTY" (autogeneradas por Excel)
+    // Filtrar columnas autogeneradas por Excel
     const cleanedRows = rows.map(row => {
       const cleaned = {};
       for (const key of Object.keys(row)) {
         const keyLower = String(key).toLowerCase().trim();
-        // Ignorar SOLO columnas autogeneradas por Excel/XLSX
-        if (keyLower.startsWith('import_') || 
+        if (keyLower.startsWith('import_') ||
             keyLower.startsWith('__empty') ||
             keyLower === 'import #') {
           continue;
@@ -66,17 +64,17 @@ async function parseFile(filePath, fileType) {
     });
 
     const headers = Object.keys(cleanedRows[0] || {});
-    
+
     if (VERBOSE_IMPORT_LOGS) {
       console.log('[CSV Parse] Headers detectados:', headers);
       console.log('[CSV Parse] Primera fila limpia:', cleanedRows[0]);
     }
 
-    // ✅ VALIDACIÓN ESTRICTA: Solo permitir columnas conocidas
+    // Validación: solo permitir columnas conocidas
     const allowedColumns = [
-      'codigo', 'fecha', 'unidades', 'importe', 'nombre', // formato MaxiRest
-      'costo', 'p_total', 'neto', 'tipo_iva',             // columnas opcionales de MaxiRest
-      'article_id', 'date', 'qty', 'amount', 'article_name', // formato básico
+      'codigo', 'fecha', 'unidades', 'importe', 'nombre',
+      'costo', 'p_total', 'neto', 'tipo_iva',
+      'article_id', 'date', 'qty', 'amount', 'article_name',
     ];
 
     const allowedLower = allowedColumns.map(c => c.toLowerCase());
@@ -118,14 +116,6 @@ function detectFormat(headers) {
 
 /**
  * Normaliza una fecha a YYYY-MM-DD.
- * Soporta:
- * - Date object
- * - Excel serial (number)
- * - YYYY-MM-DD
- * - DD/MM/YY y DD/MM/YYYY
- * - DD-MM-YY y DD-MM-YYYY
- *
- * Evitamos new Date("10/4/25") porque es ambiguo.
  */
 function normalizeDate(dateValue) {
   if (dateValue == null || dateValue === '') return null;
@@ -150,11 +140,7 @@ function normalizeDate(dateValue) {
     const dd = parseInt(m[1], 10);
     const mm = parseInt(m[2], 10);
     let yy = parseInt(m[3], 10);
-
-    if (m[3].length === 2) {
-      yy = yy <= 69 ? 2000 + yy : 1900 + yy;
-    }
-
+    if (m[3].length === 2) yy = yy <= 69 ? 2000 + yy : 1900 + yy;
     if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
       const d = new Date(Date.UTC(yy, mm - 1, dd));
       if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
@@ -168,11 +154,7 @@ function normalizeDate(dateValue) {
     const dd = parseInt(m[1], 10);
     const mm = parseInt(m[2], 10);
     let yy = parseInt(m[3], 10);
-
-    if (m[3].length === 2) {
-      yy = yy <= 69 ? 2000 + yy : 1900 + yy;
-    }
-
+    if (m[3].length === 2) yy = yy <= 69 ? 2000 + yy : 1900 + yy;
     if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
       const d = new Date(Date.UTC(yy, mm - 1, dd));
       if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
@@ -180,7 +162,6 @@ function normalizeDate(dateValue) {
     return null;
   }
 
-  // Último recurso SOLO para formatos no ambiguos
   if (/^\d{4}\//.test(s) || /^\d{4}\./.test(s)) {
     const d = new Date(s);
     if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
@@ -191,7 +172,6 @@ function normalizeDate(dateValue) {
 
 /**
  * Valida y normaliza una fila
- * ✅ ACTUALIZADO: Acepta article_id = 0
  */
 function normalizeRow(row, format = 'maxi_export', rowNumber) {
   const normalized = {
@@ -206,17 +186,17 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
     let dateField, idField, qtyField, amountField, nameField;
 
     if (format === 'maxi_export') {
-      dateField = getByKeysCI(row, ['fecha']);
-      idField = getByKeysCI(row, ['codigo']);
-      qtyField = getByKeysCI(row, ['unidades']);
+      dateField   = getByKeysCI(row, ['fecha']);
+      idField     = getByKeysCI(row, ['codigo']);
+      qtyField    = getByKeysCI(row, ['unidades']);
       amountField = getByKeysCI(row, ['importe']);
-      nameField = getByKeysCI(row, ['nombre']);
+      nameField   = getByKeysCI(row, ['nombre']);
     } else {
-      dateField = getByKeysCI(row, ['date', 'fecha']);
-      idField = getByKeysCI(row, ['article_id', 'codigo']);
-      qtyField = getByKeysCI(row, ['qty', 'unidades']);
+      dateField   = getByKeysCI(row, ['date', 'fecha']);
+      idField     = getByKeysCI(row, ['article_id', 'codigo']);
+      qtyField    = getByKeysCI(row, ['qty', 'unidades']);
       amountField = getByKeysCI(row, ['amount', 'importe']);
-      nameField = getByKeysCI(row, ['article_name', 'nombre']);
+      nameField   = getByKeysCI(row, ['article_name', 'nombre']);
     }
 
     normalized.date = normalizeDate(dateField);
@@ -224,10 +204,9 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
       throw new Error(`Fecha inválida o faltante: "${dateField}"`);
     }
 
-    // ✅ CAMBIO: Aceptar article_id = 0 (artículos sin código)
     const rawId = String(idField ?? '').trim();
     normalized.article_id = rawId === '' ? 0 : parseInt(rawId, 10);
-    
+
     if (!Number.isFinite(normalized.article_id) || normalized.article_id < 0) {
       throw new Error(`ID de artículo inválido: "${idField}" (debe ser número >= 0)`);
     }
@@ -256,11 +235,10 @@ function normalizeRow(row, format = 'maxi_export', rowNumber) {
 }
 
 /* ============================================================
-   NUEVOS HELPERS (staging + overlap + diff + apply replace)
+   Helpers: staging + overlap + diff + apply replace
    ============================================================ */
 
 async function insertStagingItems(client, { importId, businessId, items }) {
-  // Reemplazar staging previo de ese import (idempotente)
   await client.query('DELETE FROM sales_csv_import_items WHERE import_id = $1', [importId]);
 
   const CHUNK = 1000;
@@ -339,12 +317,11 @@ async function computeDiffStats(client, { importId, businessId, from, to }) {
     rows_same: 0,
     rows_missing_in_new: 0,
     delta_amount: 0,
-    delta_qty: 0
+    delta_qty: 0,
   };
 }
 
 async function applyReplaceRange(client, { businessId, from, to, importId }) {
-  // Reemplazo por rango solo para source='csv'
   await client.query(`
     DELETE FROM sales_daily_items
     WHERE business_id = $1
@@ -366,12 +343,15 @@ async function applyReplaceRange(client, { businessId, from, to, importId }) {
 }
 
 /**
- * Importa archivo a la base de datos
- * NUEVO: staging + detección solapamiento + change set + notificación
+ * Importa archivo a la base de datos.
  *
- * Regla:
- * - si NO solapa: aplica directo (replace por rango) y termina "completed"
- * - si SÍ solapa: deja en "awaiting_approval" + crea change_set + sync_notification
+ * El CSV se guarda SIEMPRE con el business_id del negocio activo (el que viene
+ * en el request). No hay redirección al negocio principal. Esto permite que
+ * cada subnegocio tenga sus propios datos de ventas aislados.
+ *
+ * Regla de solapamiento:
+ * - si NO solapa: aplica directo (replace por rango) → status "completed"
+ * - si SÍ solapa: deja en "awaiting_approval" + change_set + notificación
  */
 async function importFileToDatabase({ businessId, userId, filePath, originalName, fileType }) {
   const client = await pool.connect();
@@ -382,30 +362,15 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     await client.query('BEGIN');
     txOpen = true;
 
-    // Resolver subnegocio → principal para que las ventas siempre
-    // queden en el business_id correcto (donde las busca resolveSalesBusiness)
-    const { rows: bizRows } = await client.query(
-      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
-    );
-    const biz = bizRows[0] || { id: businessId, created_from: null, organization_id: null };
-    let salesBusinessId = businessId; // default: usar el que viene
+    // El businessId que llega es el negocio activo. Se usa directamente, sin
+    // redirigir al principal. Cada negocio gestiona sus propias ventas.
+    const salesBusinessId = businessId;
 
-    if (biz.created_from === 'from_group' && biz.organization_id) {
-      const { rows: rootRows } = await client.query(
-        `SELECT id FROM app_businesses
-          WHERE organization_id = $1
-            AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-          ORDER BY id ASC LIMIT 1`,
-        [biz.organization_id]
-      );
-      if (rootRows[0]?.id) {
-        salesBusinessId = rootRows[0].id;
-        console.log(`[CSV Import] Subnegocio ${businessId} → guardando ventas en principal ${salesBusinessId}`);
-      }
+    if (VERBOSE_IMPORT_LOGS) {
+      console.log(`[CSV Import] Iniciando importación para business ${salesBusinessId}`);
     }
 
-    // 1) Crear registro importación (con el businessId original para trazabilidad,
-    //    pero las ventas en staging van con salesBusinessId)
+    // 1) Crear registro de importación
     const { rows: [importRecord] } = await client.query(`
       INSERT INTO sales_csv_imports
         (business_id, user_id, filename, original_name, file_size, file_type, status)
@@ -421,10 +386,9 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     ]);
 
     importId = importRecord.id;
-    businessId = salesBusinessId; // usar el principal para todo el resto del proceso
 
     if (VERBOSE_IMPORT_LOGS) {
-      console.log(`[CSV Import] Iniciando importación #${importId} para business ${businessId}`);
+      console.log(`[CSV Import] Registro creado #${importId} para business ${salesBusinessId}`);
     }
 
     // 2) Parsear
@@ -456,13 +420,13 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
       console.log(`[CSV Import] Formato detectado: ${format}`);
     }
 
-    // 4) Normalizar filas + agregación (day+article_id) para evitar duplicados
+    // 4) Normalizar filas + agregación (day+article_id)
     let failed = 0;
     const errors = [];
     let minDate = null;
     let maxDate = null;
 
-    const agg = new Map(); // key: `${date}|${article_id}` => { day, article_id, qty, amount, article_name }
+    const agg = new Map(); // key: `${date}|${article_id}`
 
     for (let i = 0; i < rows.length; i++) {
       const normalized = normalizeRow(rows[i], format, i + 1);
@@ -492,7 +456,6 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     }
 
     if (!minDate || !maxDate) {
-      // todas fallaron
       await client.query(`
         UPDATE sales_csv_imports
         SET
@@ -524,11 +487,11 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
 
     const items = Array.from(agg.values());
 
-    // 5) Guardar en staging (sales_csv_import_items)
-    await insertStagingItems(client, { importId, businessId, items });
+    // 5) Guardar en staging
+    await insertStagingItems(client, { importId, businessId: salesBusinessId, items });
 
-    // 6) Detectar solapamiento contra CSV previo
-    const hasOverlap = await hasCsvOverlap(client, { businessId, from: minDate, to: maxDate });
+    // 6) Detectar solapamiento contra CSV previo del mismo negocio
+    const hasOverlap = await hasCsvOverlap(client, { businessId: salesBusinessId, from: minDate, to: maxDate });
 
     let mode = 'applied';
     let changeSetId = null;
@@ -538,21 +501,20 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
 
     if (!hasOverlap) {
       appliedRows = await applyReplaceRange(client, {
-        businessId,
+        businessId: salesBusinessId,
         from: minDate,
         to: maxDate,
-        importId
+        importId,
       });
 
-      // ✅ NUEVO: reconstruir sales_daily desde sales_daily_items (prefiere csv)
+      // Reconstruir sales_daily priorizando CSV sobre Maxi
       await rebuildSalesDailyRange({
-        businessId,
+        businessId: salesBusinessId,
         from: minDate,
         to: maxDate,
-        client, // misma transacción
+        client,
       });
 
-      // Marcar import como completed
       await client.query(`
         UPDATE sales_csv_imports
         SET
@@ -578,29 +540,27 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
       ]);
 
     } else {
-      // ⚠️ Solapa: NO tocar sales_daily_items, crear change set + notificación
+      // Solapa: NO tocar sales_daily_items, crear change set + notificación
       mode = 'pending';
-      diffStats = await computeDiffStats(client, { importId, businessId, from: minDate, to: maxDate });
+      diffStats = await computeDiffStats(client, { importId, businessId: salesBusinessId, from: minDate, to: maxDate });
 
       const summary = {
         import_id: importId,
         range: { from: minDate, to: maxDate },
         stats: diffStats,
-        action: 'replace_range'
+        action: 'replace_range',
       };
 
-      // Crear change set (requiere que agregues 'sales_import' al check)
       const { rows: [cs] } = await client.query(`
         INSERT INTO sync_change_sets
           (business_id, scope, status, created_by, summary, changes)
         VALUES
           ($1, 'sales_import', 'pending', $2, $3::jsonb, '[]'::jsonb)
         RETURNING id
-      `, [businessId, userId, JSON.stringify(summary)]);
+      `, [salesBusinessId, userId, JSON.stringify(summary)]);
 
       changeSetId = cs.id;
 
-      // Marcar import como awaiting_approval
       await client.query(`
         UPDATE sales_csv_imports
         SET
@@ -621,7 +581,6 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
         JSON.stringify(errors),
       ]);
 
-      // Notificación (sync_notifications)
       const title = 'Ventas CSV: solapamiento detectado';
       const message =
         `Rango ${minDate} → ${maxDate}. ` +
@@ -629,7 +588,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
         `Δ$ ${diffStats.delta_amount}`;
 
       const createdNotif = await notifService.createSyncNotification({
-        businessId,
+        businessId: salesBusinessId,
         userId,
         type: 'sales_import_overlap',
         title,
@@ -641,7 +600,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
           range: { from: minDate, to: maxDate },
           stats: diffStats,
           suggested_action: 'replace_range',
-        }
+        },
       });
 
       notifId = createdNotif?.id || null;
@@ -650,7 +609,6 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     await client.query('COMMIT');
     txOpen = false;
 
-    // 7) limpiar temp
     try { fs.unlinkSync(filePath); } catch { }
 
     if (VERBOSE_IMPORT_LOGS) {
@@ -683,7 +641,6 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
 
     console.error('[CSV Import] Error fatal:', error);
 
-    // fuera de tx
     if (importId) {
       try {
         await pool.query(`

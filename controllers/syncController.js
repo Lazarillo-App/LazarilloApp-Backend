@@ -255,7 +255,7 @@ async function upsertArticles({ client, businessId, items }) {
  */
 exports.syncNow = async (req, res) => {
   const biz = req.business;
-  const userId = req.user?.id; // 🆕 Capturamos el user_id
+  const userId = req.user?.id;
 
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
@@ -319,26 +319,18 @@ exports.syncNow = async (req, res) => {
 
       await client.query('COMMIT');
 
-      // 🆕 AUTO-ASIGNACIÓN POST-SYNC + NOTIFICACIÓN
       try {
         const result = await autoAssignNewArticles(biz.id);
         autoAssigned = result.assigned;
 
         if (autoAssigned > 0) {
           console.log(`[syncNow] Auto-asignados ${autoAssigned} artículos a agrupaciones existentes`);
-
-          // 🆕 CREAR NOTIFICACIÓN
           if (userId) {
-            await notifyAutoAssign({
-              businessId: biz.id,
-              userId,
-              result
-            });
+            await notifyAutoAssign({ businessId: biz.id, userId, result });
           }
         }
       } catch (autoErr) {
         console.error('[syncNow] Error en auto-asignación (no crítico):', autoErr.message);
-        // No rompemos el sync por esto
       }
     }
 
@@ -351,7 +343,7 @@ exports.syncNow = async (req, res) => {
       upserted,
       mapped,
       cacheHash,
-      auto_assigned: autoAssigned // 🆕
+      auto_assigned: autoAssigned,
     });
 
   } catch (e) {
@@ -377,9 +369,6 @@ exports.listArticlesFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
-  // Todos los negocios de la org ven los MISMOS artículos — los del negocio principal.
-  // Sin Agrupación y Discontinuados son globales: muestran artículos que no están
-  // en ninguna agrupación nombrada de ningún negocio de la org.
   const { principalId } = await getOrgArticleContext(biz.id, pool);
 
   const { rows } = await pool.query(
@@ -392,31 +381,22 @@ exports.listArticlesFromDB = async (req, res) => {
   res.json({ items: rows });
 };
 
-/**
- * GET /businesses/:id/articles/tree (subrubro > categoría > artículos)
- */
-
 /* ─────────────────────────────────────────────────────────────────────────
- * getOrgContext(bizId, pool)
- * 
+ * getOrgArticleContext(bizId, pool)
+ *
  * Para cualquier negocio de una org, devuelve:
  *   - principalId: el negocio principal (el más antiguo, no from_group)
- *   - assignedIds: Set de article_ids que están asignados en ALGUNA agrupación
- *                  real (no Sin Agrupación, no Discontinuados) de CUALQUIER
- *                  negocio de la org
- * 
+ *   - assignedIds: Set de article_ids asignados en agrupaciones reales
+ *
  * Si el negocio no tiene org, devuelve { principalId: bizId, assignedIds: null }
- * (null = no filtrar)
  * ─────────────────────────────────────────────────────────────────────── */
 async function getOrgArticleContext(bizId, pool) {
-  // ¿Tiene org?
   const { rows: bizRows } = await pool.query(
     `SELECT organization_id, created_from FROM app_businesses WHERE id = $1`, [bizId]
   );
   const biz = bizRows[0];
   if (!biz?.organization_id) return { principalId: bizId, assignedIds: null };
 
-  // Negocio principal de la org
   const { rows: principalRows } = await pool.query(
     `SELECT id FROM app_businesses
       WHERE organization_id = $1 AND created_from != 'from_group'
@@ -425,8 +405,6 @@ async function getOrgArticleContext(bizId, pool) {
   );
   const principalId = principalRows[0]?.id || bizId;
 
-  // Todos los IDs asignados en agrupaciones reales de cualquier negocio de la org
-  // (excluyendo Sin Agrupación y Discontinuados — esos son el "flotante")
   const { rows: agRows } = await pool.query(
     `SELECT ag.articulos, ag.app_articles_ids
        FROM agrupaciones ag
@@ -460,8 +438,6 @@ exports.listArticlesTreeFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
   try {
-    // Todos los negocios de la org ven el árbol del negocio principal.
-    // Sin Agrupación = artículos no asignados en ninguna agrupación de ningún negocio de la org.
     const { principalId } = await getOrgArticleContext(biz.id, pool);
 
     const { rows } = await pool.query(
@@ -525,9 +501,11 @@ exports.maxiArticlesProxy = async (req, res) => {
   }
 };
 
-// controllers/syncController.js  (reemplazá solo salesSummaryFromDB)
-
-/* salesSummaryFromDB - versión top-N agregada (usa columnas reales) */
+/* ============================================================
+   salesSummaryFromDB
+   - Sin redirección al principal: cada negocio lee sus propios datos
+   - DISTINCT ON priorizando source='csv' sobre 'maxi' para evitar duplicados
+   ============================================================ */
 exports.salesSummaryFromDB = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -543,44 +521,11 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const lim = Number(limit) || 50;
     const search = (q && String(q).trim()) || null;
 
-    // ── Resolver negocio raíz si es subnegocio (from_group) ──────────────────
-    let salesBizId = biz.id;
-    let subArticleIds = null; // null = sin filtro (negocio principal)
+    // Siempre usar el negocio activo — sin redirección al principal.
+    // Cada negocio (principal o subnegocio) tiene sus propias filas en sales_daily_items.
+    const salesBizId = biz.id;
 
-    if (biz.created_from === 'from_group' && biz.organization_id) {
-      const { rows: rootRows } = await pool.query(
-        `SELECT id FROM app_businesses
-         WHERE organization_id = $1
-           AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-         ORDER BY id ASC LIMIT 1`,
-        [biz.organization_id]
-      );
-      if (rootRows.length) {
-        salesBizId = rootRows[0].id;
-        console.log(`[salesSummaryFromDB] Subnegocio ${biz.id} → ventas en negocio raíz ${salesBizId}`);
-      }
-
-      // Obtener article_ids del subnegocio SOLO desde agrupaciones (no maxi_articles)
-      const { rows: agrupRows } = await pool.query(
-        `SELECT articulos FROM agrupaciones
-          WHERE business_id = $1 AND moved_to_business_id IS NULL`,
-        [biz.id]
-      );
-      const ids = new Set();
-      for (const row of agrupRows) {
-        const arr = Array.isArray(row.articulos)
-          ? row.articulos
-          : (typeof row.articulos === 'string' ? JSON.parse(row.articulos || '[]') : []);
-        for (const item of arr) {
-          const id = Number(item?.id ?? item?.articulo_id ?? item);
-          if (Number.isFinite(id) && id > 0) ids.add(id);
-        }
-      }
-      subArticleIds = ids.size > 0 ? Array.from(ids) : [];
-      console.log(`[salesSummaryFromDB] Subnegocio ${biz.id} filtra ${subArticleIds.length} artículos`);
-    }
-
-    /* Totales por día desde sales_daily */
+    /* Total desde sales_daily (ya reconstruido con DISTINCT ON por rebuildSalesDailyRange) */
     const { rows: totRows } = await pool.query(
       `SELECT
         COALESCE(SUM(total), 0)::numeric AS total,
@@ -596,35 +541,18 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     const params = [salesBizId, fromYmd, toYmd];
     let whereExtra = '';
 
-    // Filtro por artículos del subnegocio
-    if (subArticleIds !== null) {
-      if (subArticleIds.length === 0) {
-        // Subnegocio sin artículos asignados → devolver vacío
-        return res.json({
-          ok: true,
-          business_id: biz.id,
-          sales_biz_id: salesBizId,
-          from: fromYmd,
-          to: toYmd,
-          total: 0,
-          tx_count: 0,
-          limit: lim,
-          items: [],
-        });
-      }
-      params.push(subArticleIds);
-      whereExtra += `\nAND s.article_id = ANY($${params.length}::int[])`;
-    }
-
     if (search) {
       params.push(`%${search}%`);
-      whereExtra += `
+      whereExtra = `
     AND (
       COALESCE(ma.nombre, a.name, ('Artículo #' || s.article_id::text))
       ILIKE $${params.length}
     )`;
     }
 
+    // CTE con DISTINCT ON: cuando existen source='csv' y source='maxi' para el mismo
+    // (business_id, day, article_id), se queda solo con el CSV (prioridad 0 < 1).
+    // Esto evita duplicar el monto cuando el usuario re-importa datos que Maxi ya tenía.
     const sqlItems = `
 WITH preferred AS (
   SELECT DISTINCT ON (business_id, day, article_id)
@@ -660,7 +588,6 @@ LIMIT ${lim};
     return res.json({
       ok: true,
       business_id: biz.id,
-      sales_biz_id: salesBizId,
       from: fromYmd,
       to: toYmd,
       total,
@@ -676,22 +603,17 @@ LIMIT ${lim};
       })),
     });
 
-
   } catch (e) {
     next(e);
   }
 };
 
-
 /**
  * GET /api/businesses/:id/sales/:articuloId?from&to&groupBy=day
  *
- * Serie por ARTÍCULO usando sales_daily_items:
- * {
- *   ok, business_id, articulo_id, from, to, groupBy,
- *   total,
- *   items: [ { label: 'YYYY-MM-DD', qty, amount } ]
- * }
+ * Serie temporal por artículo.
+ * Sin redirección al principal — cada negocio lee sus propios datos.
+ * DISTINCT ON priorizando source='csv' para evitar duplicados.
  */
 exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
   try {
@@ -702,54 +624,32 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
     if (!businessId || !articuloId || !from || !to) {
       return res.status(400).json({
         error: 'missing_params',
-        required: ['businessId', 'articuloId', 'from', 'to']
+        required: ['businessId', 'articuloId', 'from', 'to'],
       });
     }
 
-    console.log('[salesSeriesFromDB] 📊 Consultando ventas:', { businessId, articuloId, from, to, groupBy });
-
-    // PASO 1: Resolver en qué negocio están realmente las ventas.
-    // Si es un subnegocio (from_group), las ventas están en el negocio raíz de la organización.
+    // Verificar que el negocio existe
     const { rows: bizRows } = await pool.query(
-      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`,
+      `SELECT id FROM app_businesses WHERE id = $1`,
       [businessId]
     );
     if (!bizRows.length) {
       return res.status(404).json({ error: 'business_not_found' });
     }
-    const biz = bizRows[0];
 
-    let salesBizId = businessId;
-    if (biz.created_from === 'from_group' && biz.organization_id) {
-      const { rows: rootRows } = await pool.query(
-        `SELECT id FROM app_businesses
-          WHERE organization_id = $1
-            AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-          ORDER BY id ASC LIMIT 1`,
-        [biz.organization_id]
-      );
-      if (rootRows.length) {
-        salesBizId = rootRows[0].id;
-        console.log(`[salesSeriesFromDB] Subnegocio ${businessId} → ventas en negocio raíz ${salesBizId}`);
-      }
-    }
+    // Sin redirección: las ventas se leen siempre del negocio activo.
+    const salesBizId = businessId;
 
-    // PASO 2: Obtener el nombre del artículo desde maxi_articles.
-    // Buscamos en el negocio donde están las ventas (salesBizId) y también en el negocio
-    // original (businessId) por si los artículos están cargados con otro business_id.
+    // Nombre del artículo
     const { rows: artRows } = await pool.query(
-      `SELECT articulo_id AS id, nombre
-       FROM maxi_articles
-       WHERE articulo_id = $1
-         AND business_id = ANY($2::int[])
+      `SELECT nombre FROM maxi_articles
+       WHERE articulo_id = $1 AND business_id = $2
        LIMIT 1`,
-      [articuloId, [salesBizId, businessId]]
+      [articuloId, salesBizId]
     );
-
     const articleNombre = artRows[0]?.nombre || `#${articuloId}`;
-    console.log(`[salesSeriesFromDB] ✅ Artículo ${articuloId}: "${articleNombre}", buscando ventas en negocio ${salesBizId}`);
 
-    // PASO 3: Construir el GROUP BY según el parámetro
+    // GROUP BY según parámetro
     let dateTrunc;
     if (groupBy === 'day') {
       dateTrunc = 'sdi.day::text';
@@ -760,22 +660,28 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
     } else {
       return res.status(400).json({
         error: 'invalid_group_by',
-        valid_values: ['day', 'week', 'month']
+        valid_values: ['day', 'week', 'month'],
       });
     }
 
-    // PASO 4: Buscar ventas directamente por article_id en el negocio donde están las ventas.
-    // No hace falta ningún JOIN — article_id en sales_daily_items ES el articulo_id de maxi_articles.
+    // DISTINCT ON priorizando CSV, luego agrupa por período
     const salesQuery = `
+      WITH preferred AS (
+        SELECT DISTINCT ON (business_id, day, article_id)
+          business_id, day, article_id, qty, amount
+        FROM sales_daily_items
+        WHERE business_id = $1
+          AND article_id  = $2
+          AND day >= $3::date
+          AND day <= $4::date
+        ORDER BY business_id, day, article_id,
+          CASE WHEN source = 'csv' THEN 0 ELSE 1 END
+      )
       SELECT
         ${dateTrunc} AS label,
         SUM(qty)     AS qty,
         SUM(amount)  AS amount
-      FROM sales_daily_items sdi
-      WHERE sdi.business_id = $1
-        AND sdi.article_id  = $2
-        AND sdi.day >= $3::date
-        AND sdi.day <= $4::date
+      FROM preferred sdi
       GROUP BY label
       ORDER BY label
     `;
@@ -783,34 +689,31 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
     const { rows } = await pool.query(salesQuery, [salesBizId, articuloId, from, to]);
 
     const items = rows.map(row => ({
-      label: row.label,
-      qty: parseInt(row.qty || 0, 10),
-      amount: parseFloat(row.amount || 0)
+      label:  row.label,
+      qty:    parseInt(row.qty    || 0, 10),
+      amount: parseFloat(row.amount || 0),
     }));
 
     const total = items.reduce((sum, item) => sum + item.qty, 0);
-
-    console.log('[salesSeriesFromDB] ✅ Resultados:', { articuloId, itemsCount: items.length, total });
 
     return res.json({
       total,
       items,
       meta: {
-        article_id: articuloId,
+        article_id:     articuloId,
         article_nombre: articleNombre,
-        business_id: businessId,
-        sales_biz_id: salesBizId,
+        business_id:    businessId,
         from,
         to,
-        groupBy
-      }
+        groupBy,
+      },
     });
 
   } catch (err) {
     console.error('[salesSeriesFromDB] ❌ Error:', err);
     return next(err);
   }
-}
+};
 
 // ============================ CHANGE SETS (INSUMOS) ============================
 
@@ -843,9 +746,6 @@ function riskForCounts({ canonicalCount, incomingCount, minKeepRatio = 0.8 }) {
 
 /**
  * POST /api/businesses/:businessId/sync/insumos/detect
- * Crea un change set para insumos.
- * - NO aplica cambios
- * - Si Maxi viene “cortado” (ej 220 vs 1170), lo bloquea (status = error)
  */
 exports.detectInsumosChanges = async (req, res) => {
   const businessId = Number(req.params.businessId);
@@ -859,15 +759,12 @@ exports.detectInsumosChanges = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Canonical = lo fijo en tu DB
     const canonicalCount = await getCanonicalInsumosCount(client, businessId);
 
-    // Incoming = lo que vino de Maxi
     const raw = await fetchMaxiInsumos({ businessId, req });
     const incoming = normalizarInsumosMaxi(raw);
     const incomingCount = incoming.length;
 
-    // Policy (si existe en sync_policies)
     const { rows: polRows } = await client.query(`
       SELECT policies
       FROM sync_policies
@@ -886,10 +783,7 @@ exports.detectInsumosChanges = async (req, res) => {
       risk,
     };
 
-    // Si viene roto -> status error (bloqueado)
     const status = risk.blocked ? 'error' : 'pending';
-
-    // Por ahora guardamos change set sin diff detallado (lo hacemos después)
     const changes = [];
 
     const { rows: csRows } = await client.query(`
@@ -909,7 +803,6 @@ exports.detectInsumosChanges = async (req, res) => {
 
     const cs = csRows?.[0];
 
-    // Notificación (si querés)
     if (userId) {
       await client.query(`
         INSERT INTO sync_notifications (business_id, user_id, type, title, message, metadata)
@@ -917,7 +810,7 @@ exports.detectInsumosChanges = async (req, res) => {
       `, [
         businessId,
         userId,
-        'error', // usamos tipo existente del CHECK
+        'error',
         risk.blocked ? 'Detect insumos BLOQUEADO' : 'Detect insumos listo',
         risk.blocked
           ? 'Maxi devolvió menos insumos de lo esperado. No se aplicará nada hasta revisar.'
