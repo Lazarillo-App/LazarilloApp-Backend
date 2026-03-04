@@ -70,6 +70,10 @@ exports.sync = async (req, res, next) => {
     // 2) Compras del rango
     const facturas = await fetchMaxiPurchases({ businessId, req, from, to, provdr, num });
     console.log('[purchases.sync] Facturas recibidas:', facturas.length);
+    // 🔍 TEMPORAL - ver estructura de MaxiRest
+    if (facturas.length > 0) {
+      console.log('[purchases.sync] primera factura:', JSON.stringify(facturas[0], null, 2).slice(0, 800));
+    }
     if (!facturas.length) {
       return res.json({ ok: true, inserted: 0, updated: 0, items: 0, suppliers: suppliersCount, message: 'Sin compras en el rango' });
     }
