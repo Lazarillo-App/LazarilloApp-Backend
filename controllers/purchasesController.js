@@ -80,6 +80,7 @@ exports.sync = async (req, res, next) => {
 
     // 3) Cruzar con insumos
     const insumoMap = await buildInsumoMap(businessId);
+    console.log(`[purchases.sync] insumoMap: ${insumoMap.size} insumos con codigo_maxi. Primeras 5 claves:`, [...insumoMap.keys()].slice(0, 5));
 
     // 4) Upsert
     const result = await upsertPurchasesBatch(businessId, facturas, insumoMap);
@@ -255,7 +256,7 @@ exports.exportCsv = async (req, res, next) => {
       'Fecha','Factura','Proveedor','CUIT',
       'Cod.Maxi','Insumo','Unidad',
       'Cantidad','Precio unit.','Total neto',
-      'IVA %','IVA $','Neto unit.','Imp.Int.',
+      'IVA %','IVA $','Factor presentación','Imp.Int.',
     ];
 
     const esc = (v) => {
@@ -271,8 +272,12 @@ exports.exportCsv = async (req, res, next) => {
         r.fecha ? String(r.fecha).slice(0,10) : '',
         r.factura, r.proveedor, r.cuit,
         r.codigo_maxi, r.insumo, r.unidad,
-        r.cantidad, r.precio, r.precio_total,
-        r.iva_tasa, r.iva_total, r.neto, r.imp_int,
+        r.cantidad,                                        // cantidad real
+        r.precio != null ? Number(r.precio).toFixed(4) : '', // precio unitario real
+        r.precio_total,
+        r.iva_tasa, r.iva_total,
+        r.neto,                                            // factor de presentación original
+        r.imp_int,
       ].map(esc).join(',')),
     ];
 

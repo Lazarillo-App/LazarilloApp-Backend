@@ -59,7 +59,19 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
         const codigoMaxi = it.insumo != null ? Number(it.insumo) : null;
         const insumoId   = codigoMaxi != null ? (insumoMap.get(codigoMaxi) ?? null) : null;
         const itemFecha  = it.fecha ?? fecha;
-        const itemPrecio = Number(it.precio ?? 0);
+
+        // En MaxiRest:
+        // - it.cantidad  = cantidad de bultos/unidades comprados
+        // - it.neto      = factor de presentación (ej: 100 = "precio por 100 unidades")
+        // - it.precio    = precio por "neto" unidades (NO es el unitario real)
+        // - it.preciotot = it.precio * it.cantidad (total de la línea)
+        //
+        // Precio unitario real = it.precio / it.neto  (cuando neto > 0)
+        // Cantidad total real  = it.cantidad * it.neto
+        const factorNeto      = Number(it.neto ?? 1) || 1;
+        const cantidadTotal   = Number(it.cantidad ?? 0) * factorNeto;
+        const precioUnitario  = factorNeto > 0 ? Number(it.precio ?? 0) / factorNeto : Number(it.precio ?? 0);
+        const itemPrecio      = precioUnitario;
 
         await client.query(
           `INSERT INTO purchase_items
@@ -70,8 +82,11 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
           [purchaseId, businessId, insumoId,
            itemFecha,
-           it.sucursal ?? 0, it.cantidad ?? 0, it.neto ?? 0,
-           itemPrecio, it.preciotot ?? 0,
+           it.sucursal ?? 0,
+           cantidadTotal,        // cantidad real (cantidad * factor neto)
+           factorNeto,           // guardamos el factor neto original para referencia
+           precioUnitario,       // precio por unidad real
+           it.preciotot ?? 0,    // total de la línea (sin cambios)
            it.iva_tasa ?? 0, it.iva ?? 0, it.iva_total ?? 0,
            it.imp_int ?? 0, it.imp_inttot ?? 0,
            it.orden_compra ?? 0, it.cptoCaja ?? 0, it.referencia ?? '']
