@@ -7,224 +7,108 @@ const pool = require('../config/db');
  */
 async function autoAssignNewArticles(businessId) {
   const client = await pool.connect();
-  
   try {
     await client.query('BEGIN');
 
-    // 1️⃣ Artículos del negocio
-    const { rows: allArticles } = await client.query(`
-      SELECT 
-        ma.articulo_id,
-        COALESCE(NULLIF(TRIM(ma.categoria), ''), '[PENDIENTE]') AS categoria,
-        COALESCE(NULLIF(TRIM(ma.subrubro), ''), '[PENDIENTE]') AS subrubro
-      FROM maxi_articles ma
-      WHERE ma.business_id = $1
-    `, [businessId]);
+    // Artículos existentes en maxi_articles del negocio
+    const { rows: allArticles } = await client.query(
+      `SELECT ma.articulo_id
+         FROM maxi_articles ma
+        WHERE ma.business_id = $1`,
+      [businessId]
+    );
 
-    console.log('📦 [auto-assign] Total artículos en maxi_articles:', allArticles.length);
+    if (!allArticles.length) {
+      await client.query('COMMIT');
+      return { assigned: 0, details: [] };
+    }
 
-    // 2️⃣ Artículos ya asignados - CORREGIDO: usar WITH + LATERAL
-    const { rows: assignedArticles } = await client.query(`
-      WITH article_ids AS (
-        SELECT 
-          ag.id AS agrupacion_id,
-          ag.nombre AS agrupacion_nombre,
-          (elem->>'id')::int AS articulo_id
-        FROM agrupaciones ag,
-        LATERAL jsonb_array_elements(ag.articulos) AS elem
-        WHERE ag.business_id = $1
-          AND LOWER(ag.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'discontinuados')
-          AND ag.moved_to_business_id IS NULL
-      )
-      SELECT DISTINCT
-        ai.articulo_id,
-        COALESCE(NULLIF(TRIM(ma.categoria), ''), '[PENDIENTE]') AS categoria,
-        COALESCE(NULLIF(TRIM(ma.subrubro), ''), '[PENDIENTE]') AS subrubro,
-        ai.agrupacion_id,
-        ai.agrupacion_nombre
-      FROM article_ids ai
-      LEFT JOIN maxi_articles ma 
-        ON ma.business_id = $1 
-        AND ma.articulo_id = ai.articulo_id
-    `, [businessId]);
+    // IDs ya asignados en cualquier agrupación real de la org
+    // (excluye Sin Agrupación y Discontinuados)
+    const { rows: assignedRows } = await client.query(
+      `WITH article_ids AS (
+          SELECT (elem->>'id')::int AS articulo_id
+          FROM agrupaciones ag,
+          LATERAL jsonb_array_elements(ag.articulos) AS elem
+          WHERE ag.business_id = $1
+            AND LOWER(ag.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'discontinuados', 'descontinuados')
+            AND ag.moved_to_business_id IS NULL
+        )
+        SELECT DISTINCT articulo_id FROM article_ids WHERE articulo_id IS NOT NULL`,
+      [businessId]
+    );
 
-    console.log('✅ [auto-assign] Artículos ya asignados:', assignedArticles.length);
-
-    // 3️⃣ Crear mapa de taxonomía
     const assignedIds = new Set(
-      assignedArticles
-        .map(r => Number(r.articulo_id))
-        .filter(n => Number.isFinite(n) && n > 0)
+      assignedRows.map(r => Number(r.articulo_id)).filter(n => Number.isFinite(n) && n > 0)
     );
 
-    // Mapa: "categoria|subrubro" → [ { id, nombre }, ... ]
-    const taxonomyToGroups = new Map();
-    
-    for (const row of assignedArticles) {
-      if (!row.categoria || !row.subrubro) continue;
-      
-      const key = `${row.categoria}|${row.subrubro}`;
-      
-      if (!taxonomyToGroups.has(key)) {
-        taxonomyToGroups.set(key, []);
-      }
-      
-      const groups = taxonomyToGroups.get(key);
-      
-      // Agregar grupo solo si no está ya en la lista
-      if (!groups.find(g => g.id === row.agrupacion_id)) {
-        groups.push({
-          id: row.agrupacion_id,
-          nombre: row.agrupacion_nombre
-        });
-      }
-    }
+    // Artículos sin asignar → van todos a Sin Agrupación (pool global)
+    const unassigned = allArticles
+      .map(a => Number(a.articulo_id))
+      .filter(id => Number.isFinite(id) && id > 0 && !assignedIds.has(id));
 
-    console.log('🗺️  [auto-assign] Taxonomías encontradas:', taxonomyToGroups.size);
-    console.log('🗺️  [auto-assign] Primeras 10 taxonomías:', 
-      Array.from(taxonomyToGroups.entries())
-        .slice(0, 10)
-        .map(([k, groups]) => `"${k}" → [${groups.map(g => `"${g.nombre}"`).join(', ')}]`)
-    );
-
-    // 4️⃣ Artículos sin asignar
-    const unassigned = allArticles.filter(a => {
-      const id = Number(a.articulo_id);
-      return Number.isFinite(id) && id > 0 && !assignedIds.has(id);
-    });
-
-    console.log('❓ [auto-assign] Artículos sin asignar:', unassigned.length);
-    
-    if (unassigned.length > 0) {
-      console.log('📋 [auto-assign] Primeros 10 sin asignar:', 
-        unassigned.slice(0, 10).map(a => {
-          const key = `${a.categoria}|${a.subrubro}`;
-          const matchingGroups = taxonomyToGroups.get(key) || [];
-          return {
-            id: a.articulo_id,
-            key,
-            hasMatch: matchingGroups.length > 0,
-            targetGroups: matchingGroups.map(g => g.nombre)
-          };
-        })
-      );
-    }
+    console.log(`[auto-assign] ${allArticles.length} artículos, ${assignedIds.size} asignados, ${unassigned.length} sin asignar`);
 
     if (!unassigned.length) {
       await client.query('COMMIT');
       return { assigned: 0, details: [] };
     }
 
-    // 5️⃣ Agrupar por destino (elegimos el PRIMER grupo que matchea)
-    const toAssign = new Map();
-
-    for (const art of unassigned) {
-      const key = `${art.categoria}|${art.subrubro}`;
-      const matchingGroups = taxonomyToGroups.get(key);
-
-      if (matchingGroups && matchingGroups.length > 0) {
-        // Tomar el primer grupo que matchea
-        const targetGroup = matchingGroups[0];
-        
-        if (!toAssign.has(targetGroup.id)) {
-          toAssign.set(targetGroup.id, {
-            nombre: targetGroup.nombre,
-            ids: []
-          });
-        }
-        
-        toAssign.get(targetGroup.id).ids.push(Number(art.articulo_id));
-      }
-    }
-
-    console.log('🎯 [auto-assign] Grupos a actualizar:', toAssign.size);
-    console.log('🎯 [auto-assign] Detalle:', 
-      Array.from(toAssign.entries()).map(([gid, data]) => 
-        `${data.ids.length} artículos → "${data.nombre}" (grupo ${gid})`
-      )
+    // Buscar Sin Agrupación del negocio (siempre el principal llama a esta función)
+    const { rows: todoRows } = await client.query(
+      `SELECT id FROM agrupaciones
+          WHERE business_id = $1
+            AND (nombre ILIKE 'Sin Agrupac%' OR nombre ILIKE 'Sin Agrupar%')
+          LIMIT 1`,
+      [businessId]
     );
 
-    // 6️⃣ Aplicar asignaciones
-    const details = [];
-    let totalAssigned = 0;
+    if (!todoRows[0]?.id) {
+      console.warn(`[auto-assign] No se encontró Sin Agrupación para negocio ${businessId}`);
+      await client.query('COMMIT');
+      return { assigned: 0, details: [] };
+    }
 
-    for (const [groupId, data] of toAssign.entries()) {
-      const { nombre, ids } = data;
-      
-      if (!ids.length) continue;
+    // Agregar solo los que no estén ya en Sin Agrupación (evitar duplicados)
+    const { rows: alreadyInTodo } = await client.query(
+      `SELECT (elem->>'id')::int AS articulo_id
+          FROM agrupaciones,
+          LATERAL jsonb_array_elements(articulos) AS elem
+         WHERE id = $1`,
+      [todoRows[0].id]
+    );
+    const alreadyTodoIds = new Set(
+      alreadyInTodo.map(r => Number(r.articulo_id)).filter(n => n > 0)
+    );
 
-      // 🆕 Obtener nombres de los artículos antes de asignar
-      const { rows: articleNames } = await client.query(`
-        SELECT articulo_id, nombre
-        FROM maxi_articles
-        WHERE business_id = $1
-          AND articulo_id = ANY($2::int[])
-      `, [businessId, ids]);
+    const toAdd = unassigned.filter(id => !alreadyTodoIds.has(id));
 
-      const articlesMap = new Map(articleNames.map(a => [a.articulo_id, a.nombre]));
-
-      // Solo asignar si la agrupación no fue movida a un subnegocio
-      const { rows: agCheck } = await client.query(
-        `SELECT moved_to_business_id FROM agrupaciones WHERE id = $1`,
-        [groupId]
+    if (toAdd.length > 0) {
+      await client.query(
+        `UPDATE agrupaciones
+            SET articulos = articulos || $2::jsonb, updated_at = NOW()
+          WHERE id = $1`,
+        [todoRows[0].id, JSON.stringify(toAdd.map(id => ({ id })))]
       );
-      if (agCheck[0]?.moved_to_business_id) {
-        console.log(`⏭️ [auto-assign] Saltando grupo ${groupId} "${nombre}" - movido a subnegocio ${agCheck[0].moved_to_business_id}`);
-        continue;
-      }
-
-      await client.query(`
-        UPDATE agrupaciones
-        SET 
-          articulos = articulos || $2::jsonb,
-          updated_at = NOW()
-        WHERE id = $1 AND moved_to_business_id IS NULL
-      `, [
-        groupId,
-        JSON.stringify(ids.map(id => ({ id })))
-      ]);
-
-      totalAssigned += ids.length;
-      
-      // 🆕 Incluir nombres en details
-      details.push({
-        agrupacion_id: groupId,
-        agrupacion_nombre: nombre,
-        articulos_agregados: ids.length,
-        articulos: ids.map(id => ({
-          id,
-          nombre: articlesMap.get(id) || `Artículo #${id}`
-        }))
-      });
-
-      console.log(`✨ [auto-assign] ${ids.length} artículos → "${nombre}" (grupo ${groupId})`);
+      console.log(`[auto-assign] ${toAdd.length} artículos nuevos → Sin Agrupación global (negocio ${businessId})`);
     }
 
     await client.query('COMMIT');
 
-    console.log('🏁 [auto-assign] RESULTADO FINAL:', { 
-      totalAssigned, 
-      gruposActualizados: details.length,
-      details: details.map(d => ({
-        grupo: d.agrupacion_nombre,
-        agregados: d.articulos_agregados,
-        articulos: d.articulos.map(a => a.nombre) // 🆕 Mostrar nombres en log
-      }))
-    });
-
     return {
-      assigned: totalAssigned,
-      details
+      assigned: toAdd.length,
+      details: toAdd.length ? [{ agrupacion_id: todoRows[0].id, agrupacion_nombre: 'Sin Agrupación', articulos_agregados: toAdd.length, articulos: toAdd.map(id => ({ id })) }] : []
     };
 
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('❌ [auto-assign] ERROR:', error);
+    console.error('[auto-assign] ERROR:', error);
     throw error;
   } finally {
     client.release();
   }
 }
+
 
 module.exports = {
   autoAssignNewArticles
