@@ -1,48 +1,49 @@
 /* eslint-disable no-console */
 
 const pool = require('../config/db');
-const getBusinessId = require('../utils/getBusinessId');
+const getBusinessIdUtil = require('../utils/getBusinessId');
 
-/* =============== helpers básicos =============== */
+/* ─── helpers ─────────────────────────────────────────────────── */
 function sendError(res, status, message) {
   return res.status(status).json({ ok: false, error: message });
 }
 
-// Para grupos (CRUD): usar el bizId resuelto por el middleware (siempre el principal)
-// Los grupos son globales — todos los negocios comparten las mismas agrupaciones
-
-// Para items de grupos (discontinuados): usar el bizId ORIGINAL del subnegocio
-// porque Discontinuados es por negocio — cada uno tiene el suyo
-function getBusinessId(req) {
-  if (req._insumosResolvedFrom) return Number(req._insumosResolvedFrom);
-  return getBusinessId(req);
+// Negocio principal (resuelto por el middleware para subnegocios)
+// Se usa para CRUD de grupos: list, create, update, delete, createOrMove
+function getPrincipalBizId(req) {
+  return getBusinessIdUtil(req);
 }
 
-async function assertGroup(bizId, groupId) {
+// Negocio original del request (el subnegocio si aplica)
+// Se usa solo para validar ownership en operaciones de items (Discontinuados)
+function getOriginalBizId(req) {
+  if (req._insumosResolvedFrom) return Number(req._insumosResolvedFrom);
+  return getBusinessIdUtil(req);
+}
+
+// Verifica que el grupo exista — acepta que pertenezca al principal O al subnegocio
+// bizPrincipal: negocio principal (resuelto)
+// bizOriginal:  negocio del request (puede ser subnegocio)
+async function assertGroupMultiBiz(bizPrincipal, bizOriginal, groupId) {
+  const ids = [...new Set([bizPrincipal, bizOriginal].filter(Boolean))];
+  const placeholders = ids.map((_, i) => `$${i + 2}`).join(', ');
   const { rowCount } = await pool.query(
-    'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
-    [groupId, bizId]
+    `SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id IN (${placeholders})`,
+    [groupId, ...ids]
   );
   return rowCount > 0;
 }
 
-/* =============== LISTAR GRUPOS =============== */
+/* ─── LIST ───────────────────────────────────────────────────────── */
 async function list(req, res) {
-  console.log('🚀🚀🚀 [NUEVA VERSION] insumoGroups.list called 🚀🚀🚀');
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   try {
     const { rows } = await pool.query(
-      `
-      SELECT 
-        g.id,
-        g.business_id,
-        g.nombre,
-        g.descripcion,
-        g.es_favorita,
-        g.created_at,
-        g.updated_at,
+      `SELECT 
+        g.id, g.business_id, g.nombre, g.descripcion, g.es_favorita,
+        g.created_at, g.updated_at,
         COALESCE(
           json_agg(
             json_build_object(
@@ -56,36 +57,13 @@ async function list(req, res) {
           '[]'::json
         ) AS items
       FROM insumo_groups g
-      LEFT JOIN insumo_group_items gi
-        ON gi.group_id = g.id
-      LEFT JOIN insumos i
-        ON i.id = gi.insumo_id
+      LEFT JOIN insumo_group_items gi ON gi.group_id = g.id
+      LEFT JOIN insumos i ON i.id = gi.insumo_id
       WHERE g.business_id = $1
-      GROUP BY 
-        g.id,
-        g.business_id,
-        g.nombre,
-        g.descripcion,
-        g.es_favorita,
-        g.created_at,
-        g.updated_at
-      ORDER BY lower(trim(g.nombre))
-      `,
+      GROUP BY g.id, g.business_id, g.nombre, g.descripcion, g.es_favorita, g.created_at, g.updated_at
+      ORDER BY lower(trim(g.nombre))`,
       [bizId]
     );
-
-    console.log('📋 [insumoGroups.list] Grupos:', rows.length);
-    if (rows.length > 0) {
-      rows.forEach((g, idx) => {
-        console.log(`📋 [insumoGroups.list] Grupo ${idx + 1}/${rows.length}:`, {
-          id: g.id,
-          nombre: g.nombre,
-          itemsCount: g.items?.length || 0,
-          firstItem: g.items?.[0],
-        });
-      });
-    }
-
     return res.json({ ok: true, data: rows });
   } catch (err) {
     console.error('[insumoGroups] list error:', err);
@@ -93,54 +71,31 @@ async function list(req, res) {
   }
 }
 
-/* =============== OBTENER UNO =============== */
+/* ─── GET ONE ────────────────────────────────────────────────────── */
 async function getOne(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   try {
     const { rows } = await pool.query(
-      `
-      SELECT 
-        g.id,
-        g.business_id,
-        g.nombre,
-        g.descripcion,
-        g.es_favorita,
-        g.created_at,
-        g.updated_at,
+      `SELECT 
+        g.id, g.business_id, g.nombre, g.descripcion, g.es_favorita,
+        g.created_at, g.updated_at,
         COALESCE(
           json_agg(
-            json_build_object(
-              'insumo_id', gi.insumo_id,
-              'id', i.id,
-              'nombre', i.nombre
-            )
+            json_build_object('insumo_id', gi.insumo_id, 'id', i.id, 'nombre', i.nombre)
           ) FILTER (WHERE gi.insumo_id IS NOT NULL),
           '[]'::json
         ) AS items
       FROM insumo_groups g
-      LEFT JOIN insumo_group_items gi
-        ON gi.group_id = g.id
-      LEFT JOIN insumos i
-        ON i.id = gi.insumo_id
-      WHERE g.business_id = $1
-        AND g.id = $2
-      GROUP BY 
-        g.id,
-        g.business_id,
-        g.nombre,
-        g.descripcion,
-        g.es_favorita,
-        g.created_at,
-        g.updated_at
-      `,
+      LEFT JOIN insumo_group_items gi ON gi.group_id = g.id
+      LEFT JOIN insumos i ON i.id = gi.insumo_id
+      WHERE g.business_id = $1 AND g.id = $2
+      GROUP BY g.id, g.business_id, g.nombre, g.descripcion, g.es_favorita, g.created_at, g.updated_at`,
       [bizId, id]
     );
-
     if (!rows.length) return sendError(res, 404, 'not_found');
     return res.json({ ok: true, data: rows[0] });
   } catch (err) {
@@ -149,99 +104,69 @@ async function getOne(req, res) {
   }
 }
 
-/* =============== CREAR / EDITAR / BORRAR GRUPO =============== */
+/* ─── CREATE ─────────────────────────────────────────────────────── */
 async function create(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const nombre = String(req.body.nombre || '').trim();
   const descripcion = req.body.descripcion ?? null;
   if (!nombre) return sendError(res, 400, 'El nombre es obligatorio');
 
   try {
     const { rows } = await pool.query(
-      `
-      INSERT INTO insumo_groups (business_id, nombre, descripcion)
-      VALUES ($1, $2, $3)
-      RETURNING id, business_id, nombre, descripcion, es_favorita,
-                created_at, updated_at
-      `,
+      `INSERT INTO insumo_groups (business_id, nombre, descripcion)
+       VALUES ($1, $2, $3)
+       RETURNING id, business_id, nombre, descripcion, es_favorita, created_at, updated_at`,
       [bizId, nombre, descripcion]
     );
-
     return res.status(201).json({ ok: true, data: rows[0] });
   } catch (err) {
     console.error('[insumoGroups] create error:', err);
-    if (err.code === '23505') {
-      return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
-    }
+    if (err.code === '23505') return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
     return sendError(res, 500, 'Error al crear agrupación de insumos');
   }
 }
 
+/* ─── UPDATE ─────────────────────────────────────────────────────── */
 async function update(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   const nombre = req.body.nombre != null ? String(req.body.nombre).trim() : null;
   const descripcion = req.body.descripcion ?? null;
   const esFavorita = req.body.es_favorita;
-
-  if (!nombre && descripcion == null && esFavorita == null) {
-    return sendError(res, 400, 'Nada para actualizar');
-  }
+  if (!nombre && descripcion == null && esFavorita == null) return sendError(res, 400, 'Nada para actualizar');
 
   const sets = [];
   const values = [id, bizId];
   let idx = values.length;
 
-  if (nombre != null && nombre !== '') {
-    idx += 1;
-    sets.push(`nombre = $${idx}`);
-    values.push(nombre);
-  }
-  if (descripcion !== undefined) {
-    idx += 1;
-    sets.push(`descripcion = $${idx}`);
-    values.push(descripcion);
-  }
-  if (esFavorita !== undefined) {
-    idx += 1;
-    sets.push(`es_favorita = $${idx}`);
-    values.push(Boolean(esFavorita));
-  }
+  if (nombre) { idx++; sets.push(`nombre = $${idx}`); values.push(nombre); }
+  if (descripcion !== undefined) { idx++; sets.push(`descripcion = $${idx}`); values.push(descripcion); }
+  if (esFavorita !== undefined) { idx++; sets.push(`es_favorita = $${idx}`); values.push(Boolean(esFavorita)); }
   sets.push('updated_at = now()');
 
   try {
     const { rows } = await pool.query(
-      `
-      UPDATE insumo_groups
-      SET ${sets.join(', ')}
-      WHERE id = $1 AND business_id = $2
-      RETURNING id, business_id, nombre, descripcion, es_favorita,
-                created_at, updated_at
-      `,
+      `UPDATE insumo_groups SET ${sets.join(', ')} WHERE id = $1 AND business_id = $2
+       RETURNING id, business_id, nombre, descripcion, es_favorita, created_at, updated_at`,
       values
     );
-
     if (!rows.length) return sendError(res, 404, 'not_found');
     return res.json({ ok: true, data: rows[0] });
   } catch (err) {
     console.error('[insumoGroups] update error:', err);
-    if (err.code === '23505') {
-      return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
-    }
+    if (err.code === '23505') return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
     return sendError(res, 500, 'Error al actualizar agrupación de insumos');
   }
 }
 
+/* ─── DELETE ─────────────────────────────────────────────────────── */
 async function remove(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
@@ -254,33 +179,27 @@ async function remove(req, res) {
     return res.json({ ok: true });
   } catch (err) {
     console.error('[insumoGroups] remove error:', err);
-    return sendError(res, 500, 'Error al eliminar la agrupación de insumos');
+    return sendError(res, 500, 'Error al eliminar agrupación de insumos');
   }
 }
 
-/* =============== ITEMS: replace / add / bulk / remove =============== */
-/**
- * PUT /groups/:id/items  body: { insumoIds: [] }
- * (Reemplaza por completo el set de items)
- */
+/* ─── ITEMS: replace ─────────────────────────────────────────────── */
 async function replaceItems(req, res) {
-  const bizId = getItemsBusinessId(req);
-  if (!bizId) return sendError(res, 400, 'business_id requerido');
+  const bizPrincipal = getPrincipalBizId(req);
+  const bizOriginal  = getOriginalBizId(req);
+  if (!bizPrincipal) return sendError(res, 400, 'business_id requerido');
 
   const groupId = Number(req.params.id);
   if (!Number.isFinite(groupId)) return sendError(res, 400, 'ID inválido');
 
-  const insumoIds = (req.body.insumoIds || [])
-    .map(Number)
-    .filter((n) => Number.isFinite(n) && n > 0);
+  const insumoIds = (req.body.insumoIds || []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
 
   const client = await pool.connect();
   try {
-    const okGroup = await assertGroup(bizId, groupId);
-    if (!okGroup) return sendError(res, 404, 'not_found');
+    const ok = await assertGroupMultiBiz(bizPrincipal, bizOriginal, groupId);
+    if (!ok) return sendError(res, 404, 'not_found');
 
     await client.query('BEGIN');
-
     await client.query('DELETE FROM insumo_group_items WHERE group_id = $1', [groupId]);
 
     if (insumoIds.length) {
@@ -288,17 +207,10 @@ async function replaceItems(req, res) {
       const placeholders = [];
       insumoIds.forEach((insumoId, i) => {
         values.push(groupId, insumoId);
-        const p1 = 2 * i + 1;
-        const p2 = 2 * i + 2;
-        placeholders.push(`($${p1}, $${p2})`);
+        placeholders.push(`($${2*i+1}, $${2*i+2})`);
       });
-
       await client.query(
-        `
-        INSERT INTO insumo_group_items (group_id, insumo_id)
-        VALUES ${placeholders.join(', ')}
-        ON CONFLICT (group_id, insumo_id) DO NOTHING
-        `,
+        `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${placeholders.join(', ')} ON CONFLICT DO NOTHING`,
         values
       );
     }
@@ -306,40 +218,33 @@ async function replaceItems(req, res) {
     await client.query('COMMIT');
     return res.json({ ok: true });
   } catch (err) {
-    console.error('[insumoGroups] replaceItems error:', err);
     await client.query('ROLLBACK').catch(() => {});
+    console.error('[insumoGroups] replaceItems error:', err);
     return sendError(res, 500, 'Error al actualizar items de la agrupación');
   } finally {
     client.release();
   }
 }
 
-/**
- * POST /groups/:id/items  body: { insumoId }
- */
+/* ─── ITEMS: add one ─────────────────────────────────────────────── */
 async function addItemToGroup(req, res) {
-  const bizId = getItemsBusinessId(req);
-  if (!bizId) return sendError(res, 400, 'business_id requerido');
+  const bizPrincipal = getPrincipalBizId(req);
+  const bizOriginal  = getOriginalBizId(req);
+  if (!bizPrincipal) return sendError(res, 400, 'business_id requerido');
 
-  const groupId = Number(req.params.id);
+  const groupId  = Number(req.params.id);
   const insumoId = Number(req.body.insumoId);
-
   if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'IDs inválidos');
   if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'IDs inválidos');
 
   try {
-    const okGroup = await assertGroup(bizId, groupId);
-    if (!okGroup) return sendError(res, 404, 'not_found');
+    const ok = await assertGroupMultiBiz(bizPrincipal, bizOriginal, groupId);
+    if (!ok) return sendError(res, 404, 'not_found');
 
     await pool.query(
-      `
-      INSERT INTO insumo_group_items (group_id, insumo_id)
-      VALUES ($1, $2)
-      ON CONFLICT (group_id, insumo_id) DO NOTHING
-      `,
+      `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
       [groupId, insumoId]
     );
-
     return res.json({ ok: true });
   } catch (err) {
     console.error('[insumoGroups] addItemToGroup error:', err);
@@ -347,12 +252,11 @@ async function addItemToGroup(req, res) {
   }
 }
 
-/**
- * POST /groups/:id/items/bulk  body: { insumoIds: [] }
- */
+/* ─── ITEMS: bulk add ────────────────────────────────────────────── */
 async function addMultipleItemsToGroup(req, res) {
-  const bizId = getItemsBusinessId(req);
-  if (!bizId) return sendError(res, 400, 'business_id requerido');
+  const bizPrincipal = getPrincipalBizId(req);
+  const bizOriginal  = getOriginalBizId(req);
+  if (!bizPrincipal) return sendError(res, 400, 'business_id requerido');
 
   const groupId = Number(req.params.id);
   const insumoIds = Array.isArray(req.body?.insumoIds)
@@ -364,28 +268,18 @@ async function addMultipleItemsToGroup(req, res) {
 
   const client = await pool.connect();
   try {
-    const okGroup = await assertGroup(bizId, groupId);
-    if (!okGroup) return sendError(res, 404, 'not_found');
+    const ok = await assertGroupMultiBiz(bizPrincipal, bizOriginal, groupId);
+    if (!ok) {
+      console.error(`[insumoGroups] bulk 404: groupId=${groupId}, bizPrincipal=${bizPrincipal}, bizOriginal=${bizOriginal}`);
+      return sendError(res, 404, 'not_found');
+    }
 
     await client.query('BEGIN');
-
-    const valuesSql = insumoIds
-      .map((_, idx) => {
-        const p1 = idx * 2 + 1;
-        const p2 = idx * 2 + 2;
-        return `($${p1}, $${p2})`;
-      })
-      .join(', ');
-
     const params = insumoIds.flatMap((id) => [groupId, id]);
+    const valuesSql = insumoIds.map((_, idx) => `($${idx*2+1}, $${idx*2+2})`).join(', ');
 
     const r = await client.query(
-      `
-      INSERT INTO insumo_group_items (group_id, insumo_id)
-      VALUES ${valuesSql}
-      ON CONFLICT (group_id, insumo_id) DO NOTHING
-      RETURNING insumo_id
-      `,
+      `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${valuesSql} ON CONFLICT DO NOTHING RETURNING insumo_id`,
       params
     );
 
@@ -400,34 +294,25 @@ async function addMultipleItemsToGroup(req, res) {
   }
 }
 
-/**
- * DELETE /groups/:id/items/:insumoId
- * ✅ idempotente: si no está, igual ok:true
- */
+/* ─── ITEMS: remove ──────────────────────────────────────────────── */
 async function removeItemFromGroup(req, res) {
-  const bizId = getItemsBusinessId(req);
-  if (!bizId) return sendError(res, 400, 'business_id requerido');
+  const bizPrincipal = getPrincipalBizId(req);
+  const bizOriginal  = getOriginalBizId(req);
+  if (!bizPrincipal) return sendError(res, 400, 'business_id requerido');
 
-  const groupId = Number(req.params.id);
+  const groupId  = Number(req.params.id);
   const insumoId = Number(req.params.insumoId);
-
   if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'ID inválido');
   if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'ID inválido');
 
   try {
-    // 1) valida que el grupo es de este business
-    const ok = await pool.query(
-      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
-      [groupId, bizId]
-    );
-    if (!ok.rowCount) return sendError(res, 404, 'not_found');
+    const ok = await assertGroupMultiBiz(bizPrincipal, bizOriginal, groupId);
+    if (!ok) return sendError(res, 404, 'not_found');
 
-    // 2) delete idempotente
     const r = await pool.query(
       'DELETE FROM insumo_group_items WHERE group_id = $1 AND insumo_id = $2',
       [groupId, insumoId]
     );
-
     return res.json({ ok: true, removed: r.rowCount || 0 });
   } catch (err) {
     console.error('[insumoGroups] removeItemFromGroup error:', err);
@@ -435,31 +320,24 @@ async function removeItemFromGroup(req, res) {
   }
 }
 
-/* =============== EXCLUSIONES =============== */
+/* ─── EXCLUSIONES ────────────────────────────────────────────────── */
 async function getExclusions(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   try {
-    const { rowCount: groupCount } = await pool.query(
+    const { rowCount } = await pool.query(
       'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
       [id, bizId]
     );
-    if (!groupCount) return sendError(res, 404, 'not_found');
+    if (!rowCount) return sendError(res, 404, 'not_found');
 
     const { rows } = await pool.query(
-      `
-      SELECT id, scope, ref_id
-      FROM insumo_group_exclusions
-      WHERE group_id = $1
-      ORDER BY created_at DESC
-      `,
+      'SELECT id, scope, ref_id FROM insumo_group_exclusions WHERE group_id = $1 ORDER BY created_at DESC',
       [id]
     );
-
     return res.json({ ok: true, data: rows });
   } catch (err) {
     console.error('[insumoGroups] getExclusions error:', err);
@@ -468,48 +346,35 @@ async function getExclusions(req, res) {
 }
 
 async function addExclusions(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   const { exclusions } = req.body;
-  if (!Array.isArray(exclusions) || !exclusions.length) {
-    return sendError(res, 400, 'exclusions debe ser un array no vacío');
-  }
+  if (!Array.isArray(exclusions) || !exclusions.length) return sendError(res, 400, 'exclusions debe ser un array no vacío');
 
   try {
-    const { rowCount: groupCount } = await pool.query(
-      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
-      [id, bizId]
+    const { rowCount } = await pool.query(
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2', [id, bizId]
     );
-    if (!groupCount) return sendError(res, 404, 'not_found');
+    if (!rowCount) return sendError(res, 404, 'not_found');
 
     const values = [];
     const placeholders = [];
-
     exclusions.forEach((e, idx) => {
-      const scope = e.scope || 'insumo';
       const refId = Number(e.ref_id);
       if (!Number.isFinite(refId)) return;
-
       const base = idx * 3;
-      values.push(id, scope, refId);
-      placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
+      values.push(id, e.scope || 'insumo', refId);
+      placeholders.push(`($${base+1}, $${base+2}, $${base+3})`);
     });
-
-    if (!placeholders.length) return sendError(res, 400, 'No hay exclusiones válidas para agregar');
+    if (!placeholders.length) return sendError(res, 400, 'No hay exclusiones válidas');
 
     await pool.query(
-      `
-      INSERT INTO insumo_group_exclusions (group_id, scope, ref_id)
-      VALUES ${placeholders.join(', ')}
-      ON CONFLICT (group_id, scope, ref_id) DO NOTHING
-      `,
+      `INSERT INTO insumo_group_exclusions (group_id, scope, ref_id) VALUES ${placeholders.join(', ')} ON CONFLICT DO NOTHING`,
       values
     );
-
     return res.json({ ok: true, count: placeholders.length });
   } catch (err) {
     console.error('[insumoGroups] addExclusions error:', err);
@@ -518,39 +383,28 @@ async function addExclusions(req, res) {
 }
 
 async function removeExclusions(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   const { ids, scope = 'insumo' } = req.body;
-  if (!Array.isArray(ids) || !ids.length) {
-    return sendError(res, 400, 'ids debe ser un array no vacío');
-  }
+  if (!Array.isArray(ids) || !ids.length) return sendError(res, 400, 'ids debe ser un array no vacío');
 
   try {
     const { rowCount: groupCount } = await pool.query(
-      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
-      [id, bizId]
+      'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2', [id, bizId]
     );
     if (!groupCount) return sendError(res, 404, 'not_found');
 
     const refIds = ids.map(Number).filter(Number.isFinite);
-    if (!refIds.length) return sendError(res, 400, 'No hay IDs válidos para eliminar');
+    if (!refIds.length) return sendError(res, 400, 'No hay IDs válidos');
 
-    const placeholders = refIds.map((_, idx) => `$${idx + 3}`).join(', ');
-
+    const placeholders = refIds.map((_, i) => `$${i+3}`).join(', ');
     const { rowCount } = await pool.query(
-      `
-      DELETE FROM insumo_group_exclusions
-      WHERE group_id = $1
-        AND scope = $2
-        AND ref_id IN (${placeholders})
-      `,
+      `DELETE FROM insumo_group_exclusions WHERE group_id = $1 AND scope = $2 AND ref_id IN (${placeholders})`,
       [id, scope, ...refIds]
     );
-
     return res.json({ ok: true, deleted: rowCount });
   } catch (err) {
     console.error('[insumoGroups] removeExclusions error:', err);
@@ -558,9 +412,9 @@ async function removeExclusions(req, res) {
   }
 }
 
-/* =============== CREATE OR MOVE =============== */
+/* ─── CREATE OR MOVE ─────────────────────────────────────────────── */
 async function createOrMove(req, res) {
-  const bizId = getBusinessId(req);
+  const bizId = getPrincipalBizId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const nombre = String(req.body?.nombre || '').trim();
@@ -568,75 +422,47 @@ async function createOrMove(req, res) {
     .map(Number)
     .filter((n) => Number.isFinite(n) && n > 0);
 
-  if (!nombre || !ids.length) {
-    return sendError(res, 400, 'Nombre e IDs son obligatorios');
-  }
+  if (!nombre || !ids.length) return sendError(res, 400, 'Nombre e IDs son obligatorios');
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     let destRow;
-    {
-      const r = await client.query(
-        `
-        SELECT id, nombre
-        FROM insumo_groups
-        WHERE business_id = $1 AND nombre = $2
-        FOR UPDATE
-        `,
+    const existing = await client.query(
+      'SELECT id, nombre FROM insumo_groups WHERE business_id = $1 AND nombre = $2 FOR UPDATE',
+      [bizId, nombre]
+    );
+    if (existing.rows.length) {
+      destRow = existing.rows[0];
+    } else {
+      const inserted = await client.query(
+        'INSERT INTO insumo_groups (business_id, nombre) VALUES ($1, $2) RETURNING id, nombre',
         [bizId, nombre]
       );
-
-      if (r.rows.length) {
-        destRow = r.rows[0];
-      } else {
-        const r2 = await client.query(
-          `
-          INSERT INTO insumo_groups (business_id, nombre)
-          VALUES ($1, $2)
-          RETURNING id, nombre
-          `,
-          [bizId, nombre]
-        );
-        destRow = r2.rows[0];
-      }
+      destRow = inserted.rows[0];
     }
 
     const destId = Number(destRow.id);
 
+    // Quitar esos insumos de OTROS grupos del mismo negocio
     await client.query(
-      `
-      DELETE FROM insumo_group_items
-      WHERE group_id IN (
-        SELECT id FROM insumo_groups WHERE business_id = $1 AND id != $2
-      )
-      AND insumo_id = ANY($3::int[])
-      `,
+      `DELETE FROM insumo_group_items
+       WHERE group_id IN (SELECT id FROM insumo_groups WHERE business_id = $1 AND id != $2)
+       AND insumo_id = ANY($3::int[])`,
       [bizId, destId, ids]
     );
 
-    const values = [];
-    const placeholders = [];
-    ids.forEach((insumoId, i) => {
-      values.push(destId, insumoId);
-      const p1 = 2 * i + 1;
-      const p2 = 2 * i + 2;
-      placeholders.push(`($${p1}, $${p2})`);
-    });
-
+    // Insertar en el grupo destino
+    const values = ids.flatMap((insumoId) => [destId, insumoId]);
+    const placeholders = ids.map((_, i) => `($${2*i+1}, $${2*i+2})`).join(', ');
     await client.query(
-      `
-      INSERT INTO insumo_group_items (group_id, insumo_id)
-      VALUES ${placeholders.join(', ')}
-      ON CONFLICT (group_id, insumo_id) DO NOTHING
-      `,
+      `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${placeholders} ON CONFLICT DO NOTHING`,
       values
     );
 
     await client.query('COMMIT');
-
-    console.log(`✅ [createOrMove] Agrupación "${nombre}" (ID: ${destId}) con ${ids.length} insumos`);
+    console.log(`✅ [createOrMove] "${nombre}" (ID: ${destId}) con ${ids.length} insumos`);
     return res.json({ ok: true, id: destId, nombre, moved: ids.length });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -648,22 +474,9 @@ async function createOrMove(req, res) {
 }
 
 module.exports = {
-  list,
-  getOne,
-  create,
-  update,
-  remove,
-
+  list, getOne, create, update, remove,
   replaceItems,
-
-  // ✅ nombres “de ruta” (claros)
-  addItemToGroup,
-  addMultipleItemsToGroup,
-  removeItemFromGroup,
-
-  getExclusions,
-  addExclusions,
-  removeExclusions,
-
+  addItemToGroup, addMultipleItemsToGroup, removeItemFromGroup,
+  getExclusions, addExclusions, removeExclusions,
   createOrMove,
 };
