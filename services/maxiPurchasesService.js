@@ -85,7 +85,7 @@ async function fetchMaxiPurchases({ businessId, req, from, to, provdr = '', num 
   for (const chunk of chunks) {
     console.log(`  chunk: ${chunk.from} -> ${chunk.to}`);
     const rows = await fetchMaxiPurchasesChunk({ bearer, from: chunk.from, to: chunk.to, provdr, num });
-    all.push(...rows);
+    all.push(...rows.filter(r => r != null));
   }
   return all;
 }

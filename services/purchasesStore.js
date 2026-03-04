@@ -10,6 +10,7 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
   try {
     await client.query('BEGIN');
     for (const factura of facturas) {
+      if (!factura) continue; // MaxiRest puede mandar nulls en el array
       const facturaKey = String(factura.numero ?? '').trim();
       if (!facturaKey) continue;
       const proveedorId = factura.proveedor ? Number(factura.proveedor) : null;
