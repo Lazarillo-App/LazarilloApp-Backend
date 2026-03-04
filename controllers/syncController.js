@@ -626,6 +626,16 @@ exports.salesSummaryFromDB = async (req, res, next) => {
     }
 
     const sqlItems = `
+WITH preferred AS (
+  SELECT DISTINCT ON (business_id, day, article_id)
+    business_id, day, article_id, qty, amount
+  FROM sales_daily_items
+  WHERE business_id = $1
+    AND day BETWEEN $2::date AND $3::date
+    AND COALESCE(NULLIF(article_id::text,''), '0')::bigint <> 0
+  ORDER BY business_id, day, article_id,
+    CASE WHEN source = 'csv' THEN 0 ELSE 1 END
+)
 SELECT
   s.article_id,
   COALESCE(MAX(ma.nombre), MAX(a.name), 'Artículo #' || s.article_id::text) AS nombre,
@@ -633,21 +643,17 @@ SELECT
   COALESCE(MAX(ma.subrubro), MAX(m.subrubro), MAX(sr.nombre), '[PENDIENTE]') AS subrubro,
   SUM(s.qty)::numeric    AS qty,
   SUM(s.amount)::numeric AS amount
-FROM sales_daily_items s
+FROM preferred s
 LEFT JOIN maxi_articles   ma ON ma.business_id = s.business_id AND ma.articulo_id = s.article_id
 LEFT JOIN maxi_article_map m  ON m.business_id  = s.business_id AND m.articulo_id  = s.article_id
 LEFT JOIN app_articles     a  ON a.business_id  = s.business_id AND a.id           = s.article_id
 LEFT JOIN categorias       c  ON c.id = a.categoria_id
 LEFT JOIN subrubros        sr ON sr.id = a.subrubro_id
-WHERE s.business_id = $1
-  AND s.day BETWEEN $2::date AND $3::date
-  AND COALESCE(NULLIF(s.article_id::text,''), '0')::bigint <> 0
 ${whereExtra}
 GROUP BY s.article_id
 ORDER BY qty DESC
 LIMIT ${lim};
 `;
-
 
     const { rows } = await pool.query(sqlItems, params);
 
@@ -777,8 +783,8 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
     const { rows } = await pool.query(salesQuery, [salesBizId, articuloId, from, to]);
 
     const items = rows.map(row => ({
-      label:  row.label,
-      qty:    parseInt(row.qty    || 0, 10),
+      label: row.label,
+      qty: parseInt(row.qty || 0, 10),
       amount: parseFloat(row.amount || 0)
     }));
 
@@ -790,10 +796,10 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
       total,
       items,
       meta: {
-        article_id:     articuloId,
+        article_id: articuloId,
         article_nombre: articleNombre,
-        business_id:    businessId,
-        sales_biz_id:   salesBizId,
+        business_id: businessId,
+        sales_biz_id: salesBizId,
         from,
         to,
         groupBy
