@@ -8,12 +8,13 @@ function sendError(res, status, message) {
   return res.status(status).json({ ok: false, error: message });
 }
 
-// Para grupos: usar el bizId ORIGINAL del subnegocio (no el resuelto al principal)
-// Los grupos son por negocio — cada subnegocio tiene los suyos propios
-function getGroupBusinessId(req) {
-  // Si el middleware resolvió un subnegocio, usar el original
+// Para grupos (CRUD): usar el bizId resuelto por el middleware (siempre el principal)
+// Los grupos son globales — todos los negocios comparten las mismas agrupaciones
+
+// Para items de grupos (discontinuados): usar el bizId ORIGINAL del subnegocio
+// porque Discontinuados es por negocio — cada uno tiene el suyo
+function getBusinessId(req) {
   if (req._insumosResolvedFrom) return Number(req._insumosResolvedFrom);
-  // Si no, usar el negocio del request normal
   return getBusinessId(req);
 }
 
@@ -28,7 +29,7 @@ async function assertGroup(bizId, groupId) {
 /* =============== LISTAR GRUPOS =============== */
 async function list(req, res) {
   console.log('🚀🚀🚀 [NUEVA VERSION] insumoGroups.list called 🚀🚀🚀');
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   try {
@@ -94,7 +95,7 @@ async function list(req, res) {
 
 /* =============== OBTENER UNO =============== */
 async function getOne(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const id = Number(req.params.id);
@@ -150,7 +151,7 @@ async function getOne(req, res) {
 
 /* =============== CREAR / EDITAR / BORRAR GRUPO =============== */
 async function create(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const nombre = String(req.body.nombre || '').trim();
@@ -179,7 +180,7 @@ async function create(req, res) {
 }
 
 async function update(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const id = Number(req.params.id);
@@ -238,7 +239,7 @@ async function update(req, res) {
 }
 
 async function remove(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const id = Number(req.params.id);
@@ -263,7 +264,7 @@ async function remove(req, res) {
  * (Reemplaza por completo el set de items)
  */
 async function replaceItems(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getItemsBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const groupId = Number(req.params.id);
@@ -317,7 +318,7 @@ async function replaceItems(req, res) {
  * POST /groups/:id/items  body: { insumoId }
  */
 async function addItemToGroup(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getItemsBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const groupId = Number(req.params.id);
@@ -350,7 +351,7 @@ async function addItemToGroup(req, res) {
  * POST /groups/:id/items/bulk  body: { insumoIds: [] }
  */
 async function addMultipleItemsToGroup(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getItemsBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const groupId = Number(req.params.id);
@@ -404,7 +405,7 @@ async function addMultipleItemsToGroup(req, res) {
  * ✅ idempotente: si no está, igual ok:true
  */
 async function removeItemFromGroup(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getItemsBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const groupId = Number(req.params.id);
@@ -436,7 +437,7 @@ async function removeItemFromGroup(req, res) {
 
 /* =============== EXCLUSIONES =============== */
 async function getExclusions(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const id = Number(req.params.id);
@@ -467,7 +468,7 @@ async function getExclusions(req, res) {
 }
 
 async function addExclusions(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const id = Number(req.params.id);
@@ -517,7 +518,7 @@ async function addExclusions(req, res) {
 }
 
 async function removeExclusions(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const id = Number(req.params.id);
@@ -559,7 +560,7 @@ async function removeExclusions(req, res) {
 
 /* =============== CREATE OR MOVE =============== */
 async function createOrMove(req, res) {
-  const bizId = getGroupBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const nombre = String(req.body?.nombre || '').trim();
