@@ -134,17 +134,14 @@ exports.obtenerAgrupaciones = async (req, res) => {
       // Filtrar: ocultar agrupaciones movidas a otros subnegocios
       // MANTENER: Sin Agrupación propia del subnegocio (is_temporary) y agrupaciones creadas aquí
       // ELIMINAR: Discontinuados propio (viene del principal) y movidas
-      // Quitar las agrupaciones propias del subnegocio que ya fueron movidas,
-      // Discontinuados propios (vienen del principal) y Sin Agrupación propia
-      // (la Sin Agrupación es GLOBAL: vive en el principal y la comparten todos).
       agrupaciones = agrupaciones.filter(ag => {
-        if (ag.moved_to_business_id) return false;
-        if (isDiscontinuadosName(ag.nombre)) return false;
-        if (isTodoName(ag.nombre)) return false; // la propia se reemplaza por la global
+        if (ag.moved_to_business_id) return false;         // ya fue dividida
+        if (isDiscontinuadosName(ag.nombre)) return false; // Discontinuados viene del principal
         return true;
       });
 
-      // Inyectar Sin Agrupación global Y Discontinuados del negocio principal
+      // Inyectar SOLO Discontinuados del negocio principal de la org
+      // (Sin Agrupación es propia de cada subnegocio — cada uno tiene la suya)
       if (organizationId) {
         const { rows: principalRows } = await pool.query(
           `SELECT id FROM app_businesses
@@ -156,29 +153,29 @@ exports.obtenerAgrupaciones = async (req, res) => {
         const principalId = principalRows[0]?.id;
 
         if (principalId && Number(principalId) !== Number(businessId)) {
-          const { rows: globalRows } = await pool.query(
+          const { rows: discRows } = await pool.query(
             `SELECT id, nombre, business_id,
                     COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos,
                     app_articles_ids, is_temporary, moved_to_business_id
                FROM agrupaciones
               WHERE business_id = $1
                 AND (
-                  nombre ILIKE 'Sin Agrupac%'
-                  OR nombre ILIKE 'Sin Agrupar%'
-                  OR nombre ILIKE 'Discontinuados'
+                  nombre ILIKE 'Discontinuados'
                   OR nombre ILIKE 'Descontinuados'
-                )`,
+                )
+              LIMIT 1`,
             [principalId]
           );
 
-          // Sin Agrupación va al inicio, Discontinuados al final
-          const globalTodo = globalRows.find(r => isTodoName(r.nombre));
-          const globalDisc = globalRows.find(r => isDiscontinuadosName(r.nombre));
-
-          const tag = (row) => ({ ...row, global_from_principal: true, principal_business_id: principalId });
-
-          if (globalTodo) agrupaciones = [tag(globalTodo), ...agrupaciones];
-          if (globalDisc) agrupaciones = [...agrupaciones, tag(globalDisc)];
+          if (discRows.length) {
+            const globalDisc = {
+              ...discRows[0],
+              global_from_principal: true,
+              principal_business_id: principalId,
+            };
+            // Discontinuados siempre al final
+            agrupaciones = [...agrupaciones, globalDisc];
+          }
         }
       }
     } else {
@@ -524,41 +521,6 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
       [JSON.stringify(filtered), id, businessId]
     );
 
-    // Si el negocio es un subnegocio, mover el artículo a la Sin Agrupación
-    // global del principal (pool compartido de la org).
-    try {
-      const { rows: bizRows } = await pool.query(
-        `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`,
-        [businessId]
-      );
-      const biz = bizRows[0];
-      if (biz?.created_from === 'from_group' && biz?.organization_id) {
-        const { rows: princRows } = await pool.query(
-          `SELECT id FROM app_businesses
-            WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
-          [biz.organization_id]
-        );
-        const principalId = princRows[0]?.id;
-        if (principalId && Number(principalId) !== Number(businessId)) {
-          // Agregar a Sin Agrupación del principal (sin duplicar)
-          await pool.query(
-            `UPDATE agrupaciones
-                SET articulos = (
-                  CASE WHEN articulos @> $2::jsonb THEN articulos
-                       ELSE articulos || $2::jsonb
-                  END
-                ), updated_at = NOW()
-              WHERE business_id = $1
-                AND (nombre ILIKE 'Sin Agrupac%' OR nombre ILIKE 'Sin Agrupar%')`,
-            [principalId, JSON.stringify([{ id: articuloId }])]
-          );
-        }
-      }
-    } catch (moveErr) {
-      // No crítico: el artículo ya fue quitado de la agrupación
-      console.error('[eliminarArticuloDeAgrupacion] Error moviendo a Sin Agrupación global:', moveErr.message);
-    }
-
     return res.json(rows[0]);
   } catch (e) {
     console.error('eliminarArticuloDeAgrupacion error:', {
@@ -625,9 +587,9 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
   }
 
-  // Si el destino es "Sin Agrupación" o "Discontinuados" y es subnegocio,
-  // redirigir al negocio principal de la org (ambas son globales).
-  if (isTodoName(nombre) || isDiscontinuadosName(nombre)) {
+  // Si el destino es "Discontinuados" y es subnegocio,
+  // redirigir al Discontinuados del negocio principal de la org
+  if (isDiscontinuadosName(nombre)) {
     const { rows: bizRows } = await pool.query(
       `SELECT b.created_from, b.organization_id
          FROM app_businesses b
@@ -653,19 +615,31 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 
   const idsSet = new Set(ids);
 
+  // Para nombres especiales (Sin Agrupación, Discontinuados), normalizar para evitar
+  // crear duplicados por diferencias de tilde. Ej: 'Sin Agrupacion' → busca también 'Sin Agrupación'
+  let nombreFinal = nombre;
+  if (isTodoName(nombre)) nombreFinal = TODO_NAME_LEGACY;       // siempre usar versión con tilde
+  if (isDiscontinuadosName(nombre)) nombreFinal = DISC_NAME;    // siempre 'Discontinuados'
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     // 1) crear o encontrar la agrupación destino
+    // Para nombres especiales buscamos por ambas variantes (con/sin tilde) para no crear duplicados
     let destRow;
     {
       const r = await client.query(
         `SELECT id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
            FROM agrupaciones
-          WHERE business_id=$1 AND nombre=$2
+          WHERE business_id=$1 AND (
+            nombre=$2
+            OR (nombre=$3 AND $4)
+          )
+          ORDER BY id ASC
+          LIMIT 1
           FOR UPDATE`,
-        [businessId, nombre]
+        [businessId, nombreFinal, TODO_NAME_INITIAL, isTodoName(nombre)]
       );
 
       if (r.rows.length) {
@@ -675,7 +649,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
           `INSERT INTO agrupaciones (business_id, nombre, articulos)
            VALUES ($1, $2, '[]'::jsonb)
            RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
-          [businessId, nombre]
+          [businessId, nombreFinal]
         );
         destRow = r2.rows[0];
       }
@@ -742,7 +716,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     }
 
     await client.query('COMMIT');
-    return res.json({ ok: true, id: destId, nombre, moved });
+    return res.json({ ok: true, id: destId, nombre: nombreFinal, moved });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('createOrMoveAgrupacion error:', e);
@@ -774,19 +748,35 @@ exports.ensureTodoAgrupacion = async (req, res) => {
     let discRow = all.find((r) => isDiscontinuadosName(r.nombre)) || null;
 
     if (!todoRow) {
-      const { rows } = await pool.query(
+      // Intentar primero con la versión legacy (con tilde) para consistencia con negocios existentes
+      // Si tampoco existe, crear con el nombre inicial (sin tilde)
+      const { rows: legacyRows } = await pool.query(
         `INSERT INTO agrupaciones (business_id, nombre, articulos)
          VALUES ($1, $2, '[]'::jsonb)
-         ON CONFLICT (business_id, nombre) DO NOTHING
+         ON CONFLICT (business_id, nombre) DO UPDATE SET updated_at = NOW()
          RETURNING id, nombre`,
-        [businessId, TODO_NAME_INITIAL]
+        [businessId, TODO_NAME_LEGACY]
       );
+      todoRow = legacyRows[0] || null;
 
-      // si por carrera no devolvió, buscá
-      todoRow = rows[0] || (await pool.query(
-        `SELECT id, nombre FROM agrupaciones WHERE business_id=$1 AND nombre=$2 LIMIT 1`,
-        [businessId, TODO_NAME_INITIAL]
-      )).rows[0];
+      if (!todoRow) {
+        const { rows } = await pool.query(
+          `INSERT INTO agrupaciones (business_id, nombre, articulos)
+           VALUES ($1, $2, '[]'::jsonb)
+           ON CONFLICT (business_id, nombre) DO UPDATE SET updated_at = NOW()
+           RETURNING id, nombre`,
+          [businessId, TODO_NAME_INITIAL]
+        );
+        todoRow = rows[0] || null;
+      }
+
+      if (!todoRow) {
+        // último recurso: buscar cualquier variante
+        todoRow = (await pool.query(
+          `SELECT id, nombre FROM agrupaciones WHERE business_id=$1 AND (nombre=$2 OR nombre=$3) LIMIT 1`,
+          [businessId, TODO_NAME_LEGACY, TODO_NAME_INITIAL]
+        )).rows[0];
+      }
     }
 
     // Solo crear Discontinuados en el negocio principal (no en subnegocios)
