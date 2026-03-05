@@ -426,31 +426,25 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     }
 
     // Si el grupo target es Discontinuados y estamos en subnegocio,
-    // redirigir al Discontinuados del negocio principal (igual que createOrMoveAgrupacion)
+    // redirigir al Discontinuados del negocio principal
     {
       const { rows: agRows } = await pool.query(
-        `SELECT nombre FROM agrupaciones WHERE id = $1`,
-        [id]
+        `SELECT nombre FROM agrupaciones WHERE id = $1`, [id]
       );
       const agNombre = agRows[0]?.nombre ?? '';
       if (isDiscontinuadosName(agNombre)) {
         const { rows: bizRows } = await pool.query(
-          `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`,
-          [businessId]
+          `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
         );
         const biz = bizRows[0];
         if (biz?.created_from === 'from_group' && biz?.organization_id) {
           const { rows: orgBiz } = await pool.query(
-            `SELECT id FROM app_businesses
-              WHERE organization_id = $1
-              ORDER BY created_at ASC
-              LIMIT 1`,
+            `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
             [biz.organization_id]
           );
           if (orgBiz[0]?.id) {
-            const originalBizId = businessId;
+            console.log(`[agregarArticulosAgrupacion] Redirigiendo Discontinuados de negocio ${businessId} al principal ${orgBiz[0].id}`);
             businessId = orgBiz[0].id;
-            console.log(`[agregarArticulosAgrupacion] Redirigiendo Discontinuados de negocio ${originalBizId} al principal ${businessId}`);
           }
         }
       }
@@ -524,12 +518,36 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 // ============================================================================
 exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   try {
-    const businessId = getBusinessId(req);
+    let businessId = getBusinessId(req);
     const id = Number(req.params.id);
     const articuloId = Number(req.params.articuloId);
 
     if (!Number.isFinite(businessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    // Redirigir al negocio principal si la agrupación es Discontinuados y venimos de un subnegocio
+    {
+      const { rows: agRows } = await pool.query(
+        `SELECT nombre FROM agrupaciones WHERE id = $1`, [id]
+      );
+      const agNombre = agRows[0]?.nombre ?? '';
+      if (isDiscontinuadosName(agNombre)) {
+        const { rows: bizRows } = await pool.query(
+          `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
+        );
+        const biz = bizRows[0];
+        if (biz?.created_from === 'from_group' && biz?.organization_id) {
+          const { rows: orgBiz } = await pool.query(
+            `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
+            [biz.organization_id]
+          );
+          if (orgBiz[0]?.id) {
+            console.log(`[eliminarArticuloDeAgrupacion] Redirigiendo Discontinuados de ${businessId} al principal ${orgBiz[0].id}`);
+            businessId = orgBiz[0].id;
+          }
+        }
+      }
     }
 
     const { rows: r0 } = await pool.query(
@@ -980,15 +998,50 @@ exports.moveItemsBetweenGroups = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { rows } = await client.query(
-      `SELECT id, articulos FROM agrupaciones
-        WHERE business_id=$1 AND id = ANY($2::int[])
-        FOR UPDATE`,
-      [businessId, [fromId, toId]]
+    // Buscar cada grupo por su propio business_id (Discontinuados puede vivir en el principal)
+    const { rows: nameRows } = await client.query(
+      `SELECT id, nombre, business_id FROM agrupaciones WHERE id = ANY($1::int[])`,
+      [[fromId, toId]]
+    );
+    const fromMeta = nameRows.find((r) => Number(r.id) === fromId);
+    const toMeta   = nameRows.find((r) => Number(r.id) === toId);
+
+    if (!fromMeta || !toMeta) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Agrupación/es no encontrada/s' });
+    }
+
+    // Para Discontinuados en subnegocio, redirigir al business_id del principal
+    const resolveDiscBizId = async (agNombre, reqBizId) => {
+      if (!isDiscontinuadosName(agNombre)) return reqBizId;
+      const { rows: bRows } = await client.query(
+        `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [reqBizId]
+      );
+      const biz = bRows[0];
+      if (biz?.created_from === 'from_group' && biz?.organization_id) {
+        const { rows: oRows } = await client.query(
+          `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
+          [biz.organization_id]
+        );
+        if (oRows[0]?.id) return oRows[0].id;
+      }
+      return reqBizId;
+    };
+
+    const fromBizId = await resolveDiscBizId(fromMeta.nombre, businessId);
+    const toBizId   = await resolveDiscBizId(toMeta.nombre,   businessId);
+
+    const { rows: fromRows } = await client.query(
+      `SELECT id, articulos FROM agrupaciones WHERE id=$1 AND business_id=$2 FOR UPDATE`,
+      [fromId, fromBizId]
+    );
+    const { rows: toRows } = await client.query(
+      `SELECT id, articulos FROM agrupaciones WHERE id=$1 AND business_id=$2 FOR UPDATE`,
+      [toId, toBizId]
     );
 
-    const fromRow = rows.find((r) => Number(r.id) === fromId);
-    const toRow = rows.find((r) => Number(r.id) === toId);
+    const fromRow = fromRows[0] || null;
+    const toRow   = toRows[0]   || null;
 
     if (!fromRow || !toRow) {
       await client.query('ROLLBACK');
@@ -1021,12 +1074,12 @@ exports.moveItemsBetweenGroups = async (req, res) => {
 
     await client.query(
       `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
-      [JSON.stringify(fromFiltered), fromId, businessId]
+      [JSON.stringify(fromFiltered), fromId, fromBizId]
     );
 
     await client.query(
       `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
-      [JSON.stringify(toMerged), toId, businessId]
+      [JSON.stringify(toMerged), toId, toBizId]
     );
 
     await client.query('COMMIT');
