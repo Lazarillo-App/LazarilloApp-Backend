@@ -879,21 +879,6 @@ exports.salesSummary = async (req, res, next) => {
   }
 };
 
-module.exports = {
-  maxiPing: exports.maxiPing,
-  syncWindow: exports.syncWindow,
-  backfillOnce: exports.backfillOnce,
-  dailyAuto: exports.dailyAuto,
-  rebuildAggregates: exports.rebuildAggregates,
-  syncSalesForBusiness: exports.syncSalesForBusiness,
-  reconcileAndRebuild: exports.reconcileAndRebuild,
-  listDailyItems: exports.listDailyItems,
-  exportSalesCsv: exports.exportSalesCsv,
-  diagnosticRaw: exports.diagnosticRaw, 
-  salesSummary: exports.salesSummary,
-  getFirstSaleDate: exports.getFirstSaleDate,
-};
-
 /* ══════════════════════════════════════════════════════════
    GET /api/businesses/:id/sales/first-date
    Devuelve la primera fecha con ventas del negocio (o del principal si es subnegocio).
@@ -919,4 +904,19 @@ exports.getFirstSaleDate = async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+};
+
+module.exports = {
+  maxiPing: exports.maxiPing,
+  syncWindow: exports.syncWindow,
+  backfillOnce: exports.backfillOnce,
+  dailyAuto: exports.dailyAuto,
+  rebuildAggregates: exports.rebuildAggregates,
+  syncSalesForBusiness: exports.syncSalesForBusiness,
+  reconcileAndRebuild: exports.reconcileAndRebuild,
+  listDailyItems: exports.listDailyItems,
+  exportSalesCsv: exports.exportSalesCsv,
+  diagnosticRaw: exports.diagnosticRaw,
+  salesSummary: exports.salesSummary,
+  getFirstSaleDate: exports.getFirstSaleDate,  
 };
