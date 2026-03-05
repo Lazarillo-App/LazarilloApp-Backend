@@ -14,7 +14,9 @@ const {
   upsertExclusiones,
   moveItemsBetweenGroups,
   createOrMoveAgrupacion,
-  assignAgrupacionToDivision, 
+  assignAgrupacionToDivision,
+  getArticuloOrigen,
+  getArticulosOrigenes,
 } = require('../controllers/agrupacionesController');
 
 const { materializeGroupsFromTaxonomy } = require('../services/autoGroupingService');
@@ -53,6 +55,8 @@ router.post('/agrupaciones/:id/exclusiones', safe(upsertExclusiones, 'upsertExcl
 
 router.post('/agrupaciones/:fromId/move-items', safe(moveItemsBetweenGroups, 'moveItemsBetweenGroups'));
 router.post('/agrupaciones/create-or-move', safe(createOrMoveAgrupacion, 'createOrMoveAgrupacion'));
+router.get('/agrupaciones/articulo/:articuloId/origen', safe(getArticuloOrigen, 'getArticuloOrigen'));
+router.post('/agrupaciones/articulos/origenes', safe(getArticulosOrigenes, 'getArticulosOrigenes'));
 
 // ⬇️ NUEVO: materializar agrupaciones desde taxonomía (idempotente)
 // POST /api/businesses/:businessId/agrupaciones/auto-from-taxonomy?strategy=by-subrubro|by-categoria

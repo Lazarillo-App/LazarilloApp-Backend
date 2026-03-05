@@ -1236,3 +1236,163 @@ exports.assignAgrupacionToDivision = async (req, res) => {
     });
   }
 };
+// ============================================================================
+// GET /businesses/:businessId/agrupaciones/articulo/:articuloId/origen
+// Devuelve el grupo y negocio de origen real de un artículo
+// (busca en todos los negocios de la misma organización, excluye Discontinuados)
+// ============================================================================
+exports.getArticuloOrigen = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    const articuloId = Number(req.params.articuloId);
+
+    if (!Number.isFinite(businessId) || !Number.isFinite(articuloId)) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    // Obtener la organización del negocio actual
+    const { rows: bizRows } = await pool.query(
+      `SELECT organization_id, created_from FROM app_businesses WHERE id = $1`,
+      [businessId]
+    );
+    const biz = bizRows[0];
+    if (!biz) return res.status(404).json({ ok: false, error: 'Negocio no encontrado' });
+
+    // Buscar en todos los negocios de la organización (o solo este si no tiene org)
+    let bizIds = [businessId];
+    if (biz.organization_id) {
+      const { rows: orgBizRows } = await pool.query(
+        `SELECT id FROM app_businesses WHERE organization_id = $1`,
+        [biz.organization_id]
+      );
+      bizIds = orgBizRows.map(r => Number(r.id));
+    }
+
+    // Buscar en todas las agrupaciones de esos negocios, excluyendo Discontinuados/Todo
+    const { rows: agRows } = await pool.query(
+      `SELECT a.id, a.nombre, a.business_id, b.nombre AS business_nombre
+         FROM agrupaciones a
+         JOIN app_businesses b ON b.id = a.business_id
+        WHERE a.business_id = ANY($1::int[])
+          AND a.articulos::text LIKE $2
+          AND a.nombre NOT ILIKE 'Discontinuados'
+          AND a.nombre NOT ILIKE 'Descontinuados'
+          AND a.nombre NOT ILIKE 'Todo'
+          AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
+          AND a.nombre NOT ILIKE 'Sin Agrupar'
+          AND a.nombre NOT ILIKE 'Sin Grupo'`,
+      [bizIds, `%"id": ${articuloId}%`]
+    );
+
+    // También intentar con formato sin espacio
+    let allRows = agRows;
+    if (!agRows.length) {
+      const { rows: agRows2 } = await pool.query(
+        `SELECT a.id, a.nombre, a.business_id, b.nombre AS business_nombre
+           FROM agrupaciones a
+           JOIN app_businesses b ON b.id = a.business_id
+          WHERE a.business_id = ANY($1::int[])
+            AND a.articulos::text LIKE $2
+            AND a.nombre NOT ILIKE 'Discontinuados'
+            AND a.nombre NOT ILIKE 'Descontinuados'
+            AND a.nombre NOT ILIKE 'Todo'
+            AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
+            AND a.nombre NOT ILIKE 'Sin Agrupar'
+            AND a.nombre NOT ILIKE 'Sin Grupo'`,
+        [bizIds, `%"id":${articuloId}%`]
+      );
+      allRows = agRows2;
+    }
+
+    if (!allRows.length) {
+      return res.json({ ok: true, origen: null });
+    }
+
+    // Devolver el primer match (priorizar el negocio que hizo el request)
+    const preferred = allRows.find(r => Number(r.business_id) === businessId) || allRows[0];
+
+    return res.json({
+      ok: true,
+      origen: {
+        groupId: Number(preferred.id),
+        groupName: preferred.nombre,
+        bizId: Number(preferred.business_id),
+        bizName: preferred.business_nombre,
+      },
+    });
+  } catch (e) {
+    console.error('getArticuloOrigen error:', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ============================================================================
+// POST /businesses/:businessId/agrupaciones/articulos/origenes
+// Body: { ids: number[] }
+// Devuelve el origen de cada artículo: { [articuloId]: { groupId, groupName, bizId, bizName } }
+// ============================================================================
+exports.getArticulosOrigenes = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map(Number).filter(Number.isFinite);
+
+    if (!Number.isFinite(businessId) || !ids.length) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    // Obtener todos los negocios de la organización
+    const { rows: bizRows } = await pool.query(
+      `SELECT organization_id FROM app_businesses WHERE id = $1`, [businessId]
+    );
+    const orgId = bizRows[0]?.organization_id;
+
+    let bizIds = [businessId];
+    if (orgId) {
+      const { rows: orgBizRows } = await pool.query(
+        `SELECT id FROM app_businesses WHERE organization_id = $1`, [orgId]
+      );
+      bizIds = orgBizRows.map(r => Number(r.id));
+    }
+
+    // Traer todas las agrupaciones relevantes (excluye Discontinuados/Todo/Sin Agrupación)
+    const { rows: agRows } = await pool.query(
+      `SELECT a.id, a.nombre, a.business_id, b.nombre AS business_nombre,
+              COALESCE(a.articulos, '[]'::jsonb) AS articulos
+         FROM agrupaciones a
+         JOIN app_businesses b ON b.id = a.business_id
+        WHERE a.business_id = ANY($1::int[])
+          AND a.nombre NOT ILIKE 'Discontinuados'
+          AND a.nombre NOT ILIKE 'Descontinuados'
+          AND a.nombre NOT ILIKE 'Todo'
+          AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
+          AND a.nombre NOT ILIKE 'Sin Agrupar'
+          AND a.nombre NOT ILIKE 'Sin Grupo'`,
+      [bizIds]
+    );
+
+    const idsSet = new Set(ids);
+    // mapa: articuloId → origen
+    const origenes = {};
+
+    for (const ag of agRows) {
+      const arts = parseJsonArrayLoose(ag.articulos);
+      for (const art of arts) {
+        const artId = Number(art?.id);
+        if (!idsSet.has(artId)) continue;
+        if (origenes[artId]) continue; // ya encontrado
+        origenes[artId] = {
+          groupId: Number(ag.id),
+          groupName: ag.nombre,
+          bizId: Number(ag.business_id),
+          bizName: ag.business_nombre,
+        };
+      }
+    }
+
+    return res.json({ ok: true, origenes });
+  } catch (e) {
+    console.error('getArticulosOrigenes error:', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
