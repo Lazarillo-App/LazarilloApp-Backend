@@ -274,20 +274,29 @@ exports.createBusinessFromGroup = async (req, res, next) => {
       [uid, newBiz.id]
     );
 
-    // 5) Crear agrupación "Sin Agrupación" en el nuevo negocio con los artículos
+    // 5) Crear agrupación con el nombre de la agrupación origen en el nuevo negocio.
+    // Los artículos llegan ya agrupados — el usuario no tiene que reagrupar desde cero.
+    // Además crear "Sin Agrupación" vacía para que exista el espacio global.
     const { rows: sinAgrRows } = await client.query(
       `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
-       VALUES ($1, 'Sin Agrupación', $2::jsonb, $3::jsonb, TRUE, NOW(), NOW())
+       VALUES ($1, $2, $3::jsonb, $4::jsonb, FALSE, NOW(), NOW())
        RETURNING id`,
       [
         newBiz.id,
-        // articulos como array de objetos {id}
-        JSON.stringify(artIds.map(id => ({ id }))),
-        // app_articles_ids como array plano de números
-        JSON.stringify(artIds),
+        group.nombre,                                    // nombre de la agrupación origen
+        JSON.stringify(artIds.map(id => ({ id }))),      // articulos como array de objetos {id}
+        JSON.stringify(artIds),                          // app_articles_ids como array plano
       ]
     );
-    console.log(`📁 [createBusinessFromGroup] "Sin Agrupación" ID=${sinAgrRows[0].id} con ${artIds.length} artículos`);
+    console.log(`📁 [createBusinessFromGroup] Agrupación "${group.nombre}" ID=${sinAgrRows[0].id} con ${artIds.length} artículos`);
+
+    // 5b) Crear "Sin Agrupación" vacía (espacio global para artículos sin agrupar)
+    await client.query(
+      `INSERT INTO agrupaciones (business_id, nombre, articulos, app_articles_ids, is_temporary, created_at, updated_at)
+       VALUES ($1, 'Sin Agrupación', '[]'::jsonb, '[]'::jsonb, TRUE, NOW(), NOW())
+       ON CONFLICT (business_id, nombre) DO NOTHING`,
+      [newBiz.id]
+    );
 
     // 6) Crear agrupación "Discontinuados" vacía en el nuevo negocio
     await client.query(
