@@ -290,3 +290,29 @@ exports.exportCsv = async (req, res, next) => {
     next(e);
   }
 };
+
+// GET /api/purchases/first-date
+// Devuelve la fecha más antigua con compras sincronizadas en la DB
+exports.firstDate = async (req, res, next) => {
+  try {
+    const rawBizId = getBusinessId(req);
+    if (!rawBizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    const businessId = await resolvePurchaseBusiness(rawBizId);
+
+    const { rows } = await pool.query(
+      `SELECT MIN(fecha)::date AS first_date
+         FROM purchase_items
+        WHERE business_id = $1`,
+      [businessId]
+    );
+
+    const firstDate = rows[0]?.first_date
+      ? String(rows[0].first_date).slice(0, 10)   // "2024-08-15"
+      : null;
+
+    res.json({ ok: true, firstDate });
+  } catch (e) {
+    console.error('[purchases.firstDate] error:', e);
+    next(e);
+  }
+};
