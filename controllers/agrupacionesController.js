@@ -418,11 +418,42 @@ exports.eliminarAgrupacion = async (req, res) => {
 // ============================================================================
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
-    const businessId = getBusinessId(req);
+    let businessId = getBusinessId(req);
     const id = Number(req.params.id ?? req.params.agrupacionId);
 
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    // Si el grupo target es Discontinuados y estamos en subnegocio,
+    // redirigir al Discontinuados del negocio principal (igual que createOrMoveAgrupacion)
+    {
+      const { rows: agRows } = await pool.query(
+        `SELECT nombre FROM agrupaciones WHERE id = $1`,
+        [id]
+      );
+      const agNombre = agRows[0]?.nombre ?? '';
+      if (isDiscontinuadosName(agNombre)) {
+        const { rows: bizRows } = await pool.query(
+          `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`,
+          [businessId]
+        );
+        const biz = bizRows[0];
+        if (biz?.created_from === 'from_group' && biz?.organization_id) {
+          const { rows: orgBiz } = await pool.query(
+            `SELECT id FROM app_businesses
+              WHERE organization_id = $1
+              ORDER BY created_at ASC
+              LIMIT 1`,
+            [biz.organization_id]
+          );
+          if (orgBiz[0]?.id) {
+            const originalBizId = businessId;
+            businessId = orgBiz[0].id;
+            console.log(`[agregarArticulosAgrupacion] Redirigiendo Discontinuados de negocio ${originalBizId} al principal ${businessId}`);
+          }
+        }
+      }
     }
 
     // Puede venir `articulos` (objetos) o `ids` o `articuloIds` (números)
