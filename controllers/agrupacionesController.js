@@ -647,7 +647,6 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     );
     const biz = bizRows[0];
     if (biz?.created_from === 'from_group' && biz?.organization_id) {
-      // Buscar el negocio más antiguo de la org (el principal)
       const { rows: orgBiz } = await pool.query(
         `SELECT id FROM app_businesses
           WHERE organization_id = $1
@@ -662,6 +661,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     }
   }
 
+  // Sin Agrupación también es global — vive en el principal igual que Discontinuados
   if (isTodoName(nombre)) {
     const { rows: bizRows } = await pool.query(
       `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`,
@@ -671,9 +671,9 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     if (biz?.created_from === 'from_group' && biz?.organization_id) {
       const { rows: orgBiz } = await pool.query(
         `SELECT id FROM app_businesses
-        WHERE organization_id = $1
-        ORDER BY created_at ASC
-        LIMIT 1`,
+          WHERE organization_id = $1
+          ORDER BY created_at ASC
+          LIMIT 1`,
         [biz.organization_id]
       );
       if (orgBiz[0]?.id) {
@@ -686,17 +686,16 @@ exports.createOrMoveAgrupacion = async (req, res) => {
   const idsSet = new Set(ids);
 
   // Para nombres especiales (Sin Agrupación, Discontinuados), normalizar para evitar
-  // crear duplicados por diferencias de tilde. Ej: 'Sin Agrupacion' → busca también 'Sin Agrupación'
+  // crear duplicados por diferencias de tilde.
   let nombreFinal = nombre;
-  if (isTodoName(nombre)) nombreFinal = TODO_NAME_LEGACY;       // siempre usar versión con tilde
-  if (isDiscontinuadosName(nombre)) nombreFinal = DISC_NAME;    // siempre 'Discontinuados'
+  if (isTodoName(nombre)) nombreFinal = TODO_NAME_LEGACY;
+  if (isDiscontinuadosName(nombre)) nombreFinal = DISC_NAME;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     // 1) crear o encontrar la agrupación destino
-    // Para nombres especiales buscamos por ambas variantes (con/sin tilde) para no crear duplicados
     let destRow;
     {
       const r = await client.query(
@@ -742,7 +741,6 @@ exports.createOrMoveAgrupacion = async (req, res) => {
       if (gid === destId) continue;
 
       const list = parseJsonArrayLoose(g.articulos);
-
       const filtered = list.filter((a) => {
         const aid = extractArticuloId(a);
         return !(aid != null && idsSet.has(aid));
@@ -760,17 +758,14 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     let moved = 0;
     {
       const list = parseJsonArrayLoose(destRow.articulos);
-
       const seen = new Set(
-        list
-          .map(extractArticuloId)
-          .filter((n) => n != null)
+        list.map(extractArticuloId).filter((n) => n != null)
       );
 
       const toAdd = [];
       for (const id of ids) {
         if (!seen.has(id)) {
-          toAdd.push({ id }); // ✅ mínimo, limpio
+          toAdd.push({ id });
           seen.add(id);
           moved++;
         }
