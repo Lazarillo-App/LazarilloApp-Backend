@@ -245,19 +245,44 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       if (r.codigo_maxi != null) insumoMap.set(Number(r.codigo_maxi), Number(r.id));
     }
 
-    // DELETE del rango completo para este negocio (source='csv')
-    await client.query(
-      `DELETE FROM purchase_items
-       WHERE business_id = $1 AND source = 'csv' AND fecha BETWEEN $2::date AND $3::date`,
-      [salesBizId, minDate, maxDate]
-    );
+    // Verificar si la columna source existe en purchase_items
+    const { rows: colCheck } = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'purchase_items' AND column_name = 'source'
+    `);
+    const hasSource = colCheck.length > 0;
+
+    // DELETE del rango completo para este negocio
+    // Si source existe, solo borramos los de CSV. Si no, borramos todo el rango
+    // (primera importación — los datos existentes son de MaxiRest sync)
+    if (hasSource) {
+      await client.query(
+        `DELETE FROM purchase_items
+         WHERE business_id = $1 AND source = 'csv' AND fecha BETWEEN $2::date AND $3::date`,
+        [salesBizId, minDate, maxDate]
+      );
+    } else {
+      await client.query(
+        `DELETE FROM purchase_items
+         WHERE business_id = $1 AND fecha BETWEEN $2::date AND $3::date`,
+        [salesBizId, minDate, maxDate]
+      );
+    }
 
     // También limpiar purchases huérfanos de CSV en ese rango
-    await client.query(
-      `DELETE FROM purchases
-       WHERE business_id = $1 AND source = 'csv' AND fecha BETWEEN $2::date AND $3::date`,
-      [salesBizId, minDate, maxDate]
-    );
+    const { rows: colCheck2 } = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'purchases' AND column_name = 'source'
+    `);
+    const hasPurchaseSource = colCheck2.length > 0;
+
+    if (hasPurchaseSource) {
+      await client.query(
+        `DELETE FROM purchases
+         WHERE business_id = $1 AND source = 'csv' AND fecha BETWEEN $2::date AND $3::date`,
+        [salesBizId, minDate, maxDate]
+      );
+    }
 
     // INSERT de los nuevos items — cada comprobante único → 1 purchase header
     // Agrupar por comprob para crear los headers
@@ -293,17 +318,25 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
         const purchaseId = purchaseMap.get(comprobKey);
         const insumoId   = insumoMap.get(item.codigo) ?? null;
 
-        await client.query(
-          `INSERT INTO purchase_items
-             (purchase_id, business_id, insumo_id, fecha, cantidad, precio, precio_total,
-              source, referencia, created_at)
-           VALUES ($1,$2,$3,$4::date,$5,$6,$7,'csv',$8,NOW())`,
-          [purchaseId, salesBizId, insumoId, item.fecha,
-           item.cantidad,
-           item.p_prom ?? 0,
-           item.importe,
-           item.nombre ?? null]
-        );
+        if (hasSource) {
+          await client.query(
+            `INSERT INTO purchase_items
+               (purchase_id, business_id, insumo_id, fecha, cantidad, precio, precio_total,
+                source, referencia)
+             VALUES ($1,$2,$3,$4::date,$5,$6,$7,'csv',$8)`,
+            [purchaseId, salesBizId, insumoId, item.fecha,
+             item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO purchase_items
+               (purchase_id, business_id, insumo_id, fecha, cantidad, precio, precio_total,
+                referencia)
+             VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8)`,
+            [purchaseId, salesBizId, insumoId, item.fecha,
+             item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
+          );
+        }
         insertedCount++;
       }
     }
