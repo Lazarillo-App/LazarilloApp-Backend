@@ -281,7 +281,7 @@ exports.actualizarAgrupacion = async (req, res) => {
         [id, businessId]
       );
       prevNombre = prevRows[0]?.nombre || null;
-    } catch (_) {}
+    } catch (_) { }
 
     const sets = [];
     const vals = [];
@@ -345,7 +345,7 @@ exports.actualizarAgrupacion = async (req, res) => {
            ON CONFLICT (business_id, nombre) DO NOTHING`,
           [businessId, TODO_NAME_INITIAL]
         );
-      } catch (_) {}
+      } catch (_) { }
 
       try {
         await pool.query(
@@ -354,7 +354,7 @@ exports.actualizarAgrupacion = async (req, res) => {
            ON CONFLICT (business_id, nombre) DO NOTHING`,
           [businessId, DISC_NAME]
         );
-      } catch (_) {}
+      } catch (_) { }
     }
 
     return res.json(updated);
@@ -403,7 +403,7 @@ exports.eliminarAgrupacion = async (req, res) => {
         `DELETE FROM agrupacion_exclusiones WHERE agrupacion_id=$1 AND business_id=$2`,
         [id, businessId]
       );
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({ ok: true });
   } catch (e) {
@@ -455,8 +455,8 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 
     const rawIds =
       Array.isArray(req.body?.ids) ? req.body.ids :
-      Array.isArray(req.body?.articuloIds) ? req.body.articuloIds :
-      [];
+        Array.isArray(req.body?.articuloIds) ? req.body.articuloIds :
+          [];
 
     const incomingIds = Array.isArray(rawIds)
       ? [...new Set(rawIds.map(Number))].filter(Number.isFinite)
@@ -465,12 +465,12 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     const incoming = incomingArticulos.length
       ? incomingArticulos
       : incomingIds.map((x) => ({
-          id: x,
-          nombre: '',
-          categoria: 'Sin categoría',
-          subrubro: 'Sin subrubro',
-          precio: 0,
-        }));
+        id: x,
+        nombre: '',
+        categoria: 'Sin categoría',
+        subrubro: 'Sin subrubro',
+        precio: 0,
+      }));
 
     if (!incoming.length) {
       return res.status(400).json({ ok: false, error: 'Sin artículos para agregar' });
@@ -662,6 +662,27 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     }
   }
 
+  if (isTodoName(nombre)) {
+    const { rows: bizRows } = await pool.query(
+      `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`,
+      [businessId]
+    );
+    const biz = bizRows[0];
+    if (biz?.created_from === 'from_group' && biz?.organization_id) {
+      const { rows: orgBiz } = await pool.query(
+        `SELECT id FROM app_businesses
+        WHERE organization_id = $1
+        ORDER BY created_at ASC
+        LIMIT 1`,
+        [biz.organization_id]
+      );
+      if (orgBiz[0]?.id) {
+        console.log(`[createOrMoveAgrupacion] Redirigiendo Sin Agrupación de subnegocio ${businessId} al principal ${orgBiz[0].id}`);
+        businessId = orgBiz[0].id;
+      }
+    }
+  }
+
   const idsSet = new Set(ids);
 
   // Para nombres especiales (Sin Agrupación, Discontinuados), normalizar para evitar
@@ -843,7 +864,7 @@ exports.ensureTodoAgrupacion = async (req, res) => {
              ON CONFLICT (business_id, nombre) DO NOTHING`,
             [businessId, DISC_NAME]
           );
-        } catch (_) {}
+        } catch (_) { }
       }
     }
 
@@ -1004,7 +1025,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
       [[fromId, toId]]
     );
     const fromMeta = nameRows.find((r) => Number(r.id) === fromId);
-    const toMeta   = nameRows.find((r) => Number(r.id) === toId);
+    const toMeta = nameRows.find((r) => Number(r.id) === toId);
 
     if (!fromMeta || !toMeta) {
       await client.query('ROLLBACK');
@@ -1029,7 +1050,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     };
 
     const fromBizId = await resolveDiscBizId(fromMeta.nombre, businessId);
-    const toBizId   = await resolveDiscBizId(toMeta.nombre,   businessId);
+    const toBizId = await resolveDiscBizId(toMeta.nombre, businessId);
 
     const { rows: fromRows } = await client.query(
       `SELECT id, articulos FROM agrupaciones WHERE id=$1 AND business_id=$2 FOR UPDATE`,
@@ -1041,7 +1062,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     );
 
     const fromRow = fromRows[0] || null;
-    const toRow   = toRows[0]   || null;
+    const toRow = toRows[0] || null;
 
     if (!fromRow || !toRow) {
       await client.query('ROLLBACK');
@@ -1163,9 +1184,9 @@ exports.assignAgrupacionToDivision = async (req, res) => {
     const divisionIdRaw = req.body?.divisionId;
     const divisionId =
       divisionIdRaw === null ||
-      divisionIdRaw === undefined ||
-      divisionIdRaw === '' ||
-      divisionIdRaw === 'null'
+        divisionIdRaw === undefined ||
+        divisionIdRaw === '' ||
+        divisionIdRaw === 'null'
         ? null
         : Number(divisionIdRaw);
 
