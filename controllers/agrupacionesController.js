@@ -636,22 +636,19 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
   }
 
-  // Si el destino es "Discontinuados" y es subnegocio,
-  // redirigir al Discontinuados del negocio principal de la org
+  // Guardar el negocio original ANTES de cualquier redirección
+  const originalBusinessId = businessId;
+
+  // Si el destino es "Discontinuados" y es subnegocio, redirigir al principal
   if (isDiscontinuadosName(nombre)) {
     const { rows: bizRows } = await pool.query(
-      `SELECT b.created_from, b.organization_id
-         FROM app_businesses b
-        WHERE b.id = $1`,
+      `SELECT b.created_from, b.organization_id FROM app_businesses b WHERE b.id = $1`,
       [businessId]
     );
     const biz = bizRows[0];
     if (biz?.created_from === 'from_group' && biz?.organization_id) {
       const { rows: orgBiz } = await pool.query(
-        `SELECT id FROM app_businesses
-          WHERE organization_id = $1
-          ORDER BY created_at ASC
-          LIMIT 1`,
+        `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
         [biz.organization_id]
       );
       if (orgBiz[0]?.id) {
@@ -670,14 +667,11 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     const biz = bizRows[0];
     if (biz?.created_from === 'from_group' && biz?.organization_id) {
       const { rows: orgBiz } = await pool.query(
-        `SELECT id FROM app_businesses
-          WHERE organization_id = $1
-          ORDER BY created_at ASC
-          LIMIT 1`,
+        `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
         [biz.organization_id]
       );
       if (orgBiz[0]?.id) {
-        console.log(`[createOrMoveAgrupacion] Redirigiendo Sin Agrupación de subnegocio ${businessId} al principal ${orgBiz[0].id}`);
+        console.log(`[createOrMoveAgrupacion] Redirigiendo Sin Agrupación de subnegocio ${originalBusinessId} al principal ${orgBiz[0].id}`);
         businessId = orgBiz[0].id;
       }
     }
@@ -685,8 +679,6 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 
   const idsSet = new Set(ids);
 
-  // Para nombres especiales (Sin Agrupación, Discontinuados), normalizar para evitar
-  // crear duplicados por diferencias de tilde.
   let nombreFinal = nombre;
   if (isTodoName(nombre)) nombreFinal = TODO_NAME_LEGACY;
   if (isDiscontinuadosName(nombre)) nombreFinal = DISC_NAME;
@@ -695,7 +687,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // 1) crear o encontrar la agrupación destino
+    // 1) crear o encontrar la agrupación destino en el negocio principal
     let destRow;
     {
       const r = await client.query(
@@ -726,7 +718,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 
     const destId = Number(destRow.id);
 
-    // 2) bloquear todas las agrupaciones del negocio
+    // 2) bloquear todas las agrupaciones del negocio destino (principal)
     const { rows: groups } = await client.query(
       `SELECT id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos
          FROM agrupaciones
@@ -735,7 +727,7 @@ exports.createOrMoveAgrupacion = async (req, res) => {
       [businessId]
     );
 
-    // 3) quitar ids de TODAS las otras agrupaciones (mover real)
+    // 3) quitar ids de todas las agrupaciones del principal
     for (const g of groups) {
       const gid = Number(g.id);
       if (gid === destId) continue;
@@ -754,13 +746,35 @@ exports.createOrMoveAgrupacion = async (req, res) => {
       }
     }
 
+    // 3b) si se redirigió desde un subnegocio, limpiar también sus agrupaciones
+    if (Number(originalBusinessId) !== Number(businessId)) {
+      const { rows: subGroups } = await client.query(
+        `SELECT id, COALESCE(articulos, '[]'::jsonb) AS articulos
+           FROM agrupaciones
+          WHERE business_id=$1
+          FOR UPDATE`,
+        [originalBusinessId]
+      );
+      for (const g of subGroups) {
+        const list = parseJsonArrayLoose(g.articulos);
+        const filtered = list.filter((a) => {
+          const aid = extractArticuloId(a);
+          return !(aid != null && idsSet.has(aid));
+        });
+        if (filtered.length !== list.length) {
+          await client.query(
+            `UPDATE agrupaciones SET articulos=$1::jsonb WHERE id=$2 AND business_id=$3`,
+            [JSON.stringify(filtered), Number(g.id), originalBusinessId]
+          );
+        }
+      }
+    }
+
     // 4) agregar ids (sin duplicar) a la agrupación destino
     let moved = 0;
     {
       const list = parseJsonArrayLoose(destRow.articulos);
-      const seen = new Set(
-        list.map(extractArticuloId).filter((n) => n != null)
-      );
+      const seen = new Set(list.map(extractArticuloId).filter((n) => n != null));
 
       const toAdd = [];
       for (const id of ids) {
