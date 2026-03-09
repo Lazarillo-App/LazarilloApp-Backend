@@ -34,7 +34,7 @@ const organizationsRoutes = require('./routes/organizationsRoutes');
 const recetasRoutes       = require('./routes/recetasRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
 const ventasCSVRoutes = require('./routes/ventasCSVRoutes');    
-
+const purchasesImportRoutes = require('./routes/purchasesImportRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
 const syncRoutes = require('./routes/syncRoutes');
 
@@ -72,6 +72,7 @@ app.use((req, res, next) => {
   const isMultipartUpload = 
     req.headers['content-type']?.includes('multipart/form-data') ||
     req.path.includes('/import-csv') ||
+    req.path.includes('/purchases/import-csv') ||
     req.path.endsWith('/logo');
     
   if (isMultipartUpload && req.method === 'POST') {
@@ -140,6 +141,7 @@ app.use('/api/ventas-csv', ventasCSVRoutes);
 
 // 1) IMPORTS CSV (más específico) primero
 app.use('/api/businesses', salesImportRoutes);
+app.use('/api/businesses', purchasesImportRoutes);
 
 // 2) rutas específicas por businessId
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
