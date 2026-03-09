@@ -232,17 +232,14 @@ exports.exportCsv = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT
            pi.fecha,
-           p.factura_key           AS factura,
-           s.nombre                AS proveedor,
-           s.cuit,
+           p.factura_key                           AS factura,
+           COALESCE(s.nombre, pi.referencia)       AS proveedor,
            i.codigo_maxi,
-           i.nombre                AS insumo,
-           i.unidad_med            AS unidad,
-           pi.cantidad, pi.precio, pi.precio_total,
-           pi.iva_tasa,
-           pi.iva_total_item       AS iva_total,
-           pi.neto,
-           pi.imp_int_total        AS imp_int
+           COALESCE(i.nombre, pi.referencia)       AS insumo,
+           COALESCE(i.unidad_med, '')              AS unidad,
+           pi.cantidad,
+           pi.precio                               AS precio_unit,
+           pi.precio_total                         AS total_neto
          FROM purchase_items pi
          JOIN purchases p  ON p.id = pi.purchase_id
          LEFT JOIN suppliers s ON s.id = p.proveedor_id
@@ -253,10 +250,9 @@ exports.exportCsv = async (req, res, next) => {
     );
 
     const headers = [
-      'Fecha','Factura','Proveedor','CUIT',
-      'Cod.Maxi','Insumo','Unidad',
-      'Cantidad','Precio unit.','Total neto',
-      'IVA %','IVA $','Factor presentación','Imp.Int.',
+      'Fecha', 'Factura', 'Proveedor',
+      'Cod.Maxi', 'Insumo', 'Unidad',
+      'Cantidad', 'Precio unit.', 'Total neto',
     ];
 
     const esc = (v) => {
@@ -269,15 +265,15 @@ exports.exportCsv = async (req, res, next) => {
     const lines = [
       headers.join(','),
       ...rows.map((r) => [
-        r.fecha ? String(r.fecha).slice(0,10) : '',
-        r.factura, r.proveedor, r.cuit,
-        r.codigo_maxi, r.insumo, r.unidad,
-        r.cantidad,                                        // cantidad real
-        r.precio != null ? Number(r.precio).toFixed(4) : '', // precio unitario real
-        r.precio_total,
-        r.iva_tasa, r.iva_total,
-        r.neto,                                            // factor de presentación original
-        r.imp_int,
+        r.fecha ? String(r.fecha).slice(0, 10) : '',
+        r.factura,
+        r.proveedor,
+        r.codigo_maxi,
+        r.insumo,
+        r.unidad,
+        r.cantidad,
+        r.precio_unit != null ? Number(r.precio_unit).toFixed(4) : '',
+        r.total_neto,
       ].map(esc).join(',')),
     ];
 
