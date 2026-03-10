@@ -42,23 +42,26 @@ exports.getReceta = async (req, res, next) => {
 
     const receta = recetaRows[0];
 
-    // Items de la receta con info del insumo
+    // Items de la receta — usa insumo_id (nuevo) con fallback a supply_id (legacy)
     const { rows: items } = await pool.query(
       `SELECT
          ri.id,
          ri.receta_id,
-         ri.supply_id,
-         ms.nombre       AS supply_nombre,
-         ms.medida       AS supply_medida,
-         ms.precio       AS supply_precio_base,
+         COALESCE(ri.insumo_id, ri.supply_id)              AS supply_id,
+         COALESCE(i.nombre,  ri.nombre_insumo_maxi, ms.nombre)   AS supply_nombre,
+         COALESCE(i.unidad_med, ri.unidad, ms.medida)             AS supply_medida,
+         COALESCE(i.precio_ref, 0)                                AS supply_precio_base,
          ri.cantidad,
          ri.unidad,
          ri.costo_unitario,
-         ROUND(ri.cantidad * ri.costo_unitario, 4) AS costo_total_item,
+         ROUND(ri.cantidad * ri.costo_unitario, 4)         AS costo_total_item,
          ri.notas,
-         ri.orden
+         ri.orden,
+         ri.codigo_maxi_insumo,
+         ri.nombre_insumo_maxi
        FROM receta_items ri
-       JOIN maxi_supplies ms ON ms.id = ri.supply_id
+       LEFT JOIN insumos i  ON i.id  = ri.insumo_id
+       LEFT JOIN maxi_supplies ms ON ms.id = ri.supply_id
       WHERE ri.receta_id = $1
       ORDER BY ri.orden ASC, ri.id ASC`,
       [receta.id]
@@ -132,11 +135,12 @@ exports.saveReceta = async (req, res, next) => {
     await client.query('BEGIN');
 
     // UPSERT de la receta
+    // origen='manual' → el sync de MaxiRest nunca va a pisar los items de esta receta
     const { rows: recetaRows } = await client.query(
       `INSERT INTO recetas
          (article_id, business_id, nombre, descripcion, porciones,
-          porcentaje_venta, costo_total, active, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, NOW(), NOW())
+          porcentaje_venta, costo_total, active, origen, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, 'manual', $8, NOW(), NOW())
        ON CONFLICT (article_id, business_id)
        DO UPDATE SET
          nombre           = EXCLUDED.nombre,
@@ -145,6 +149,7 @@ exports.saveReceta = async (req, res, next) => {
          porcentaje_venta = EXCLUDED.porcentaje_venta,
          costo_total      = EXCLUDED.costo_total,
          active           = TRUE,
+         origen           = 'manual',
          updated_at       = NOW()
        RETURNING *`,
       [
@@ -181,20 +186,20 @@ exports.saveReceta = async (req, res, next) => {
       if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
       if (cantidad <= 0) continue;
 
-      // Validar que el insumo existe
-      const { rows: supplyCheck } = await client.query(
-        `SELECT id, nombre, medida FROM maxi_supplies WHERE id = $1 LIMIT 1`,
+      // Validar que el insumo existe en tabla insumos (nueva arquitectura)
+      const { rows: insumoCheck } = await client.query(
+        `SELECT id, nombre, unidad_med FROM insumos WHERE id = $1 LIMIT 1`,
         [supplyId]
       );
 
-      if (!supplyCheck.length) {
-        console.warn(`[saveReceta] supply_id=${supplyId} no existe, ignorando item`);
+      if (!insumoCheck.length) {
+        console.warn(`[saveReceta] insumo_id=${supplyId} no existe en tabla insumos, ignorando item`);
         continue;
       }
 
       const { rows: itemRows } = await client.query(
         `INSERT INTO receta_items
-           (receta_id, supply_id, cantidad, unidad, costo_unitario, notas, orden, created_at, updated_at)
+           (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas, orden, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
          RETURNING *`,
         [receta.id, supplyId, cantidad, unidad, costoUnitario, notas, orden]
@@ -202,8 +207,9 @@ exports.saveReceta = async (req, res, next) => {
 
       savedItems.push({
         ...itemRows[0],
-        supply_nombre: supplyCheck[0].nombre,
-        supply_medida: supplyCheck[0].medida,
+        supply_id:    supplyId,
+        supply_nombre: insumoCheck[0].nombre,
+        supply_medida: insumoCheck[0].unidad_med,
         costo_total_item: Math.round(cantidad * costoUnitario * 10000) / 10000,
       });
     }
