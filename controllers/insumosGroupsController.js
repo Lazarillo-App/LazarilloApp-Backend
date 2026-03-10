@@ -415,6 +415,7 @@ async function removeExclusions(req, res) {
 /* ─── CREATE OR MOVE ─────────────────────────────────────────────── */
 async function createOrMove(req, res) {
   const bizId = getPrincipalBizId(req);
+  console.log('[createOrMove] bizId:', bizId, '| body.nombre:', req.body?.nombre, '| ids.length:', (req.body?.ids || []).length);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const nombre = String(req.body?.nombre || '').trim();
