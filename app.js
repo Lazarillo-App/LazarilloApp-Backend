@@ -33,6 +33,8 @@ const diagnosticRoutes = require('./routes/diagnosticRoutes');
 const organizationsRoutes = require('./routes/organizationsRoutes');
 const recetasRoutes       = require('./routes/recetasRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
+const insumosImportRoutes   = require('./routes/insumosImportRoutes');
+const articulosImportRoutes = require('./routes/articulosImportRoutes');
 const ventasCSVRoutes = require('./routes/ventasCSVRoutes');    
 const purchasesImportRoutes = require('./routes/purchasesImportRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
@@ -142,6 +144,8 @@ app.use('/api/ventas-csv', ventasCSVRoutes);
 // 1) IMPORTS CSV (más específico) primero
 app.use('/api/businesses', salesImportRoutes);
 app.use('/api/businesses', purchasesImportRoutes);
+app.use('/api/businesses', insumosImportRoutes);
+app.use('/api/businesses', articulosImportRoutes);
 
 // 2) rutas específicas por businessId
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
