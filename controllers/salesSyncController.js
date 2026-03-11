@@ -595,7 +595,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="ventas_${businessId}_${from}_a_${to}.csv"`
+      `attachment; filename="ventas_${rawBizId}_${from}_a_${to}.csv"`
     );
 
     // BOM UTF-8 para Excel
