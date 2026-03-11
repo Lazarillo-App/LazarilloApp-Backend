@@ -24,12 +24,37 @@ const addDaysUTC = (d, n) => new Date(d.getTime() + n * 86400000);
  *                    o null si hay que traer todos (caso negocio principal)
  * ───────────────────────────────────────────────────────────────────────── */
 async function resolveSalesBusiness(biz) {
-  // Si el negocio no es un subnegocio creado desde grupo, devolvemos tal cual
   if (biz.created_from !== 'from_group' || !biz.organization_id) {
-    return { salesBizId: biz.id, articleIds: null };
+    // ── Negocio principal: filtrar por sus propios artículos ──
+    const { rows: artRows } = await pool.query(
+      `SELECT DISTINCT (elem->>'id')::bigint AS article_id
+         FROM agrupaciones,
+              jsonb_array_elements(
+                CASE WHEN articulos IS NOT NULL AND articulos::text != 'null'
+                     THEN articulos::jsonb ELSE '[]'::jsonb END
+              ) AS elem
+        WHERE business_id = $1
+          AND moved_to_business_id IS NULL
+          AND (elem->>'id') IS NOT NULL
+          AND (elem->>'id') ~ '^[0-9]+$'
+          AND (elem->>'id')::bigint > 0`,
+      [biz.id]
+    );
+
+    const articleIds = artRows
+      .map(r => Number(r.article_id))
+      .filter(n => Number.isFinite(n) && n > 0);
+
+    console.log(`[resolveSalesBusiness] Principal ${biz.id} → artículos propios=${articleIds.length}`);
+
+    return {
+      salesBizId: biz.id,
+      // Si no tiene artículos en agrupaciones, no filtrar (negocio nuevo/vacío)
+      articleIds: articleIds.length > 0 ? articleIds : null,
+    };
   }
 
-  // Es un subnegocio — buscar el negocio raíz de la organización
+  // ── Subnegocio: buscar raíz y filtrar por sus agrupaciones ──
   const { rows: rootRows } = await pool.query(
     `SELECT id FROM app_businesses
       WHERE organization_id = $1
@@ -41,10 +66,6 @@ async function resolveSalesBusiness(biz) {
 
   const salesBizId = rootRows[0]?.id ?? biz.id;
 
-  // Obtener los article_id del subnegocio SOLO desde sus agrupaciones.
-  // NO usar maxi_articles del subnegocio porque tiene copia completa del catálogo
-  // y causaría que se muestren todas las ventas del principal en el subnegocio.
-  // Las ventas de un subnegocio = únicamente artículos en sus agrupaciones propias.
   const { rows: artRows } = await pool.query(
     `SELECT DISTINCT (elem->>'id')::bigint AS article_id
        FROM agrupaciones,
@@ -66,7 +87,6 @@ async function resolveSalesBusiness(biz) {
 
   console.log(`[resolveSalesBusiness] Subnegocio ${biz.id} → salesBizId=${salesBizId}, artículos=${articleIds.length}`);
 
-  // Si no encontramos artículos, devolvemos null para NO filtrar (mejor mostrar todo que nada)
   return {
     salesBizId,
     articleIds: articleIds.length > 0 ? articleIds : null,
@@ -91,12 +111,12 @@ function clampToYesterday(a, b) {
 exports.maxiPing = async (req, res) => {
   try {
     const biz = req.business;
-    
+
     // Si hay credenciales en DB o header X-Maxi-Token, esto devuelve token válido o lanza
     const token = await getBearer(biz.id, req);
     const props = biz?.props || {};
     const mx = props.maxi || props.maxi_credentials || {};
-    
+
     return res.json({
       ok: true,
       configured: !!(mx?.email && (mx?.codcli || mx?.cod_cli)),
@@ -105,11 +125,11 @@ exports.maxiPing = async (req, res) => {
       codcli: mx?.codcli || mx?.cod_cli || null,
     });
   } catch (e) {
-    return res.json({ 
-      ok: false, 
-      configured: false, 
-      connected: false, 
-      error: e.message || 'ping_failed' 
+    return res.json({
+      ok: false,
+      configured: false,
+      connected: false,
+      error: e.message || 'ping_failed'
     });
   }
 };
@@ -317,7 +337,7 @@ exports.reconcileAndRebuild = async (req, res, next) => {
   try {
     const biz = req.business;
     const { from, to } = req.body || {};
-    
+
     const client = await require('../config/db').connect();
     try {
       await client.query('BEGIN');
@@ -330,7 +350,7 @@ exports.reconcileAndRebuild = async (req, res, next) => {
     } finally {
       client.release();
     }
-    
+
     await require('../services/salesStore').upsertDailyAggregates(biz.id, from, to);
     res.json({ ok: true, business_id: String(biz.id), from, to, reconciled: true, rebuilt: true });
   } catch (e) { next(e); }
@@ -918,5 +938,5 @@ module.exports = {
   exportSalesCsv: exports.exportSalesCsv,
   diagnosticRaw: exports.diagnosticRaw,
   salesSummary: exports.salesSummary,
-  getFirstSaleDate: exports.getFirstSaleDate,  
+  getFirstSaleDate: exports.getFirstSaleDate,
 };
