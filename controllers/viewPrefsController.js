@@ -1,3 +1,4 @@
+// controllers/viewPrefsController.js
 /* eslint-disable no-console */
 const pool = require('../config/db');
 
@@ -5,8 +6,7 @@ const VALID_MODES = ['by-subrubro', 'by-categoria', 'elaborados', 'no-elaborados
 
 /**
  * GET /api/businesses/:id/view-prefs
- * resp: { ok: true, byGroup: { [agrupacionId]: viewMode } }
- * ✅ GLOBAL: no depende de división
+ * resp: { ok: true, byGroup: { [agrupacionId]: viewMode }, byInsumoGroup: { [insumoGroupId]: viewMode } }
  */
 exports.getViewPrefs = async (req, res, next) => {
   try {
@@ -18,16 +18,23 @@ exports.getViewPrefs = async (req, res, next) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT agrupacion_id, view_mode
+      `SELECT agrupacion_id, insumo_group_id, view_mode
        FROM app_user_group_view_prefs
        WHERE business_id = $1 AND user_id = $2`,
       [biz.id, user.id]
     );
 
     const byGroup = {};
-    for (const r of rows) byGroup[r.agrupacion_id] = r.view_mode;
+    const byInsumoGroup = {};
+    for (const r of rows) {
+      if (r.insumo_group_id != null) {
+        byInsumoGroup[r.insumo_group_id] = r.view_mode;
+      } else if (r.agrupacion_id != null) {
+        byGroup[r.agrupacion_id] = r.view_mode;
+      }
+    }
 
-    return res.json({ ok: true, byGroup });
+    return res.json({ ok: true, byGroup, byInsumoGroup });
   } catch (e) {
     console.error('getViewPrefs error:', e);
     next(e);
@@ -36,13 +43,15 @@ exports.getViewPrefs = async (req, res, next) => {
 
 /**
  * POST /api/businesses/:id/view-prefs
- * body: { agrupacionId, viewMode, divisionId }  // divisionId llega pero NO se persiste
+ * body: { agrupacionId, viewMode, scope?, divisionId }
+ * scope = 'insumo' → usa insumo_group_id
+ * scope = 'articulo' (default) → usa agrupacion_id
  */
 exports.saveViewPref = async (req, res, next) => {
   try {
     const biz = req.business;
     const user = req.user;
-    const { agrupacionId, viewMode } = req.body || {};
+    const { agrupacionId, viewMode, scope = 'articulo' } = req.body || {};
 
     const groupIdNum = Number(agrupacionId);
 
@@ -54,34 +63,73 @@ exports.saveViewPref = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_view_mode' });
     }
 
-    // Verificar que el grupo existe en este negocio antes de guardar
-    // (evita FK violation cuando el grupo pertenece a otro business)
-    const { rows: groupCheck } = await pool.query(
-      `SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2
-       UNION ALL
-       SELECT 1 FROM agrupaciones WHERE id = $1 AND business_id = $2
-       LIMIT 1`,
-      [groupIdNum, biz.id]
-    );
+    const isInsumo = scope === 'insumo';
+
+    // Verificar que el grupo existe en este negocio (o en el principal de la org)
+    let groupCheck;
+    if (isInsumo) {
+      const { rows } = await pool.query(
+        `SELECT 1 FROM insumo_groups 
+         WHERE id = $1 AND (
+           business_id = $2
+           OR business_id IN (
+             SELECT b2.id FROM app_businesses b2
+             WHERE b2.organization_id = (
+               SELECT organization_id FROM app_businesses WHERE id = $2
+             ) AND b2.created_from != 'from_group'
+           )
+         ) LIMIT 1`,
+        [groupIdNum, biz.id]
+      );
+      groupCheck = rows;
+    } else {
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agrupaciones 
+         WHERE id = $1 AND (
+           business_id = $2
+           OR business_id IN (
+             SELECT b2.id FROM app_businesses b2
+             WHERE b2.organization_id = (
+               SELECT organization_id FROM app_businesses WHERE id = $2
+             ) AND b2.created_from != 'from_group'
+           )
+         ) LIMIT 1`,
+        [groupIdNum, biz.id]
+      );
+      groupCheck = rows;
+    }
 
     if (!groupCheck.length) {
-      // Grupo no pertenece a este negocio — ignorar silenciosamente
-      console.warn(`[saveViewPref] Grupo ${groupIdNum} no encontrado en business ${biz.id}, ignorando`);
+      console.warn(`[saveViewPref] Grupo ${groupIdNum} (scope=${scope}) no encontrado en business ${biz.id}, ignorando`);
       return res.json({ ok: true, skipped: true });
     }
 
-    await pool.query(
-      `
-      INSERT INTO app_user_group_view_prefs
-        (user_id, business_id, agrupacion_id, view_mode, updated_at)
-      VALUES ($1, $2, $3, $4, NOW())
-      ON CONFLICT (user_id, business_id, agrupacion_id)
-      DO UPDATE SET
-        view_mode = EXCLUDED.view_mode,
-        updated_at = NOW()
-      `,
-      [user.id, biz.id, groupIdNum, viewMode]
-    );
+    if (isInsumo) {
+      // Para insumos: usar insumo_group_id, agrupacion_id = NULL
+      await pool.query(
+        `INSERT INTO app_user_group_view_prefs
+           (user_id, business_id, insumo_group_id, agrupacion_id, view_mode, updated_at)
+         VALUES ($1, $2, $3, NULL, $4, NOW())
+         ON CONFLICT (user_id, business_id, insumo_group_id, division_key)
+         WHERE insumo_group_id IS NOT NULL
+         DO UPDATE SET
+           view_mode = EXCLUDED.view_mode,
+           updated_at = NOW()`,
+        [user.id, biz.id, groupIdNum, viewMode]
+      );
+    } else {
+      // Para artículos: usar agrupacion_id, insumo_group_id = NULL
+      await pool.query(
+        `INSERT INTO app_user_group_view_prefs
+           (user_id, business_id, agrupacion_id, insumo_group_id, view_mode, updated_at)
+         VALUES ($1, $2, $3, NULL, $4, NOW())
+         ON CONFLICT (user_id, business_id, agrupacion_id, division_key)
+         DO UPDATE SET
+           view_mode = EXCLUDED.view_mode,
+           updated_at = NOW()`,
+        [user.id, biz.id, groupIdNum, viewMode]
+      );
+    }
 
     return res.json({ ok: true });
   } catch (e) {
@@ -148,7 +196,6 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_scope' });
     }
 
-    // ✅ Normalizar divisionId
     const divisionId =
       divisionIdRaw === null || divisionIdRaw === undefined || divisionIdRaw === ''
         ? null
@@ -158,9 +205,7 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_division_id' });
     }
 
-    // ✅ division_key: 0 para principal, número para divisiones
     const divisionKey = divisionId == null ? 0 : Number(divisionId);
-
     const groupIdNum = Number(agrupacionId);
 
     console.log('💾 [saveFavoriteGroup]', {
@@ -174,7 +219,6 @@ exports.saveFavoriteGroup = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // ✅ Si groupId es null o inválido → BORRAR favorita
     if (!Number.isFinite(groupIdNum)) {
       await client.query(
         `DELETE FROM app_user_group_favs
@@ -190,8 +234,6 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       return res.json({ ok: true, favoriteGroupId: null, scope, divisionId });
     }
 
-    // ✅ Validar que el grupo exista — buscar también en el principal de la org
-    // (para insumos, el grupo puede pertenecer al negocio principal cuando se accede desde subnegocio)
     const tableName = scope === 'articulo' ? 'agrupaciones' : 'insumo_groups';
     const { rows: checkRows } = await client.query(
       `SELECT id, business_id FROM ${tableName} 
@@ -214,11 +256,9 @@ exports.saveFavoriteGroup = async (req, res, next) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'group_not_found' });
     }
-    
-    // Usar el business_id real del grupo (puede ser el principal)
+
     const realBizId = checkRows[0].business_id;
 
-    // ✅ UPSERT: eliminar anterior e insertar nueva (o usar ON CONFLICT)
     await client.query(
       `INSERT INTO app_user_group_favs
          (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
