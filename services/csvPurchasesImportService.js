@@ -43,7 +43,6 @@ async function parseFile(filePath) {
 
   const headers = Object.keys(cleanedRows[0] || {});
 
-  // Validar que tenga al menos las columnas mínimas
   const required = ['codigo', 'cantidad', 'importe', 'fecha'];
   const headersLower = headers.map(h => String(h).toLowerCase().trim());
   const missing = required.filter(r => !headersLower.includes(r));
@@ -131,12 +130,16 @@ function normalizeRow(row, idx) {
 /**
  * Importa compras CSV a purchase_items.
  *
+ * Cada negocio es dueño de sus propias compras:
+ *   dataBizId  = businessId que llega → donde se guardan las compras
+ *   credsBizId = negocio principal de la org → donde están los insumos (lista compartida)
+ *
  * Estrategia:
  * - Cada fila del CSV = un purchase_item (una línea de factura)
  * - Se agrupa por (comprob, codigo) para acumular si hay duplicados
- * - Para el rango de fechas del archivo: DELETE todos los items con source='csv'
+ * - Para el rango de fechas del archivo: DELETE los items con source='csv' del dataBizId
  *   y luego INSERT los nuevos → el último archivo es la fuente de verdad
- * - Se vincula el insumo_id buscando por codigo_maxi en la tabla insumos
+ * - Se vincula el insumo_id buscando por codigo_maxi en la tabla insumos (del principal)
  * - Nunca se importa el día actual
  */
 async function importPurchasesToDatabase({ businessId, userId, filePath, originalName, fileType }) {
@@ -145,12 +148,16 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
   let txOpen    = false;
 
   try {
-    // Resolver al negocio principal (compras = recurso global)
+    // ── dataBizId: donde se guardan las compras (el negocio activo) ──
+    const dataBizId = Number(businessId);
+
+    // ── credsBizId: donde están los insumos (el principal de la org) ──
+    // La lista de insumos es compartida y vive en el negocio principal.
     const { rows: bizRows } = await pool.query(
-      `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
+      `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [dataBizId]
     );
     const biz = bizRows[0] || {};
-    let salesBizId = Number(businessId);
+    let credsBizId = dataBizId; // default: mismo negocio (si es independiente)
     if (biz.created_from === 'from_group' && biz.organization_id) {
       const { rows: rootRows } = await pool.query(
         `SELECT id FROM app_businesses
@@ -159,19 +166,21 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
           ORDER BY id ASC LIMIT 1`,
         [biz.organization_id]
       );
-      if (rootRows[0]?.id) salesBizId = Number(rootRows[0].id);
+      if (rootRows[0]?.id) credsBizId = Number(rootRows[0].id);
     }
+
+    console.log(`[CSV Purchases Import] dataBizId=${dataBizId} credsBizId=${credsBizId}`);
 
     await client.query('BEGIN');
     txOpen = true;
 
-    // Registro de importación
+    // Registro de importación — se guarda con el negocio activo (dataBizId)
     const { rows: [rec] } = await client.query(
       `INSERT INTO purchases_csv_imports
          (business_id, user_id, filename, original_name, file_size, file_type, status)
        VALUES ($1,$2,$3,$4,$5,$6,'processing')
        RETURNING id`,
-      [salesBizId, userId, path.basename(filePath), originalName, fs.statSync(filePath).size, fileType]
+      [dataBizId, userId, path.basename(filePath), originalName, fs.statSync(filePath).size, fileType]
     );
     importId = rec.id;
 
@@ -183,10 +192,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     let   failed  = 0;
     let   minDate = null;
     let   maxDate = null;
-
-    // Map key: `${fecha}|${codigo}|${comprob}` → acumula cantidad e importe
-    const agg = new Map();
-
+    const agg     = new Map();
     const todayUTC = new Date().toISOString().slice(0, 10);
 
     for (let i = 0; i < rows.length; i++) {
@@ -198,13 +204,11 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       }
       const { fecha, codigo, cantidad, importe, nombre, proveedor, comprob, p_prom, medida, cod_pro } = norm.data;
 
-      // Nunca importar el día actual
       if (fecha === todayUTC) continue;
 
       if (!minDate || fecha < minDate) minDate = fecha;
       if (!maxDate || fecha > maxDate) maxDate = fecha;
 
-      // Clave única por fecha + código + comprobante (cada factura es una línea)
       const key = `${fecha}|${codigo}|${comprob ?? ''}`;
       if (!agg.has(key)) {
         agg.set(key, { fecha, codigo, cantidad, importe, nombre, proveedor, comprob, p_prom, medida, cod_pro });
@@ -234,42 +238,40 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
 
     const items = Array.from(agg.values());
 
-    // Construir mapa codigo_maxi → insumo_id
+    // ── Insumos: buscar en credsBizId (lista compartida del principal) ──
     const { rows: insumoRows } = await client.query(
       `SELECT id, codigo_maxi::bigint AS codigo_maxi FROM insumos
        WHERE business_id = $1 AND codigo_maxi IS NOT NULL AND codigo_maxi ~ '^[0-9]+$'`,
-      [salesBizId]
+      [credsBizId]
     );
     const insumoMap = new Map();
     for (const r of insumoRows) {
       if (r.codigo_maxi != null) insumoMap.set(Number(r.codigo_maxi), Number(r.id));
     }
+    console.log(`[CSV Purchases Import] insumoMap: ${insumoMap.size} insumos del biz ${credsBizId}`);
 
-    // Verificar si la columna source existe en purchase_items
+    // Verificar columna source
     const { rows: colCheck } = await client.query(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'purchase_items' AND column_name = 'source'
     `);
     const hasSource = colCheck.length > 0;
 
-    // DELETE del rango completo para este negocio
-    // Si source existe, solo borramos los de CSV. Si no, borramos todo el rango
-    // (primera importación — los datos existentes son de MaxiRest sync)
+    // ── DELETE del rango — solo del negocio activo (dataBizId) ──
     if (hasSource) {
       await client.query(
         `DELETE FROM purchase_items
          WHERE business_id = $1 AND source = 'csv' AND fecha BETWEEN $2::date AND $3::date`,
-        [salesBizId, minDate, maxDate]
+        [dataBizId, minDate, maxDate]
       );
     } else {
       await client.query(
         `DELETE FROM purchase_items
          WHERE business_id = $1 AND fecha BETWEEN $2::date AND $3::date`,
-        [salesBizId, minDate, maxDate]
+        [dataBizId, minDate, maxDate]
       );
     }
 
-    // También limpiar purchases huérfanos de CSV en ese rango
     const { rows: colCheck2 } = await client.query(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'purchases' AND column_name = 'source'
@@ -280,14 +282,12 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       await client.query(
         `DELETE FROM purchases
          WHERE business_id = $1 AND source = 'csv' AND fecha BETWEEN $2::date AND $3::date`,
-        [salesBizId, minDate, maxDate]
+        [dataBizId, minDate, maxDate]
       );
     }
 
-    // INSERT de los nuevos items — cada comprobante único → 1 purchase header
-    // Agrupar por comprob para crear los headers
-    const purchaseMap = new Map(); // comprob → purchase_id
-
+    // ── INSERT — todos los registros con business_id = dataBizId ──
+    const purchaseMap = new Map();
     const CHUNK = 500;
     let insertedCount = 0;
 
@@ -297,7 +297,6 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       for (const item of chunk) {
         const comprobKey = item.comprob ?? `CSV-${item.fecha}-${item.codigo}`;
 
-        // Upsert del header de compra
         if (!purchaseMap.has(comprobKey)) {
           const { rows: [ph] } = await client.query(
             `INSERT INTO purchases
@@ -307,10 +306,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
              ON CONFLICT (business_id, factura_key) DO UPDATE SET
                updated_at = NOW()
              RETURNING id`,
-            [salesBizId, comprobKey,
-             // Si tenemos cod_pro intentamos vincular al supplier
-             item.cod_pro || null,
-             item.fecha]
+            [dataBizId, comprobKey, item.cod_pro || null, item.fecha]
           );
           purchaseMap.set(comprobKey, ph.id);
         }
@@ -324,7 +320,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
                (purchase_id, business_id, insumo_id, fecha, cantidad, precio, precio_total,
                 source, referencia)
              VALUES ($1,$2,$3,$4::date,$5,$6,$7,'csv',$8)`,
-            [purchaseId, salesBizId, insumoId, item.fecha,
+            [purchaseId, dataBizId, insumoId, item.fecha,
              item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
           );
         } else {
@@ -333,7 +329,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
                (purchase_id, business_id, insumo_id, fecha, cantidad, precio, precio_total,
                 referencia)
              VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8)`,
-            [purchaseId, salesBizId, insumoId, item.fecha,
+            [purchaseId, dataBizId, insumoId, item.fecha,
              item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
           );
         }
@@ -356,6 +352,8 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     txOpen = false;
 
     try { fs.unlinkSync(filePath); } catch { }
+
+    console.log(`[CSV Purchases Import] OK — dataBizId=${dataBizId} inserted=${insertedCount} range=${minDate}→${maxDate}`);
 
     return {
       ok: true,
