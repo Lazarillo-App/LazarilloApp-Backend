@@ -219,7 +219,7 @@ async function fetchRangeWithFallback(fromDate, toDate, bearer, conc = CONC) {
 }
 
 /* ───────── API pública ───────── */
-async function fetchSalesRanged({ businessId, from, to, req }) {
+async function fetchSalesRanged({ businessId, credsBizId, from, to, req }) {
   if (!businessId) { const e = new Error('businessId requerido'); e.status = 400; throw e; }
 
   const todayUTC = at00UTC(new Date());
@@ -228,9 +228,11 @@ async function fetchSalesRanged({ businessId, from, to, req }) {
   const Td = at00UTC(new Date(to));
   const toClamp = Td > AYER ? AYER : Td;
 
-  const bearer = await getBearer(businessId, req);
-  
-  // 🎯 Retorna array plano de órdenes
+  // ✅ credsBizId = negocio con credenciales (principal)
+  // businessId   = negocio donde se guardan los datos
+  const authBizId = credsBizId || businessId;
+  const bearer = await getBearer(authBizId, req);
+
   return await fetchRangeWithFallback(Fd, toClamp, bearer, CONC);
 }
 

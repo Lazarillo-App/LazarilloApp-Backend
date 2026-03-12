@@ -162,7 +162,6 @@ app.use('/api/businesses', businessRoutes);
 
 // 4) genérica al final
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
-app.use('/api/businesses/:businessId', agrupacionesRoutes);
 
 /* util debug */
 app.get('/api/_debug/whoami', authRequired, (req, res) => {

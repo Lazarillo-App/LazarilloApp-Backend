@@ -29,7 +29,7 @@ const addDaysUTC = (d, n) => new Date(d.getTime() + n*86400000);
 
 function lastNDaysUntilYesterday(N = 7) {
   const now = new Date();
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); // hoy (UTC) 00:00
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   end.setUTCDate(end.getUTCDate() - 1); // AYER
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - (N - 1));
@@ -71,11 +71,13 @@ async function upsertState(client, businessId, patch) {
 }
 
 /* ─────────────────────────── API pública ─────────────────────────── */
+
 /**
  * Ventana explícita: requiere { from, to } (YYYY-MM-DD).
- * Hace fetch → upsert → reconcile → rebuild agregados dentro del rango [from..to].
+ * credsBizId: negocio con credenciales Maxi (principal de la org).
+ *             Si no se pasa, usa businessId (negocio autónomo).
  */
-async function runWindow({ businessId, from, to, req } = {}) {
+async function runWindow({ businessId, credsBizId, from, to, req } = {}) {
   if (!businessId) { const e = new Error('businessId requerido'); e.status = 400; throw e; }
   if (!from || !to)  { const e = new Error('from/to requeridos'); e.status = 400; throw e; }
 
@@ -86,27 +88,32 @@ async function runWindow({ businessId, from, to, req } = {}) {
   const T = ymd(new Date(ymd(at00(new Date(to))) > ymd(end) ? end : at00(new Date(to))));
 
   // 1) Traer crudo desde Maxi
-  const raw = await fetchSalesRanged({ businessId, from: F, to: T, req });
+  // credsBizId = quien tiene las credenciales (principal), businessId = donde se guardan los datos
+  const raw = await fetchSalesRanged({
+    businessId,
+    credsBizId: credsBizId || businessId,
+    from: F,
+    to: T,
+    req,
+  });
 
   // 2) Upsert completo (ventas + ítems + mapping + agregados diarios)
-  const result = await upsertSalesBatch(businessId, raw); // usa su propia transacción
+  const result = await upsertSalesBatch(businessId, raw);
 
   return { from: F, to: T, fetched: raw.length, ...result };
 }
 
 /**
  * Backfill inicial UNA SOLA VEZ (N días hasta AYER).
- * Se usa al crear un negocio o cuando aún no hay backfill inicial hecho.
+ * credsBizId: negocio con credenciales Maxi (principal de la org).
  */
-
-async function ensureInitialBackfillOnce({ businessId, req, days }) {
+async function ensureInitialBackfillOnce({ businessId, credsBizId, req, days }) {
   if (!businessId) {
     const e = new Error('businessId requerido');
     e.status = 400;
     throw e;
   }
 
-  // N configurable vía parámetro, sino usa INIT_BACKFILL_DAYS
   const N = Number(days) > 0 ? Number(days) : INIT_BACKFILL_DAYS;
 
   const client = await pool.connect();
@@ -131,8 +138,14 @@ async function ensureInitialBackfillOnce({ businessId, req, days }) {
     // Cerramos transacción antes de hablar con Maxi
     await client.query('COMMIT');
 
-    // 1) Traer crudo
-    const raw = await fetchSalesRanged({ businessId, from, to, req });
+    // 1) Traer crudo — credenciales del principal, datos del negocio activo
+    const raw = await fetchSalesRanged({
+      businessId,
+      credsBizId: credsBizId || businessId,
+      from,
+      to,
+      req,
+    });
 
     // 2) Upsert completo (incluye mapping + agregados diarios)
     const res = await upsertSalesBatch(businessId, raw);
@@ -171,9 +184,9 @@ async function ensureInitialBackfillOnce({ businessId, req, days }) {
 /**
  * Incremental diario: desde (último día + 1) hasta AYER.
  * Si nunca hizo backfill inicial, lo dispara primero.
+ * credsBizId: negocio con credenciales Maxi (principal de la org).
  */
-
-async function runDailyAuto({ businessId, req }) {
+async function runDailyAuto({ businessId, credsBizId, req }) {
   const client = await pool.connect();
   let locked = false;
   try {
@@ -187,42 +200,45 @@ async function runDailyAuto({ businessId, req }) {
 
     const state = await readState(client, businessId);
     if (!state?.initial_backfill_done) {
-      await client.query('COMMIT'); // liberar transacción antes de delegar
-      return await ensureInitialBackfillOnce({ businessId, req });
+      await client.query('COMMIT');
+      // Pasar credsBizId al backfill inicial
+      return await ensureInitialBackfillOnce({ businessId, credsBizId, req });
     }
 
     const maxDay = await getMaxDayFromDB(client, businessId);
-    const y = yesterdayISO(); // AYER
+    const y = yesterdayISO();
 
-    // Si no hay datos aún, hacer backfill inicial
     if (!maxDay) {
       await client.query('COMMIT');
-      return await ensureInitialBackfillOnce({ businessId, req });
+      return await ensureInitialBackfillOnce({ businessId, credsBizId, req });
     }
 
-    // Calcular desde el día siguiente al último día que tenemos
     const start = new Date(maxDay);
     start.setUTCDate(start.getUTCDate() + 1);
     const from = toISODate(start);
     const to = y;
 
-    // Ya al día
     if (from > to) {
       await upsertState(client, businessId, { last_daily_sync_at: to });
       await client.query('COMMIT');
       return { ok: true, up_to_date: true, last_day: maxDay };
     }
 
-    await client.query('COMMIT'); // cerrar antes del fetch externo
+    await client.query('COMMIT');
 
-    // Traer lo faltante → upsert completo (incluye mapping + agregados)
-    const raw = await fetchSalesRanged({ businessId, from, to, req });
+    // Traer lo faltante — credenciales del principal, datos del negocio activo
+    const raw = await fetchSalesRanged({
+      businessId,
+      credsBizId: credsBizId || businessId,
+      from,
+      to,
+      req,
+    });
     const res = await upsertSalesBatch(businessId, raw);
 
     const rFrom = res.minDay || from;
     const rTo   = res.maxDay || to;
 
-    // Actualizar estado de sync
     const c2 = await pool.connect();
     try {
       await c2.query('BEGIN');

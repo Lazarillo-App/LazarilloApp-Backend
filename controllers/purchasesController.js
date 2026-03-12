@@ -6,31 +6,30 @@ const getBusinessId = require('../utils/getBusinessId');
 const { fetchMaxiSuppliers, fetchMaxiPurchases } = require('../services/maxiPurchasesService');
 const { upsertPurchasesBatch, upsertSuppliers } = require('../services/purchasesStore');
 
-// Resuelve siempre al negocio principal de la org (igual que insumos)
+// ── Cada negocio es dueño de sus propias compras ──
 async function resolvePurchaseBusiness(bizId) {
+  return bizId;
+}
+
+// ── Credenciales siempre del principal ──
+async function resolveCredsBizId(bizId) {
   const { rows } = await pool.query(
-    'SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1',
+    'SELECT created_from, organization_id FROM app_businesses WHERE id = $1',
     [bizId]
   );
   const biz = rows[0];
-  if (!biz) return bizId;
-  // Si no es subnegocio, es el principal directamente
-  if (biz.created_from !== 'from_group' || !biz.organization_id) return bizId;
-  // Igual que resolveInsumoBusiness: principal = más antiguo con created_from != 'from_group'
+  if (!biz || biz.created_from !== 'from_group' || !biz.organization_id) return bizId;
   const { rows: rootRows } = await pool.query(
     `SELECT id FROM app_businesses
-       WHERE organization_id = (
-         SELECT organization_id FROM app_businesses WHERE id = $1
-       )
-       AND created_from != 'from_group'
-       ORDER BY created_at ASC
-       LIMIT 1`,
-    [bizId]
+      WHERE organization_id = $1
+        AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
+      ORDER BY id ASC LIMIT 1`,
+    [biz.organization_id]
   );
   return rootRows[0]?.id ?? bizId;
 }
 
-// Map<codigoMaxi:number, insumoId:number> para cruzar items con insumos
+// ── Mapa codigo_maxi → insumo_id (usa el principal, lista compartida) ──
 async function buildInsumoMap(businessId) {
   const { rows } = await pool.query(
     `SELECT id, codigo_maxi::bigint AS codigo_maxi
@@ -52,25 +51,26 @@ exports.sync = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     if (!rawBizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
-    const businessId = await resolvePurchaseBusiness(rawBizId);
+
+    const businessId = rawBizId;                         // donde se guardan las compras
+    const credsBizId = await resolveCredsBizId(rawBizId); // donde están las credenciales
 
     const { from, to, provdr, num } = req.body;
     if (!from || !to) return res.status(400).json({ ok: false, error: 'from y to son requeridos' });
 
-    // 1) Proveedores (no critico)
+    // 1) Proveedores (no crítico)
     let suppliersCount = 0;
     try {
-      const proveedores = await fetchMaxiSuppliers({ businessId, req });
+      const proveedores = await fetchMaxiSuppliers({ businessId: credsBizId, req });
       suppliersCount = await upsertSuppliers(businessId, proveedores);
       console.log('[purchases.sync] Proveedores:', suppliersCount);
     } catch (e) {
-      console.warn('[purchases.sync] Proveedores fallo (no critico):', e.message);
+      console.warn('[purchases.sync] Proveedores falló (no crítico):', e.message);
     }
 
-    // 2) Compras del rango
-    const facturas = await fetchMaxiPurchases({ businessId, req, from, to, provdr, num });
+    // 2) Compras del rango — credenciales del principal, datos del negocio activo
+    const facturas = await fetchMaxiPurchases({ businessId: credsBizId, req, from, to, provdr, num });
     console.log('[purchases.sync] Facturas recibidas:', facturas.length);
-    // 🔍 TEMPORAL - ver estructura de MaxiRest
     if (facturas.length > 0) {
       console.log('[purchases.sync] primera factura:', JSON.stringify(facturas[0], null, 2).slice(0, 800));
     }
@@ -78,11 +78,11 @@ exports.sync = async (req, res, next) => {
       return res.json({ ok: true, inserted: 0, updated: 0, items: 0, suppliers: suppliersCount, message: 'Sin compras en el rango' });
     }
 
-    // 3) Cruzar con insumos
-    const insumoMap = await buildInsumoMap(businessId);
-    console.log(`[purchases.sync] insumoMap: ${insumoMap.size} insumos con codigo_maxi. Primeras 5 claves:`, [...insumoMap.keys()].slice(0, 5));
+    // 3) Cruzar con insumos (lista del principal, compartida)
+    const insumoMap = await buildInsumoMap(credsBizId);
+    console.log(`[purchases.sync] insumoMap: ${insumoMap.size} insumos. Primeras 5:`, [...insumoMap.keys()].slice(0, 5));
 
-    // 4) Upsert
+    // 4) Upsert con el businessId del negocio activo
     const result = await upsertPurchasesBatch(businessId, facturas, insumoMap);
     res.json({ ok: true, ...result, suppliers: suppliersCount });
   } catch (e) {
@@ -95,9 +95,9 @@ exports.sync = async (req, res, next) => {
 exports.syncSuppliers = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
-    const businessId = await resolvePurchaseBusiness(rawBizId);
-    const proveedores = await fetchMaxiSuppliers({ businessId, req });
-    const count = await upsertSuppliers(businessId, proveedores);
+    const credsBizId = await resolveCredsBizId(rawBizId);
+    const proveedores = await fetchMaxiSuppliers({ businessId: credsBizId, req });
+    const count = await upsertSuppliers(rawBizId, proveedores);
     res.json({ ok: true, suppliers: count });
   } catch (e) { next(e); }
 };
@@ -124,16 +124,16 @@ exports.list = async (req, res, next) => {
 
     const { from, to, proveedor_id, insumo_id, page = 1, limit = 500 } = req.query;
     const params = [businessId];
-    const where  = ['pi.business_id = $1'];
+    const where = ['pi.business_id = $1'];
 
-    if (from)        { params.push(from);                where.push(`pi.fecha >= $${params.length}`); }
-    if (to)          { params.push(to);                  where.push(`pi.fecha <= $${params.length}`); }
-    if (proveedor_id){ params.push(Number(proveedor_id)); where.push(`p.proveedor_id = $${params.length}`); }
-    if (insumo_id)   { params.push(Number(insumo_id));    where.push(`pi.insumo_id = $${params.length}`); }
+    if (from)         { params.push(from);                 where.push(`pi.fecha >= $${params.length}`); }
+    if (to)           { params.push(to);                   where.push(`pi.fecha <= $${params.length}`); }
+    if (proveedor_id) { params.push(Number(proveedor_id)); where.push(`p.proveedor_id = $${params.length}`); }
+    if (insumo_id)    { params.push(Number(insumo_id));    where.push(`pi.insumo_id = $${params.length}`); }
 
-    const whereSql  = 'WHERE ' + where.join(' AND ');
+    const whereSql = 'WHERE ' + where.join(' AND ');
     const hardLimit = Math.min(Math.max(Number(limit), 1), 10000);
-    const offset    = (Math.max(Number(page), 1) - 1) * hardLimit;
+    const offset = (Math.max(Number(page), 1) - 1) * hardLimit;
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -223,11 +223,11 @@ exports.exportCsv = async (req, res, next) => {
     const { from, to, proveedor_id, insumo_id } = req.query;
 
     const params = [businessId];
-    const where  = ['pi.business_id = $1'];
-    if (from)        { params.push(from);                where.push(`pi.fecha >= $${params.length}`); }
-    if (to)          { params.push(to);                  where.push(`pi.fecha <= $${params.length}`); }
-    if (proveedor_id){ params.push(Number(proveedor_id)); where.push(`p.proveedor_id = $${params.length}`); }
-    if (insumo_id)   { params.push(Number(insumo_id));    where.push(`pi.insumo_id = $${params.length}`); }
+    const where = ['pi.business_id = $1'];
+    if (from)         { params.push(from);                 where.push(`pi.fecha >= $${params.length}`); }
+    if (to)           { params.push(to);                   where.push(`pi.fecha <= $${params.length}`); }
+    if (proveedor_id) { params.push(Number(proveedor_id)); where.push(`p.proveedor_id = $${params.length}`); }
+    if (insumo_id)    { params.push(Number(insumo_id));    where.push(`pi.insumo_id = $${params.length}`); }
 
     const { rows } = await pool.query(
       `SELECT
@@ -249,28 +249,18 @@ exports.exportCsv = async (req, res, next) => {
       params
     );
 
-    const headers = [
-      'Fecha', 'Factura', 'Proveedor',
-      'Cod.Maxi', 'Insumo', 'Unidad',
-      'Cantidad', 'Precio unit.', 'Total neto',
-    ];
-
+    const headers = ['Fecha', 'Factura', 'Proveedor', 'Cod.Maxi', 'Insumo', 'Unidad', 'Cantidad', 'Precio unit.', 'Total neto'];
     const esc = (v) => {
       if (v == null) return '';
       const s = String(v);
       return s.includes(',') || s.includes('"') || s.includes('\n')
         ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
-
     const lines = [
       headers.join(','),
       ...rows.map((r) => [
         r.fecha ? String(r.fecha).slice(0, 10) : '',
-        r.factura,
-        r.proveedor,
-        r.codigo_maxi,
-        r.insumo,
-        r.unidad,
+        r.factura, r.proveedor, r.codigo_maxi, r.insumo, r.unidad,
         r.cantidad,
         r.precio_unit != null ? Number(r.precio_unit).toFixed(4) : '',
         r.total_neto,
@@ -288,7 +278,6 @@ exports.exportCsv = async (req, res, next) => {
 };
 
 // GET /api/purchases/first-date
-// Devuelve la fecha más antigua con compras sincronizadas en la DB
 exports.firstDate = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
@@ -303,7 +292,7 @@ exports.firstDate = async (req, res, next) => {
     );
 
     const firstDate = rows[0]?.first_date
-      ? String(rows[0].first_date).slice(0, 10)   // "2024-08-15"
+      ? String(rows[0].first_date).slice(0, 10)
       : null;
 
     res.json({ ok: true, firstDate });

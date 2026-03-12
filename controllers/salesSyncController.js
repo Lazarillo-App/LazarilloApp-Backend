@@ -11,86 +11,33 @@ const pad2 = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 const addDaysUTC = (d, n) => new Date(d.getTime() + n * 86400000);
 
-/* ─────────────────────────────────────────────────────────────────────────
- * resolveSalesBusiness(biz)
- *
- * Los subnegocios (created_from = 'from_group') NO tienen filas propias en
- * sales_daily_items — las ventas están guardadas con el business_id del negocio
- * principal (raíz de la organización).
- *
- * Esta función devuelve:
- *   - salesBizId   : el business_id donde realmente están las ventas
- *   - articleIds   : array de IDs de artículos del subnegocio (para filtrar),
- *                    o null si hay que traer todos (caso negocio principal)
- * ───────────────────────────────────────────────────────────────────────── */
-async function resolveSalesBusiness(biz) {
-  if (biz.created_from !== 'from_group' || !biz.organization_id) {
-    // ── Negocio principal: filtrar por sus propios artículos ──
-    const { rows: artRows } = await pool.query(
-      `SELECT DISTINCT (elem->>'id')::bigint AS article_id
-         FROM agrupaciones,
-              jsonb_array_elements(
-                CASE WHEN articulos IS NOT NULL AND articulos::text != 'null'
-                     THEN articulos::jsonb ELSE '[]'::jsonb END
-              ) AS elem
-        WHERE business_id = $1
-          AND moved_to_business_id IS NULL
-          AND (elem->>'id') IS NOT NULL
-          AND (elem->>'id') ~ '^[0-9]+$'
-          AND (elem->>'id')::bigint > 0`,
-      [biz.id]
-    );
-
-    const articleIds = artRows
-      .map(r => Number(r.article_id))
-      .filter(n => Number.isFinite(n) && n > 0);
-
-    console.log(`[resolveSalesBusiness] Principal ${biz.id} → artículos propios=${articleIds.length}`);
-
-    return {
-      salesBizId: biz.id,
-      // Si no tiene artículos en agrupaciones, no filtrar (negocio nuevo/vacío)
-      articleIds: articleIds.length > 0 ? articleIds : null,
-    };
+/* ───────── resolución de credenciales ───────── */
+// Devuelve el businessId del negocio que tiene las credenciales Maxi (el principal de la org).
+// Si el negocio ya es el principal (o no tiene org), devuelve el mismo bizId.
+async function resolveCredsBizId(bizId) {
+  const { rows } = await pool.query(
+    'SELECT created_from, organization_id FROM app_businesses WHERE id = $1',
+    [bizId]
+  );
+  const biz = rows[0];
+  if (!biz || biz.created_from !== 'from_group' || !biz.organization_id) {
+    return bizId; // ya es el principal
   }
-
-  // ── Subnegocio: buscar raíz y filtrar por sus agrupaciones ──
   const { rows: rootRows } = await pool.query(
     `SELECT id FROM app_businesses
       WHERE organization_id = $1
         AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-      ORDER BY id ASC
-      LIMIT 1`,
+      ORDER BY id ASC LIMIT 1`,
     [biz.organization_id]
   );
+  return rootRows[0]?.id ?? bizId;
+}
 
-  const salesBizId = rootRows[0]?.id ?? biz.id;
-
-  const { rows: artRows } = await pool.query(
-    `SELECT DISTINCT (elem->>'id')::bigint AS article_id
-       FROM agrupaciones,
-            jsonb_array_elements(
-              CASE WHEN articulos IS NOT NULL AND articulos::text != 'null'
-                   THEN articulos::jsonb ELSE '[]'::jsonb END
-            ) AS elem
-      WHERE business_id = $1
-        AND moved_to_business_id IS NULL
-        AND (elem->>'id') IS NOT NULL
-        AND (elem->>'id') ~ '^[0-9]+$'
-        AND (elem->>'id')::bigint > 0`,
-    [biz.id]
-  );
-
-  const articleIds = artRows
-    .map(r => Number(r.article_id))
-    .filter(n => Number.isFinite(n) && n > 0);
-
-  console.log(`[resolveSalesBusiness] Subnegocio ${biz.id} → salesBizId=${salesBizId}, artículos=${articleIds.length}`);
-
-  return {
-    salesBizId,
-    articleIds: articleIds.length > 0 ? articleIds : null,
-  };
+/* ───────── resolución de ventas ───────── */
+// Cada negocio es dueño de sus propias ventas.
+// La resolución de credenciales se hace por separado con resolveCredsBizId.
+async function resolveSalesBusiness(biz) {
+  return { salesBizId: biz.id, articleIds: null };
 }
 
 function parseDate(zd, fb) {
@@ -111,9 +58,9 @@ function clampToYesterday(a, b) {
 exports.maxiPing = async (req, res) => {
   try {
     const biz = req.business;
-
-    // Si hay credenciales en DB o header X-Maxi-Token, esto devuelve token válido o lanza
-    const token = await getBearer(biz.id, req);
+    // Para el ping usamos las credenciales del principal
+    const credsBizId = await resolveCredsBizId(biz.id);
+    const token = await getBearer(credsBizId, req);
     const props = biz?.props || {};
     const mx = props.maxi || props.maxi_credentials || {};
 
@@ -134,16 +81,15 @@ exports.maxiPing = async (req, res) => {
   }
 };
 
-/** POST /api/businesses/:id/sync-sales/window  body: { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD', dryrun?: boolean } */
+/** POST /api/businesses/:id/sync-sales/window  body: { from, to, dryrun? } */
 exports.syncWindow = async (req, res) => {
   try {
     const biz = req.business;
+    const credsBizId = await resolveCredsBizId(biz.id);
 
-    // 1) Normalizar from/to desde body o query
     const fromRaw = String(
       (req.body && req.body.from) || (req.query && req.query.from) || ''
     ).slice(0, 10);
-
     const toRaw = String(
       (req.body && req.body.to) || (req.query && req.query.to) || ''
     ).slice(0, 10);
@@ -152,29 +98,25 @@ exports.syncWindow = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'from_to_required' });
     }
 
-    // 2) Clamp hasta AYER
     const defFrom = new Date(`${fromRaw}T00:00:00Z`);
     const defTo = new Date(`${toRaw}T00:00:00Z`);
-
     const { from: Fd, to: Td } = clampToYesterday(defFrom, defTo);
     const F = ymd(Fd);
     const T = ymd(Td);
 
-    // 3) Flag de dryrun desde body o query
     const dryrun = !!(
       (req.body && req.body.dryrun) ||
       (req.query && (req.query.dryrun === '1' || String(req.query.dryrun).toLowerCase() === 'true'))
     );
 
-    // 4) Traer ventas crudas desde Maxi para ese rango exacto
     const rawDocs = await fetchSalesRanged({
-      businessId: biz.id,
+      businessId: biz.id,   // donde se guardan los datos
+      credsBizId,            // de donde vienen las credenciales
       from: F,
       to: T,
       req,
     });
 
-    // Si querés diagnosticar sin tocar DB
     if (dryrun) {
       return res.json({
         ok: true,
@@ -187,22 +129,17 @@ exports.syncWindow = async (req, res) => {
       });
     }
 
-    // 5) Upsert completo dentro de transacción (ventas + items diarios)
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-
-      // upsertSalesBatch debe devolver { upserted, updated, minDay, maxDay }
       const result = await upsertSalesBatch(biz.id, rawDocs, client);
-
       await client.query('COMMIT');
-
       return res.json({
         ok: true,
         business_id: String(biz.id),
         from: F,
         to: T,
-        ...result, // upserted, updated, minDay, maxDay
+        ...result,
       });
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch (_) { }
@@ -222,9 +159,10 @@ exports.syncWindow = async (req, res) => {
 exports.backfillOnce = async (req, res) => {
   try {
     const biz = req.business;
+    const credsBizId = await resolveCredsBizId(biz.id);
     const days = req.body?.days ? Number(req.body.days) : undefined;
 
-    const out = await ensureInitialBackfillOnce({ businessId: biz.id, req, days });
+    const out = await ensureInitialBackfillOnce({ businessId: biz.id, credsBizId, req, days });
     return res.json({ ok: true, business_id: String(biz.id), ...out });
   } catch (e) {
     return res.status(e.status || 500).json({ ok: false, error: e.message || 'backfill_failed' });
@@ -235,7 +173,9 @@ exports.backfillOnce = async (req, res) => {
 exports.dailyAuto = async (req, res) => {
   try {
     const biz = req.business;
-    const out = await runDailyAuto({ businessId: biz.id, req });
+    const credsBizId = await resolveCredsBizId(biz.id);
+
+    const out = await runDailyAuto({ businessId: biz.id, credsBizId, req });
     return res.json({ ok: true, business_id: String(biz.id), ...out });
   } catch (e) {
     return res.status(e.status || 500).json({ ok: false, error: e.message || 'daily_auto_failed' });
@@ -265,6 +205,8 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
     dryrun = false,
   } = body || {};
 
+  const credsBizId = await resolveCredsBizId(biz.id);
+
   // 1) Ventana explícita
   if (from && to) {
     const defFrom = new Date(`${from}T00:00:00Z`);
@@ -274,6 +216,7 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
 
     const rawDocs = await fetchSalesRanged({
       businessId: biz.id,
+      credsBizId,
       from: F,
       to: T,
       req,
@@ -310,12 +253,12 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
     }
 
     case 'backfill_30d': {
-      const out = await ensureInitialBackfillOnce({ businessId: biz.id, days: 30, req });
+      const out = await ensureInitialBackfillOnce({ businessId: biz.id, credsBizId, days: 30, req });
       return { ok: true, ...out };
     }
 
     case 'backfill': {
-      const out = await ensureInitialBackfillOnce({ businessId: biz.id, req });
+      const out = await ensureInitialBackfillOnce({ businessId: biz.id, credsBizId, req });
       return { ok: true, ...out };
     }
 
@@ -327,7 +270,7 @@ exports.syncSalesForBusiness = async (biz, body = {}, req) => {
 
     case 'auto':
     default: {
-      const out = await runDailyAuto({ businessId: biz.id, req });
+      const out = await runDailyAuto({ businessId: biz.id, credsBizId, req });
       return { ok: true, ...out };
     }
   }
@@ -360,15 +303,6 @@ exports.reconcileAndRebuild = async (req, res, next) => {
 // LISTADO DE VENTAS DIARIAS
 // ============================================================================
 
-/**
- * GET /api/businesses/:id/sales/daily-items
- * Query params:
- * - from, to (YYYY-MM-DD) - requeridos
- * - articleId (opcional) - filtrar por artículo específico
- * - groupIds (opcional) - filtrar por grupos: "1,2,3"
- * - limit, offset (paginación)
- * - source (csv|maxi)
- */
 exports.listDailyItems = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -376,7 +310,7 @@ exports.listDailyItems = async (req, res, next) => {
       from,
       to,
       articleId,
-      groupIds, // 🆕 Filtro por grupos (viene del frontend)
+      groupIds,
       limit = 500000,
       offset = 0,
       source = null,
@@ -389,56 +323,45 @@ exports.listDailyItems = async (req, res, next) => {
       });
     }
 
-    // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
 
     const params = [salesBizId, from, to];
     let whereClause = '';
     let groupFilter = '';
 
-    // Filtro por artículo específico (tiene prioridad sobre filtro de subnegocio)
     if (articleId) {
       params.push(Number(articleId));
       whereClause = `AND sdi.article_id = $${params.length}`;
     } else if (subBizArticleIds) {
-      // Filtro automático por artículos del subnegocio
       params.push(subBizArticleIds);
       whereClause = `AND sdi.article_id = ANY($${params.length})`;
     }
 
-    // Filtro por source
     let sourceFilter = '';
     if (source) {
       params.push(source);
       sourceFilter = `AND sdi.source = $${params.length}`;
     }
 
-    // 🆕 Filtro por grupos (viene del frontend cuando está en una división)
     if (groupIds) {
       const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
         params.push(ids);
         groupFilter = `
           AND sdi.article_id IN (
-            SELECT DISTINCT article_id 
-            FROM article_groups 
+            SELECT DISTINCT article_id
+            FROM article_groups
             WHERE group_id = ANY($${params.length})
           )
         `;
       }
     }
 
-    // JOIN de nombres: buscar en salesBizId y biz.id (subnegocio tiene artículos copiados)
     const nameBizIds = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
     params.push(nameBizIds);
     const nameBizParam = `$${params.length}`;
-
-    // Para el sqlTotals usamos los mismos params excepto el último (nameBizIds)
     const paramsTotals = params.slice(0, params.length - 1);
 
-    // Query principal
-    // IMPORTANTE: el JOIN de nombres se hace DESPUÉS del GROUP BY para evitar
-    // que maxi_articles con múltiples business_id duplique filas y multiplique qty/amount
     const sql = `
       WITH agg AS (
         SELECT
@@ -483,7 +406,6 @@ exports.listDailyItems = async (req, res, next) => {
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
-    // Query de totales (sin el nameBizParam)
     const sqlTotals = `
       SELECT
         COUNT(DISTINCT sdi.article_id) AS rows_total,
@@ -529,10 +451,6 @@ exports.listDailyItems = async (req, res, next) => {
 // EXPORTAR CSV
 // ============================================================================
 
-/**
- * GET /api/businesses/:id/sales/export-csv
- * Query: from, to, groupIds (opcional)
- */
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
   try {
     const rawBizId = Number(req.params.id);
@@ -542,12 +460,9 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       return res.status(400).json({ error: 'businessId inválido' });
     }
     if (!from || !to) {
-      return res.status(400).json({
-        error: 'from y to son obligatorios (YYYY-MM-DD)'
-      });
+      return res.status(400).json({ error: 'from y to son obligatorios (YYYY-MM-DD)' });
     }
 
-    // Resolver subnegocio → principal (igual que listDailyItems)
     const bizRow = await pool.query(
       `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`, [rawBizId]
     );
@@ -558,21 +473,19 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     let articleFilter = '';
     let groupFilter = '';
 
-    // Filtro por artículos del subnegocio
     if (subBizArticleIds) {
       params.push(subBizArticleIds);
       articleFilter = `AND sdi.article_id = ANY($${params.length})`;
     }
 
-    // Filtro por grupos si viene
     if (groupIds) {
       const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
         params.push(ids);
         groupFilter = `
           AND sdi.article_id IN (
-            SELECT DISTINCT article_id 
-            FROM article_groups 
+            SELECT DISTINCT article_id
+            FROM article_groups
             WHERE group_id = ANY($${params.length})
           )
         `;
@@ -583,8 +496,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       SELECT
         sdi.article_id AS codigo,
         COALESCE(
-         NULLIF(TRIM(MAX(ma.nombre)), ''), 
-         NULLIF(TRIM(MAX(aa.name)), ''),
+          NULLIF(TRIM(MAX(ma.nombre)), ''),
+          NULLIF(TRIM(MAX(aa.name)), ''),
           'Artículo #' || sdi.article_id::text
         ) AS nombre,
         SUM(sdi.qty)::numeric AS unidades,
@@ -596,7 +509,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         sdi.day::date AS fecha
       FROM sales_daily_items sdi
       LEFT JOIN maxi_articles ma
-        ON ma.business_id = sdi.business_id 
+        ON ma.business_id = sdi.business_id
         AND ma.articulo_id = sdi.article_id
       LEFT JOIN app_articles aa
         ON aa.business_id = sdi.business_id
@@ -605,36 +518,22 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         AND sdi.day BETWEEN $2::date AND $3::date
         ${articleFilter}
         ${groupFilter}
-      GROUP BY sdi.day::date, sdi.article_id 
+      GROUP BY sdi.day::date, sdi.article_id
       ORDER BY sdi.day ASC, sdi.article_id ASC;
     `;
 
     const { rows } = await pool.query(sql, params);
 
-    // Headers CSV
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="ventas_${rawBizId}_${from}_a_${to}.csv"`
     );
-
-    // BOM UTF-8 para Excel
     res.write('\uFEFF');
 
-    const headers = [
-      'codigo',
-      'nombre',
-      'unidades',
-      'importe',
-      'costo',
-      'p_total',
-      'neto',
-      'tipo_iva',
-      'fecha'
-    ];
+    const headers = ['codigo', 'nombre', 'unidades', 'importe', 'costo', 'p_total', 'neto', 'tipo_iva', 'fecha'];
     res.write(headers.join(',') + '\n');
 
-    // Escribir filas
     for (const r of rows) {
       try {
         const fecha = r.fecha instanceof Date
@@ -660,7 +559,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     }
 
     return res.end();
-
   } catch (e) {
     console.error('[exportSalesCsv] error:', e);
     res.status(500).json({
@@ -679,71 +577,55 @@ function csvEscape(val) {
   return s;
 }
 
-/**
- * 🔍 DIAGNÓSTICO: Ver datos crudos de MaxiRest
- * GET /api/businesses/:id/sync-sales/diagnostic-raw?from=YYYY-MM-DD&to=YYYY-MM-DD
- */
+// ============================================================================
+// DIAGNÓSTICO
+// ============================================================================
+
 exports.diagnosticRaw = async (req, res) => {
   try {
     const biz = req.business;
+    const credsBizId = await resolveCredsBizId(biz.id);
     const from = req.query.from || '2025-12-01';
     const to = req.query.to || '2025-12-02';
 
     console.log('\n========================================');
     console.log('=== DIAGNÓSTICO DE VENTAS CRUDAS ===');
     console.log('========================================');
-    console.log('businessId:', biz.id);
-    console.log('from:', from);
-    console.log('to:', to);
+    console.log('businessId:', biz.id, '| credsBizId:', credsBizId);
+    console.log('from:', from, '| to:', to);
     console.log('----------------------------------------\n');
 
     const raw = await fetchSalesRanged({
       businessId: biz.id,
+      credsBizId,
       from,
       to,
-      req
+      req,
     });
 
-    console.log('=== CANTIDAD DE ITEMS ===');
     console.log('Total facturas/ordenes:', raw.length);
-
-    if (raw.length > 0) {
-      console.log('\n=== PRIMERA FACTURA/ORDEN (estructura completa) ===');
-      console.log(JSON.stringify(raw[0], null, 2));
-
-      if (raw[1]) {
-        console.log('\n=== SEGUNDA FACTURA/ORDEN ===');
-        console.log(JSON.stringify(raw[1], null, 2));
-      }
-
-      if (raw[2]) {
-        console.log('\n=== TERCERA FACTURA/ORDEN ===');
-        console.log(JSON.stringify(raw[2], null, 2));
-      }
-    }
-
-    console.log('\n========================================\n');
+    if (raw.length > 0) console.log('Primera factura:', JSON.stringify(raw[0], null, 2));
 
     res.json({
       success: true,
       business_id: biz.id,
+      creds_biz_id: credsBizId,
       from,
       to,
       total: raw.length,
       muestra: {
         primera: raw[0] || null,
         segunda: raw[1] || null,
-        tercera: raw[2] || null
+        tercera: raw[2] || null,
       },
-      primeras_5: raw.slice(0, 5)
+      primeras_5: raw.slice(0, 5),
     });
-
   } catch (error) {
     console.error('❌ Error en diagnóstico:', error);
     res.status(error.status || 500).json({
       success: false,
       error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 };
@@ -752,10 +634,6 @@ exports.diagnosticRaw = async (req, res) => {
 // RESUMEN DE VENTAS
 // ============================================================================
 
-/**
- * GET /api/businesses/:id/sales/summary
- * Query: from, to, source, groupIds (opcional), articleIds (opcional)
- */
 exports.salesSummary = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -764,7 +642,7 @@ exports.salesSummary = async (req, res, next) => {
       to,
       source = 'csv',
       articleIds = null,
-      groupIds = null, // 🆕 Filtro por grupos
+      groupIds = null,
     } = req.query;
 
     if (!from || !to) {
@@ -774,20 +652,17 @@ exports.salesSummary = async (req, res, next) => {
       });
     }
 
-    // 🔑 Resolver dónde están las ventas (subnegocio → negocio raíz)
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
 
     const params = [salesBizId, from, to, source];
     let articleFilter = '';
     let groupFilter = '';
 
-    // Filtro automático por artículos del subnegocio
     if (subBizArticleIds) {
       params.push(subBizArticleIds);
       articleFilter = `AND sdi.article_id = ANY($${params.length})`;
     }
 
-    // Filtro por artículos específicos (del query, override del subnegocio)
     if (articleIds && !subBizArticleIds) {
       const ids = String(articleIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
@@ -796,29 +671,24 @@ exports.salesSummary = async (req, res, next) => {
       }
     }
 
-    // 🆕 Filtro por grupos
     if (groupIds) {
       const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
         params.push(ids);
         groupFilter = `
           AND sdi.article_id IN (
-            SELECT DISTINCT article_id 
-            FROM article_groups 
+            SELECT DISTINCT article_id
+            FROM article_groups
             WHERE group_id = ANY($${params.length})
           )
         `;
       }
     }
 
-    // Para el JOIN de nombres: buscamos en salesBizId Y en biz.id (por si los artículos
-    // están copiados en el subnegocio con su propio business_id)
     const nameBizIds = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
     params.push(nameBizIds);
     const nameBizParam = `$${params.length}`;
 
-    // IMPORTANTE: igual que listDailyItems, separamos el JOIN de nombres del SUM
-    // para evitar que maxi_articles con múltiples business_id duplique qty/amount
     const sql = `
       WITH agg AS (
         SELECT
@@ -869,7 +739,6 @@ exports.salesSummary = async (req, res, next) => {
 
     const { rows } = await pool.query(sql, params);
 
-    // Calcular totales globales
     const totals = rows.reduce((acc, row) => {
       acc.total_qty += Number(row.total_qty || 0);
       acc.total_amount += Number(row.total_amount || 0);
@@ -901,8 +770,6 @@ exports.salesSummary = async (req, res, next) => {
 
 /* ══════════════════════════════════════════════════════════
    GET /api/businesses/:id/sales/first-date
-   Devuelve la primera fecha con ventas del negocio (o del principal si es subnegocio).
-   Usado por el selector de calendario para el rango "Histórico".
 ══════════════════════════════════════════════════════════ */
 exports.getFirstSaleDate = async (req, res, next) => {
   try {
@@ -919,7 +786,6 @@ exports.getFirstSaleDate = async (req, res, next) => {
     );
 
     const firstDate = rows[0]?.first_date || null;
-
     return res.json({ ok: true, first_date: firstDate, sales_biz_id: salesBizId });
   } catch (e) {
     next(e);
@@ -939,4 +805,5 @@ module.exports = {
   diagnosticRaw: exports.diagnosticRaw,
   salesSummary: exports.salesSummary,
   getFirstSaleDate: exports.getFirstSaleDate,
+  resolveCredsBizId,
 };
