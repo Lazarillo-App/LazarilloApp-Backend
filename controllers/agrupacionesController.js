@@ -132,16 +132,16 @@ exports.obtenerAgrupaciones = async (req, res) => {
 
     if (isSubBusiness) {
       // Filtrar: ocultar agrupaciones movidas a otros subnegocios
-      // MANTENER: Sin Agrupación propia del subnegocio (is_temporary) y agrupaciones creadas aquí
-      // ELIMINAR: Discontinuados propio (viene del principal) y movidas
+      // ELIMINAR: Discontinuados y Sin Agrupacion propios (son globales, vienen del principal)
       agrupaciones = agrupaciones.filter(ag => {
         if (ag.moved_to_business_id) return false;         // ya fue dividida
         if (isDiscontinuadosName(ag.nombre)) return false; // Discontinuados viene del principal
+        if (isTodoName(ag.nombre)) return false;            // Sin Agrupacion viene del principal
         return true;
       });
 
-      // Inyectar SOLO Discontinuados del negocio principal de la org
-      // (Sin Agrupación es propia de cada subnegocio — cada uno tiene la suya)
+      // Inyectar Discontinuados Y Sin Agrupacion del principal (son globales)
+      // Todos los subnegocios from_group comparten los mismos grupos especiales
       if (organizationId) {
         const { rows: principalRows } = await pool.query(
           `SELECT id FROM app_businesses
@@ -175,6 +175,28 @@ exports.obtenerAgrupaciones = async (req, res) => {
             };
             // Discontinuados siempre al final
             agrupaciones = [...agrupaciones, globalDisc];
+          }
+
+          // Inyectar Sin Agrupacion del principal (es global, no propia del subnegocio)
+          const { rows: todoRows } = await pool.query(
+            `SELECT id, nombre, business_id,
+                    COALESCE(NULLIF(articulos::text,'')::jsonb,'[]'::jsonb) AS articulos,
+                    app_articles_ids, is_temporary, moved_to_business_id
+               FROM agrupaciones
+              WHERE business_id = $1
+                AND (nombre ILIKE 'Sin Agrupaci_n' OR nombre = 'Sin Agrupacion')
+              LIMIT 1`,
+            [principalId]
+          );
+
+          if (todoRows.length) {
+            const globalTodo = {
+              ...todoRows[0],
+              global_from_principal: true,
+              principal_business_id: principalId,
+            };
+            // Sin Agrupacion siempre al principio
+            agrupaciones = [globalTodo, ...agrupaciones];
           }
         }
       }
