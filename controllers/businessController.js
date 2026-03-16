@@ -215,14 +215,15 @@ exports.update = async (req, res) => {
   const social = incoming.social || null;
   const description = (incoming.description ?? null);
 
-  const patch = {
-    ...(branding ? { branding } : {}),
-    ...(contact ? { contact } : {}),
-    ...(address ? { address } : {}),
-    ...(social ? { social } : {}),
-    ...(description !== null ? { description } : {})
-  };
-  const patchIsEmpty = Object.keys(patch).length === 0;
+  // Construir patch sin eliminar nulls — necesitamos poder borrar campos (ej: logo_url: null)
+  // El branding se mergea a nivel profundo para no perder campos existentes
+  const patchParts = [];
+  if (branding) patchParts.push({ branding });
+  if (contact)  patchParts.push({ contact });
+  if (address)  patchParts.push({ address });
+  if (social)   patchParts.push({ social });
+  if (description !== null) patchParts.push({ description });
+  const patchIsEmpty = patchParts.length === 0;
 
   const { rows } = await pool.query(
     `
@@ -231,13 +232,26 @@ exports.update = async (req, res) => {
          name = COALESCE($2, name),
          props = CASE
                    WHEN $3::jsonb IS NULL THEN props
-                   ELSE COALESCE(props,'{}'::jsonb) || jsonb_strip_nulls($3::jsonb)
+                   ELSE (
+                     -- merge profundo del branding para no perder campos existentes
+                     -- otros campos (contact, address, etc) se reemplazan completos
+                     COALESCE(props, '{}'::jsonb)
+                     || ($3::jsonb - 'branding')
+                     || CASE
+                          WHEN $3::jsonb ? 'branding'
+                          THEN jsonb_build_object(
+                            'branding',
+                            COALESCE(props->'branding', '{}'::jsonb) || ($3->'branding')
+                          )
+                          ELSE '{}'::jsonb
+                        END
+                   )
                  END,
          updated_at = NOW()
      WHERE id = $1
      RETURNING id, name, slug, props, owner_id, created_at, updated_at;
     `,
-    [businessId, name, patchIsEmpty ? null : patch]
+    [businessId, name, patchIsEmpty ? null : Object.assign({}, ...patchParts)]
   );
 
   const saved = attachBranding(rows[0]);
