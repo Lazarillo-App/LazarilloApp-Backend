@@ -214,7 +214,6 @@ function requireNumericParam(paramName) {
 
 router.get(
   '/:id/sales/:articuloId',
-  cacheJson(300),
   requireNumericParam('articuloId'),
   ensureFn('salesSeriesFromDB', salesSeriesFromDB)
 );
