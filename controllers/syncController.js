@@ -705,30 +705,15 @@ exports.salesSeriesFromDB = async function salesSeriesFromDB(req, res, next) {
     console.log('[salesSeriesFromDB] 📊 Consultando ventas:', { businessId, articuloId, from, to, groupBy });
 
     // PASO 1: Resolver en qué negocio están realmente las ventas.
-    // Si es un subnegocio (from_group), las ventas están en el negocio raíz de la organización.
     const { rows: bizRows } = await pool.query(
-      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`,
+      `SELECT id FROM app_businesses WHERE id = $1`,
       [businessId]
     );
     if (!bizRows.length) {
       return res.status(404).json({ error: 'business_not_found' });
     }
-    const biz = bizRows[0];
 
-    let salesBizId = businessId;
-    if (biz.created_from === 'from_group' && biz.organization_id) {
-      const { rows: rootRows } = await pool.query(
-        `SELECT id FROM app_businesses
-          WHERE organization_id = $1
-            AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-          ORDER BY id ASC LIMIT 1`,
-        [biz.organization_id]
-      );
-      if (rootRows.length) {
-        salesBizId = rootRows[0].id;
-        console.log(`[salesSeriesFromDB] Subnegocio ${businessId} → ventas en negocio raíz ${salesBizId}`);
-      }
-    }
+    const salesBizId = businessId;
 
     // PASO 2: Obtener el nombre del artículo desde maxi_articles.
     // Buscamos en el negocio donde están las ventas (salesBizId) y también en el negocio
