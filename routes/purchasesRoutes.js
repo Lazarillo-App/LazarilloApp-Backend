@@ -2,13 +2,21 @@
 'use strict';
 const router = require('express').Router();
 const ctrl   = require('../controllers/purchasesController');
-
-router.post('/sync',           ctrl.sync);           // sincronizar rango desde MaxiRest
-router.post('/sync-suppliers', ctrl.syncSuppliers);  // sync solo proveedores
-router.get('/suppliers',       ctrl.listSuppliers);  // listar proveedores
-router.get('/export/csv',      ctrl.exportCsv);      // descargar CSV (antes que /)
-router.get('/summary',         ctrl.summary);        // totales por proveedor
-router.get('/first-date', ctrl.firstDate);           // fecha de la compra más antigua (para sugerir desde cuándo sincronizar)
-router.get('/',                ctrl.list);           // listado con filtros y paginacion
-
+const batchesCtrl = require('../controllers/purchasesBatchesController'); 
+ 
+router.post('/sync',           ctrl.sync);
+router.post('/sync-suppliers', ctrl.syncSuppliers);
+router.get('/suppliers',       ctrl.listSuppliers);
+router.get('/export/csv',      ctrl.exportCsv);
+router.get('/summary',         ctrl.summary);
+router.get('/first-date',      ctrl.firstDate);
+ 
+// Gestión de lotes
+router.get('/batches',                    batchesCtrl.listBatches);
+router.delete('/batches/:batchId',        batchesCtrl.deleteBatch);
+router.post('/batches/:batchId/move',     batchesCtrl.moveBatch);
+ 
+router.get('/', ctrl.list);
+ 
 module.exports = router;
+ 

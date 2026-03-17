@@ -3,8 +3,21 @@
 
 const pool = require('../config/db');
 
-async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
-  if (!facturas?.length) return { inserted: 0, updated: 0, items: 0 };
+/* ─── helper: genera batch_id único ─── */
+function generateBatchId() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const rand = Math.random().toString(16).slice(2, 6);
+  return `${date}-${time}-${rand}`;
+}
+
+async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = null) {
+  // ✅ Si no viene batch_id externo, generar uno nuevo para esta importación
+  const effectiveBatchId = batchId || generateBatchId();
+
+  if (!facturas?.length) return { inserted: 0, updated: 0, items: 0, batch_id: effectiveBatchId };
   const client = await pool.connect();
   let inserted = 0, updated = 0, totalItems = 0;
   try {
@@ -27,12 +40,14 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
       const total = netoTotal + ivaTotal + impIntTotal;
       const fecha = items[0]?.fecha ?? null;
 
+      // ✅ Incluir batch_id en el INSERT y en el ON CONFLICT UPDATE
       const upsertRes = await client.query(
         `INSERT INTO purchases
            (business_id, factura_key, proveedor_id, fecha,
             neto_total, iva_total, imp_int_total, total,
+            batch_id,
             synced_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
          ON CONFLICT (business_id, factura_key) DO UPDATE SET
            proveedor_id  = EXCLUDED.proveedor_id,
            fecha         = EXCLUDED.fecha,
@@ -40,12 +55,14 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
            iva_total     = EXCLUDED.iva_total,
            imp_int_total = EXCLUDED.imp_int_total,
            total         = EXCLUDED.total,
+           batch_id      = EXCLUDED.batch_id,
            synced_at     = NOW(),
            updated_at    = NOW()
          RETURNING id, (xmax = 0) AS is_insert`,
         [businessId, facturaKey, proveedorId, fecha,
          netoTotal.toFixed(2), ivaTotal.toFixed(2),
-         impIntTotal.toFixed(2), total.toFixed(2)]
+         impIntTotal.toFixed(2), total.toFixed(2),
+         effectiveBatchId]  // ✅ $9
       );
 
       const purchaseId = upsertRes.rows[0].id;
@@ -83,17 +100,17 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
           [purchaseId, businessId, insumoId,
            itemFecha,
            it.sucursal ?? 0,
-           cantidadTotal,        // cantidad real (cantidad * factor neto)
-           factorNeto,           // guardamos el factor neto original para referencia
-           precioUnitario,       // precio por unidad real
-           it.preciotot ?? 0,    // total de la línea (sin cambios)
+           cantidadTotal,
+           factorNeto,
+           precioUnitario,
+           it.preciotot ?? 0,
            it.iva_tasa ?? 0, it.iva ?? 0, it.iva_total ?? 0,
            it.imp_int ?? 0, it.imp_inttot ?? 0,
            it.orden_compra ?? 0, it.cptoCaja ?? 0, it.referencia ?? '']
         );
         totalItems++;
 
-        // Rastrear último precio por insumo (quedarse con el de fecha más reciente)
+        // Rastrear último precio por insumo
         if (insumoId && itemPrecio > 0 && itemFecha) {
           const prev = ultimoPrecioMap.get(insumoId);
           if (!prev || itemFecha >= prev.fecha) {
@@ -118,7 +135,7 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap) {
     }
 
     await client.query('COMMIT');
-    return { inserted, updated, items: totalItems, preciosActualizados };
+    return { inserted, updated, items: totalItems, preciosActualizados, batch_id: effectiveBatchId };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -158,4 +175,4 @@ async function upsertSuppliers(businessId, proveedores) {
   }
 }
 
-module.exports = { upsertPurchasesBatch, upsertSuppliers };
+module.exports = { upsertPurchasesBatch, upsertSuppliers, generateBatchId };
