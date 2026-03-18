@@ -1448,3 +1448,69 @@ exports.getArticulosOrigenes = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// ============================================================================
+// DELETE /businesses/:businessId/agrupaciones/:id/articulos
+// Body: { ids: number[] }
+// Elimina múltiples artículos de una agrupación en un solo request (bulk).
+// ============================================================================
+exports.eliminarArticulosDeAgrupacionBulk = async (req, res) => {
+  try {
+    let businessId = getBusinessId(req);
+    const id = Number(req.params.id);
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map(Number).filter(Number.isFinite);
+
+    if (!Number.isFinite(businessId) || !Number.isFinite(id) || !ids.length) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+
+    // Redirigir al negocio principal si la agrupación es Discontinuados y venimos de subnegocio
+    {
+      const { rows: agRows } = await pool.query(
+        `SELECT nombre FROM agrupaciones WHERE id = $1`, [id]
+      );
+      const agNombre = agRows[0]?.nombre ?? '';
+      if (isDiscontinuadosName(agNombre)) {
+        const { rows: bizRows } = await pool.query(
+          `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
+        );
+        const biz = bizRows[0];
+        if (biz?.created_from === 'from_group' && biz?.organization_id) {
+          const { rows: orgBiz } = await pool.query(
+            `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
+            [biz.organization_id]
+          );
+          if (orgBiz[0]?.id) businessId = orgBiz[0].id;
+        }
+      }
+    }
+
+    const { rows: r0 } = await pool.query(
+      `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
+      [id, businessId]
+    );
+
+    if (!r0.length) {
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    }
+
+    const idsSet = new Set(ids);
+    const base = parseJsonArrayLoose(r0[0].articulos);
+    const filtered = base.filter(a => !idsSet.has(Number(a.id)));
+    const removed = base.length - filtered.length;
+
+    const { rows } = await pool.query(
+      `UPDATE agrupaciones
+          SET articulos = $1::jsonb, updated_at = NOW()
+        WHERE id = $2 AND business_id = $3
+        RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
+      [JSON.stringify(filtered), id, businessId]
+    );
+
+    return res.json({ ok: true, removed, remaining: filtered.length, data: rows[0] });
+  } catch (e) {
+    console.error('eliminarArticulosDeAgrupacionBulk error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};

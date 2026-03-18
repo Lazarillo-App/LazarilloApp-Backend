@@ -17,6 +17,7 @@ const {
   assignAgrupacionToDivision,
   getArticuloOrigen,
   getArticulosOrigenes,
+  eliminarArticulosDeAgrupacionBulk,
 } = require('../controllers/agrupacionesController');
 
 const { materializeGroupsFromTaxonomy } = require('../services/autoGroupingService');
@@ -58,10 +59,8 @@ router.post(
 router.put('/agrupaciones/:id', safe(actualizarAgrupacion, 'actualizarAgrupacion'));
 router.delete('/agrupaciones/:id', safe(eliminarAgrupacion, 'eliminarAgrupacion'));
 router.put('/agrupaciones/:id/articulos', safe(agregarArticulosAgrupacion, 'agregarArticulosAgrupacion'));
-router.delete(
-  '/agrupaciones/:id/articulos/:articuloId',
-  safe(eliminarArticuloDeAgrupacion, 'eliminarArticuloDeAgrupacion')
-);
+router.delete('/agrupaciones/:id/articulos', safe(eliminarArticulosDeAgrupacionBulk, 'eliminarArticulosDeAgrupacionBulk'));
+router.delete('/agrupaciones/:id/articulos/:articuloId',safe(eliminarArticuloDeAgrupacion, 'eliminarArticuloDeAgrupacion'));
 router.get('/agrupaciones/:id/exclusiones', safe(listarExclusiones, 'listarExclusiones'));
 router.post('/agrupaciones/:id/exclusiones', safe(upsertExclusiones, 'upsertExclusiones'));
 router.post('/agrupaciones/:fromId/move-items', safe(moveItemsBetweenGroups, 'moveItemsBetweenGroups'));
