@@ -1322,7 +1322,7 @@ exports.getArticuloOrigen = async (req, res) => {
 
     // Buscar en todas las agrupaciones de esos negocios, excluyendo Discontinuados/Todo
     const { rows: agRows } = await pool.query(
-      `SELECT a.id, a.nombre, a.business_id, b.nombre AS business_nombre
+      `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre
          FROM agrupaciones a
          JOIN app_businesses b ON b.id = a.business_id
         WHERE a.business_id = ANY($1::int[])
@@ -1340,7 +1340,7 @@ exports.getArticuloOrigen = async (req, res) => {
     let allRows = agRows;
     if (!agRows.length) {
       const { rows: agRows2 } = await pool.query(
-        `SELECT a.id, a.nombre, a.business_id, b.nombre AS business_nombre
+        `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre
            FROM agrupaciones a
            JOIN app_businesses b ON b.id = a.business_id
           WHERE a.business_id = ANY($1::int[])
@@ -1409,7 +1409,7 @@ exports.getArticulosOrigenes = async (req, res) => {
 
     // Traer todas las agrupaciones relevantes (excluye Discontinuados/Todo/Sin Agrupación)
     const { rows: agRows } = await pool.query(
-      `SELECT a.id, a.nombre, a.business_id, b.nombre AS business_nombre,
+      `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre,
               COALESCE(a.articulos, '[]'::jsonb) AS articulos
          FROM agrupaciones a
          JOIN app_businesses b ON b.id = a.business_id
