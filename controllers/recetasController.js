@@ -50,12 +50,16 @@ exports.getReceta = async (req, res, next) => {
          COALESCE(ri.insumo_id, ri.supply_id)              AS supply_id,
          COALESCE(i.nombre,  ri.nombre_insumo_maxi, ms.nombre)   AS supply_nombre,
          COALESCE(i.unidad_med, ri.unidad, ms.medida)             AS supply_medida,
-         COALESCE(i.precio_ref, 0)                                AS supply_precio_base,
+         COALESCE(i.precio_ref, 0)                                AS precio_ref_db,
          ri.cantidad,
          ri.unidad,
          ri.costo_unitario,
          ROUND(ri.cantidad * ri.costo_unitario, 4)         AS costo_total_item,
          ri.notas,
+         ri.observaciones,
+         ri.merma,
+         ri.pedido,
+         ri.tipo_costo,
          ri.orden,
          ri.codigo_maxi_insumo,
          ri.nombre_insumo_maxi
@@ -197,12 +201,19 @@ exports.saveReceta = async (req, res, next) => {
         continue;
       }
 
+      const merma        = item.merma    !== false;  // default true
+      const pedido       = item.pedido   !== false;  // default true
+      const tipoCosto    = (item.tipoCosto    || 'total').trim();
+      const observaciones = (item.observaciones || '').trim() || null;
+
       const { rows: itemRows } = await client.query(
         `INSERT INTO receta_items
-           (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas, orden, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+           (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
+            observaciones, merma, pedido, tipo_costo, orden, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
          RETURNING *`,
-        [receta.id, supplyId, cantidad, unidad, costoUnitario, notas, orden]
+        [receta.id, supplyId, cantidad, unidad, costoUnitario, notas,
+         observaciones, merma, pedido, tipoCosto, orden]
       );
 
       savedItems.push({

@@ -314,6 +314,22 @@ router.post('/:id/onboard', async (req, res, next) => {
   }
 });
 
+/* Config del negocio — props públicas para el front */
+router.get('/:id/config', async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const props = biz?.props || {};
+    res.json({
+      ok: true,
+      config: {
+        articulos_costo_ideal:  Number(props.articulos_costo_ideal  ?? 30),
+        insumos_costo_ideal:    Number(props.insumos_costo_ideal    ?? 30),
+        compras_alerta_semanas: Number(props.compras_alerta_semanas ?? 4),
+      },
+    });
+  } catch (e) { next(e); }
+});
+
 /* Por :id */
 router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOne));
 router.patch('/:id', ensureFn('businesses.update', businesses.update));

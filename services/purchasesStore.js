@@ -78,16 +78,16 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = n
         const itemFecha  = it.fecha ?? fecha;
 
         // En MaxiRest:
-        // - it.cantidad  = cantidad de bultos/unidades comprados
-        // - it.neto      = factor de presentación (ej: 100 = "precio por 100 unidades")
-        // - it.precio    = precio por "neto" unidades (NO es el unitario real)
-        // - it.preciotot = it.precio * it.cantidad (total de la línea)
+        // - it.cantidad  = cantidad real comprada
+        // - it.precio    = precio unitario real (ya es el precio por unidad)
+        // - it.neto      = importe neto de la línea (precio × cantidad, sin IVA)
+        // - it.preciotot = total de la línea incluyendo impuestos internos
         //
-        // Precio unitario real = it.precio / it.neto  (cuando neto > 0)
-        // Cantidad total real  = it.cantidad * it.neto
-        const factorNeto      = Number(it.neto ?? 1) || 1;
-        const cantidadTotal   = Number(it.cantidad ?? 0) * factorNeto;
-        const precioUnitario  = factorNeto > 0 ? Number(it.precio ?? 0) / factorNeto : Number(it.precio ?? 0);
+        // IMPORTANTE: neto NO es un factor de presentación, es el subtotal neto.
+        // No hay que dividir precio por neto ni multiplicar cantidad por neto.
+        const cantidadTotal   = Number(it.cantidad ?? 0);
+        const precioUnitario  = Number(it.precio ?? 0);
+        const factorNeto      = Number(it.neto ?? 0); // guardado como referencia, no se usa en cálculo
         const itemPrecio      = precioUnitario;
 
         await client.query(

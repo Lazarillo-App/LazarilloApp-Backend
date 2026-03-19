@@ -1,0 +1,29 @@
+// routes/articlePriceConfigRoutes.js
+'use strict';
+
+const express = require('express');
+const router  = express.Router({ mergeParams: true });
+const ctrl    = require('../controllers/articlePriceConfigController');
+const { authRequired }           = require('../middleware/authMiddleware');
+const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+
+router.use(authRequired);
+router.param('businessId', requireBusinessAccessParam);
+
+// GET  /api/businesses/:businessId/recetas-costos
+// Devuelve { costos: { [articleId]: { costoTotal, porciones } } }
+router.get('/:businessId/recetas-costos', ctrl.getRecetasCostos);
+
+// GET  /api/businesses/:businessId/article-price-config
+// Devuelve byArticle, byRubro, byAgrupacion
+router.get('/:businessId/article-price-config', ctrl.getPriceConfig);
+
+// POST /api/businesses/:businessId/article-price-config
+// Body: { scope, scopeId, objetivo?, precioManual?, articleIds? }
+router.post('/:businessId/article-price-config', ctrl.savePriceConfig);
+
+// DELETE /api/businesses/:businessId/article-price-config
+// Body: { scope, scopeId }
+router.delete('/:businessId/article-price-config', ctrl.deletePriceConfig);
+
+module.exports = router;
