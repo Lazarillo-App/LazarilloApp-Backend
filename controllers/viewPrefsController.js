@@ -1,284 +1,61 @@
-// controllers/viewPrefsController.js
-/* eslint-disable no-console */
-const pool = require('../config/db');
 
-const VALID_MODES = ['by-subrubro', 'by-categoria', 'elaborados', 'no-elaborados'];
-
-/**
- * GET /api/businesses/:id/view-prefs
- * resp: { ok: true, byGroup: { [agrupacionId]: viewMode }, byInsumoGroup: { [insumoGroupId]: viewMode } }
- */
-exports.getViewPrefs = async (req, res, next) => {
+// ── POST /businesses/:id/view-prefs ──
+// Body: { agrupacionId, viewMode, divisionId?, scope? }
+exports.saveViewPref = async (req, res) => {
   try {
-    const biz = req.business;
-    const user = req.user;
-
-    if (!biz?.id || !user?.id) {
-      return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
+    const businessId = Number(req.params.id);
+    const agrupacionId = Number(req.body?.agrupacionId);
+    const viewMode = String(req.body?.viewMode || '').trim();
+    const divisionId = req.body?.divisionId ? Number(req.body.divisionId) : null;
+    const scope = req.body?.scope || 'articulo'; // default 'articulo' para compatibilidad
+ 
+    if (!Number.isFinite(businessId) || !Number.isFinite(agrupacionId) || !viewMode) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
-
-    const { rows } = await pool.query(
-      `SELECT agrupacion_id, insumo_group_id, view_mode
-       FROM app_user_group_view_prefs
-       WHERE business_id = $1 AND user_id = $2`,
-      [biz.id, user.id]
+ 
+    const divVal = Number.isFinite(divisionId) ? divisionId : null;
+ 
+    await pool.query(
+      `INSERT INTO business_view_prefs (business_id, agrupacion_id, view_mode, division_id, scope)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (business_id, agrupacion_id, COALESCE(division_id, 0), COALESCE(scope, 'articulo'))
+       DO UPDATE SET view_mode = EXCLUDED.view_mode, updated_at = NOW()`,
+      [businessId, agrupacionId, viewMode, divVal, scope]
     );
-
-    const byGroup = {};
-    const byInsumoGroup = {};
-    for (const r of rows) {
-      if (r.insumo_group_id != null) {
-        byInsumoGroup[r.insumo_group_id] = r.view_mode;
-      } else if (r.agrupacion_id != null) {
-        byGroup[r.agrupacion_id] = r.view_mode;
-      }
-    }
-
-    return res.json({ ok: true, byGroup, byInsumoGroup });
-  } catch (e) {
-    console.error('getViewPrefs error:', e);
-    next(e);
-  }
-};
-
-/**
- * POST /api/businesses/:id/view-prefs
- * body: { agrupacionId, viewMode, scope?, divisionId }
- * scope = 'insumo' → usa insumo_group_id
- * scope = 'articulo' (default) → usa agrupacion_id
- */
-exports.saveViewPref = async (req, res, next) => {
-  try {
-    const biz = req.business;
-    const user = req.user;
-    const { agrupacionId, viewMode, scope = 'articulo' } = req.body || {};
-
-    const groupIdNum = Number(agrupacionId);
-
-    if (!biz?.id || !user?.id || !Number.isFinite(groupIdNum) || groupIdNum <= 0) {
-      return res.status(400).json({ ok: false, error: 'invalid_params' });
-    }
-
-    if (!VALID_MODES.includes(viewMode)) {
-      return res.status(400).json({ ok: false, error: 'invalid_view_mode' });
-    }
-
-    const isInsumo = scope === 'insumo';
-
-    // Verificar que el grupo existe en este negocio (o en el principal de la org)
-    let groupCheck;
-    if (isInsumo) {
-      const { rows } = await pool.query(
-        `SELECT 1 FROM insumo_groups 
-         WHERE id = $1 AND (
-           business_id = $2
-           OR business_id IN (
-             SELECT b2.id FROM app_businesses b2
-             WHERE b2.organization_id = (
-               SELECT organization_id FROM app_businesses WHERE id = $2
-             ) AND b2.created_from != 'from_group'
-           )
-         ) LIMIT 1`,
-        [groupIdNum, biz.id]
-      );
-      groupCheck = rows;
-    } else {
-      const { rows } = await pool.query(
-        `SELECT 1 FROM agrupaciones 
-         WHERE id = $1 AND (
-           business_id = $2
-           OR business_id IN (
-             SELECT b2.id FROM app_businesses b2
-             WHERE b2.organization_id = (
-               SELECT organization_id FROM app_businesses WHERE id = $2
-             ) AND b2.created_from != 'from_group'
-           )
-         ) LIMIT 1`,
-        [groupIdNum, biz.id]
-      );
-      groupCheck = rows;
-    }
-
-    if (!groupCheck.length) {
-      console.warn(`[saveViewPref] Grupo ${groupIdNum} (scope=${scope}) no encontrado en business ${biz.id}, ignorando`);
-      return res.json({ ok: true, skipped: true });
-    }
-
-    if (isInsumo) {
-      // Para insumos: usar insumo_group_id, agrupacion_id = NULL
-      await pool.query(
-        `INSERT INTO app_user_group_view_prefs
-           (user_id, business_id, insumo_group_id, agrupacion_id, view_mode, updated_at)
-         VALUES ($1, $2, $3, NULL, $4, NOW())
-         ON CONFLICT (user_id, business_id, insumo_group_id, division_key)
-         WHERE insumo_group_id IS NOT NULL
-         DO UPDATE SET
-           view_mode = EXCLUDED.view_mode,
-           updated_at = NOW()`,
-        [user.id, biz.id, groupIdNum, viewMode]
-      );
-    } else {
-      // Para artículos: usar agrupacion_id, insumo_group_id = NULL
-      await pool.query(
-        `INSERT INTO app_user_group_view_prefs
-           (user_id, business_id, agrupacion_id, insumo_group_id, view_mode, updated_at)
-         VALUES ($1, $2, $3, NULL, $4, NOW())
-         ON CONFLICT (user_id, business_id, agrupacion_id, division_key)
-         DO UPDATE SET
-           view_mode = EXCLUDED.view_mode,
-           updated_at = NOW()`,
-        [user.id, biz.id, groupIdNum, viewMode]
-      );
-    }
-
+ 
     return res.json({ ok: true });
   } catch (e) {
-    console.error('saveViewPref error:', e);
-    next(e);
-  }
-};
-
-/* =========================================================
-   FAVORITA POR USUARIO + NEGOCIO + DIVISIÓN
-   GET  /api/businesses/:id/fav-group
-   POST /api/businesses/:id/fav-group
-   ========================================================= */
-
-exports.getFavoriteGroup = async (req, res, next) => {
-  try {
-    const biz = req.business;
-    const user = req.user;
-
-    const scope = req.query.scope || 'articulo';
-
-    const divisionIdRaw = req.query.divisionId;
-    const divisionId =
-      divisionIdRaw == null || divisionIdRaw === '' ? null : Number(divisionIdRaw);
-
-    if (divisionId !== null && !Number.isFinite(divisionId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_division_id' });
+    // Si falla el ON CONFLICT (constraint no existe), intentar upsert manual
+    if (e.code === '42P10' || e.code === '23505') {
+      try {
+        const divVal = Number.isFinite(Number(req.body?.divisionId)) ? Number(req.body.divisionId) : null;
+        const scope = req.body?.scope || 'articulo';
+        const businessId = Number(req.params.id);
+        const agrupacionId = Number(req.body?.agrupacionId);
+        const viewMode = String(req.body?.viewMode || '');
+ 
+        // Intentar UPDATE primero, luego INSERT
+        const upd = await pool.query(
+          `UPDATE business_view_prefs
+             SET view_mode = $1, updated_at = NOW()
+           WHERE business_id = $2 AND agrupacion_id = $3
+             AND (division_id = $4 OR (division_id IS NULL AND $4 IS NULL))
+             AND (scope = $5 OR (scope IS NULL AND $5 = 'articulo'))`,
+          [viewMode, businessId, agrupacionId, divVal, scope]
+        );
+        if (!upd.rowCount) {
+          await pool.query(
+            `INSERT INTO business_view_prefs (business_id, agrupacion_id, view_mode, division_id, scope)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [businessId, agrupacionId, viewMode, divVal, scope]
+          );
+        }
+        return res.json({ ok: true });
+      } catch (e2) {
+        console.error('saveViewPref fallback error:', e2.message);
+      }
     }
-
-    const divisionKey = divisionId == null ? 0 : Number(divisionId);
-
-    const { rows } = await pool.query(
-      `SELECT agrupacion_id
-       FROM app_user_group_favs
-       WHERE business_id = $1
-         AND user_id = $2
-         AND scope = $3
-         AND division_key = $4
-       LIMIT 1`,
-      [biz.id, user.id, scope, divisionKey]
-    );
-
-    const favoriteGroupId = rows.length ? Number(rows[0].agrupacion_id) : null;
-    res.json({ ok: true, favoriteGroupId, scope, divisionId });
-  } catch (e) {
-    console.error('getFavoriteGroup error:', e);
-    next(e);
-  }
-};
-
-exports.saveFavoriteGroup = async (req, res, next) => {
-  const client = await pool.connect();
-  try {
-    const biz = req.business;
-    const user = req.user;
-
-    const { agrupacionId, scope = 'articulo', divisionId: divisionIdRaw = null } = req.body || {};
-
-    if (!biz?.id || !user?.id) {
-      return res.status(400).json({ ok: false, error: 'missing_business_or_user' });
-    }
-
-    if (!['articulo', 'insumo'].includes(scope)) {
-      return res.status(400).json({ ok: false, error: 'invalid_scope' });
-    }
-
-    const divisionId =
-      divisionIdRaw === null || divisionIdRaw === undefined || divisionIdRaw === ''
-        ? null
-        : Number(divisionIdRaw);
-
-    if (divisionId !== null && !Number.isFinite(divisionId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_division_id' });
-    }
-
-    const divisionKey = divisionId == null ? 0 : Number(divisionId);
-    const groupIdNum = Number(agrupacionId);
-
-    console.log('💾 [saveFavoriteGroup]', {
-      userId: user.id,
-      businessId: biz.id,
-      scope,
-      divisionId,
-      divisionKey,
-      groupId: groupIdNum,
-    });
-
-    await client.query('BEGIN');
-
-    if (!Number.isFinite(groupIdNum)) {
-      await client.query(
-        `DELETE FROM app_user_group_favs
-         WHERE user_id = $1 
-           AND business_id = $2 
-           AND scope = $3 
-           AND division_key = $4`,
-        [user.id, biz.id, scope, divisionKey]
-      );
-
-      await client.query('COMMIT');
-      console.log('✅ Favorita eliminada');
-      return res.json({ ok: true, favoriteGroupId: null, scope, divisionId });
-    }
-
-    const tableName = scope === 'articulo' ? 'agrupaciones' : 'insumo_groups';
-    const { rows: checkRows } = await client.query(
-      `SELECT id, business_id FROM ${tableName} 
-       WHERE id = $1
-         AND (
-           business_id = $2
-           OR business_id IN (
-             SELECT b2.id FROM app_businesses b2
-             WHERE b2.organization_id = (
-               SELECT organization_id FROM app_businesses WHERE id = $2
-             )
-             AND b2.created_from != 'from_group'
-           )
-         )
-       LIMIT 1`,
-      [groupIdNum, biz.id]
-    );
-
-    if (!checkRows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, error: 'group_not_found' });
-    }
-
-    const realBizId = checkRows[0].business_id;
-
-    await client.query(
-      `INSERT INTO app_user_group_favs
-         (user_id, business_id, agrupacion_id, scope, division_id, division_key, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (user_id, business_id, scope, division_key)
-       DO UPDATE SET
-         agrupacion_id = EXCLUDED.agrupacion_id,
-         division_id = EXCLUDED.division_id,
-         updated_at = NOW()`,
-      [user.id, realBizId, groupIdNum, scope, divisionId, divisionKey]
-    );
-
-    await client.query('COMMIT');
-    console.log('✅ Favorita guardada');
-    return res.json({ ok: true, favoriteGroupId: groupIdNum, scope, divisionId });
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.error('❌ saveFavoriteGroup error:', e);
-    next(e);
-  } finally {
-    client.release();
+    console.error('saveViewPref error:', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
