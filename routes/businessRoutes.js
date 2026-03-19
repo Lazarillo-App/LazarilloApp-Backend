@@ -49,14 +49,14 @@ const upload = multer({
       originalname: file.originalname,
       mimetype: file.mimetype,
     });
-    
+
     const ok = /image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(file.mimetype);
-    
+
     if (!ok) {
       console.error('❌ Multer rechazó archivo:', file.mimetype);
       return cb(Object.assign(new Error('unsupported_file_type'), { code: 'UNSUPPORTED_TYPE' }));
     }
-    
+
     console.log('✅ Multer aceptó archivo');
     cb(null, true);
   },
@@ -65,14 +65,14 @@ const upload = multer({
 /* ───────── Logo: subir archivo ───────── */
 router.post('/:id/logo', upload.any(), (req, res, next) => {
   // Buscar el archivo en cualquier campo
-  const file = req.files?.find(f => 
-    f.fieldname === 'file' || 
-    f.fieldname === 'logo' || 
+  const file = req.files?.find(f =>
+    f.fieldname === 'file' ||
+    f.fieldname === 'logo' ||
     f.fieldname === 'image'
   );
-  
+
   req.file = file || null;
-  
+
   console.log('🔍 Multer procesó:', {
     hasFiles: !!req.files,
     filesCount: req.files?.length || 0,
@@ -86,13 +86,13 @@ router.post('/:id/logo', upload.any(), (req, res, next) => {
   });
 
   if (!req.file && !req.body?.url) {
-    return res.status(400).json({ 
-      error: 'missing_file', 
-      accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
+    return res.status(400).json({
+      error: 'missing_file',
+      accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'],
       max_mb: 5,
     });
   }
-  
+
   return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
 });
 
@@ -118,14 +118,14 @@ router.use('/:id/sync', syncRoutes);
 /* ───────── Logo: subir archivo ───────── */
 router.post('/:id/logo', upload.any(), (req, res, next) => {
   // Buscar el archivo en cualquier campo
-  const file = req.files?.find(f => 
-    f.fieldname === 'file' || 
-    f.fieldname === 'logo' || 
+  const file = req.files?.find(f =>
+    f.fieldname === 'file' ||
+    f.fieldname === 'logo' ||
     f.fieldname === 'image'
   );
-  
+
   req.file = file || null;
-  
+
   console.log('🔍 Multer procesó:', {
     hasFiles: !!req.files,
     filesCount: req.files?.length || 0,
@@ -139,9 +139,9 @@ router.post('/:id/logo', upload.any(), (req, res, next) => {
   });
 
   if (!req.file && !req.body?.url) {
-    return res.status(400).json({ 
-      error: 'missing_file', 
-      accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'], 
+    return res.status(400).json({
+      error: 'missing_file',
+      accept: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'],
       max_mb: 5,
       debug: {
         receivedFields: req.files?.map(f => f.fieldname) || [],
@@ -149,7 +149,7 @@ router.post('/:id/logo', upload.any(), (req, res, next) => {
       }
     });
   }
-  
+
   return ensureFn('businesses.uploadLogo', businesses.uploadLogo)(req, res, next);
 });
 
@@ -294,33 +294,10 @@ router.patch('/:id/default-group', async (req, res, next) => {
 router.post('/:id/sync-sales/reconcile-and-rebuild',
   ensureFn('sales.reconcileAndRebuild', sales.reconcileAndRebuild));
 
-router.get(
-  '/:id/view-prefs',
-  authRequired,
-  loadBusiness,
-  viewPrefsCtrl.getViewPrefs
-);
-
-router.post(
-  '/:id/view-prefs',
-  authRequired,
-  loadBusiness,
-  viewPrefsCtrl.saveViewPref
-);
-
-router.get(
-  '/:id/fav-group',
-  authRequired,
-  loadBusiness,
-  viewPrefsCtrl.getFavoriteGroup
-);
-
-router.post(
-  '/:id/fav-group',
-  authRequired,
-  loadBusiness,
-  viewPrefsCtrl.saveFavoriteGroup
-);
+router.get('/:id/view-prefs', viewPrefsCtrl.getViewPrefs);
+router.post('/:id/view-prefs', viewPrefsCtrl.saveViewPref);
+router.get('/:id/fav-group', viewPrefsCtrl.getFavoriteGroup);
+router.post('/:id/fav-group', viewPrefsCtrl.saveFavoriteGroup);
 
 router.post('/:businessId/rebuild-article-map', businesses.rebuildForBusiness);
 
