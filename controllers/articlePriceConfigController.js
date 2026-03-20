@@ -14,21 +14,58 @@ exports.getRecetasCostos = async (req, res, next) => {
     const bizId = Number(req.params.businessId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
+    // Obtener config de alerta de semanas del negocio
+    const { rows: bizRows } = await pool.query(
+      `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
+    );
+    const alertaSemanas = Number(bizRows[0]?.props?.compras_alerta_semanas ?? 4);
+    const alertaMs = alertaSemanas * 7 * 24 * 60 * 60 * 1000;
+
+    // Recetas con sus items e insumos — un solo query
     const { rows } = await pool.query(
-      `SELECT article_id, costo_total, porciones
-         FROM recetas
-        WHERE business_id = $1
-          AND active = TRUE`,
+      `SELECT
+         r.article_id,
+         r.costo_total,
+         r.porciones,
+         ri.insumo_id,
+         -- Fecha última compra del insumo (en el negocio principal = credsBizId)
+         (
+           SELECT MAX(pi.fecha)
+           FROM purchase_items pi
+           WHERE pi.insumo_id = ri.insumo_id
+             AND pi.precio > 0
+         ) AS fecha_ultima_compra
+       FROM recetas r
+       JOIN receta_items ri ON ri.receta_id = r.id
+       WHERE r.business_id = $1
+         AND r.active = TRUE
+         AND ri.tipo_costo != 'nulo'`,
       [bizId]
     );
 
-    // Devolver como mapa article_id → { costoTotal, porciones }
+    // Agrupar por article_id
     const costos = {};
+    const ahora = Date.now();
+
     for (const r of rows) {
-      costos[Number(r.article_id)] = {
-        costoTotal: Number(r.costo_total) || 0,
-        porciones:  Number(r.porciones)   || 1,
-      };
+      const artId = Number(r.article_id);
+      if (!costos[artId]) {
+        costos[artId] = {
+          costoTotal:   Number(r.costo_total) || 0,
+          porciones:    Number(r.porciones)   || 1,
+          tieneAlerta:  false,
+          insumosAlerta: [],
+        };
+      }
+
+      // Verificar alerta: sin compras o compra muy vieja
+      const fechaUltima = r.fecha_ultima_compra ? new Date(r.fecha_ultima_compra).getTime() : null;
+      const esVieja = !fechaUltima || (ahora - fechaUltima) > alertaMs;
+
+      if (esVieja && r.insumo_id) {
+        costos[artId].tieneAlerta = true;
+        costos[artId].insumosAlerta.push(Number(r.insumo_id));
+      }
     }
 
     return res.json({ ok: true, costos });
@@ -197,6 +234,66 @@ exports.deletePriceConfig = async (req, res, next) => {
     return res.json({ ok: true });
   } catch (e) {
     console.error('[deletePriceConfig]', e);
+    next(e);
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════
+   GET /api/businesses/:businessId/recetas-alertas
+   Devuelve lista de insumos con compras vencidas que están
+   siendo usados en recetas activas del negocio.
+   Útil para el panel de alertas en Configuración → Artículos.
+══════════════════════════════════════════════════════════════ */
+exports.getRecetasAlertas = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const { rows: bizRows } = await pool.query(
+      `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
+    );
+    const alertaSemanas = Number(bizRows[0]?.props?.compras_alerta_semanas ?? 4);
+
+    const { rows } = await pool.query(
+      `SELECT
+         i.id          AS insumo_id,
+         i.nombre      AS insumo_nombre,
+         i.unidad_med,
+         MAX(pi.fecha) AS fecha_ultima_compra,
+         COUNT(DISTINCT r.article_id)::int AS en_recetas,
+         -- artículos afectados
+         array_agg(DISTINCT r.article_id) AS article_ids
+       FROM receta_items ri
+       JOIN recetas r   ON r.id = ri.receta_id AND r.business_id = $1 AND r.active = TRUE
+       JOIN insumos i   ON i.id = ri.insumo_id
+       LEFT JOIN purchase_items pi ON pi.insumo_id = i.id AND pi.precio > 0
+       WHERE ri.tipo_costo != 'nulo'
+       GROUP BY i.id, i.nombre, i.unidad_med
+       HAVING
+         -- Sin compras o última compra hace más de N semanas
+         MAX(pi.fecha) IS NULL
+         OR MAX(pi.fecha) < CURRENT_DATE - ($2 || ' weeks')::interval
+       ORDER BY fecha_ultima_compra ASC NULLS FIRST, i.nombre ASC`,
+      [bizId, alertaSemanas]
+    );
+
+    return res.json({
+      ok: true,
+      alertaSemanas,
+      total: rows.length,
+      insumos: rows.map(r => ({
+        insumoId:          Number(r.insumo_id),
+        nombre:            r.insumo_nombre,
+        unidadMed:         r.unidad_med,
+        fechaUltimaCompra: r.fecha_ultima_compra
+          ? String(r.fecha_ultima_compra).slice(0, 10)
+          : null,
+        enRecetas:         r.en_recetas,
+        articleIds:        (r.article_ids || []).map(Number),
+      })),
+    });
+  } catch (e) {
+    console.error('[getRecetasAlertas]', e);
     next(e);
   }
 };

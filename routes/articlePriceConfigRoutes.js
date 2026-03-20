@@ -11,8 +11,12 @@ router.use(authRequired);
 router.param('businessId', requireBusinessAccessParam);
 
 // GET  /api/businesses/:businessId/recetas-costos
-// Devuelve { costos: { [articleId]: { costoTotal, porciones } } }
+// Devuelve { costos: { [articleId]: { costoTotal, porciones, tieneAlerta, insumosAlerta } } }
 router.get('/:businessId/recetas-costos', ctrl.getRecetasCostos);
+
+// GET  /api/businesses/:businessId/recetas-alertas
+// Devuelve lista de insumos con compras vencidas usados en recetas
+router.get('/:businessId/recetas-alertas', ctrl.getRecetasAlertas);
 
 // GET  /api/businesses/:businessId/article-price-config
 // Devuelve byArticle, byRubro, byAgrupacion
