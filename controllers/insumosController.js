@@ -191,6 +191,15 @@ exports.listar = async (req, res) => {
             ORDER BY pi3.fecha DESC
             LIMIT 1
           ) AS precio_ultima_compra,
+          (
+            SELECT pi4.fecha
+            FROM purchase_items pi4
+            WHERE pi4.insumo_id = i.id
+              AND pi4.business_id = i.business_id
+              AND pi4.precio > 0
+            ORDER BY pi4.fecha DESC
+            LIMIT 1
+          ) AS fecha_ultima_compra,
           COALESCE(
             json_agg(
               DISTINCT jsonb_build_object(
