@@ -141,7 +141,7 @@ exports.savePriceConfig = async (req, res, next) => {
     const bizId = Number(req.params.businessId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
-    const { scope, scopeId, objetivo, precioManual, articleIds } = req.body || {};
+    const { scope, scopeId, objetivo, precioManual, articleIds, pisarTodo = false } = req.body || {};
 
     const VALID_SCOPES = ['articulo', 'rubro', 'agrupacion'];
     if (!VALID_SCOPES.includes(scope)) {
@@ -179,11 +179,24 @@ exports.savePriceConfig = async (req, res, next) => {
       );
     }
 
-    // ── Si es agrupación con objetivo → override masivo en todos sus artículos ──
-    if (scope === 'agrupacion' && objetivoVal !== null && Array.isArray(articleIds) && articleIds.length > 0) {
-      for (const artId of articleIds) {
-        const id = Number(artId);
-        if (!Number.isFinite(id) || id <= 0) continue;
+    // ── Si es agrupación/rubro con objetivo → override masivo en artículos ──
+    if (objetivoVal !== null && Array.isArray(articleIds) && articleIds.length > 0) {
+      // Si pisarTodo=false, no tocar artículos que ya tienen override manual (scope='articulo')
+      let idsToUpdate = articleIds.map(Number).filter(id => Number.isFinite(id) && id > 0);
+
+      if (!pisarTodo) {
+        // Obtener artículos que ya tienen override manual
+        const { rows: existentes } = await client.query(
+          `SELECT scope_id FROM article_price_config
+           WHERE business_id = $1 AND scope = 'articulo'
+             AND scope_id = ANY($2::text[])`,
+          [bizId, idsToUpdate.map(String)]
+        );
+        const conOverride = new Set(existentes.map(r => Number(r.scope_id)));
+        idsToUpdate = idsToUpdate.filter(id => !conOverride.has(id));
+      }
+
+      for (const id of idsToUpdate) {
         await client.query(
           `INSERT INTO article_price_config
              (business_id, scope, scope_id, objetivo_pct, updated_at)
@@ -195,7 +208,7 @@ exports.savePriceConfig = async (req, res, next) => {
           [bizId, String(id), objetivoVal]
         );
       }
-      console.log(`[savePriceConfig] Override masivo agrupación ${scopeIdStr} → ${articleIds.length} artículos con objetivo ${objetivoVal}%`);
+      console.log(`[savePriceConfig] Override masivo ${scope} ${scopeIdStr} → ${idsToUpdate.length}/${articleIds.length} artículos (pisarTodo=${pisarTodo})`);
     }
 
     await client.query('COMMIT');
@@ -221,8 +234,21 @@ exports.deletePriceConfig = async (req, res, next) => {
     const bizId = Number(req.params.businessId);
     const { scope, scopeId } = req.body || {};
 
-    if (!bizId || !scope || scopeId == null) {
+    if (!bizId || !scope) {
       return res.status(400).json({ ok: false, error: 'params_invalidos' });
+    }
+
+    // scope='all' → borrar todos los overrides del negocio (para el deshacer)
+    if (scope === 'all') {
+      await pool.query(
+        `DELETE FROM article_price_config WHERE business_id = $1`,
+        [bizId]
+      );
+      return res.json({ ok: true });
+    }
+
+    if (scopeId == null) {
+      return res.status(400).json({ ok: false, error: 'scopeId_requerido' });
     }
 
     await pool.query(
