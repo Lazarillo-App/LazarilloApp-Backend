@@ -76,10 +76,14 @@ async function upsertFromMaxi(businessId, items = [], opts = {}) {
       const estado = useIncomingEstado ? (it.estado ?? 'activo') : 'activo';
 
       // armamos el “next” para diff
+      // precio_ref: si Maxi manda 0/null, preservar el existente para no disparar diff
+      const precioRefIncoming = (it.precio_ref != null && Number(it.precio_ref) > 0)
+        ? Number(it.precio_ref)
+        : null;
       const next = {
         nombre,
         unidad_med: it.unidad_med ?? null,
-        precio_ref: it.precio_ref ?? null,
+        precio_ref: precioRefIncoming ?? (prev?.precio_ref ?? null),
         rubro: it.rubro ?? null,
         estado,
       };
@@ -103,7 +107,13 @@ async function upsertFromMaxi(businessId, items = [], opts = {}) {
         DO UPDATE SET
           nombre = EXCLUDED.nombre,
           unidad_med = EXCLUDED.unidad_med,
-          precio_ref = EXCLUDED.precio_ref,
+          -- Solo actualizar precio_ref si Maxi trae un valor válido > 0
+          -- Si Maxi manda 0 o null, preservar el precio que ya tenemos (de compras importadas)
+          precio_ref = CASE
+            WHEN EXCLUDED.precio_ref IS NOT NULL AND EXCLUDED.precio_ref > 0
+            THEN EXCLUDED.precio_ref
+            ELSE insumos.precio_ref
+          END,
           rubro = EXCLUDED.rubro,
           estado = EXCLUDED.estado,
           origen = 'maxi',
