@@ -215,6 +215,20 @@ exports.update = async (req, res) => {
   const social = incoming.social || null;
   const description = (incoming.description ?? null);
 
+  // Keys de configuración que se pueden guardar directamente en props
+  const CONFIG_KEYS = [
+    'articulos_costo_ideal',
+    'insumos_costo_ideal',
+    'compras_alerta_semanas',
+  ];
+  const configPatch = {};
+  for (const key of CONFIG_KEYS) {
+    if (incoming[key] !== undefined) {
+      configPatch[key] = incoming[key] != null ? Number(incoming[key]) : null;
+    }
+  }
+  const hasConfigPatch = Object.keys(configPatch).length > 0;
+
   // Construir patch sin eliminar nulls — necesitamos poder borrar campos (ej: logo_url: null)
   // El branding se mergea a nivel profundo para no perder campos existentes
   const patchParts = [];
@@ -223,6 +237,7 @@ exports.update = async (req, res) => {
   if (address)  patchParts.push({ address });
   if (social)   patchParts.push({ social });
   if (description !== null) patchParts.push({ description });
+  if (hasConfigPatch) patchParts.push(configPatch);
   const patchIsEmpty = patchParts.length === 0;
 
   const { rows } = await pool.query(
@@ -952,7 +967,7 @@ exports.saveMaxiCredentials = async (req, res, next) => {
       ...maxiPrev,
       email,
       codcli,
-      pass_enc: passEnc,                                 // 👈 mismo nombre que usa todo el resto del código
+      pass_enc: passEnc,                                 
     };
 
     const newProps = {
