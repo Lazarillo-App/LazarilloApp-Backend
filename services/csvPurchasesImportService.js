@@ -3,8 +3,9 @@
 
 const pool = require('../config/db');
 const XLSX = require('xlsx');
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
+const { generateBatchId } = require('./purchasesStore');
 
 /**
  * Columnas esperadas del informe de MaxiRest:
@@ -92,11 +93,11 @@ function parseNum(v) {
 
 function normalizeRow(row, idx) {
   try {
-    const fecha = normalizeDate(getCI(row, ['fecha', 'date']));
+    const fecha    = normalizeDate(getCI(row, ['fecha', 'date']));
     if (!fecha) throw new Error(`Fecha inválida: "${getCI(row, ['fecha'])}"`);
 
     const codigoRaw = String(getCI(row, ['codigo', 'code']) ?? '').trim();
-    const codigo = codigoRaw === '' ? null : parseInt(codigoRaw, 10);
+    const codigo    = codigoRaw === '' ? null : parseInt(codigoRaw, 10);
     if (codigo == null || !Number.isFinite(codigo) || codigo < 0) {
       throw new Error(`Código inválido: "${codigoRaw}"`);
     }
@@ -107,14 +108,14 @@ function normalizeRow(row, idx) {
     const importe = parseNum(getCI(row, ['importe', 'amount', 'total']));
     if (importe == null) throw new Error(`Importe inválido: "${getCI(row, ['importe'])}"`);
 
-    const nombre = getCI(row, ['nombre', 'name']) != null ? String(getCI(row, ['nombre', 'name'])).trim() : null;
+    const nombre    = getCI(row, ['nombre', 'name'])    != null ? String(getCI(row, ['nombre', 'name'])).trim()    : null;
     const proveedor = getCI(row, ['proveedor', 'supplier']) != null ? String(getCI(row, ['proveedor', 'supplier'])).trim() : null;
-    const comprob = getCI(row, ['comprob', 'comprobante', 'factura', 'invoice']) != null
+    const comprob   = getCI(row, ['comprob', 'comprobante', 'factura', 'invoice']) != null
       ? String(getCI(row, ['comprob', 'comprobante', 'factura', 'invoice'])).trim()
       : null;
-    const pProm = parseNum(getCI(row, ['p_prom', 'precio', 'price', 'precio_prom']));
-    const medida = getCI(row, ['medida', 'unidad', 'unit']) != null ? String(getCI(row, ['medida', 'unidad', 'unit'])).trim() : null;
-    const codPro = getCI(row, ['cod_pro', 'cod_proveedor']) != null
+    const pProm     = parseNum(getCI(row, ['p_prom', 'precio', 'price', 'precio_prom']));
+    const medida    = getCI(row, ['medida', 'unidad', 'unit']) != null ? String(getCI(row, ['medida', 'unidad', 'unit'])).trim() : null;
+    const codPro    = getCI(row, ['cod_pro', 'cod_proveedor']) != null
       ? parseInt(String(getCI(row, ['cod_pro', 'cod_proveedor'])), 10)
       : null;
 
@@ -144,8 +145,8 @@ function normalizeRow(row, idx) {
  */
 async function importPurchasesToDatabase({ businessId, userId, filePath, originalName, fileType }) {
   const client = await pool.connect();
-  let importId = null;
-  let txOpen = false;
+  let importId  = null;
+  let txOpen    = false;
 
   try {
     // ── dataBizId: donde se guardan las compras (el negocio activo) ──
@@ -171,6 +172,10 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
 
     console.log(`[CSV Purchases Import] dataBizId=${dataBizId} credsBizId=${credsBizId}`);
 
+    // Generar batch_id único para este lote de importación
+    const batchId = generateBatchId();
+    console.log(`[CSV Purchases Import] batch_id=${batchId}`);
+
     await client.query('BEGIN');
     txOpen = true;
 
@@ -188,11 +193,11 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     const { rows } = await parseFile(filePath);
 
     // Normalizar
-    const errors = [];
-    let failed = 0;
-    let minDate = null;
-    let maxDate = null;
-    const agg = new Map();
+    const errors  = [];
+    let   failed  = 0;
+    let   minDate = null;
+    let   maxDate = null;
+    const agg     = new Map();
     const todayUTC = new Date().toISOString().slice(0, 10);
 
     for (let i = 0; i < rows.length; i++) {
@@ -215,8 +220,8 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       } else {
         const prev = agg.get(key);
         prev.cantidad += cantidad;
-        prev.importe += importe;
-        if (!prev.nombre && nombre) prev.nombre = nombre;
+        prev.importe  += importe;
+        if (!prev.nombre    && nombre)    prev.nombre    = nombre;
         if (!prev.proveedor && proveedor) prev.proveedor = proveedor;
       }
     }
@@ -301,18 +306,19 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
           const { rows: [ph] } = await client.query(
             `INSERT INTO purchases
                (business_id, factura_key, proveedor_id, fecha, neto_total, iva_total,
-                imp_int_total, total, source, synced_at, updated_at)
-             VALUES ($1,$2,$3,$4::date,0,0,0,0,'csv',NOW(),NOW())
+                imp_int_total, total, source, batch_id, synced_at, updated_at)
+             VALUES ($1,$2,$3,$4::date,0,0,0,0,'csv',$5,NOW(),NOW())
              ON CONFLICT (business_id, factura_key) DO UPDATE SET
+               batch_id  = EXCLUDED.batch_id,
                updated_at = NOW()
              RETURNING id`,
-            [dataBizId, comprobKey, item.cod_pro || null, item.fecha]
+            [dataBizId, comprobKey, item.cod_pro || null, item.fecha, batchId]
           );
           purchaseMap.set(comprobKey, ph.id);
         }
 
         const purchaseId = purchaseMap.get(comprobKey);
-        const insumoId = insumoMap.get(item.codigo) ?? null;
+        const insumoId   = insumoMap.get(item.codigo) ?? null;
 
         if (hasSource) {
           await client.query(
@@ -321,7 +327,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
                 source, referencia)
              VALUES ($1,$2,$3,$4::date,$5,$6,$7,'csv',$8)`,
             [purchaseId, dataBizId, insumoId, item.fecha,
-              item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
+             item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
           );
         } else {
           await client.query(
@@ -330,7 +336,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
                 referencia)
              VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8)`,
             [purchaseId, dataBizId, insumoId, item.fecha,
-              item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
+             item.cantidad, item.p_prom ?? 0, item.importe, item.nombre ?? null]
           );
         }
         insertedCount++;
@@ -343,9 +349,9 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
          rows_inserted = $6, rows_failed = $7, error_log = $8::jsonb, processed_at = NOW()
        WHERE id = $1`,
       [importId,
-        failed === rows.length ? 'failed' : 'completed',
-        rows.length, minDate, maxDate,
-        insertedCount, failed, JSON.stringify(errors)]
+       failed === rows.length ? 'failed' : 'completed',
+       rows.length, minDate, maxDate,
+       insertedCount, failed, JSON.stringify(errors)]
     );
 
     // ── Actualizar precio_ref en insumos con el último precio pagado ──
@@ -370,7 +376,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       [dataBizId, minDate, maxDate, credsBizId]
     );
     if (preciosActualizados > 0) {
-      console.log(`[CSV Purchases Import] precio_ref actualizado en ${preciosActualizados} insumos`);
+      console.log(\`[CSV Purchases Import] precio_ref actualizado en \${preciosActualizados} insumos\`);
     }
 
     await client.query('COMMIT');
@@ -378,11 +384,12 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
 
     try { fs.unlinkSync(filePath); } catch { }
 
-    console.log(`[CSV Purchases Import]OK — dataBizId = ${ dataBizId } inserted = ${ insertedCount } range = ${ minDate }→${ maxDate }`);
+    console.log(`[CSV Purchases Import] OK — dataBizId=${dataBizId} inserted=${insertedCount} range=${minDate}→${maxDate} batch=${batchId}`);
 
     return {
       ok: true,
       import_id: importId,
+      batch_id: batchId,
       summary: {
         total_rows:  rows.length,
         valid_rows:  items.length,
@@ -401,7 +408,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     if (importId) {
       try {
         await pool.query(
-          `UPDATE purchases_csv_imports SET status = 'failed', error_log = $2:: jsonb, processed_at = NOW() WHERE id = $1`,
+          `UPDATE purchases_csv_imports SET status='failed', error_log=$2::jsonb, processed_at=NOW() WHERE id=$1`,
           [importId, JSON.stringify([{ error: error.message }])]
         );
       } catch { }
