@@ -45,7 +45,7 @@ exports.listBatches = async (req, res, next) => {
        WHERE p.business_id = $1
          AND p.batch_id IS NOT NULL
        GROUP BY p.batch_id, p.business_id, b.name
-       ORDER BY MIN(p.created_at) DESC`,
+       ORDER BY MIN(p.synced_at) DESC`,
       [bizId]
     );
 
