@@ -376,7 +376,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       [dataBizId, minDate, maxDate, credsBizId]
     );
     if (preciosActualizados > 0) {
-      console.log(\`[CSV Purchases Import] precio_ref actualizado en \${preciosActualizados} insumos\`);
+      console.log(`[CSV Purchases Import] precio_ref actualizado en \${preciosActualizados} insumos`);
     }
 
     await client.query('COMMIT');
