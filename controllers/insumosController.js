@@ -172,34 +172,10 @@ exports.listar = async (req, res) => {
           i.*,
           ir.nombre as rubro_nombre,
           ir.es_elaborador,
-          -- Precio promedio de compras (últimos 90 días)
-          (
-            SELECT ROUND(AVG(pi2.precio)::numeric, 4)
-            FROM purchase_items pi2
-            WHERE pi2.insumo_id = i.id
-              AND pi2.business_id = i.business_id
-              AND pi2.precio > 0
-              AND pi2.fecha >= CURRENT_DATE - INTERVAL '90 days'
-          ) AS precio_promedio,
-          -- Precio de la última compra
-          (
-            SELECT pi3.precio
-            FROM purchase_items pi3
-            WHERE pi3.insumo_id = i.id
-              AND pi3.business_id = i.business_id
-              AND pi3.precio > 0
-            ORDER BY pi3.fecha DESC
-            LIMIT 1
-          ) AS precio_ultima_compra,
-          (
-            SELECT pi4.fecha
-            FROM purchase_items pi4
-            WHERE pi4.insumo_id = i.id
-              AND pi4.business_id = i.business_id
-              AND pi4.precio > 0
-            ORDER BY pi4.fecha DESC
-            LIMIT 1
-          ) AS fecha_ultima_compra,
+          -- Precio promedio y última compra via LATERAL (un solo acceso a purchase_items)
+          lc.precio_promedio,
+          lc.precio_ultima_compra,
+          lc.fecha_ultima_compra,
           COALESCE(
             json_agg(
               DISTINCT jsonb_build_object(
@@ -215,8 +191,20 @@ exports.listar = async (req, res) => {
           AND ir.codigo::text = i.rubro
         LEFT JOIN insumo_group_items gi ON gi.insumo_id = i.id
         LEFT JOIN insumo_groups g ON g.id = gi.group_id AND g.business_id = i.business_id
+        LEFT JOIN LATERAL (
+          SELECT
+            ROUND(AVG(CASE WHEN pi_all.fecha >= CURRENT_DATE - INTERVAL '90 days' THEN pi_all.precio END)::numeric, 4) AS precio_promedio,
+            (SELECT pi_ult.precio FROM purchase_items pi_ult
+             WHERE pi_ult.insumo_id = i.id AND pi_ult.business_id = i.business_id AND pi_ult.precio > 0
+             ORDER BY pi_ult.fecha DESC LIMIT 1) AS precio_ultima_compra,
+            MAX(pi_all.fecha) AS fecha_ultima_compra
+          FROM purchase_items pi_all
+          WHERE pi_all.insumo_id = i.id
+            AND pi_all.business_id = i.business_id
+            AND pi_all.precio > 0
+        ) lc ON true
         ${whereSql}
-        GROUP BY i.id, ir.nombre, ir.es_elaborador
+        GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra
         ORDER BY ${orderBySql} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}
