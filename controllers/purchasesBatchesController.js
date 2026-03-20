@@ -35,7 +35,7 @@ exports.listBatches = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT
          p.batch_id,
-         MIN(p.created_at)::timestamptz AS created_at,
+         MIN(p.synced_at)::timestamptz AS created_at,
          COUNT(pi.id)::int AS total_items,
          p.business_id,
          b.name AS business_name
