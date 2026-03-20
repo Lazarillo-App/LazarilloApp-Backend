@@ -270,6 +270,21 @@ exports.update = async (req, res) => {
   );
 
   const saved = attachBranding(rows[0]);
+
+  // Si se guardó el % costo ideal global de artículos → limpiar todos los overrides
+  // para que el global aplique a todo (el usuario puede re-hacer overrides después)
+  if (configPatch.articulos_costo_ideal !== undefined) {
+    try {
+      await pool.query(
+        `DELETE FROM article_price_config WHERE business_id = $1`,
+        [businessId]
+      );
+      console.log(`[update] Limpiados overrides de article_price_config para biz ${businessId}`);
+    } catch (e) {
+      console.warn('[update] No se pudieron limpiar overrides:', e.message);
+    }
+  }
+
   return res.json({ business: saved });
 };
 
@@ -967,7 +982,7 @@ exports.saveMaxiCredentials = async (req, res, next) => {
       ...maxiPrev,
       email,
       codcli,
-      pass_enc: passEnc,                                 
+      pass_enc: passEnc,                                 // 👈 mismo nombre que usa todo el resto del código
     };
 
     const newProps = {
