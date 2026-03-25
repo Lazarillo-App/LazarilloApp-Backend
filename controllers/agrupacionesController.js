@@ -1291,7 +1291,8 @@ exports.assignAgrupacionToDivision = async (req, res) => {
 // ============================================================================
 // GET /businesses/:businessId/agrupaciones/articulo/:articuloId/origen
 // Devuelve el grupo y negocio de origen real de un artículo
-// (busca en todos los negocios de la misma organización, excluye Discontinuados)
+// (busca en todos los negocios de la misma organización, excluye Discontinuados/Todo/SinAgrupación)
+// Soporta tanto el JSONB `articulos` (negocios nuevos) como `app_articles_ids` (negocios legacy 44/45)
 // ============================================================================
 exports.getArticuloOrigen = async (req, res) => {
   try {
@@ -1320,48 +1321,52 @@ exports.getArticuloOrigen = async (req, res) => {
       bizIds = orgBizRows.map(r => Number(r.id));
     }
 
-    // Buscar en todas las agrupaciones de esos negocios, excluyendo Discontinuados/Todo
+    const excludeNames = `
+      AND a.nombre NOT ILIKE 'Discontinuados'
+      AND a.nombre NOT ILIKE 'Descontinuados'
+      AND a.nombre NOT ILIKE 'Todo'
+      AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
+      AND a.nombre NOT ILIKE 'Sin Agrupar'
+      AND a.nombre NOT ILIKE 'Sin Grupo'
+      AND (a.is_temporary IS NULL OR a.is_temporary = false)
+    `;
+
+    // 1. Buscar en JSONB `articulos` usando jsonb_array_elements (exacto, sin falsos positivos)
     const { rows: agRows } = await pool.query(
-      `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre
+      `SELECT DISTINCT a.id, a.nombre, a.business_id, b.name AS business_nombre
          FROM agrupaciones a
-         JOIN app_businesses b ON b.id = a.business_id
+         JOIN app_businesses b ON b.id = a.business_id,
+         jsonb_array_elements(COALESCE(a.articulos, '[]'::jsonb)) AS art
         WHERE a.business_id = ANY($1::int[])
-          AND a.articulos::text LIKE $2
-          AND a.nombre NOT ILIKE 'Discontinuados'
-          AND a.nombre NOT ILIKE 'Descontinuados'
-          AND a.nombre NOT ILIKE 'Todo'
-          AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
-          AND a.nombre NOT ILIKE 'Sin Agrupar'
-          AND a.nombre NOT ILIKE 'Sin Grupo'`,
-      [bizIds, `%"id": ${articuloId}%`]
+          AND (art->>'id')::int = $2
+          ${excludeNames}`,
+      [bizIds, articuloId]
     );
 
-    // También intentar con formato sin espacio
     let allRows = agRows;
-    if (!agRows.length) {
-      const { rows: agRows2 } = await pool.query(
+
+    // 2. Si no encontró nada, buscar en `app_articles_ids` (negocios legacy como 44/45)
+    if (!allRows.length) {
+      const { rows: legacyRows } = await pool.query(
         `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre
            FROM agrupaciones a
            JOIN app_businesses b ON b.id = a.business_id
           WHERE a.business_id = ANY($1::int[])
-            AND a.articulos::text LIKE $2
-            AND a.nombre NOT ILIKE 'Discontinuados'
-            AND a.nombre NOT ILIKE 'Descontinuados'
-            AND a.nombre NOT ILIKE 'Todo'
-            AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
-            AND a.nombre NOT ILIKE 'Sin Agrupar'
-            AND a.nombre NOT ILIKE 'Sin Grupo'`,
-        [bizIds, `%"id":${articuloId}%`]
+            AND a.app_articles_ids IS NOT NULL
+            AND $2 = ANY(a.app_articles_ids::int[])
+            ${excludeNames}`,
+        [bizIds, articuloId]
       );
-      allRows = agRows2;
+      allRows = legacyRows;
     }
 
     if (!allRows.length) {
       return res.json({ ok: true, origen: null });
     }
 
-    // Devolver el primer match (priorizar el negocio que hizo el request)
-    const preferred = allRows.find(r => Number(r.business_id) === businessId) || allRows[0];
+    // Priorizar: 1) negocio que hizo el request, 2) primer resultado
+    const preferred =
+      allRows.find(r => Number(r.business_id) === businessId) || allRows[0];
 
     return res.json({
       ok: true,
@@ -1408,9 +1413,11 @@ exports.getArticulosOrigenes = async (req, res) => {
     }
 
     // Traer todas las agrupaciones relevantes (excluye Discontinuados/Todo/Sin Agrupación)
+    // Incluye app_articles_ids para soporte de negocios legacy (44/45)
     const { rows: agRows } = await pool.query(
       `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre,
-              COALESCE(a.articulos, '[]'::jsonb) AS articulos
+              COALESCE(a.articulos, '[]'::jsonb) AS articulos,
+              a.app_articles_ids
          FROM agrupaciones a
          JOIN app_businesses b ON b.id = a.business_id
         WHERE a.business_id = ANY($1::int[])
@@ -1419,7 +1426,8 @@ exports.getArticulosOrigenes = async (req, res) => {
           AND a.nombre NOT ILIKE 'Todo'
           AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
           AND a.nombre NOT ILIKE 'Sin Agrupar'
-          AND a.nombre NOT ILIKE 'Sin Grupo'`,
+          AND a.nombre NOT ILIKE 'Sin Grupo'
+          AND (a.is_temporary IS NULL OR a.is_temporary = false)`,
       [bizIds]
     );
 
@@ -1428,11 +1436,29 @@ exports.getArticulosOrigenes = async (req, res) => {
     const origenes = {};
 
     for (const ag of agRows) {
+      // 1. Buscar en JSONB articulos (negocios nuevos con maxi_articles)
       const arts = parseJsonArrayLoose(ag.articulos);
       for (const art of arts) {
         const artId = Number(art?.id);
         if (!idsSet.has(artId)) continue;
         if (origenes[artId]) continue; // ya encontrado
+        origenes[artId] = {
+          groupId: Number(ag.id),
+          groupName: ag.nombre,
+          bizId: Number(ag.business_id),
+          bizName: ag.business_nombre,
+        };
+      }
+
+      // 2. Buscar en app_articles_ids (negocios legacy 44/45 con app_articles)
+      const legacyIds = Array.isArray(ag.app_articles_ids)
+        ? ag.app_articles_ids.map(Number)
+        : (typeof ag.app_articles_ids === 'string'
+            ? JSON.parse(ag.app_articles_ids || '[]').map(Number)
+            : []);
+      for (const artId of legacyIds) {
+        if (!idsSet.has(artId)) continue;
+        if (origenes[artId]) continue; // JSONB tiene prioridad si ya se encontró
         origenes[artId] = {
           groupId: Number(ag.id),
           groupName: ag.nombre,
