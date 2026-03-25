@@ -263,6 +263,55 @@ exports.crearAgrupacion = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
     }
 
+    // Verificar si ya existe una agrupación con ese nombre en este negocio
+    const { rows: existing } = await pool.query(
+      `SELECT id, nombre, moved_to_business_id,
+              jsonb_array_length(COALESCE(articulos, '[]'::jsonb)) AS art_count,
+              is_temporary
+         FROM agrupaciones
+        WHERE business_id = $1 AND LOWER(nombre) = LOWER($2)
+        LIMIT 1`,
+      [bizId, nombre]
+    );
+
+    if (existing.length) {
+      const dup = existing[0];
+      const artCount = Number(dup.art_count ?? 0);
+      const isMoved = dup.moved_to_business_id != null;
+      const isEmpty = artCount === 0;
+      const isSpecial = isTodoName(dup.nombre) || isDiscontinuadosName(dup.nombre);
+
+      if (isSpecial) {
+        return res.status(409).json({
+          ok: false,
+          error: `"${dup.nombre}" es una agrupación especial y no se puede reutilizar`,
+        });
+      }
+
+      if (isMoved || isEmpty) {
+        // La agrupación existente fue movida a otro subnegocio o quedó vacía:
+        // la reciclamos (reseteamos moved_to_business_id, cargamos los artículos nuevos)
+        const { rows: recycled } = await pool.query(
+          `UPDATE agrupaciones
+              SET articulos = $1::jsonb,
+                  moved_to_business_id = NULL,
+                  is_temporary = false,
+                  updated_at = NOW()
+            WHERE id = $2 AND business_id = $3
+            RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
+          [JSON.stringify(articulos), dup.id, bizId]
+        );
+        console.log('[crearAgrupacion] Reciclando agrupación "' + nombre + '" (id=' + dup.id + ') en negocio ' + bizId + ' (estaba ' + (isMoved ? 'movida' : 'vacía') + ')');
+        return res.status(201).json(recycled[0]);
+      }
+
+      // Existe y tiene artículos — conflicto real
+      return res.status(409).json({
+        ok: false,
+        error: `Ya existe una agrupación llamada "${nombre}" con artículos en este negocio`,
+      });
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO agrupaciones (business_id, nombre, articulos)
        VALUES ($1, $2, $3::jsonb)
@@ -273,6 +322,7 @@ exports.crearAgrupacion = async (req, res) => {
     return res.status(201).json(rows[0]);
   } catch (e) {
     if (e.code === '23505') {
+      // Fallback por race condition
       return res
         .status(409)
         .json({ ok: false, error: 'Ya existe una agrupación con ese nombre' });
@@ -331,6 +381,41 @@ exports.actualizarAgrupacion = async (req, res) => {
       // ✅ Si era TODO y deja de serlo => recrear "Sin Agrupacion"
       if (prevNombre && isTodoName(prevNombre) && !isTodoName(nombre)) {
         todoRenamedOutOfTodo = true;
+      }
+
+      // Si el nombre nuevo ya existe en otro registro del mismo negocio,
+      // verificar si ese duplicado es movido/vacío y se puede eliminar para ceder el nombre
+      if (prevNombre && nombre.toLowerCase() !== prevNombre.toLowerCase()) {
+        const { rows: dupRows } = await pool.query(
+          `SELECT id, nombre, moved_to_business_id,
+                  jsonb_array_length(COALESCE(articulos, '[]'::jsonb)) AS art_count,
+                  is_temporary
+             FROM agrupaciones
+            WHERE business_id = $1 AND LOWER(nombre) = LOWER($2) AND id != $3
+            LIMIT 1`,
+          [businessId, nombre, id]
+        );
+        if (dupRows.length) {
+          const dup = dupRows[0];
+          const artCount = Number(dup.art_count ?? 0);
+          const isMoved = dup.moved_to_business_id != null;
+          const isEmpty = artCount === 0;
+          const isSpecial = isTodoName(dup.nombre) || isDiscontinuadosName(dup.nombre);
+
+          if (isSpecial || (!isMoved && !isEmpty)) {
+            return res.status(409).json({
+              ok: false,
+              error: `Ya existe una agrupación llamada "${nombre}"${!isEmpty ? ' con artículos' : ''} en este negocio`,
+            });
+          }
+
+          // Es movida o vacía — eliminarla para liberar el nombre
+          await pool.query(
+            `DELETE FROM agrupaciones WHERE id = $1 AND business_id = $2`,
+            [dup.id, businessId]
+          );
+          console.log('[actualizarAgrupacion] Eliminando duplicado fantasma "' + dup.nombre + '" (id=' + dup.id + ') para liberar nombre en negocio ' + businessId);
+        }
       }
 
       push('nombre', nombre);
