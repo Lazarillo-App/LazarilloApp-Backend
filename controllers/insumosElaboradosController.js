@@ -4,7 +4,7 @@
  * Endpoints para marcar insumos como elaborados y gestionar sus recetas
  */
 
-const db = require('../db/connection'); // Ajustar según tu configuración
+const db = require('../config/db');
 
 /**
  * PATCH /api/insumos/:id/elaborado

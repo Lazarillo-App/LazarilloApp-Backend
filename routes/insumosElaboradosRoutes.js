@@ -1,45 +1,18 @@
-// backend/routes/insumosElaborados.js
-/**
- * Rutas para gestionar insumos elaborados
- */
-
+// routes/insumosElaboradosRoutes.js
+'use strict';
 const express = require('express');
 const router = express.Router();
-const controller = require('../controllers/insumosElaboradosController');
+const ctrl = require('../controllers/insumosElaboradosController');
 
-// Middleware de autenticación (ajustar según tu implementación)
-const { requireAuth, requireBusiness } = require('../middleware/auth');
+// El guard global /api ya aplica authRequired — no hace falta repetirlo acá
 
-// Aplicar middlewares a todas las rutas
-router.use(requireAuth);
-router.use(requireBusiness);
-
-// ===== GESTIÓN DE INSUMOS ELABORADOS =====
-
-// Marcar/desmarcar insumo individual como elaborado
-router.patch('/:id/elaborado', controller.toggleInsumoElaborado);
-
-// Marcar/desmarcar múltiples insumos como elaborados
-router.post('/elaborado/bulk', controller.toggleInsumosElaboradosBulk);
-
-// Listar todos los insumos elaborados
-router.get('/elaborados', controller.listInsumosElaborados);
-
-// Obtener estadísticas de insumos elaborados
-router.get('/elaborados/stats', controller.getElaboradosStats);
-
-// Mover todos los elaborados a un grupo
-router.post('/elaborados/mover-a-grupo', controller.moverElaboradosAGrupo);
-
-// ===== GESTIÓN DE RECETAS DE INSUMOS =====
-
-// Obtener receta de un insumo
-router.get('/:id/receta', controller.getInsumoReceta);
-
-// Guardar/actualizar receta de un insumo
-router.post('/:id/receta', controller.saveInsumoReceta);
-
-// Eliminar receta de un insumo
-router.delete('/:id/receta', controller.deleteInsumoReceta);
+router.patch('/:id/elaborado', ctrl.toggleInsumoElaborado);
+router.post('/elaborado/bulk', ctrl.toggleInsumosElaboradosBulk);
+router.get('/elaborados', ctrl.listInsumosElaborados);
+router.get('/elaborados/stats', ctrl.getElaboradosStats);
+router.post('/elaborados/mover-a-grupo', ctrl.moverElaboradosAGrupo);
+router.get('/:id/receta', ctrl.getInsumoReceta);
+router.post('/:id/receta', ctrl.saveInsumoReceta);
+router.delete('/:id/receta', ctrl.deleteInsumoReceta);
 
 module.exports = router;
