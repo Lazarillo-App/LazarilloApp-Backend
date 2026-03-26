@@ -36,6 +36,7 @@ const recetasImportRoutes        = require('./routes/recetasImportRoutes');
 const articlePriceConfigRoutes   = require('./routes/articlePriceConfigRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
 const insumosImportRoutes   = require('./routes/insumosImportRoutes');
+const insumosElaboradosRoutes = require('./routes/insumosElaboradosRoutes');
 const articulosImportRoutes = require('./routes/articulosImportRoutes');
 const ventasCSVRoutes = require('./routes/ventasCSVRoutes');    
 const purchasesImportRoutes = require('./routes/purchasesImportRoutes');
@@ -138,6 +139,7 @@ app.use('/api/purchases', authRequired, purchasesRoutes);
 app.use('/api/branches', branchesRoutes);
 app.use('/api/divisions', divisionsRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
+app.use('/api/insumos', insumosElaboradosRoutes);
 
 /* =========================================================
    ✅ ORDEN IMPORTANTE EN /api/businesses
