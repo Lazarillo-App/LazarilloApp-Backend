@@ -51,9 +51,9 @@ exports.getRecetasCostos = async (req, res, next) => {
       const artId = Number(r.article_id);
       if (!costos[artId]) {
         costos[artId] = {
-          costoTotal:   Number(r.costo_total) || 0,
-          porciones:    Number(r.porciones)   || 1,
-          tieneAlerta:  false,
+          costoTotal: Number(r.costo_total) || 0,
+          porciones: Number(r.porciones) || 1,
+          tieneAlerta: false,
           insumosAlerta: [],
         };
       }
@@ -95,14 +95,14 @@ exports.getPriceConfig = async (req, res, next) => {
       [bizId]
     );
 
-    const byArticle    = {};
-    const byRubro      = {};
+    const byArticle = {};
+    const byRubro = {};
     const byAgrupacion = {};
 
     for (const r of rows) {
       const entry = {
-        objetivo:     r.objetivo_pct    != null ? Number(r.objetivo_pct)    : null,
-        precioManual: r.precio_manual   != null ? Number(r.precio_manual)   : null,
+        objetivo: r.objetivo_pct != null ? Number(r.objetivo_pct) : null,
+        precioManual: r.precio_manual != null ? Number(r.precio_manual) : null,
       };
       if (r.scope === 'articulo') {
         byArticle[String(r.scope_id)] = entry;
@@ -151,7 +151,7 @@ exports.savePriceConfig = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'scopeId_requerido' });
     }
 
-    const objetivoVal    = objetivo     != null ? Number(objetivo)     : null;
+    const objetivoVal = objetivo != null ? Number(objetivo) : null;
     const precioManualVal = precioManual != null ? Number(precioManual) : null;
     const scopeIdStr = String(scopeId).trim();
 
@@ -165,18 +165,46 @@ exports.savePriceConfig = async (req, res, next) => {
          VALUES ($1, $2, $3, $4, $5, NOW())
          ON CONFLICT (business_id, scope, scope_id)
          DO UPDATE SET
-           objetivo_pct  = COALESCE(EXCLUDED.objetivo_pct,  article_price_config.objetivo_pct),
-           precio_manual = COALESCE(EXCLUDED.precio_manual, article_price_config.precio_manual),
-           updated_at    = NOW()`,
+        objetivo_pct  = CASE WHEN $4::numeric IS NOT NULL 
+                       THEN EXCLUDED.objetivo_pct 
+                       ELSE article_price_config.objetivo_pct END,
+        precio_manual = CASE WHEN $5::numeric IS NOT NULL 
+                       THEN EXCLUDED.precio_manual 
+                       ELSE article_price_config.precio_manual END,
+        updated_at    = NOW()`,
         [bizId, scope, scopeIdStr, objetivoVal, precioManualVal]
       );
-    } else {
-      // Si ambos son null → borrar el registro (resetear al nivel superior)
-      await client.query(
-        `DELETE FROM article_price_config
-          WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
-        [bizId, scope, scopeIdStr]
-      );
+    } else if (objetivo === null && precioManual === null) {
+      // Solo borrar el campo que vino explícitamente en el body
+      // Si mandaron precioManual: null → borrar solo precio_manual
+      // Si mandaron objetivo: null → borrar solo objetivo_pct
+      // Para saber cuál se mandó, hay que chequear si la key existe en el body
+      const bodyKeys = Object.keys(req.body || {});
+      const borrarManual = bodyKeys.includes('precioManual');
+      const borrarObjetivo = bodyKeys.includes('objetivo');
+
+      if (borrarManual && borrarObjetivo) {
+        // Borrar registro completo
+        await client.query(
+          `DELETE FROM article_price_config
+        WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
+          [bizId, scope, scopeIdStr]
+        );
+      } else if (borrarManual) {
+        await client.query(
+          `UPDATE article_price_config
+         SET precio_manual = NULL, updated_at = NOW()
+       WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
+          [bizId, scope, scopeIdStr]
+        );
+      } else if (borrarObjetivo) {
+        await client.query(
+          `UPDATE article_price_config
+         SET objetivo_pct = NULL, updated_at = NOW()
+       WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
+          [bizId, scope, scopeIdStr]
+        );
+      }
     }
 
     // ── Si es agrupación/rubro con objetivo → override masivo en artículos ──
@@ -215,7 +243,7 @@ exports.savePriceConfig = async (req, res, next) => {
 
     return res.json({ ok: true, scope, scopeId: scopeIdStr, objetivo: objetivoVal, precioManual: precioManualVal });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[savePriceConfig]', e);
     next(e);
   } finally {
@@ -308,14 +336,14 @@ exports.getRecetasAlertas = async (req, res, next) => {
       alertaSemanas,
       total: rows.length,
       insumos: rows.map(r => ({
-        insumoId:          Number(r.insumo_id),
-        nombre:            r.insumo_nombre,
-        unidadMed:         r.unidad_med,
+        insumoId: Number(r.insumo_id),
+        nombre: r.insumo_nombre,
+        unidadMed: r.unidad_med,
         fechaUltimaCompra: r.fecha_ultima_compra
           ? String(r.fecha_ultima_compra).slice(0, 10)
           : null,
-        enRecetas:         r.en_recetas,
-        articleIds:        (r.article_ids || []).map(Number),
+        enRecetas: r.en_recetas,
+        articleIds: (r.article_ids || []).map(Number),
       })),
     });
   } catch (e) {
