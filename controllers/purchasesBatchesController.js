@@ -7,10 +7,6 @@ const pool = require('../config/db');
 const getBusinessId = require('../utils/getBusinessId');
 
 /* ─── helpers ─── */
-/**
- * Genera un batch_id único con formato: YYYYMMDD-HHMMSS-<random4>
- * Ejemplo: 20260317-143022-a3f1
- */
 function generateBatchId() {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -19,13 +15,11 @@ function generateBatchId() {
   const rand = Math.random().toString(16).slice(2, 6);
   return `${date}-${time}-${rand}`;
 }
-
 exports.generateBatchId = generateBatchId;
 
 /**
  * GET /api/purchases/batches
  * Lista todos los lotes de importación del negocio activo.
- * Devuelve: [{ batch_id, created_at, total_items, business_id, business_name }]
  */
 exports.listBatches = async (req, res, next) => {
   try {
@@ -36,12 +30,12 @@ exports.listBatches = async (req, res, next) => {
       `SELECT
          p.batch_id,
          MIN(p.synced_at)::timestamptz AS created_at,
-         COUNT(pi.id)::int AS total_items,
+         COUNT(pi.id)::int             AS total_items,
          p.business_id,
-         b.name AS business_name
+         b.name                        AS business_name
        FROM purchases p
        LEFT JOIN purchase_items pi ON pi.purchase_id = p.id
-       LEFT JOIN app_businesses b ON b.id = p.business_id
+       LEFT JOIN app_businesses b  ON b.id = p.business_id
        WHERE p.business_id = $1
          AND p.batch_id IS NOT NULL
        GROUP BY p.batch_id, p.business_id, b.name
@@ -52,6 +46,76 @@ exports.listBatches = async (req, res, next) => {
     res.json({ ok: true, data: rows });
   } catch (e) {
     console.error('[listBatches] error:', e);
+    next(e);
+  }
+};
+
+/**
+ * GET /api/purchases/batches/:batchId/preview
+ * Devuelve las primeras N filas del lote para vista previa (read-only).
+ * Query param: ?limit=20 (máx 100)
+ * Respuesta: { ok, columns: string[], rows: object[], total: number, showing: number }
+ *
+ * Estrategia: desnormaliza purchases + purchase_items + suppliers + insumos
+ * en columnas legibles para el usuario final, igual a como se vería el CSV original.
+ */
+exports.previewBatch = async (req, res, next) => {
+  try {
+    const bizId = getBusinessId(req);
+    const { batchId } = req.params;
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+
+    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
+
+    // Verificar que el lote pertenece al negocio
+    const { rows: check } = await pool.query(
+      `SELECT COUNT(*)::int AS cnt
+       FROM purchases
+       WHERE batch_id = $1 AND business_id = $2`,
+      [batchId, bizId]
+    );
+    if (!check[0]?.cnt) {
+      return res.status(404).json({ ok: false, error: 'Lote no encontrado para este negocio' });
+    }
+
+    // Total de ítems en el lote
+    const { rows: totalRows } = await pool.query(
+      `SELECT COUNT(pi.id)::int AS total
+       FROM purchase_items pi
+       JOIN purchases p ON p.id = pi.purchase_id
+       WHERE p.batch_id = $1 AND p.business_id = $2`,
+      [batchId, bizId]
+    );
+    const total = totalRows[0]?.total ?? 0;
+
+    // Primeras N filas desnormalizadas — columnas en español legibles
+    // Ajustá los nombres de columna / tablas a tu esquema real si difieren
+    const { rows } = await pool.query(
+      `SELECT
+         TO_CHAR(p.purchase_date, 'DD/MM/YYYY')          AS "Fecha",
+         COALESCE(s.name, p.supplier_name, '—')          AS "Proveedor",
+         COALESCE(p.invoice_number::text, '—')           AS "Nº Factura",
+         COALESCE(ins.nombre, pi.insumo_nombre, '—')     AS "Insumo",
+         COALESCE(ins.unidad_medida, '—')                AS "Unidad",
+         pi.quantity::numeric                             AS "Cantidad",
+         pi.unit_price::numeric                          AS "Precio Unit.",
+         (pi.quantity * pi.unit_price)::numeric          AS "Subtotal"
+       FROM purchases p
+       LEFT JOIN purchase_items pi  ON pi.purchase_id = p.id
+       LEFT JOIN suppliers s        ON s.id = p.supplier_id
+       LEFT JOIN insumos ins        ON ins.id = pi.insumo_id
+       WHERE p.batch_id = $1 AND p.business_id = $2
+       ORDER BY p.purchase_date DESC, p.id, pi.id
+       LIMIT $3`,
+      [batchId, bizId, limit]
+    );
+
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+
+    res.json({ ok: true, columns, rows, total, showing: rows.length });
+  } catch (e) {
+    console.error('[previewBatch] error:', e);
     next(e);
   }
 };
@@ -72,7 +136,6 @@ exports.deleteBatch = async (req, res, next) => {
     try {
       await client.query('BEGIN');
 
-      // Verificar que el lote pertenece al negocio
       const { rows: check } = await client.query(
         `SELECT COUNT(*)::int AS cnt FROM purchases WHERE batch_id = $1 AND business_id = $2`,
         [batchId, bizId]
@@ -82,7 +145,6 @@ exports.deleteBatch = async (req, res, next) => {
         return res.status(404).json({ ok: false, error: 'Lote no encontrado para este negocio' });
       }
 
-      // Eliminar items primero (FK)
       const { rowCount: itemsDeleted } = await client.query(
         `DELETE FROM purchase_items
          WHERE purchase_id IN (
@@ -91,7 +153,6 @@ exports.deleteBatch = async (req, res, next) => {
         [batchId, bizId]
       );
 
-      // Eliminar compras
       const { rowCount: purchasesDeleted } = await client.query(
         `DELETE FROM purchases WHERE batch_id = $1 AND business_id = $2`,
         [batchId, bizId]
@@ -120,7 +181,6 @@ exports.deleteBatch = async (req, res, next) => {
 /**
  * POST /api/purchases/batches/:batchId/move
  * body: { targetBusinessId: number }
- * Mueve todos los registros de un lote a otro negocio.
  */
 exports.moveBatch = async (req, res, next) => {
   try {
@@ -137,7 +197,6 @@ exports.moveBatch = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'El negocio destino es el mismo que el origen' });
     }
 
-    // Verificar que el negocio destino existe
     const { rows: bizCheck } = await pool.query(
       `SELECT id FROM app_businesses WHERE id = $1`, [targetBusinessId]
     );
@@ -149,7 +208,6 @@ exports.moveBatch = async (req, res, next) => {
     try {
       await client.query('BEGIN');
 
-      // Verificar que el lote pertenece al negocio origen
       const { rows: check } = await client.query(
         `SELECT COUNT(*)::int AS cnt FROM purchases WHERE batch_id = $1 AND business_id = $2`,
         [batchId, bizId]
@@ -159,7 +217,6 @@ exports.moveBatch = async (req, res, next) => {
         return res.status(404).json({ ok: false, error: 'Lote no encontrado para este negocio' });
       }
 
-      // Mover purchase_items
       await client.query(
         `UPDATE purchase_items
          SET business_id = $1
@@ -169,7 +226,6 @@ exports.moveBatch = async (req, res, next) => {
         [targetBusinessId, batchId, bizId]
       );
 
-      // Mover purchases
       const { rowCount: moved } = await client.query(
         `UPDATE purchases SET business_id = $1 WHERE batch_id = $2 AND business_id = $3`,
         [targetBusinessId, batchId, bizId]
@@ -198,7 +254,6 @@ exports.moveBatch = async (req, res, next) => {
 
 /**
  * GET /api/businesses/:id/config
- * Devuelve la configuración del negocio (desde props).
  */
 exports.getConfig = async (req, res, next) => {
   try {
@@ -211,9 +266,10 @@ exports.getConfig = async (req, res, next) => {
       ok: true,
       business_id: bizId,
       config: {
-        articulos_costo_ideal: props.articulos_costo_ideal ?? null,
-        insumos_costo_ideal: props.insumos_costo_ideal ?? null,
-        compras_alerta_semanas: props.compras_alerta_semanas ?? null,
+        articulos_costo_ideal:   props.articulos_costo_ideal   ?? null,
+        insumos_costo_ideal:     props.insumos_costo_ideal     ?? null,
+        compras_alerta_semanas:  props.compras_alerta_semanas  ?? null,
+        ventas_alerta_dias:      props.ventas_alerta_dias      ?? null,
       },
     });
   } catch (e) {
@@ -223,13 +279,18 @@ exports.getConfig = async (req, res, next) => {
 
 /**
  * PATCH /api/businesses/:id/config
- * body: { articulos_costo_ideal?, insumos_costo_ideal?, compras_alerta_semanas? }
- * Guarda configuración en props del negocio.
+ * body: { articulos_costo_ideal?, insumos_costo_ideal?,
+ *         compras_alerta_semanas?, ventas_alerta_dias? }
  */
 exports.saveConfig = async (req, res, next) => {
   try {
     const bizId = req.params.id || getBusinessId(req);
-    const allowed = ['articulos_costo_ideal', 'insumos_costo_ideal', 'compras_alerta_semanas'];
+    const allowed = [
+      'articulos_costo_ideal',
+      'insumos_costo_ideal',
+      'compras_alerta_semanas',
+      'ventas_alerta_dias',       // ← nuevo
+    ];
     const update = {};
     for (const key of allowed) {
       if (req.body && key in req.body) {
@@ -241,7 +302,6 @@ exports.saveConfig = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'No hay campos a actualizar' });
     }
 
-    // Merge con props existentes
     const setters = Object.keys(update)
       .map((k, i) => `jsonb_build_object('${k}', $${i + 2}::numeric)`)
       .join(' || ');
