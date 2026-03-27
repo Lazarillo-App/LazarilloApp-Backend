@@ -29,7 +29,7 @@ async function resolveCredsBizId(bizId) {
   return rootRows[0]?.id ?? bizId;
 }
 
-// ── Mapa codigo_maxi → insumo_id (usa el principal, lista compartida) ──
+// ── Mapa codigo_maxi → insumo_id ──
 async function buildInsumoMap(businessId) {
   const { rows } = await pool.query(
     `SELECT id, codigo_maxi::bigint AS codigo_maxi
@@ -46,44 +46,91 @@ async function buildInsumoMap(businessId) {
   return map;
 }
 
-// POST /api/purchases/sync  { from, to, provdr?, num? }
+// ── Helper: construye cláusulas WHERE reutilizables para compras ──
+// Devuelve { where: string[], params: any[] } listo para interpolación segura.
+// El caller ya pone business_id como $1 antes de llamar a este helper.
+function buildPurchaseFilters(query, startIndex = 2) {
+  const { from, to, proveedor_id, insumo_id, branch_id } = query;
+  const where = [];
+  const params = [];
+  let idx = startIndex;
+
+  if (from) {
+    params.push(from);
+    where.push(`pi.fecha >= $${idx++}`);
+  }
+  if (to) {
+    params.push(to);
+    where.push(`pi.fecha <= $${idx++}`);
+  }
+  if (proveedor_id) {
+    params.push(Number(proveedor_id));
+    where.push(`p.proveedor_id = $${idx++}`);
+  }
+  if (insumo_id) {
+    params.push(Number(insumo_id));
+    where.push(`pi.insumo_id = $${idx++}`);
+  }
+  // branch_id = 'all' o ausente → sin filtro (muestra todas las sucursales)
+  // branch_id = número         → filtra por esa sucursal
+  // branch_id = 'none'         → solo compras sin sucursal asignada
+  if (branch_id && branch_id !== 'all') {
+    if (branch_id === 'none') {
+      where.push(`p.branch_id IS NULL`);
+    } else {
+      params.push(Number(branch_id));
+      where.push(`p.branch_id = $${idx++}`);
+    }
+  }
+
+  return { where, params };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/purchases/sync  { from, to, provdr?, num?, branch_id? }
+// ─────────────────────────────────────────────────────────────────────────────
 exports.sync = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     if (!rawBizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
 
-    const businessId = rawBizId;                         // donde se guardan las compras
-    const credsBizId = await resolveCredsBizId(rawBizId); // donde están las credenciales
+    const businessId = rawBizId;
+    const credsBizId = await resolveCredsBizId(rawBizId);
 
-    const { from, to, provdr, num } = req.body;
+    const { from, to, provdr, num, branch_id } = req.body;
     if (!from || !to) return res.status(400).json({ ok: false, error: 'from y to son requeridos' });
 
-    // 1) Proveedores (no crítico)
+    // Validar branch_id si viene: debe pertenecer al negocio
+    if (branch_id) {
+      const { rows: branchCheck } = await pool.query(
+        'SELECT id FROM app_branches WHERE id = $1 AND business_id = $2',
+        [branch_id, businessId]
+      );
+      if (!branchCheck.length) {
+        return res.status(400).json({ ok: false, error: 'Sucursal no válida para este negocio' });
+      }
+    }
+
+    // 1) Proveedores
     let suppliersCount = 0;
     try {
       const proveedores = await fetchMaxiSuppliers({ businessId: credsBizId, req });
       suppliersCount = await upsertSuppliers(businessId, proveedores);
-      console.log('[purchases.sync] Proveedores:', suppliersCount);
     } catch (e) {
       console.warn('[purchases.sync] Proveedores falló (no crítico):', e.message);
     }
 
-    // 2) Compras del rango — credenciales del principal, datos del negocio activo
+    // 2) Compras
     const facturas = await fetchMaxiPurchases({ businessId: credsBizId, req, from, to, provdr, num });
-    console.log('[purchases.sync] Facturas recibidas:', facturas.length);
-    if (facturas.length > 0) {
-      console.log('[purchases.sync] primera factura:', JSON.stringify(facturas[0], null, 2).slice(0, 800));
-    }
     if (!facturas.length) {
       return res.json({ ok: true, inserted: 0, updated: 0, items: 0, suppliers: suppliersCount, message: 'Sin compras en el rango' });
     }
 
-    // 3) Cruzar con insumos (lista del principal, compartida)
+    // 3) Cruzar con insumos
     const insumoMap = await buildInsumoMap(credsBizId);
-    console.log(`[purchases.sync] insumoMap: ${insumoMap.size} insumos. Primeras 5:`, [...insumoMap.keys()].slice(0, 5));
 
-    // 4) Upsert con el businessId del negocio activo
-    const result = await upsertPurchasesBatch(businessId, facturas, insumoMap);
+    // 4) Upsert — pasa branch_id para que se guarde en purchases
+    const result = await upsertPurchasesBatch(businessId, facturas, insumoMap, branch_id ?? null);
     res.json({ ok: true, ...result, suppliers: suppliersCount });
   } catch (e) {
     console.error('[purchases.sync] error:', e);
@@ -115,32 +162,44 @@ exports.listSuppliers = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// GET /api/purchases?from=&to=&proveedor_id=&insumo_id=&page=&limit=
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/purchases?from=&to=&proveedor_id=&insumo_id=&branch_id=&page=&limit=
+//
+// branch_id = número  → filtra esa sucursal
+// branch_id = 'all'   → todas las sucursales (default, igual que antes)
+// branch_id = 'none'  → compras sin sucursal asignada
+//
+// Nuevas columnas en la respuesta:
+//   branch_id, branch_name, branch_color  (null si no tiene sucursal)
+// ─────────────────────────────────────────────────────────────────────────────
 exports.list = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     if (!rawBizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     const businessId = await resolvePurchaseBusiness(rawBizId);
 
-    const { from, to, proveedor_id, insumo_id, page = 1, limit = 500 } = req.query;
-    const params = [businessId];
-    const where = ['pi.business_id = $1'];
-
-    if (from)         { params.push(from);                 where.push(`pi.fecha >= $${params.length}`); }
-    if (to)           { params.push(to);                   where.push(`pi.fecha <= $${params.length}`); }
-    if (proveedor_id) { params.push(Number(proveedor_id)); where.push(`p.proveedor_id = $${params.length}`); }
-    if (insumo_id)    { params.push(Number(insumo_id));    where.push(`pi.insumo_id = $${params.length}`); }
-
-    const whereSql = 'WHERE ' + where.join(' AND ');
+    const { page = 1, limit = 500 } = req.query;
     const hardLimit = Math.min(Math.max(Number(limit), 1), 10000);
-    const offset = (Math.max(Number(page), 1) - 1) * hardLimit;
+    const offset    = (Math.max(Number(page), 1) - 1) * hardLimit;
+
+    const baseParams = [businessId];
+    const baseWhere  = ['pi.business_id = $1'];
+    const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
+
+    const allWhere  = [...baseWhere, ...extraWhere];
+    const allParams = [...baseParams, ...extraParams];
+    const whereSql  = 'WHERE ' + allWhere.join(' AND ');
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
         `SELECT
            pi.id, pi.fecha,
            pi.insumo_id,
+           p.id                  AS purchase_id,
            p.factura_key         AS factura,
+           p.branch_id,
+           ab.name               AS branch_name,
+           ab.color              AS branch_color,
            s.nombre              AS proveedor_nombre,
            s.cuit                AS proveedor_cuit,
            i.nombre              AS insumo_nombre,
@@ -151,21 +210,23 @@ exports.list = async (req, res, next) => {
            pi.neto, pi.imp_int, pi.imp_int_total,
            pi.orden_compra, pi.referencia
          FROM purchase_items pi
-         JOIN purchases p  ON p.id = pi.purchase_id
-         LEFT JOIN suppliers s ON s.id = p.proveedor_id
-         LEFT JOIN insumos   i ON i.id = pi.insumo_id
+         JOIN purchases p        ON p.id = pi.purchase_id
+         LEFT JOIN app_branches ab ON ab.id = p.branch_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id
+         LEFT JOIN insumos   i   ON i.id = pi.insumo_id
          ${whereSql}
          ORDER BY pi.fecha DESC, p.factura_key, pi.id
-         LIMIT $${params.length + 1}
-         OFFSET $${params.length + 2}`,
-        [...params, hardLimit, offset]
+         LIMIT $${allParams.length + 1}
+         OFFSET $${allParams.length + 2}`,
+        [...allParams, hardLimit, offset]
       ),
       pool.query(
         `SELECT COUNT(DISTINCT pi.id)::int AS total
            FROM purchase_items pi
            JOIN purchases p ON p.id = pi.purchase_id
+           LEFT JOIN app_branches ab ON ab.id = p.branch_id
            ${whereSql}`,
-        params
+        allParams
       ),
     ]);
 
@@ -180,59 +241,73 @@ exports.list = async (req, res, next) => {
   }
 };
 
-// GET /api/purchases/summary?from=&to=
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/purchases/summary?from=&to=&branch_id=
+// ─────────────────────────────────────────────────────────────────────────────
 exports.summary = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     const businessId = await resolvePurchaseBusiness(rawBizId);
-    const { from, to } = req.query;
 
-    const params = [businessId];
-    const dateWhere = [];
-    if (from) { params.push(from); dateWhere.push(`pi.fecha >= $${params.length}`); }
-    if (to)   { params.push(to);   dateWhere.push(`pi.fecha <= $${params.length}`); }
-    const dateFilter = dateWhere.length ? 'AND ' + dateWhere.join(' AND ') : '';
+    const baseParams = [businessId];
+    const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
+    const allParams = [...baseParams, ...extraParams];
+
+    // El summary agrupa por proveedor Y por sucursal cuando no hay filtro específico
+    const branchSelect = req.query.branch_id && req.query.branch_id !== 'all'
+      ? ''  // ya filtrado, no necesita agrupar por branch
+      : `, ab.id AS branch_id, ab.name AS branch_name, ab.color AS branch_color`;
+
+    const branchGroup = req.query.branch_id && req.query.branch_id !== 'all'
+      ? ''
+      : `, ab.id, ab.name, ab.color`;
+
+    const extraFilterSql = extraWhere.length ? 'AND ' + extraWhere.join(' AND ') : '';
 
     const { rows } = await pool.query(
       `SELECT
            s.id             AS proveedor_id,
            s.nombre         AS proveedor_nombre,
-           s.cuit,
+           s.cuit
+           ${branchSelect},
            COUNT(DISTINCT p.id)::int       AS facturas,
            SUM(pi.cantidad)::numeric       AS cantidad_total,
            SUM(pi.precio_total)::numeric   AS neto_total,
            SUM(pi.iva_total_item)::numeric AS iva_total,
            SUM(pi.precio_total + COALESCE(pi.iva_total_item,0))::numeric AS total
          FROM purchase_items pi
-         JOIN purchases p  ON p.id = pi.purchase_id
-         LEFT JOIN suppliers s ON s.id = p.proveedor_id
-         WHERE pi.business_id = $1 ${dateFilter}
-         GROUP BY s.id, s.nombre, s.cuit
+         JOIN purchases p        ON p.id = pi.purchase_id
+         LEFT JOIN app_branches ab ON ab.id = p.branch_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id
+         WHERE pi.business_id = $1 ${extraFilterSql}
+         GROUP BY s.id, s.nombre, s.cuit${branchGroup}
          ORDER BY total DESC NULLS LAST`,
-      params
+      allParams
     );
     res.json({ ok: true, data: rows });
   } catch (e) { next(e); }
 };
 
-// GET /api/purchases/export/csv?from=&to=&proveedor_id=&insumo_id=
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/purchases/export/csv?from=&to=&proveedor_id=&insumo_id=&branch_id=
+// ─────────────────────────────────────────────────────────────────────────────
 exports.exportCsv = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     const businessId = await resolvePurchaseBusiness(rawBizId);
-    const { from, to, proveedor_id, insumo_id } = req.query;
 
-    const params = [businessId];
-    const where = ['pi.business_id = $1'];
-    if (from)         { params.push(from);                 where.push(`pi.fecha >= $${params.length}`); }
-    if (to)           { params.push(to);                   where.push(`pi.fecha <= $${params.length}`); }
-    if (proveedor_id) { params.push(Number(proveedor_id)); where.push(`p.proveedor_id = $${params.length}`); }
-    if (insumo_id)    { params.push(Number(insumo_id));    where.push(`pi.insumo_id = $${params.length}`); }
+    const baseParams = [businessId];
+    const baseWhere  = ['pi.business_id = $1'];
+    const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
+
+    const allWhere  = [...baseWhere, ...extraWhere];
+    const allParams = [...baseParams, ...extraParams];
 
     const { rows } = await pool.query(
       `SELECT
            pi.fecha,
            p.factura_key                           AS factura,
+           COALESCE(ab.name, '—')                  AS sucursal,
            COALESCE(s.nombre, pi.referencia)       AS proveedor,
            i.codigo_maxi,
            COALESCE(i.nombre, pi.referencia)       AS insumo,
@@ -241,15 +316,16 @@ exports.exportCsv = async (req, res, next) => {
            pi.precio                               AS precio_unit,
            pi.precio_total                         AS total_neto
          FROM purchase_items pi
-         JOIN purchases p  ON p.id = pi.purchase_id
-         LEFT JOIN suppliers s ON s.id = p.proveedor_id
-         LEFT JOIN insumos   i ON i.id = pi.insumo_id
-         WHERE ${where.join(' AND ')}
+         JOIN purchases p        ON p.id = pi.purchase_id
+         LEFT JOIN app_branches ab ON ab.id = p.branch_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id
+         LEFT JOIN insumos   i   ON i.id = pi.insumo_id
+         WHERE ${allWhere.join(' AND ')}
          ORDER BY pi.fecha ASC, p.factura_key, pi.id`,
-      params
+      allParams
     );
 
-    const headers = ['Fecha', 'Factura', 'Proveedor', 'Cod.Maxi', 'Insumo', 'Unidad', 'Cantidad', 'Precio unit.', 'Total neto'];
+    const headers = ['Fecha', 'Factura', 'Sucursal', 'Proveedor', 'Cod.Maxi', 'Insumo', 'Unidad', 'Cantidad', 'Precio unit.', 'Total neto'];
     const esc = (v) => {
       if (v == null) return '';
       const s = String(v);
@@ -260,13 +336,14 @@ exports.exportCsv = async (req, res, next) => {
       headers.join(','),
       ...rows.map((r) => [
         r.fecha ? String(r.fecha).slice(0, 10) : '',
-        r.factura, r.proveedor, r.codigo_maxi, r.insumo, r.unidad,
-        r.cantidad,
+        r.factura, r.sucursal, r.proveedor, r.codigo_maxi,
+        r.insumo, r.unidad, r.cantidad,
         r.precio_unit != null ? Number(r.precio_unit).toFixed(4) : '',
         r.total_neto,
       ].map(esc).join(',')),
     ];
 
+    const { from, to } = req.query;
     const filename = `compras_${from ?? 'all'}_${to ?? 'all'}.csv`;
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -291,11 +368,10 @@ exports.firstDate = async (req, res, next) => {
       [businessId]
     );
 
-    const firstDate = rows[0]?.first_date
-      ? String(rows[0].first_date).slice(0, 10)
-      : null;
-
-    res.json({ ok: true, firstDate });
+    res.json({
+      ok: true,
+      firstDate: rows[0]?.first_date ? String(rows[0].first_date).slice(0, 10) : null,
+    });
   } catch (e) {
     console.error('[purchases.firstDate] error:', e);
     next(e);
