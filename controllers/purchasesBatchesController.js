@@ -1,6 +1,4 @@
 // controllers/purchasesBatchesController.js
-// Endpoints para gestión de lotes de importación de compras
-// y configuración del negocio (% costo ideal, alertas de compras)
 'use strict';
 
 const pool = require('../config/db');
@@ -19,7 +17,6 @@ exports.generateBatchId = generateBatchId;
 
 /**
  * GET /api/purchases/batches
- * Lista todos los lotes de importación del negocio activo.
  */
 exports.listBatches = async (req, res, next) => {
   try {
@@ -51,24 +48,28 @@ exports.listBatches = async (req, res, next) => {
 };
 
 /**
- * GET /api/purchases/batches/:batchId/preview
- * Devuelve las primeras N filas del lote para vista previa (read-only).
- * Query param: ?limit=20 (máx 100)
- * Respuesta: { ok, columns: string[], rows: object[], total: number, showing: number }
+ * GET /api/purchases/batches/:batchId/preview?limit=20
  *
- * Estrategia: desnormaliza purchases + purchase_items + suppliers + insumos
- * en columnas legibles para el usuario final, igual a como se vería el CSV original.
+ * Schema confirmado:
+ *   purchases      → id, fecha(date), factura_key, proveedor_id, neto_total,
+ *                    iva_total, imp_int_total, total, synced_at, batch_id
+ *   purchase_items → id, purchase_id, insumo_id, fecha, branch_id, cantidad,
+ *                    neto, precio, precio_total, iva_tasa, iva, referencia, source
+ *   suppliers      → id, business_id, nombre, razon_social, cuit
+ *
+ *   JOIN: suppliers.id = purchases.proveedor_id
+ *   Nombre del insumo: purchase_items.referencia
  */
 exports.previewBatch = async (req, res, next) => {
   try {
-    const bizId = getBusinessId(req);
+    const bizId   = getBusinessId(req);
     const { batchId } = req.params;
-    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const limit   = Math.min(Number(req.query.limit) || 20, 100);
 
-    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
 
-    // Verificar que el lote pertenece al negocio
+    // Verificar pertenencia del lote al negocio
     const { rows: check } = await pool.query(
       `SELECT COUNT(*)::int AS cnt
        FROM purchases
@@ -79,57 +80,61 @@ exports.previewBatch = async (req, res, next) => {
       return res.status(404).json({ ok: false, error: 'Lote no encontrado para este negocio' });
     }
 
-    // Total de ítems en el lote
-    const { rows: totalRows } = await pool.query(
+    // Total de ítems del lote
+    const { rows: tRows } = await pool.query(
       `SELECT COUNT(pi.id)::int AS total
        FROM purchase_items pi
        JOIN purchases p ON p.id = pi.purchase_id
        WHERE p.batch_id = $1 AND p.business_id = $2`,
       [batchId, bizId]
     );
-    const total = totalRows[0]?.total ?? 0;
+    const total = tRows[0]?.total ?? 0;
 
-    // Primeras N filas desnormalizadas — columnas en español legibles
-    // Ajustá los nombres de columna / tablas a tu esquema real si difieren
+    // Vista previa desnormalizada con columnas exactas del esquema
     const { rows } = await pool.query(
       `SELECT
-         TO_CHAR(p.purchase_date, 'DD/MM/YYYY')          AS "Fecha",
-         COALESCE(s.name, p.supplier_name, '—')          AS "Proveedor",
-         COALESCE(p.invoice_number::text, '—')           AS "Nº Factura",
-         COALESCE(ins.nombre, pi.insumo_nombre, '—')     AS "Insumo",
-         COALESCE(ins.unidad_medida, '—')                AS "Unidad",
-         pi.quantity::numeric                             AS "Cantidad",
-         pi.unit_price::numeric                          AS "Precio Unit.",
-         (pi.quantity * pi.unit_price)::numeric          AS "Subtotal"
+         TO_CHAR(p.fecha, 'DD/MM/YYYY')               AS "Fecha",
+         COALESCE(s.nombre, s.razon_social, '—')      AS "Proveedor",
+         COALESCE(p.factura_key, '—')                 AS "Factura",
+         COALESCE(pi.referencia, '—')                 AS "Insumo",
+         pi.cantidad                                   AS "Cantidad",
+         pi.precio                                     AS "Precio Unit.",
+         pi.precio_total                               AS "Total Ítem",
+         p.neto_total                                  AS "Neto Compra",
+         p.iva_total                                   AS "IVA Compra",
+         p.total                                       AS "Total Compra"
        FROM purchases p
-       LEFT JOIN purchase_items pi  ON pi.purchase_id = p.id
-       LEFT JOIN suppliers s        ON s.id = p.supplier_id
-       LEFT JOIN insumos ins        ON ins.id = pi.insumo_id
+       LEFT JOIN purchase_items pi ON pi.purchase_id = p.id
+       LEFT JOIN suppliers s       ON s.id = p.proveedor_id
        WHERE p.batch_id = $1 AND p.business_id = $2
-       ORDER BY p.purchase_date DESC, p.id, pi.id
+       ORDER BY p.fecha DESC, p.id, pi.id
        LIMIT $3`,
       [batchId, bizId, limit]
     );
 
     const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-
     res.json({ ok: true, columns, rows, total, showing: rows.length });
+
   } catch (e) {
-    console.error('[previewBatch] error:', e);
+    console.error('[previewBatch] ERROR:', {
+      message: e.message,
+      code:    e.code,
+      detail:  e.detail,
+      hint:    e.hint,
+    });
     next(e);
   }
 };
 
 /**
  * DELETE /api/purchases/batches/:batchId
- * Elimina todos los registros de un lote de importación.
  */
 exports.deleteBatch = async (req, res, next) => {
   try {
-    const bizId = getBusinessId(req);
+    const bizId   = getBusinessId(req);
     const { batchId } = req.params;
 
-    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
 
     const client = await pool.connect();
@@ -152,14 +157,12 @@ exports.deleteBatch = async (req, res, next) => {
          )`,
         [batchId, bizId]
       );
-
       const { rowCount: purchasesDeleted } = await client.query(
         `DELETE FROM purchases WHERE batch_id = $1 AND business_id = $2`,
         [batchId, bizId]
       );
 
       await client.query('COMMIT');
-
       res.json({
         ok: true,
         batch_id: batchId,
@@ -180,29 +183,25 @@ exports.deleteBatch = async (req, res, next) => {
 
 /**
  * POST /api/purchases/batches/:batchId/move
- * body: { targetBusinessId: number }
  */
 exports.moveBatch = async (req, res, next) => {
   try {
-    const bizId = getBusinessId(req);
-    const { batchId } = req.params;
+    const bizId            = getBusinessId(req);
+    const { batchId }      = req.params;
     const targetBusinessId = Number(req.body?.targetBusinessId);
 
-    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
-    if (!Number.isFinite(targetBusinessId) || targetBusinessId <= 0) {
+    if (!Number.isFinite(targetBusinessId) || targetBusinessId <= 0)
       return res.status(400).json({ ok: false, error: 'targetBusinessId inválido' });
-    }
-    if (Number(bizId) === targetBusinessId) {
+    if (Number(bizId) === targetBusinessId)
       return res.status(400).json({ ok: false, error: 'El negocio destino es el mismo que el origen' });
-    }
 
     const { rows: bizCheck } = await pool.query(
       `SELECT id FROM app_businesses WHERE id = $1`, [targetBusinessId]
     );
-    if (!bizCheck.length) {
+    if (!bizCheck.length)
       return res.status(404).json({ ok: false, error: 'Negocio destino no encontrado' });
-    }
 
     const client = await pool.connect();
     try {
@@ -218,21 +217,18 @@ exports.moveBatch = async (req, res, next) => {
       }
 
       await client.query(
-        `UPDATE purchase_items
-         SET business_id = $1
+        `UPDATE purchase_items SET business_id = $1
          WHERE purchase_id IN (
            SELECT id FROM purchases WHERE batch_id = $2 AND business_id = $3
          )`,
         [targetBusinessId, batchId, bizId]
       );
-
       const { rowCount: moved } = await client.query(
         `UPDATE purchases SET business_id = $1 WHERE batch_id = $2 AND business_id = $3`,
         [targetBusinessId, batchId, bizId]
       );
 
       await client.query('COMMIT');
-
       res.json({
         ok: true,
         batch_id: batchId,
@@ -266,30 +262,26 @@ exports.getConfig = async (req, res, next) => {
       ok: true,
       business_id: bizId,
       config: {
-        articulos_costo_ideal:   props.articulos_costo_ideal   ?? null,
-        insumos_costo_ideal:     props.insumos_costo_ideal     ?? null,
-        compras_alerta_semanas:  props.compras_alerta_semanas  ?? null,
-        ventas_alerta_dias:      props.ventas_alerta_dias      ?? null,
+        articulos_costo_ideal:  props.articulos_costo_ideal  ?? null,
+        insumos_costo_ideal:    props.insumos_costo_ideal    ?? null,
+        compras_alerta_semanas: props.compras_alerta_semanas ?? null,
+        ventas_alerta_dias:     props.ventas_alerta_dias     ?? null,
       },
     });
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 };
 
 /**
  * PATCH /api/businesses/:id/config
- * body: { articulos_costo_ideal?, insumos_costo_ideal?,
- *         compras_alerta_semanas?, ventas_alerta_dias? }
  */
 exports.saveConfig = async (req, res, next) => {
   try {
-    const bizId = req.params.id || getBusinessId(req);
+    const bizId   = req.params.id || getBusinessId(req);
     const allowed = [
       'articulos_costo_ideal',
       'insumos_costo_ideal',
       'compras_alerta_semanas',
-      'ventas_alerta_dias',       // ← nuevo
+      'ventas_alerta_dias',
     ];
     const update = {};
     for (const key of allowed) {
@@ -298,9 +290,8 @@ exports.saveConfig = async (req, res, next) => {
         update[key] = v === null || v === '' ? null : Number(v);
       }
     }
-    if (!Object.keys(update).length) {
+    if (!Object.keys(update).length)
       return res.status(400).json({ ok: false, error: 'No hay campos a actualizar' });
-    }
 
     const setters = Object.keys(update)
       .map((k, i) => `jsonb_build_object('${k}', $${i + 2}::numeric)`)
@@ -314,7 +305,5 @@ exports.saveConfig = async (req, res, next) => {
     );
 
     res.json({ ok: true, business_id: bizId, updated: update });
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 };
