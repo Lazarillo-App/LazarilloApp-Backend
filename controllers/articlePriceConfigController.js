@@ -5,30 +5,24 @@ const pool = require('../config/db');
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/recetas-costos
-   Devuelve { article_id, costo_total, porciones } de todas las
-   recetas activas del negocio. El front lo usa para poblar la
-   columna Costo($) en TablaArticulos sin fetchear una por una.
 ══════════════════════════════════════════════════════════════ */
 exports.getRecetasCostos = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
-    // Obtener config de alerta de semanas del negocio
     const { rows: bizRows } = await pool.query(
       `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
     );
     const alertaSemanas = Number(bizRows[0]?.props?.compras_alerta_semanas ?? 4);
     const alertaMs = alertaSemanas * 7 * 24 * 60 * 60 * 1000;
 
-    // Recetas con sus items e insumos — un solo query
     const { rows } = await pool.query(
       `SELECT
          r.article_id,
          r.costo_total,
          r.porciones,
          ri.insumo_id,
-         -- Fecha última compra del insumo (en el negocio principal = credsBizId)
          (
            SELECT MAX(pi.fecha)
            FROM purchase_items pi
@@ -43,7 +37,6 @@ exports.getRecetasCostos = async (req, res, next) => {
       [bizId]
     );
 
-    // Agrupar por article_id
     const costos = {};
     const ahora = Date.now();
 
@@ -58,7 +51,6 @@ exports.getRecetasCostos = async (req, res, next) => {
         };
       }
 
-      // Verificar alerta: sin compras o compra muy vieja
       const fechaUltima = r.fecha_ultima_compra ? new Date(r.fecha_ultima_compra).getTime() : null;
       const esVieja = !fechaUltima || (ahora - fechaUltima) > alertaMs;
 
@@ -77,11 +69,7 @@ exports.getRecetasCostos = async (req, res, next) => {
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/article-price-config
-   Devuelve toda la config de precios del negocio:
-     - byArticle:    { [articleId]:    { objetivo, precioManual } }
-     - byRubro:      { [rubroKey]:     { objetivo } }
-     - byAgrupacion: { [agrupacionId]: { objetivo } }
-   El front resuelve la jerarquía: artículo > rubro > agrupación > global
+   Devuelve byArticle, byRubro, byAgrupacion
 ══════════════════════════════════════════════════════════════ */
 exports.getPriceConfig = async (req, res, next) => {
   try {
@@ -122,18 +110,18 @@ exports.getPriceConfig = async (req, res, next) => {
 
 /* ══════════════════════════════════════════════════════════════
    POST /api/businesses/:businessId/article-price-config
-   Guarda o actualiza un valor de config.
 
-   Body: {
-     scope:        'articulo' | 'rubro' | 'agrupacion',
-     scopeId:      string | number,   // articleId, rubroKey o agrupacionId
-     objetivo?:    number | null,     // % objetivo (null = borrar override)
-     precioManual?: number | null,    // precio manual en $ (null = borrar)
-   }
+   Body común:
+     scope, scopeId, objetivo?, precioManual?, articleIds?
 
-   Cuando scope='agrupacion' y se pasa objetivo:
-     → aplica ese objetivo a TODOS los artículos de la agrupación
-       sobreescribiendo sus registros individuales de scope='articulo'
+   Flags especiales del frontend:
+     pisarTodo   = true  → ignorar overrides individuales existentes,
+                           aplicar el objetivo a todos los articleIds
+     excluirIds  = [...] → lista de articleIds a NO tocar cuando
+                           el usuario eligió "Solo los sin individual"
+     scope       = 'global' → limpiar TODOS los overrides de objetivo
+                              en byArticle + byRubro + byAgrupacion
+                              (se usa desde ConfiguracionMain al pisar todo)
 ══════════════════════════════════════════════════════════════ */
 exports.savePriceConfig = async (req, res, next) => {
   const client = await pool.connect();
@@ -141,8 +129,55 @@ exports.savePriceConfig = async (req, res, next) => {
     const bizId = Number(req.params.businessId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
-    const { scope, scopeId, objetivo, precioManual, articleIds, pisarTodo = false } = req.body || {};
+    const {
+      scope,
+      scopeId,
+      objetivo,
+      precioManual,
+      articleIds,
+      pisarTodo = false,
+      excluirIds = [],   // ← NUEVO: IDs a excluir cuando el usuario eligió "respetar individuales"
+      nuevoGlobal,       // ← NUEVO: valor del nuevo global (solo para scope='global')
+    } = req.body || {};
 
+    // ── Caso especial: scope='global' con pisarTodo=true ─────────────────────
+    // Viene de ConfiguracionMain cuando el usuario elige "Pisar todo".
+    // Elimina TODOS los overrides de objetivo (byArticle, byRubro, byAgrupacion)
+    // para que el global sea el único valor vigente.
+    // Los precioManual individuales NO se tocan (son precios $, no % objetivo).
+    if (scope === 'global') {
+      await client.query('BEGIN');
+
+      if (pisarTodo) {
+        // Eliminar objetivo_pct de TODOS los registros del negocio
+        // pero conservar los que solo tienen precio_manual (no borrar ese campo)
+        await client.query(
+          `UPDATE article_price_config
+             SET objetivo_pct = NULL, updated_at = NOW()
+           WHERE business_id = $1`,
+          [bizId]
+        );
+        // Borrar filas que quedaron con ambos campos null (ya no tienen utilidad)
+        await client.query(
+          `DELETE FROM article_price_config
+           WHERE business_id = $1
+             AND objetivo_pct IS NULL
+             AND precio_manual IS NULL`,
+          [bizId]
+        );
+
+        console.log(`[savePriceConfig] scope=global pisarTodo → limpiados todos los objetivos del negocio ${bizId}`);
+      }
+      // Si pisarTodo=false para scope='global', no hacemos nada extra:
+      // el global (articulos_costo_ideal en props) ya se guarda aparte
+      // vía BusinessesAPI.update — los overrides individuales se respetan solos
+      // porque el front resuelve la jerarquía correctamente.
+
+      await client.query('COMMIT');
+      return res.json({ ok: true, scope: 'global', pisarTodo });
+    }
+
+    // ── Validaciones para scopes normales ─────────────────────────────────────
     const VALID_SCOPES = ['articulo', 'rubro', 'agrupacion'];
     if (!VALID_SCOPES.includes(scope)) {
       return res.status(400).json({ ok: false, error: 'scope_invalido' });
@@ -151,13 +186,13 @@ exports.savePriceConfig = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'scopeId_requerido' });
     }
 
-    const objetivoVal = objetivo != null ? Number(objetivo) : null;
+    const objetivoVal    = objetivo     != null ? Number(objetivo)     : null;
     const precioManualVal = precioManual != null ? Number(precioManual) : null;
-    const scopeIdStr = String(scopeId).trim();
+    const scopeIdStr     = String(scopeId).trim();
 
     await client.query('BEGIN');
 
-    // ── Upsert del registro principal ──
+    // ── Upsert del registro principal (scope + scopeId) ──────────────────────
     if (objetivoVal !== null || precioManualVal !== null) {
       await client.query(
         `INSERT INTO article_price_config
@@ -165,65 +200,95 @@ exports.savePriceConfig = async (req, res, next) => {
          VALUES ($1, $2, $3, $4, $5, NOW())
          ON CONFLICT (business_id, scope, scope_id)
          DO UPDATE SET
-        objetivo_pct  = CASE WHEN $4::numeric IS NOT NULL 
-                       THEN EXCLUDED.objetivo_pct 
-                       ELSE article_price_config.objetivo_pct END,
-        precio_manual = CASE WHEN $5::numeric IS NOT NULL 
-                       THEN EXCLUDED.precio_manual 
-                       ELSE article_price_config.precio_manual END,
-        updated_at    = NOW()`,
+           objetivo_pct  = CASE WHEN $4::numeric IS NOT NULL
+                           THEN EXCLUDED.objetivo_pct
+                           ELSE article_price_config.objetivo_pct END,
+           precio_manual = CASE WHEN $5::numeric IS NOT NULL
+                           THEN EXCLUDED.precio_manual
+                           ELSE article_price_config.precio_manual END,
+           updated_at    = NOW()`,
         [bizId, scope, scopeIdStr, objetivoVal, precioManualVal]
       );
     } else if (objetivo === null && precioManual === null) {
-      // Solo borrar el campo que vino explícitamente en el body
-      // Si mandaron precioManual: null → borrar solo precio_manual
-      // Si mandaron objetivo: null → borrar solo objetivo_pct
-      // Para saber cuál se mandó, hay que chequear si la key existe en el body
+      // Borrar selectivamente según qué keys vinieron en el body
       const bodyKeys = Object.keys(req.body || {});
-      const borrarManual = bodyKeys.includes('precioManual');
+      const borrarManual   = bodyKeys.includes('precioManual');
       const borrarObjetivo = bodyKeys.includes('objetivo');
 
       if (borrarManual && borrarObjetivo) {
-        // Borrar registro completo
         await client.query(
           `DELETE FROM article_price_config
-        WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
+           WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
           [bizId, scope, scopeIdStr]
         );
       } else if (borrarManual) {
         await client.query(
           `UPDATE article_price_config
-         SET precio_manual = NULL, updated_at = NOW()
-       WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
+             SET precio_manual = NULL, updated_at = NOW()
+           WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
           [bizId, scope, scopeIdStr]
         );
       } else if (borrarObjetivo) {
         await client.query(
           `UPDATE article_price_config
-         SET objetivo_pct = NULL, updated_at = NOW()
-       WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
+             SET objetivo_pct = NULL, updated_at = NOW()
+           WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
           [bizId, scope, scopeIdStr]
         );
       }
     }
 
-    // ── Si es agrupación/rubro con objetivo → override masivo en artículos ──
+    // ── Override masivo en artículos cuando es agrupación/rubro con objetivo ──
     if (objetivoVal !== null && Array.isArray(articleIds) && articleIds.length > 0) {
-      // Si pisarTodo=false, no tocar artículos que ya tienen override manual (scope='articulo')
+
       let idsToUpdate = articleIds.map(Number).filter(id => Number.isFinite(id) && id > 0);
 
-      if (!pisarTodo) {
-        // Obtener artículos que ya tienen override manual
-        const { rows: existentes } = await client.query(
-          `SELECT scope_id FROM article_price_config
-           WHERE business_id = $1 AND scope = 'articulo'
-             AND scope_id = ANY($2::text[])`,
-          [bizId, idsToUpdate.map(String)]
+      if (pisarTodo) {
+        // Pisar todo: no excluir ninguno, se aplica el objetivo a todos
+        // (el usuario eligió "Aplicar a todos" en el diálogo de confirmación)
+        console.log(`[savePriceConfig] pisarTodo=true → aplicando a ${idsToUpdate.length} artículos`);
+
+      } else {
+        // ── LÓGICA CORREGIDA ──────────────────────────────────────────────────
+        // Antes: el backend detectaba artículos con cualquier override y los excluía.
+        // Problema: la detección era inconsistente con lo que el frontend mostraba.
+        //
+        // Ahora: el FRONTEND ya hizo la detección y nos manda la lista exacta de
+        // IDs a excluir en excluirIds[]. El backend los respeta sin re-detectar.
+        // Esto garantiza que frontend y backend están perfectamente sincronizados.
+        //
+        // Si excluirIds viene vacío = el usuario eligió no excluir nada
+        // Si excluirIds tiene IDs   = excluir exactamente esos artículos
+
+        const excluirSet = new Set(
+          (excluirIds || []).map(Number).filter(id => Number.isFinite(id) && id > 0)
         );
-        const conOverride = new Set(existentes.map(r => Number(r.scope_id)));
-        idsToUpdate = idsToUpdate.filter(id => !conOverride.has(id));
+
+        if (excluirSet.size > 0) {
+          idsToUpdate = idsToUpdate.filter(id => !excluirSet.has(id));
+          console.log(`[savePriceConfig] excluirIds=${excluirSet.size} → actualizando ${idsToUpdate.length}/${articleIds.length} artículos`);
+        } else {
+          // Sin exclusiones explícitas del frontend: comportamiento conservador
+          // Solo excluir artículos que tienen AMBOS objetivo Y precio_manual
+          // (configuración muy específica que claramente el usuario hizo a propósito)
+          const { rows: muyEspecificos } = await client.query(
+            `SELECT scope_id FROM article_price_config
+             WHERE business_id = $1
+               AND scope = 'articulo'
+               AND objetivo_pct IS NOT NULL
+               AND precio_manual IS NOT NULL
+               AND scope_id = ANY($2::text[])`,
+            [bizId, idsToUpdate.map(String)]
+          );
+          const muyEspecificosSet = new Set(muyEspecificos.map(r => Number(r.scope_id)));
+          if (muyEspecificosSet.size > 0) {
+            idsToUpdate = idsToUpdate.filter(id => !muyEspecificosSet.has(id));
+            console.log(`[savePriceConfig] conservador: excluyendo ${muyEspecificosSet.size} con objetivo+manual`);
+          }
+        }
       }
 
+      // Aplicar el objetivo a todos los IDs que pasaron el filtro
       for (const id of idsToUpdate) {
         await client.query(
           `INSERT INTO article_price_config
@@ -236,12 +301,19 @@ exports.savePriceConfig = async (req, res, next) => {
           [bizId, String(id), objetivoVal]
         );
       }
-      console.log(`[savePriceConfig] Override masivo ${scope} ${scopeIdStr} → ${idsToUpdate.length}/${articleIds.length} artículos (pisarTodo=${pisarTodo})`);
+
+      console.log(`[savePriceConfig] ${scope}/${scopeIdStr} → objetivo=${objetivoVal}% en ${idsToUpdate.length}/${articleIds.length} artículos (pisarTodo=${pisarTodo})`);
     }
 
     await client.query('COMMIT');
 
-    return res.json({ ok: true, scope, scopeId: scopeIdStr, objetivo: objetivoVal, precioManual: precioManualVal });
+    return res.json({
+      ok: true,
+      scope,
+      scopeId: scopeIdStr,
+      objetivo: objetivoVal,
+      precioManual: precioManualVal,
+    });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('[savePriceConfig]', e);
@@ -253,9 +325,8 @@ exports.savePriceConfig = async (req, res, next) => {
 
 /* ══════════════════════════════════════════════════════════════
    DELETE /api/businesses/:businessId/article-price-config
-   Borra el override de un scope/scopeId (vuelve al nivel superior)
-
    Body: { scope, scopeId }
+   scope='all' → borrar todos (para deshacer)
 ══════════════════════════════════════════════════════════════ */
 exports.deletePriceConfig = async (req, res, next) => {
   try {
@@ -266,7 +337,6 @@ exports.deletePriceConfig = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'params_invalidos' });
     }
 
-    // scope='all' → borrar todos los overrides del negocio (para el deshacer)
     if (scope === 'all') {
       await pool.query(
         `DELETE FROM article_price_config WHERE business_id = $1`,
@@ -294,9 +364,6 @@ exports.deletePriceConfig = async (req, res, next) => {
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/recetas-alertas
-   Devuelve lista de insumos con compras vencidas que están
-   siendo usados en recetas activas del negocio.
-   Útil para el panel de alertas en Configuración → Artículos.
 ══════════════════════════════════════════════════════════════ */
 exports.getRecetasAlertas = async (req, res, next) => {
   try {
@@ -315,7 +382,6 @@ exports.getRecetasAlertas = async (req, res, next) => {
          i.unidad_med,
          MAX(pi.fecha) AS fecha_ultima_compra,
          COUNT(DISTINCT r.article_id)::int AS en_recetas,
-         -- artículos afectados
          array_agg(DISTINCT r.article_id) AS article_ids
        FROM receta_items ri
        JOIN recetas r   ON r.id = ri.receta_id AND r.business_id = $1 AND r.active = TRUE
@@ -324,7 +390,6 @@ exports.getRecetasAlertas = async (req, res, next) => {
        WHERE ri.tipo_costo != 'nulo'
        GROUP BY i.id, i.nombre, i.unidad_med
        HAVING
-         -- Sin compras o última compra hace más de N semanas
          MAX(pi.fecha) IS NULL
          OR MAX(pi.fecha) < CURRENT_DATE - ($2 || ' weeks')::interval
        ORDER BY fecha_ultima_compra ASC NULLS FIRST, i.nombre ASC`,
