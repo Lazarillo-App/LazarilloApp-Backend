@@ -1,202 +1,224 @@
 // controllers/branchesController.js
-const pool = require("../config/db");
+// Gestión de sucursales (app_branches)
+// Locales físicos de un mismo negocio — comparten artículos/insumos
+// pero tienen ventas y compras separadas por branch_id
+'use strict';
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+const pool = require('../config/db');
 
-const normalizeEmpty = (s) =>
-  s === undefined || s === null || String(s).trim() === ""
+const trim = (s) =>
+  s === undefined || s === null || String(s).trim() === ''
     ? null
     : String(s).trim();
 
-// ─── GET /api/businesses/:bizId/branches ────────────────────────────────────
-// Lista todas las sucursales de un negocio
-async function listBranches(req, res) {
-  const { bizId } = req.params;
+/**
+ * GET /api/businesses/:bizId/branches
+ * Lista todas las sucursales del negocio.
+ */
+exports.listBranches = async (req, res, next) => {
   try {
+    const bizId = Number(req.params.bizId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'bizId requerido' });
+
     const { rows } = await pool.query(
-      `SELECT id, business_id, name, color, logo_url, address, contacts, props,
-              created_at, updated_at
+      `SELECT
+         id, business_id, name, color, logo_url,
+         address, contacts, props,
+         created_at, updated_at
        FROM app_branches
        WHERE business_id = $1
        ORDER BY created_at ASC`,
       [bizId]
     );
-    res.json({ branches: rows });
-  } catch (err) {
-    console.error("[branches] listBranches:", err);
-    res.status(500).json({ error: "Error al listar sucursales" });
-  }
-}
 
-// ─── GET /api/businesses/:bizId/branches/:branchId ──────────────────────────
-async function getBranch(req, res) {
-  const { bizId, branchId } = req.params;
+    res.json({ ok: true, branches: rows });
+  } catch (e) {
+    console.error('[branches] listBranches:', e);
+    next(e);
+  }
+};
+
+/**
+ * GET /api/businesses/:bizId/branches/has-branches
+ * Devuelve si el negocio tiene sucursales (para que el front decida mostrar selector).
+ * IMPORTANTE: esta ruta debe registrarse ANTES de /:branchId en el router.
+ */
+exports.hasBranches = async (req, res, next) => {
   try {
+    const bizId = Number(req.params.bizId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'bizId requerido' });
+
     const { rows } = await pool.query(
-      `SELECT id, business_id, name, color, logo_url, address, contacts, props,
-              created_at, updated_at
+      `SELECT COUNT(*)::int AS count FROM app_branches WHERE business_id = $1`,
+      [bizId]
+    );
+    const count = rows[0]?.count ?? 0;
+    res.json({ ok: true, hasBranches: count > 0, count });
+  } catch (e) {
+    console.error('[branches] hasBranches:', e);
+    next(e);
+  }
+};
+
+/**
+ * GET /api/businesses/:bizId/branches/:branchId
+ */
+exports.getBranch = async (req, res, next) => {
+  try {
+    const bizId    = Number(req.params.bizId);
+    const branchId = Number(req.params.branchId);
+
+    const { rows } = await pool.query(
+      `SELECT id, business_id, name, color, logo_url,
+              address, contacts, props, created_at, updated_at
        FROM app_branches
        WHERE id = $1 AND business_id = $2`,
       [branchId, bizId]
     );
-    if (!rows[0]) return res.status(404).json({ error: "Sucursal no encontrada" });
-    res.json({ branch: rows[0] });
-  } catch (err) {
-    console.error("[branches] getBranch:", err);
-    res.status(500).json({ error: "Error al obtener sucursal" });
+    if (!rows[0]) return res.status(404).json({ ok: false, error: 'Sucursal no encontrada' });
+
+    res.json({ ok: true, branch: rows[0] });
+  } catch (e) {
+    console.error('[branches] getBranch:', e);
+    next(e);
   }
-}
+};
 
-// ─── POST /api/businesses/:bizId/branches ───────────────────────────────────
-// Crea una nueva sucursal. Hereda del negocio padre lo que no se especifique.
-async function createBranch(req, res) {
-  const { bizId } = req.params;
-  const { name, color, logo_url, address, contacts, props } = req.body;
-
-  if (!name || !String(name).trim()) {
-    return res.status(400).json({ error: "El nombre es requerido" });
-  }
-
+/**
+ * POST /api/businesses/:bizId/branches
+ * Crea una sucursal. Hereda color y logo del negocio padre si no se especifican.
+ * Body: { name, color?, logo_url?, address?, contacts?, props? }
+ */
+exports.createBranch = async (req, res, next) => {
   try {
-    // Traer datos del negocio padre para heredar defaults
-    const parentRes = await pool.query(
-      "SELECT props FROM app_businesses WHERE id = $1",
-      [bizId]
-    );
-    if (!parentRes.rows[0]) {
-      return res.status(404).json({ error: "Negocio no encontrado" });
-    }
-    const parentProps = parentRes.rows[0].props || {};
+    const bizId = Number(req.params.bizId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'bizId requerido' });
 
-    const branchColor = normalizeEmpty(color) || parentProps?.branding?.primary || "#1976d2";
-    const branchLogo  = normalizeEmpty(logo_url) || parentProps?.branding?.logo_url || null;
-    const branchAddr  = address  || parentProps?.address  || {};
-    const branchCont  = contacts || parentProps?.contact  || {};
-    const branchProps = props    || {};
+    const name = trim(req.body?.name);
+    if (!name) return res.status(400).json({ ok: false, error: 'El nombre es requerido' });
+
+    // Traer defaults del negocio padre
+    const { rows: parentRows } = await pool.query(
+      `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
+    );
+    if (!parentRows[0]) return res.status(404).json({ ok: false, error: 'Negocio no encontrado' });
+
+    const parentProps = parentRows[0].props || {};
+
+    const color    = trim(req.body?.color)    || parentProps?.branding?.primary || '#1976d2';
+    const logo_url = trim(req.body?.logo_url) || parentProps?.branding?.logo_url || null;
+    const address  = req.body?.address  ?? parentProps?.address  ?? {};
+    const contacts = req.body?.contacts ?? parentProps?.contact  ?? {};
+    const props    = req.body?.props    ?? {};
 
     const { rows } = await pool.query(
       `INSERT INTO app_branches
          (business_id, name, color, logo_url, address, contacts, props)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [
-        bizId,
-        String(name).trim(),
-        branchColor,
-        branchLogo,
-        JSON.stringify(branchAddr),
-        JSON.stringify(branchCont),
-        JSON.stringify(branchProps),
-      ]
+      [bizId, name, color, logo_url,
+       JSON.stringify(address),
+       JSON.stringify(contacts),
+       JSON.stringify(props)]
     );
-    res.status(201).json({ branch: rows[0] });
-  } catch (err) {
-    console.error("[branches] createBranch:", err);
-    res.status(500).json({ error: "Error al crear sucursal" });
+
+    res.status(201).json({ ok: true, branch: rows[0] });
+  } catch (e) {
+    console.error('[branches] createBranch:', e);
+    next(e);
   }
-}
+};
 
-// ─── PATCH /api/businesses/:bizId/branches/:branchId ────────────────────────
-// Actualización parcial: solo toca los campos enviados
-async function updateBranch(req, res) {
-  const { bizId, branchId } = req.params;
-  const { name, color, logo_url, address, contacts, props } = req.body;
-
+/**
+ * PATCH /api/businesses/:bizId/branches/:branchId
+ * Actualización parcial — solo toca los campos enviados.
+ * Body: { name?, color?, logo_url?, address?, contacts?, props? }
+ */
+exports.updateBranch = async (req, res, next) => {
   try {
-    const existing = await pool.query(
-      "SELECT * FROM app_branches WHERE id = $1 AND business_id = $2",
+    const bizId    = Number(req.params.bizId);
+    const branchId = Number(req.params.branchId);
+
+    const { rows: curr } = await pool.query(
+      `SELECT * FROM app_branches WHERE id = $1 AND business_id = $2`,
       [branchId, bizId]
     );
-    if (!existing.rows[0]) {
-      return res.status(404).json({ error: "Sucursal no encontrada" });
-    }
-    const curr = existing.rows[0];
+    if (!curr[0]) return res.status(404).json({ ok: false, error: 'Sucursal no encontrada' });
 
-    const newName     = normalizeEmpty(name)      ?? curr.name;
-    const newColor    = normalizeEmpty(color)      ?? curr.color;
-    const newLogoUrl  = logo_url !== undefined ? normalizeEmpty(logo_url) : curr.logo_url;
-    const newAddress  = address  !== undefined ? address  : curr.address;
-    const newContacts = contacts !== undefined ? contacts : curr.contacts;
-    const newProps    = props    !== undefined
-      ? { ...curr.props, ...props }  // merge profundo de props
-      : curr.props;
+    const c = curr[0];
+    const name     = trim(req.body?.name)     ?? c.name;
+    const color    = trim(req.body?.color)    ?? c.color;
+    const logo_url = req.body?.logo_url !== undefined ? trim(req.body.logo_url) : c.logo_url;
+    const address  = req.body?.address  !== undefined ? req.body.address  : c.address;
+    const contacts = req.body?.contacts !== undefined ? req.body.contacts : c.contacts;
+    // props: merge profundo para no pisar claves existentes
+    const props    = req.body?.props !== undefined
+      ? { ...c.props, ...req.body.props }
+      : c.props;
 
     const { rows } = await pool.query(
       `UPDATE app_branches
-       SET name = $1, color = $2, logo_url = $3,
-           address = $4, contacts = $5, props = $6
-       WHERE id = $7 AND business_id = $8
+       SET name=$1, color=$2, logo_url=$3, address=$4, contacts=$5, props=$6, updated_at=NOW()
+       WHERE id=$7 AND business_id=$8
        RETURNING *`,
-      [
-        newName,
-        newColor,
-        newLogoUrl,
-        JSON.stringify(newAddress),
-        JSON.stringify(newContacts),
-        JSON.stringify(newProps),
-        branchId,
-        bizId,
-      ]
+      [name, color, logo_url,
+       JSON.stringify(address),
+       JSON.stringify(contacts),
+       JSON.stringify(props),
+       branchId, bizId]
     );
-    res.json({ branch: rows[0] });
-  } catch (err) {
-    console.error("[branches] updateBranch:", err);
-    res.status(500).json({ error: "Error al actualizar sucursal" });
-  }
-}
 
-// ─── DELETE /api/businesses/:bizId/branches/:branchId ───────────────────────
-// Eliminar solo si no tiene ventas asociadas (protección de datos)
-async function deleteBranch(req, res) {
-  const { bizId, branchId } = req.params;
+    res.json({ ok: true, branch: rows[0] });
+  } catch (e) {
+    console.error('[branches] updateBranch:', e);
+    next(e);
+  }
+};
+
+/**
+ * DELETE /api/businesses/:bizId/branches/:branchId
+ * Protegido: no se puede eliminar si tiene ventas o compras asociadas.
+ */
+exports.deleteBranch = async (req, res, next) => {
   try {
-    // Verificar si tiene ventas
-    const salesCheck = await pool.query(
-      "SELECT 1 FROM sales_daily_items_branch WHERE branch_id = $1 LIMIT 1",
+    const bizId    = Number(req.params.bizId);
+    const branchId = Number(req.params.branchId);
+
+    // Verificar ventas asociadas
+    const { rows: salesCheck } = await pool.query(
+      `SELECT 1 FROM sales_daily_items_branch WHERE branch_id = $1 LIMIT 1`,
       [branchId]
     );
-    if (salesCheck.rows.length > 0) {
+    if (salesCheck.length > 0) {
       return res.status(409).json({
-        error: "No se puede eliminar una sucursal con ventas registradas",
-        code: "BRANCH_HAS_SALES",
+        ok: false,
+        error: 'No se puede eliminar una sucursal con ventas registradas',
+        code: 'BRANCH_HAS_SALES',
+      });
+    }
+
+    // Verificar compras asociadas
+    const { rows: purchasesCheck } = await pool.query(
+      `SELECT 1 FROM purchase_items WHERE branch_id = $1 LIMIT 1`,
+      [branchId]
+    );
+    if (purchasesCheck.length > 0) {
+      return res.status(409).json({
+        ok: false,
+        error: 'No se puede eliminar una sucursal con compras registradas',
+        code: 'BRANCH_HAS_PURCHASES',
       });
     }
 
     const { rowCount } = await pool.query(
-      "DELETE FROM app_branches WHERE id = $1 AND business_id = $2",
+      `DELETE FROM app_branches WHERE id = $1 AND business_id = $2`,
       [branchId, bizId]
     );
-    if (rowCount === 0) {
-      return res.status(404).json({ error: "Sucursal no encontrada" });
-    }
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("[branches] deleteBranch:", err);
-    res.status(500).json({ error: "Error al eliminar sucursal" });
-  }
-}
+    if (rowCount === 0) return res.status(404).json({ ok: false, error: 'Sucursal no encontrada' });
 
-// ─── GET /api/businesses/:bizId/branches/has-branches ───────────────────────
-// Devuelve si el negocio tiene sucursales (para que el front decida mostrar el selector)
-async function hasBranches(req, res) {
-  const { bizId } = req.params;
-  try {
-    const { rows } = await pool.query(
-      "SELECT COUNT(*) AS count FROM app_branches WHERE business_id = $1",
-      [bizId]
-    );
-    res.json({ hasBranches: parseInt(rows[0].count) > 0, count: parseInt(rows[0].count) });
-  } catch (err) {
-    console.error("[branches] hasBranches:", err);
-    res.status(500).json({ error: "Error al verificar sucursales" });
+    res.json({ ok: true, deleted: branchId });
+  } catch (e) {
+    console.error('[branches] deleteBranch:', e);
+    next(e);
   }
-}
-
-module.exports = {
-  listBranches,
-  getBranch,
-  createBranch,
-  updateBranch,
-  deleteBranch,
-  hasBranches,
 };

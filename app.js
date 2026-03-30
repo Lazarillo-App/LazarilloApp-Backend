@@ -29,7 +29,6 @@ const purchasesRoutes = require('./routes/purchasesRoutes');
 const salesBatchesRoutes = require('./routes/salesRoutes');          // ← NUEVO
 const { resolveInsumoBusiness } = require('./middleware/resolveInsumoBusiness');
 const divisionsRoutes = require('./routes/divisionsRoutes');
-const branchesRoutes = require('./routes/branchRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 const organizationsRoutes = require('./routes/organizationsRoutes');
 const recetasRoutes       = require('./routes/recetasRoutes');
@@ -135,8 +134,7 @@ app.use('/api', authRequired, loadActiveBusiness);
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/purchases', authRequired, purchasesRoutes);
-app.use('/api/sales', salesBatchesRoutes);                           // ← NUEVO
-app.use('/api/branches', branchesRoutes);
+app.use('/api/sales', salesBatchesRoutes);                    
 app.use('/api/divisions', divisionsRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
 app.use('/api/insumos', insumosElaboradosRoutes);
