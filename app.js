@@ -26,6 +26,7 @@ const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
 const purchasesRoutes = require('./routes/purchasesRoutes');
+const salesBatchesRoutes = require('./routes/salesRoutes');          // ← NUEVO
 const { resolveInsumoBusiness } = require('./middleware/resolveInsumoBusiness');
 const divisionsRoutes = require('./routes/divisionsRoutes');
 const branchesRoutes = require('./routes/branchRoutes');
@@ -131,12 +132,10 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 app.use('/api', authRequired, loadActiveBusiness);
 
 // módulos sin :businessId en la URL
-// Insumos: resolveInsumoBusiness redirige al principal para datos globales
-// Los grupos usan X-Business-Id header directamente (getBusinessId lo lee primero)
-// así que cada negocio opera sobre sus propios grupos sin problema
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/purchases', authRequired, purchasesRoutes);
+app.use('/api/sales', salesBatchesRoutes);                           // ← NUEVO
 app.use('/api/branches', branchesRoutes);
 app.use('/api/divisions', divisionsRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
