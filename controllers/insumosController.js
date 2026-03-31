@@ -26,7 +26,6 @@ function sendError(res, status, message) {
   return res.status(status).json({ ok: false, error: message });
 }
 
-// ✅ executor puede ser pool o client (para transacciones)
 async function assertGroup(executor, bizId, groupId) {
   const r = await executor.query(
     'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
@@ -36,10 +35,10 @@ async function assertGroup(executor, bizId, groupId) {
 }
 
 if (process.env.NODE_ENV !== 'production') {
-  console.log('💡 insumosController.js cargado (OPTIMIZADO - ESPEJO DE AGRUPACIONES)');
+  console.log('💡 insumosController.js cargado (es_elaborado como fuente de verdad)');
 }
 
-// ===================== INSUMOS: LISTAR OPTIMIZADO =====================
+// ===================== INSUMOS: LISTAR =====================
 exports.listar = async (req, res) => {
   try {
     const {
@@ -65,11 +64,9 @@ exports.listar = async (req, res) => {
     const where = [];
     const params = [];
 
-    // ✅ SIEMPRE calificar con alias i.
     params.push(businessId);
     where.push(`i.business_id = $${params.length}`);
 
-    // ✅ Búsqueda por nombre o código (también calificado)
     if (search) {
       params.push(`%${search}%`, `%${search}%`);
       where.push(
@@ -77,31 +74,26 @@ exports.listar = async (req, res) => {
       );
     }
 
-    // ✅ Filtro por rubro
     if (rubro) {
       params.push(String(rubro));
       where.push(`i.rubro = $${params.length}`);
     }
 
-    // ✅ Filtro por unidad de medida
     if (unidadMed) {
       params.push(unidadMed);
       where.push(`i.unidad_med = $${params.length}`);
     }
 
-    // ✅ Filtro por origen
     if (origen) {
       params.push(origen);
       where.push(`i.origen = $${params.length}`);
     }
 
-    // ✅ Filtro por estado
     if (estado && estado !== 'all') {
       params.push(estado);
       where.push(`i.estado = $${params.length}`);
     }
 
-    // ✅ Filtro por agrupación específica
     if (groupId) {
       params.push(Number(groupId));
       where.push(`
@@ -116,7 +108,6 @@ exports.listar = async (req, res) => {
       `);
     }
 
-    // ✅ Filtro por insumos sin agrupar
     if (sinAgrupacion === 'true') {
       where.push(`
         NOT EXISTS (
@@ -129,29 +120,14 @@ exports.listar = async (req, res) => {
       `);
     }
 
-    // ✅ Filtro por elaborados/no elaborados
+    // ✅ FUENTE DE VERDAD ÚNICA: es_elaborado en la tabla insumos
+    // Ya no consultamos insumo_rubros.es_elaborador para este filtro.
     if (elaborados === 'true') {
-      where.push(`
-        EXISTS (
-          SELECT 1
-          FROM insumo_rubros ir2
-          WHERE ir2.business_id = i.business_id
-            AND ir2.codigo::text = i.rubro
-            AND ir2.es_elaborador = true
-        )
-      `);
+      where.push(`i.es_elaborado = true`);
     }
 
     if (elaborados === 'false') {
-      where.push(`
-        NOT EXISTS (
-          SELECT 1
-          FROM insumo_rubros ir2
-          WHERE ir2.business_id = i.business_id
-            AND ir2.codigo::text = i.rubro
-            AND ir2.es_elaborador = true
-        )
-      `);
+      where.push(`(i.es_elaborado = false OR i.es_elaborado IS NULL)`);
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -160,9 +136,6 @@ exports.listar = async (req, res) => {
 
     const safeOrderBy = ALLOWED_ORDER_BY.includes(orderBy) ? orderBy : 'nombre';
     const safeOrder = order === 'DESC' ? 'DESC' : 'ASC';
-
-    // ✅ Importante: si ORDER BY usa columnas, deben ser i.<col> o un alias existente
-    // Si tu ALLOWED_ORDER_BY tiene "nombre", "estado", etc, conviene mapearlos a i.nombre, i.estado...
     const orderBySql = safeOrderBy.includes('.') ? safeOrderBy : `i.${safeOrderBy}`;
 
     const [dataRes, countRes] = await Promise.all([
@@ -172,7 +145,6 @@ exports.listar = async (req, res) => {
           i.*,
           ir.nombre as rubro_nombre,
           ir.es_elaborador,
-          -- Precio promedio y última compra via LATERAL (un solo acceso a purchase_items)
           lc.precio_promedio,
           lc.precio_ultima_compra,
           lc.fecha_ultima_compra,
@@ -208,7 +180,7 @@ exports.listar = async (req, res) => {
         ORDER BY ${orderBySql} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}
-      `,
+        `,
         [...params, hardLimit, offset]
       ),
       pool.query(
@@ -240,10 +212,6 @@ exports.listar = async (req, res) => {
 };
 
 // ===================== VISTA DE ÁRBOL (RUBROS) =====================
-/**
- * 🆕 Obtiene la estructura de árbol de rubros para el sidebar
- * Similar a como agrupaciones tiene su vista de árbol
- */
 exports.getTreeView = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
@@ -251,14 +219,16 @@ exports.getTreeView = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    // Obtener rubros con conteo de insumos
+    // ✅ Contamos insumos separados por es_elaborado (fuente de verdad),
+    //    agrupados por rubro para mantener la estructura del sidebar.
     const { rows: rubros } = await pool.query(
       `
       SELECT 
         ir.codigo,
         ir.nombre,
         ir.es_elaborador,
-        COUNT(i.id)::int as count_insumos
+        COUNT(i.id) FILTER (WHERE i.es_elaborado = true)::int            AS count_elaborados,
+        COUNT(i.id) FILTER (WHERE i.es_elaborado = false OR i.es_elaborado IS NULL)::int AS count_no_elaborados
       FROM insumo_rubros ir
       LEFT JOIN insumos i 
         ON i.business_id = ir.business_id 
@@ -271,11 +241,6 @@ exports.getTreeView = async (req, res) => {
       [businessId]
     );
 
-    // Separar por elaborados/no elaborados
-    const elaborados = rubros.filter(r => r.es_elaborador);
-    const noElaborados = rubros.filter(r => !r.es_elaborador);
-
-    // Contar insumos sin agrupar
     const { rows: sinAgrupar } = await pool.query(
       `
       SELECT COUNT(*)::int as count
@@ -293,16 +258,29 @@ exports.getTreeView = async (req, res) => {
       [businessId]
     );
 
+    // Totales globales por es_elaborado (independiente del rubro)
+    const totalElaborados = rubros.reduce((sum, r) => sum + (r.count_elaborados || 0), 0);
+    const totalNoElaborados = rubros.reduce((sum, r) => sum + (r.count_no_elaborados || 0), 0);
+
+    // Rubros que tienen al menos un elaborado / no elaborado
+    const rubrosConElaborados = rubros
+      .filter(r => r.count_elaborados > 0)
+      .map(r => ({ ...r, count_insumos: r.count_elaborados }));
+
+    const rubrosConNoElaborados = rubros
+      .filter(r => r.count_no_elaborados > 0)
+      .map(r => ({ ...r, count_insumos: r.count_no_elaborados }));
+
     res.json({
       ok: true,
       data: {
         elaborados: {
-          count: elaborados.reduce((sum, r) => sum + r.count_insumos, 0),
-          rubros: elaborados,
+          count: totalElaborados,
+          rubros: rubrosConElaborados,
         },
         no_elaborados: {
-          count: noElaborados.reduce((sum, r) => sum + r.count_insumos, 0),
-          rubros: noElaborados,
+          count: totalNoElaborados,
+          rubros: rubrosConNoElaborados,
         },
         sin_agrupar: {
           count: sinAgrupar[0].count,
@@ -316,10 +294,6 @@ exports.getTreeView = async (req, res) => {
 };
 
 // ===================== ESTADÍSTICAS DEL SIDEBAR =====================
-/**
- * 🆕 Obtiene estadísticas para el sidebar
- * Similar a getStats de agrupaciones
- */
 exports.getStats = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
@@ -330,19 +304,15 @@ exports.getStats = async (req, res) => {
     const { rows } = await pool.query(
       `
       SELECT
-        COUNT(*)::int as total,
-        COUNT(*) FILTER (WHERE estado = 'activo')::int as activos,
-        COUNT(*) FILTER (WHERE estado = 'discontinuado')::int as discontinuados,
-        COUNT(*) FILTER (WHERE origen = 'maxi')::int as de_maxi,
-        COUNT(*) FILTER (WHERE origen = 'manual')::int as manuales,
-        COUNT(*) FILTER (
-          WHERE EXISTS (
-            SELECT 1 FROM insumo_rubros ir
-            WHERE ir.business_id = insumos.business_id
-              AND ir.codigo::text = insumos.rubro
-              AND ir.es_elaborador = true
-          )
-        )::int as elaborados,
+        COUNT(*)::int                                                        AS total,
+        COUNT(*) FILTER (WHERE estado = 'activo')::int                      AS activos,
+        COUNT(*) FILTER (WHERE estado = 'discontinuado')::int               AS discontinuados,
+        COUNT(*) FILTER (WHERE origen = 'maxi')::int                        AS de_maxi,
+        COUNT(*) FILTER (WHERE origen = 'manual')::int                      AS manuales,
+        -- ✅ FUENTE DE VERDAD ÚNICA: es_elaborado
+        COUNT(*) FILTER (WHERE es_elaborado = true)::int                    AS elaborados,
+        COUNT(*) FILTER (WHERE es_elaborado = false OR es_elaborado IS NULL)::int AS no_elaborados,
+        COUNT(*) FILTER (WHERE es_elaborado_manual = true)::int             AS sobrescritos_manualmente,
         COUNT(*) FILTER (
           WHERE NOT EXISTS (
             SELECT 1 FROM insumo_group_items gi
@@ -350,7 +320,7 @@ exports.getStats = async (req, res) => {
             WHERE gi.insumo_id = insumos.id
               AND g.business_id = insumos.business_id
           )
-        )::int as sin_agrupar
+        )::int AS sin_agrupar
       FROM insumos
       WHERE business_id = $1
       `,
@@ -363,6 +333,95 @@ exports.getStats = async (req, res) => {
     });
   } catch (e) {
     console.error('getStats error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ===================== TOGGLE ELABORADO (marca/desmarca manual) =====================
+/**
+ * PATCH /api/insumos/:id/elaborado
+ * Marca o desmarca un insumo como elaborado.
+ * Setea es_elaborado_manual = true para que el sync de Maxi no lo pise.
+ */
+exports.toggleElaborado = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const { es_elaborado } = req.body;
+    if (typeof es_elaborado !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'es_elaborado debe ser boolean' });
+    }
+
+    const { rows } = await pool.query(
+      `
+      UPDATE insumos
+      SET
+        es_elaborado        = $1,
+        es_elaborado_manual = true,   -- el usuario tomó control, el sync no pisa esto
+        updated_at          = NOW()
+      WHERE id = $2 AND business_id = $3
+      RETURNING *
+      `,
+      [es_elaborado, id, businessId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+
+    res.json({
+      ok: true,
+      data: rows[0],
+      message: es_elaborado ? 'Insumo marcado como elaborado' : 'Insumo marcado como no elaborado',
+    });
+  } catch (e) {
+    console.error('toggleElaborado error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+/**
+ * POST /api/insumos/elaborado/bulk
+ * Marca/desmarca múltiples insumos como elaborados.
+ */
+exports.toggleElaboradoBulk = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const { insumo_ids, es_elaborado } = req.body;
+    if (!Array.isArray(insumo_ids) || !insumo_ids.length) {
+      return res.status(400).json({ ok: false, error: 'insumo_ids debe ser un array no vacío' });
+    }
+    if (typeof es_elaborado !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'es_elaborado debe ser boolean' });
+    }
+
+    const { rowCount } = await pool.query(
+      `
+      UPDATE insumos
+      SET
+        es_elaborado        = $1,
+        es_elaborado_manual = true,
+        updated_at          = NOW()
+      WHERE id = ANY($2::int[]) AND business_id = $3
+      `,
+      [es_elaborado, insumo_ids, businessId]
+    );
+
+    res.json({
+      ok: true,
+      updated: rowCount,
+      message: `${rowCount} insumo(s) actualizado(s)`,
+    });
+  } catch (e) {
+    console.error('toggleElaboradoBulk error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 };
@@ -380,18 +439,17 @@ exports.crearManual = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
     }
 
-    const estado = 'activo';
-
     const { rows } = await pool.query(
       `
       INSERT INTO insumos
       (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
        envase, vencimiento, resumen, cant_ingredientes,
-       agrupacion_base, costo_ref, nota, origen, estado)
+       agrupacion_base, costo_ref, nota, origen, estado,
+       es_elaborado, es_elaborado_manual)
       VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
       RETURNING *
-    `,
+      `,
       [
         businessId,
         b.codigoMaxi ?? null,
@@ -407,7 +465,10 @@ exports.crearManual = async (req, res) => {
         num(b.costoRef),
         b.nota ?? null,
         b.origen ?? 'manual',
-        estado,
+        'activo',
+        b.es_elaborado ?? false,
+        // si lo crean con es_elaborado explícito → marcar como manual
+        b.es_elaborado !== undefined ? true : false,
       ]
     );
 
@@ -435,12 +496,18 @@ exports.actualizar = async (req, res) => {
       sets.push(`${c} = $${vals.length}`);
     };
 
-    if (b.nombre !== undefined) push('nombre', b.nombre);
+    if (b.nombre !== undefined)    push('nombre', b.nombre);
     if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
-    if (b.rubro !== undefined) push('rubro', b.rubro);
-    if (b.estado !== undefined) push('estado', b.estado);
-    if (b.nota !== undefined) push('nota', b.nota);
+    if (b.rubro !== undefined)     push('rubro', b.rubro);
+    if (b.estado !== undefined)    push('estado', b.estado);
+    if (b.nota !== undefined)      push('nota', b.nota);
+
+    // ✅ Si actualizan es_elaborado desde este endpoint también, lo respetamos
+    if (b.es_elaborado !== undefined) {
+      push('es_elaborado', b.es_elaborado);
+      push('es_elaborado_manual', true);
+    }
 
     if (!sets.length) return res.json({ ok: true });
 
@@ -453,7 +520,7 @@ exports.actualizar = async (req, res) => {
       WHERE id = $${vals.length - 1}
         AND business_id = $${vals.length}
       RETURNING *
-    `,
+      `,
       vals
     );
 
@@ -477,11 +544,8 @@ exports.eliminar = async (req, res) => {
     }
 
     const r = await pool.query(
-      `
-      UPDATE insumos
-      SET estado = 'discontinuado', updated_at = NOW()
-      WHERE id = $1 AND business_id = $2
-    `,
+      `UPDATE insumos SET estado = 'discontinuado', updated_at = NOW()
+       WHERE id = $1 AND business_id = $2`,
       [id, businessId]
     );
 
@@ -517,30 +581,26 @@ exports.bulkUpsert = async (req, res) => {
 
       for (const it of items) {
         const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
-        if (!codigo || String(codigo).trim() === '') {
-          skipped++;
-          continue;
-        }
+        if (!codigo || String(codigo).trim() === '') { skipped++; continue; }
 
-        const nombre = (it.nombre ?? '').trim();
+        const nombre    = (it.nombre ?? '').trim();
         const unidad_med = it.unidadMed ?? it.unidad_med ?? null;
         const precio_ref = it.precioRef ?? it.precio_ref ?? null;
-        const rubro = it.rubro ?? null;
-        const origen = it.origen ?? 'manual';
-        const estado = 'activo';
+        const rubro     = it.rubro ?? null;
+        const origen    = it.origen ?? 'manual';
 
         const r = await client.query(
           `INSERT INTO insumos
            (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'activo')
            ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
-             nombre = EXCLUDED.nombre,
-             unidad_med = EXCLUDED.unidad_med,
-             precio_ref = EXCLUDED.precio_ref,
-             rubro = EXCLUDED.rubro,
-             origen = EXCLUDED.origen,
-             estado = EXCLUDED.estado,
-             updated_at = NOW()
+             nombre      = EXCLUDED.nombre,
+             unidad_med  = EXCLUDED.unidad_med,
+             precio_ref  = EXCLUDED.precio_ref,
+             rubro       = EXCLUDED.rubro,
+             origen      = EXCLUDED.origen,
+             estado      = EXCLUDED.estado,
+             updated_at  = NOW()
            RETURNING (xmax = 0) AS inserted`,
           [
             businessId,
@@ -550,7 +610,6 @@ exports.bulkUpsert = async (req, res) => {
             precio_ref == null ? null : Number(precio_ref),
             rubro,
             origen,
-            estado,
           ]
         );
 
@@ -566,15 +625,7 @@ exports.bulkUpsert = async (req, res) => {
       client.release();
     }
 
-    return res.json({
-      ok: true,
-      summary: {
-        inserted,
-        updated,
-        skipped,
-        total: inserted + updated + skipped
-      }
-    });
+    return res.json({ ok: true, summary: { inserted, updated, skipped, total: inserted + updated + skipped } });
   } catch (e) {
     console.error('bulkUpsert error:', e.message);
     return res.status(500).json({ ok: false, error: e.message });
@@ -588,22 +639,15 @@ exports.bulkUpsertCSV = async (req, res) => {
     }
 
     const text = req.file.buffer.toString('utf8');
-    const rows = parse(text, {
-      columns: true,
-      skip_empty_lines: true,
-      trim: true
-    });
+    const rows = parse(text, { columns: true, skip_empty_lines: true, trim: true });
 
     req.body = rows.map(r => ({
       codigoMaxi: r.codigoMaxi ?? r.codigo_maxi ?? r.codigo,
-      nombre: r.nombre ?? '',
-      unidadMed: r.unidadMed ?? r.unidad_med ?? null,
-      precioRef: r.precioRef ?? r.precio_ref ?? null,
-      rubro: r.rubro ?? null,
-      origen: r.origen ?? 'csv',
-      estado: String(r.estado ?? r.activo ?? 'activo').toLowerCase() === 'discontinuado'
-        ? 'discontinuado'
-        : 'activo'
+      nombre:     r.nombre ?? '',
+      unidadMed:  r.unidadMed ?? r.unidad_med ?? null,
+      precioRef:  r.precioRef ?? r.precio_ref ?? null,
+      rubro:      r.rubro ?? null,
+      origen:     r.origen ?? 'csv',
     }));
 
     return exports.bulkUpsert(req, res);
@@ -621,17 +665,15 @@ exports.__cleanupNullInsumos = async (req, res) => {
 
     const r1 = await client.query(`
       DELETE FROM insumos
-      WHERE nombre IS NULL OR TRIM(COALESCE(nombre, '')) = ''
-    `);
+      WHERE nombre IS NULL OR TRIM(COALESCE(nombre, '')) = ''`);
 
     const r2 = await client.query(`
       UPDATE insumos
-      SET nombre = NULLIF(TRIM(nombre), ''),
+      SET nombre     = NULLIF(TRIM(nombre), ''),
           unidad_med = NULLIF(TRIM(unidad_med), ''),
           updated_at = NOW()
       WHERE (nombre IS NOT NULL AND nombre <> TRIM(nombre))
-         OR (unidad_med IS NOT NULL AND unidad_med <> TRIM(unidad_med))
-    `);
+         OR (unidad_med IS NOT NULL AND unidad_med <> TRIM(unidad_med))`);
 
     const r3 = await client.query(`
       DELETE FROM insumos a
@@ -639,16 +681,14 @@ exports.__cleanupNullInsumos = async (req, res) => {
       WHERE a.id > b.id
         AND a.codigo_maxi IS NOT NULL
         AND a.codigo_maxi = b.codigo_maxi
-        AND a.business_id = b.business_id
-    `);
+        AND a.business_id = b.business_id`);
 
     await client.query('COMMIT');
-
     return res.json({
       ok: true,
       removed_without_name: r1.rowCount,
       normalized: r2.rowCount,
-      removed_dupes_by_code: r3.rowCount
+      removed_dupes_by_code: r3.rowCount,
     });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -668,19 +708,11 @@ exports.listarMaxi = async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT *
-       FROM insumos
-       WHERE business_id = $1
-         AND origen = 'maxi'
-       ORDER BY nombre ASC`,
+      `SELECT * FROM insumos WHERE business_id = $1 AND origen = 'maxi' ORDER BY nombre ASC`,
       [businessId]
     );
 
-    return res.json({
-      ok: true,
-      business_id: businessId,
-      items: rows,
-    });
+    return res.json({ ok: true, business_id: businessId, items: rows });
   } catch (e) {
     console.error('listarMaxi error:', e);
     return res.status(500).json({ ok: false, error: e.message });
@@ -697,16 +729,36 @@ exports.syncFromMaxi = async (req, res) => {
     const normItems = normalizarInsumosMaxi(raw);
 
     // 2️⃣ Upsert con detección de cambios
-    const summary = await upsertFromMaxi(
-      businessId,
-      normItems,
-      { useIncomingEstado: true }
-    );
+    const summary = await upsertFromMaxi(businessId, normItems, { useIncomingEstado: true });
 
-    // 3️⃣ 🔔 Notificación de RESUMEN (NO revisión)
-    const changedCount =
-      (summary.inserted || 0) + (summary.updated || 0);
+    // 3️⃣ ✅ Auto-inicializar es_elaborado desde el rubro para insumos NO sobrescritos manualmente
+    //    Solo toca los que es_elaborado_manual = false/null
+    try {
+      const { rowCount: autoMarked } = await pool.query(
+        `
+        UPDATE insumos i
+        SET es_elaborado = true,
+            updated_at   = NOW()
+        FROM insumo_rubros ir
+        WHERE ir.business_id = i.business_id
+          AND ir.codigo::text = i.rubro
+          AND ir.es_elaborador = true
+          AND i.business_id = $1
+          AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
+          AND i.es_elaborado IS DISTINCT FROM true
+        `,
+        [businessId]
+      );
 
+      if (autoMarked > 0) {
+        console.log(`[syncFromMaxi] Auto-marcados como elaborados: ${autoMarked} insumos`);
+      }
+    } catch (e) {
+      console.error('[syncFromMaxi] auto-mark elaborados error:', e.message);
+    }
+
+    // 4️⃣ Notificación de resumen
+    const changedCount = (summary.inserted || 0) + (summary.updated || 0);
     if (changedCount > 0) {
       await createSyncNotificationForBusinessUsers({
         businessId,
@@ -717,8 +769,7 @@ exports.syncFromMaxi = async (req, res) => {
           `Actualizados: ${summary.updated || 0}, ` +
           `Sin cambios: ${summary.unchanged || 0}.`,
         metadata: {
-          scope: 'insumos',
-          source: 'maxi',
+          scope: 'insumos', source: 'maxi',
           inserted: summary.inserted || 0,
           updated: summary.updated || 0,
           unchanged: summary.unchanged || 0,
@@ -727,7 +778,7 @@ exports.syncFromMaxi = async (req, res) => {
       });
     }
 
-    // 4️⃣ 🔔 Notificaciones POR ÍTEM (solo si requiere revisión)
+    // 5️⃣ Notificaciones por ítem (solo si requiere revisión)
     for (const ch of summary.changes || []) {
       const reviewDiffs = (ch.diffs || []).filter(d => d.policy === 'review');
       if (!reviewDiffs.length) continue;
@@ -740,43 +791,27 @@ exports.syncFromMaxi = async (req, res) => {
           .map(d => `• ${d.field}: "${d.before ?? ''}" → "${d.after ?? ''}"`)
           .join('\n'),
         metadata: {
-          scope: 'insumos',
-          source: 'maxi',
-          policy: 'review',
+          scope: 'insumos', source: 'maxi', policy: 'review',
           insumo_id: ch.insumo_id,
           codigo_maxi: ch.codigo_maxi,
           diffs: reviewDiffs,
         },
         actorUserId: userId,
-        // onlyAdmins: true  // 🔒 futuro
       });
     }
 
-    // 5️⃣ Auto-assign (dominio insumos)
+    // 6️⃣ Auto-assign
     let auto = { assigned: 0, details: [] };
     try {
       auto = await autoAssignNewInsumos(businessId);
-
       if (auto.assigned > 0 && userId) {
-        await notifyAutoAssign({
-          businessId,
-          userId,
-          result: auto,
-          entity: 'insumos',
-        });
+        await notifyAutoAssign({ businessId, userId, result: auto, entity: 'insumos' });
       }
     } catch (e) {
       console.error('[syncFromMaxi] autoAssign error:', e.message);
     }
 
-    // 6️⃣ Respuesta técnica
-    res.json({
-      ok: true,
-      scope: 'insumos',
-      ...summary,
-      auto_assigned: auto.assigned,
-    });
-
+    res.json({ ok: true, scope: 'insumos', ...summary, auto_assigned: auto.assigned });
   } catch (e) {
     console.error('syncFromMaxi error:', e);
     res.status(500).json({ ok: false, error: e.message });
@@ -805,9 +840,31 @@ exports.syncRubrosFromMaxi = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const raw = await fetchMaxiInsumosRubros({ businessId, req });
+    const raw  = await fetchMaxiInsumosRubros({ businessId, req });
     const norm = normalizarInsumosRubros(raw);
     const summary = await insumosRubrosRepo.upsertRubrosForBusiness(businessId, norm);
+
+    // ✅ Después de actualizar rubros, re-inicializar es_elaborado para insumos
+    //    que no fueron sobrescritos manualmente y cuyo nuevo rubro es elaborador.
+    try {
+      await pool.query(
+        `
+        UPDATE insumos i
+        SET es_elaborado = true,
+            updated_at   = NOW()
+        FROM insumo_rubros ir
+        WHERE ir.business_id = i.business_id
+          AND ir.codigo::text = i.rubro
+          AND ir.es_elaborador = true
+          AND i.business_id = $1
+          AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
+          AND i.es_elaborado IS DISTINCT FROM true
+        `,
+        [businessId]
+      );
+    } catch (e) {
+      console.error('[syncRubrosFromMaxi] auto-mark error:', e.message);
+    }
 
     return res.json({
       ok: true,
@@ -823,7 +880,6 @@ exports.syncRubrosFromMaxi = async (req, res) => {
   }
 };
 
-// ===================== INSUMOS: SYNC COMPRAS (opcional) =====================
 exports.syncDesdeCompras = async (req, res) => {
   if (String(process.env.ENABLE_SYNC_COMPRAS || 'false').toLowerCase() !== 'true') {
     return res.status(503).json({ ok: false, error: 'syncDesdeCompras deshabilitado' });
@@ -919,27 +975,21 @@ exports.groups_create = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const nombre = String(req.body.nombre || '').trim();
+  const nombre     = String(req.body.nombre || '').trim();
   const descripcion = req.body.descripcion ?? null;
   if (!nombre) return sendError(res, 400, 'El nombre es obligatorio');
 
   try {
     const { rows } = await pool.query(
-      `
-      INSERT INTO insumo_groups (business_id, nombre, descripcion)
-      VALUES ($1, $2, $3)
-      RETURNING id, business_id, nombre, descripcion, es_favorita,
-                created_at, updated_at
-      `,
+      `INSERT INTO insumo_groups (business_id, nombre, descripcion)
+       VALUES ($1, $2, $3)
+       RETURNING id, business_id, nombre, descripcion, es_favorita, created_at, updated_at`,
       [bizId, nombre, descripcion]
     );
-
     return res.status(201).json({ ok: true, data: rows[0] });
   } catch (err) {
     console.error('[groups_create] error:', err);
-    if (err.code === '23505') {
-      return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
-    }
+    if (err.code === '23505') return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
     return sendError(res, 500, 'Error al crear agrupación de insumos');
   }
 };
@@ -951,54 +1001,35 @@ exports.groups_update = async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
-  const nombre = req.body.nombre != null ? String(req.body.nombre).trim() : null;
+  const nombre      = req.body.nombre != null ? String(req.body.nombre).trim() : null;
   const descripcion = req.body.descripcion ?? null;
-  const esFavorita = req.body.es_favorita;
+  const esFavorita  = req.body.es_favorita;
 
   if (!nombre && descripcion == null && esFavorita == null) {
     return sendError(res, 400, 'Nada para actualizar');
   }
 
-  const sets = [];
+  const sets   = [];
   const values = [id, bizId];
   let idx = values.length;
 
-  if (nombre != null && nombre !== '') {
-    idx += 1;
-    sets.push(`nombre = $${idx}`);
-    values.push(nombre);
-  }
-  if (descripcion !== undefined) {
-    idx += 1;
-    sets.push(`descripcion = $${idx}`);
-    values.push(descripcion);
-  }
-  if (esFavorita !== undefined) {
-    idx += 1;
-    sets.push(`es_favorita = $${idx}`);
-    values.push(Boolean(esFavorita));
-  }
+  if (nombre != null && nombre !== '') { idx++; sets.push(`nombre = $${idx}`);      values.push(nombre); }
+  if (descripcion !== undefined)        { idx++; sets.push(`descripcion = $${idx}`); values.push(descripcion); }
+  if (esFavorita !== undefined)         { idx++; sets.push(`es_favorita = $${idx}`); values.push(Boolean(esFavorita)); }
   sets.push('updated_at = now()');
 
   try {
     const { rows } = await pool.query(
-      `
-      UPDATE insumo_groups
-      SET ${sets.join(', ')}
-      WHERE id = $1 AND business_id = $2
-      RETURNING id, business_id, nombre, descripcion, es_favorita,
-                created_at, updated_at
-      `,
+      `UPDATE insumo_groups SET ${sets.join(', ')}
+       WHERE id = $1 AND business_id = $2
+       RETURNING id, business_id, nombre, descripcion, es_favorita, created_at, updated_at`,
       values
     );
-
     if (!rows.length) return sendError(res, 404, 'not_found');
     return res.json({ ok: true, data: rows[0] });
   } catch (err) {
     console.error('[groups_update] error:', err);
-    if (err.code === '23505') {
-      return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
-    }
+    if (err.code === '23505') return sendError(res, 409, 'Ya existe una agrupación con ese nombre');
     return sendError(res, 500, 'Error al actualizar agrupación de insumos');
   }
 };
@@ -1028,12 +1059,12 @@ exports.groups_replaceItems = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId = Number(req.params.id);
+  const groupId   = Number(req.params.id);
   if (!Number.isFinite(groupId)) return sendError(res, 400, 'ID inválido');
 
   const insumoIds = (req.body.insumoIds || [])
     .map(Number)
-    .filter((n) => Number.isFinite(n) && n > 0);
+    .filter(n => Number.isFinite(n) && n > 0);
 
   const client = await pool.connect();
   try {
@@ -1041,20 +1072,14 @@ exports.groups_replaceItems = async (req, res) => {
     if (!ok) return sendError(res, 404, 'not_found');
 
     await client.query('BEGIN');
-
     await client.query('DELETE FROM insumo_group_items WHERE group_id = $1', [groupId]);
 
     if (insumoIds.length) {
-      const placeholders = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
-      const values = insumoIds.flatMap(id => [groupId, id]);
-
+      const ph  = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
+      const val = insumoIds.flatMap(id => [groupId, id]);
       await client.query(
-        `
-        INSERT INTO insumo_group_items (group_id, insumo_id)
-        VALUES ${placeholders}
-        ON CONFLICT (group_id, insumo_id) DO NOTHING
-        `,
-        values
+        `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${ph} ON CONFLICT DO NOTHING`,
+        val
       );
     }
 
@@ -1062,7 +1087,7 @@ exports.groups_replaceItems = async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error('[groups_replaceItems] error:', err);
-    await client.query('ROLLBACK').catch(() => { });
+    await client.query('ROLLBACK').catch(() => {});
     return sendError(res, 500, 'Error al actualizar items de la agrupación');
   } finally {
     client.release();
@@ -1070,13 +1095,12 @@ exports.groups_replaceItems = async (req, res) => {
 };
 
 exports.groups_addItem = async (req, res) => {
-  const bizId = getBusinessId(req);
+  const bizId    = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId = Number(req.params.id);
+  const groupId  = Number(req.params.id);
   const insumoId = Number(req.body.insumoId);
-
-  if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'IDs inválidos');
+  if (!Number.isFinite(groupId)  || groupId  <= 0) return sendError(res, 400, 'IDs inválidos');
   if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'IDs inválidos');
 
   try {
@@ -1084,14 +1108,9 @@ exports.groups_addItem = async (req, res) => {
     if (!ok) return sendError(res, 404, 'not_found');
 
     await pool.query(
-      `
-      INSERT INTO insumo_group_items (group_id, insumo_id)
-      VALUES ($1, $2)
-      ON CONFLICT (group_id, insumo_id) DO NOTHING
-      `,
+      `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
       [groupId, insumoId]
     );
-
     return res.json({ ok: true });
   } catch (err) {
     console.error('[groups_addItem] error:', err);
@@ -1103,9 +1122,9 @@ exports.groups_addMultiple = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId = Number(req.params.id);
+  const groupId   = Number(req.params.id);
   const insumoIds = Array.isArray(req.body?.insumoIds)
-    ? req.body.insumoIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    ? req.body.insumoIds.map(Number).filter(n => Number.isFinite(n) && n > 0)
     : [];
 
   if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'ID inválido');
@@ -1117,23 +1136,16 @@ exports.groups_addMultiple = async (req, res) => {
     if (!ok) return sendError(res, 404, 'not_found');
 
     await client.query('BEGIN');
-
-    const placeholders = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
-    const values = insumoIds.flatMap(id => [groupId, id]);
-
+    const ph  = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
+    const val = insumoIds.flatMap(id => [groupId, id]);
     const r = await client.query(
-      `
-      INSERT INTO insumo_group_items (group_id, insumo_id)
-      VALUES ${placeholders}
-      ON CONFLICT (group_id, insumo_id) DO NOTHING
-      `,
-      values
+      `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${ph} ON CONFLICT DO NOTHING`,
+      val
     );
-
     await client.query('COMMIT');
     return res.json({ ok: true, added: r.rowCount || 0 });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => { });
+    await client.query('ROLLBACK').catch(() => {});
     console.error('[groups_addMultiple] error:', err);
     return sendError(res, 500, err.message || 'Error al agregar insumos en bulk');
   } finally {
@@ -1142,13 +1154,12 @@ exports.groups_addMultiple = async (req, res) => {
 };
 
 exports.groups_removeItem = async (req, res) => {
-  const bizId = getBusinessId(req);
+  const bizId    = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId = Number(req.params.id);
+  const groupId  = Number(req.params.id);
   const insumoId = Number(req.params.insumoId);
-
-  if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'ID inválido');
+  if (!Number.isFinite(groupId)  || groupId  <= 0) return sendError(res, 400, 'ID inválido');
   if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'ID inválido');
 
   try {
@@ -1159,8 +1170,6 @@ exports.groups_removeItem = async (req, res) => {
       'DELETE FROM insumo_group_items WHERE group_id = $1 AND insumo_id = $2',
       [groupId, insumoId]
     );
-
-    console.log(`✅ [groups_removeItem] bizId=${bizId}, groupId=${groupId}, insumoId=${insumoId}, removed=${r.rowCount}`);
     return res.json({ ok: true, removed: r.rowCount || 0 });
   } catch (err) {
     console.error('[groups_removeItem] error:', err);
@@ -1172,24 +1181,16 @@ exports.groups_removeItem = async (req, res) => {
 exports.groups_getExclusions = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   try {
     const ok = await assertGroup(pool, bizId, id);
     if (!ok) return sendError(res, 404, 'not_found');
-
     const { rows } = await pool.query(
-      `
-      SELECT id, scope, ref_id
-      FROM insumo_group_exclusions
-      WHERE group_id = $1
-      ORDER BY created_at DESC
-      `,
+      `SELECT id, scope, ref_id FROM insumo_group_exclusions WHERE group_id = $1 ORDER BY created_at DESC`,
       [id]
     );
-
     return res.json({ ok: true, data: rows });
   } catch (err) {
     console.error('[groups_getExclusions] error:', err);
@@ -1200,7 +1201,6 @@ exports.groups_getExclusions = async (req, res) => {
 exports.groups_addExclusions = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
@@ -1213,14 +1213,11 @@ exports.groups_addExclusions = async (req, res) => {
     const ok = await assertGroup(pool, bizId, id);
     if (!ok) return sendError(res, 404, 'not_found');
 
-    const values = [];
-    const placeholders = [];
-
+    const values = [], placeholders = [];
     exclusions.forEach((e, idx) => {
       const scope = e.scope || 'insumo';
       const refId = Number(e.ref_id);
       if (!Number.isFinite(refId)) return;
-
       const base = idx * 3;
       values.push(id, scope, refId);
       placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
@@ -1229,14 +1226,9 @@ exports.groups_addExclusions = async (req, res) => {
     if (!placeholders.length) return sendError(res, 400, 'No hay exclusiones válidas para agregar');
 
     await pool.query(
-      `
-      INSERT INTO insumo_group_exclusions (group_id, scope, ref_id)
-      VALUES ${placeholders.join(', ')}
-      ON CONFLICT (group_id, scope, ref_id) DO NOTHING
-      `,
+      `INSERT INTO insumo_group_exclusions (group_id, scope, ref_id) VALUES ${placeholders.join(', ')} ON CONFLICT DO NOTHING`,
       values
     );
-
     return res.json({ ok: true, count: placeholders.length });
   } catch (err) {
     console.error('[groups_addExclusions] error:', err);
@@ -1247,14 +1239,11 @@ exports.groups_addExclusions = async (req, res) => {
 exports.groups_removeExclusions = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
-
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
   const { ids, scope = 'insumo' } = req.body;
-  if (!Array.isArray(ids) || !ids.length) {
-    return sendError(res, 400, 'ids debe ser un array no vacío');
-  }
+  if (!Array.isArray(ids) || !ids.length) return sendError(res, 400, 'ids debe ser un array no vacío');
 
   try {
     const ok = await assertGroup(pool, bizId, id);
@@ -1263,18 +1252,11 @@ exports.groups_removeExclusions = async (req, res) => {
     const refIds = ids.map(Number).filter(Number.isFinite);
     if (!refIds.length) return sendError(res, 400, 'No hay IDs válidos para eliminar');
 
-    const placeholders = refIds.map((_, idx) => `$${idx + 3}`).join(', ');
-
+    const ph = refIds.map((_, idx) => `$${idx + 3}`).join(', ');
     const { rowCount } = await pool.query(
-      `
-      DELETE FROM insumo_group_exclusions
-      WHERE group_id = $1
-        AND scope = $2
-        AND ref_id IN (${placeholders})
-      `,
+      `DELETE FROM insumo_group_exclusions WHERE group_id = $1 AND scope = $2 AND ref_id IN (${ph})`,
       [id, scope, ...refIds]
     );
-
     return res.json({ ok: true, deleted: rowCount });
   } catch (err) {
     console.error('[groups_removeExclusions] error:', err);
@@ -1288,73 +1270,49 @@ exports.groups_createOrMove = async (req, res) => {
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const nombre = String(req.body?.nombre || '').trim();
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+  const ids    = (Array.isArray(req.body?.ids) ? req.body.ids : [])
     .map(Number)
-    .filter((n) => Number.isFinite(n) && n > 0);
+    .filter(n => Number.isFinite(n) && n > 0);
 
-  if (!nombre || !ids.length) {
-    return sendError(res, 400, 'Nombre e IDs son obligatorios');
-  }
+  if (!nombre || !ids.length) return sendError(res, 400, 'Nombre e IDs son obligatorios');
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     let destRow;
-    {
-      const r = await client.query(
-        `
-        SELECT id, nombre
-        FROM insumo_groups
-        WHERE business_id = $1 AND nombre = $2
-        FOR UPDATE
-        `,
+    const r = await client.query(
+      `SELECT id, nombre FROM insumo_groups WHERE business_id = $1 AND nombre = $2 FOR UPDATE`,
+      [bizId, nombre]
+    );
+    if (r.rows.length) {
+      destRow = r.rows[0];
+    } else {
+      const r2 = await client.query(
+        `INSERT INTO insumo_groups (business_id, nombre) VALUES ($1, $2) RETURNING id, nombre`,
         [bizId, nombre]
       );
-
-      if (r.rows.length) {
-        destRow = r.rows[0];
-      } else {
-        const r2 = await client.query(
-          `
-          INSERT INTO insumo_groups (business_id, nombre)
-          VALUES ($1, $2)
-          RETURNING id, nombre
-          `,
-          [bizId, nombre]
-        );
-        destRow = r2.rows[0];
-      }
+      destRow = r2.rows[0];
     }
 
     const destId = Number(destRow.id);
 
     await client.query(
-      `
-      DELETE FROM insumo_group_items
-      WHERE group_id IN (
-        SELECT id FROM insumo_groups WHERE business_id = $1 AND id != $2
-      )
-      AND insumo_id = ANY($3::int[])
-      `,
+      `DELETE FROM insumo_group_items
+       WHERE group_id IN (SELECT id FROM insumo_groups WHERE business_id = $1 AND id != $2)
+         AND insumo_id = ANY($3::int[])`,
       [bizId, destId, ids]
     );
 
-    const placeholders = ids.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
-    const values = ids.flatMap(id => [destId, id]);
-
+    const ph  = ids.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
+    const val = ids.flatMap(id => [destId, id]);
     await client.query(
-      `
-      INSERT INTO insumo_group_items (group_id, insumo_id)
-      VALUES ${placeholders}
-      ON CONFLICT (group_id, insumo_id) DO NOTHING
-      `,
-      values
+      `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${ph} ON CONFLICT DO NOTHING`,
+      val
     );
 
     await client.query('COMMIT');
-
-    console.log(`✅ [groups_createOrMove] Agrupación "${nombre}" (ID: ${destId}) con ${ids.length} insumos`);
+    console.log(`✅ [groups_createOrMove] "${nombre}" (ID: ${destId}) con ${ids.length} insumos`);
     return res.json({ ok: true, id: destId, nombre, moved: ids.length });
   } catch (err) {
     await client.query('ROLLBACK');
