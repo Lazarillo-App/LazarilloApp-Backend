@@ -297,7 +297,7 @@ async function applyReplaceRange(client, { businessId, from, to, importId }) {
  * - si NO solapa: aplica directo (replace por rango) → status "completed"
  * - si SÍ solapa: deja en "awaiting_approval" + change_set + notificación
  */
-async function importFileToDatabase({ businessId, userId, filePath, originalName, fileType }) {
+async function importFileToDatabase({ businessId, userId, filePath, originalName, fileType, branchId = null }) {
   const client = await pool.connect();
   let importId = null;
   let txOpen = false;
@@ -315,24 +315,27 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     }
 
     // 1) Crear registro de importación
-    const { rows: [importRecord] } = await client.query(`
+    const { rows: [importRecord] } = await client.query(
+      `
       INSERT INTO sales_csv_imports
-        (business_id, user_id, filename, original_name, file_size, file_type, status)
-      VALUES ($1, $2, $3, $4, $5, $6, 'processing')
-      RETURNING id
-    `, [
-      salesBusinessId,
-      userId,
-      path.basename(filePath),
-      originalName,
-      fs.statSync(filePath).size,
-      fileType,
-    ]);
+        (business_id, user_id, filename, original_name, file_size, file_type, status, row_count, date_from, date_to, branch_id)
+      VALUES ($1, $2, $3, $4, $5, $6, 'processing', 0, NULL, NULL, $7)
+      RETURNING id`,
+      [
+        salesBusinessId,
+        userId,
+        path.basename(filePath),
+        originalName,
+        fs.statSync(filePath).size,
+        fileType,
+        branchId,
+      ]
+    );
 
     importId = importRecord.id;
 
     if (VERBOSE_IMPORT_LOGS) {
-      console.log(`[CSV Import] Registro creado #${importId} para business ${salesBusinessId}`);
+      console.log(`[CSV] Import Registro creado #${importId} para business ${salesBusinessId}`);
     }
 
     // 2) Parsear
@@ -343,7 +346,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     }
 
     if (VERBOSE_IMPORT_LOGS) {
-      console.log(`[CSV Import] Parseado: ${rows.length} filas, columnas:`, headers);
+      console.log(`[CSV] Import Parseado ${rows.length} filas, columnas:`, headers);
     }
 
     if (rows.length > MAX_IMPORT_ROWS) {
@@ -361,7 +364,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     }
 
     if (VERBOSE_IMPORT_LOGS) {
-      console.log(`[CSV Import] Formato detectado: ${format}`);
+      console.log(`[CSV] Import Formato detectado ${format}`);
     }
 
     // 4) Normalizar filas + agregación (day+article_id)
@@ -405,15 +408,14 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
 
     if (!minDate || !maxDate) {
       await client.query(`
-        UPDATE sales_csv_imports
-        SET
-          status = 'failed',
-          row_count = $2,
-          rows_failed = $3,
-          error_log = $4::jsonb,
-          processed_at = NOW()
-        WHERE id = $1
-      `, [importId, rows.length, failed, JSON.stringify(errors)]);
+      UPDATE sales_csv_imports
+      SET
+      status = 'failed',
+      row_count = $2,
+      rows_failed = $3,
+      error_log = $4::jsonb,
+      processed_at = NOW()
+      WHERE id = $1`, [importId, rows.length, failed, JSON.stringify(errors)]);
       await client.query('COMMIT');
       txOpen = false;
 
@@ -461,19 +463,18 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     });
 
     await client.query(`
-  UPDATE sales_csv_imports
-  SET
-    status = $2,
-    row_count = $3,
-    date_from = $4::date,
-    date_to = $5::date,
-    rows_inserted = $6,
-    rows_updated = 0,
-    rows_failed = $7,
-    error_log = $8::jsonb,
-    processed_at = NOW()
-  WHERE id = $1
-`, [
+      UPDATE sales_csv_imports
+      SET
+      status = $2,
+      row_count = $3,
+      date_from = $4::date,
+      date_to = $5::date,
+      rows_inserted = $6,
+      rows_updated = 0,
+      rows_failed = $7,
+      error_log = $8::jsonb,
+      processed_at = NOW()
+      WHERE id = $1`, [
       importId,
       failed === rows.length ? 'failed' : 'completed',
       rows.length,
@@ -490,7 +491,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     try { fs.unlinkSync(filePath); } catch { }
 
     if (VERBOSE_IMPORT_LOGS) {
-      console.log(`[CSV Import] Completado #${importId}: mode=${mode}, rows=${appliedRows}`);
+      console.log(`[CSV] Import Completado #${importId} mode = ${mode} rows = ${appliedRows}`);
     }
 
     return {
@@ -520,12 +521,11 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     if (importId) {
       try {
         await pool.query(`
-          UPDATE sales_csv_imports
-          SET status = 'failed',
-              error_log = $2::jsonb,
-              processed_at = NOW()
-          WHERE id = $1
-        `, [importId, JSON.stringify([{ error: error.message }])]);
+      UPDATE sales_csv_imports
+      SET status = 'failed',
+      error_log = $2::jsonb,
+      processed_at = NOW()
+      WHERE id = $1`, [importId, JSON.stringify([{ error: error.message }])]);
       } catch { }
     }
 
@@ -542,7 +542,7 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
  */
 async function listImports(businessId, { limit = 20 } = {}) {
   const { rows } = await pool.query(`
-    SELECT
+      SELECT
       id,
       filename,
       original_name,
@@ -558,14 +558,13 @@ async function listImports(businessId, { limit = 20 } = {}) {
       created_at,
       processed_at,
       CASE
-        WHEN error_log IS NOT NULL THEN jsonb_array_length(error_log)
-        ELSE 0
+      WHEN error_log IS NOT NULL THEN jsonb_array_length(error_log)
+      ELSE 0
       END AS error_count
-    FROM sales_csv_imports
-    WHERE business_id = $1
-    ORDER BY created_at DESC
-    LIMIT $2
-  `, [businessId, limit]);
+      FROM sales_csv_imports
+      WHERE business_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2`, [businessId, limit]);
 
   return rows;
 }
@@ -575,7 +574,7 @@ async function listImports(businessId, { limit = 20 } = {}) {
  */
 async function getImportDetails(importId, businessId) {
   const { rows } = await pool.query(`
-    SELECT
+      SELECT
       id,
       business_id,
       user_id,
@@ -593,10 +592,9 @@ async function getImportDetails(importId, businessId) {
       error_log,
       created_at,
       processed_at
-    FROM sales_csv_imports
-    WHERE id = $1 AND business_id = $2
-    LIMIT 1
-  `, [importId, businessId]);
+      FROM sales_csv_imports
+      WHERE id = $1 AND business_id = $2
+      LIMIT 1`, [importId, businessId]);
 
   return rows[0] || null;
 }

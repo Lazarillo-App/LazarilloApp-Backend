@@ -633,7 +633,6 @@ exports.diagnosticRaw = async (req, res) => {
 // ============================================================================
 // RESUMEN DE VENTAS
 // ============================================================================
-
 exports.salesSummary = async (req, res, next) => {
   try {
     const biz = req.business;
@@ -642,35 +641,37 @@ exports.salesSummary = async (req, res, next) => {
       to,
       source = 'csv',
       articleIds = null,
-      groupIds = null,
+      groupIds   = null,
+      branch_id: rawBranchId = null,   // ← NUEVO
     } = req.query;
-
+ 
     if (!from || !to) {
       return res.status(400).json({
         error: 'bad_request',
-        message: 'from y to son requeridos (YYYY-MM-DD)'
+        message: 'from y to son requeridos (YYYY-MM-DD)',
       });
     }
-
+ 
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
-
+ 
     const params = [salesBizId, from, to, source];
     let articleFilter = '';
-    let groupFilter = '';
-
+    let groupFilter   = '';
+    let branchFilter  = '';    // ← NUEVO
+ 
+    // ── Filtro de artículos ──
     if (subBizArticleIds) {
       params.push(subBizArticleIds);
       articleFilter = `AND sdi.article_id = ANY($${params.length})`;
-    }
-
-    if (articleIds && !subBizArticleIds) {
+    } else if (articleIds) {
       const ids = String(articleIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
         params.push(ids);
         articleFilter = `AND sdi.article_id = ANY($${params.length})`;
       }
     }
-
+ 
+    // ── Filtro de grupos ──
     if (groupIds) {
       const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
@@ -684,11 +685,26 @@ exports.salesSummary = async (req, res, next) => {
         `;
       }
     }
-
-    const nameBizIds = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
+ 
+    // ── NUEVO: Filtro de sucursal ──
+    // 'main'  → datos del principal (branch_id IS NULL)
+    // número  → datos de esa sucursal específica
+    // null/ausente → todas (sin filtro)
+    if (rawBranchId === 'main') {
+      branchFilter = 'AND sdi.branch_id IS NULL';
+    } else if (rawBranchId && rawBranchId !== '' && rawBranchId !== 'null') {
+      const bid = Number(rawBranchId);
+      if (Number.isFinite(bid) && bid > 0) {
+        params.push(bid);
+        branchFilter = `AND sdi.branch_id = $${params.length}`;
+      }
+    }
+    // si rawBranchId es null/undefined/'' → sin filtro = todas
+ 
+    const nameBizIds   = salesBizId !== biz.id ? [salesBizId, biz.id] : [salesBizId];
     params.push(nameBizIds);
     const nameBizParam = `$${params.length}`;
-
+ 
     const sql = `
       WITH agg AS (
         SELECT
@@ -704,6 +720,7 @@ exports.salesSummary = async (req, res, next) => {
           AND sdi.source = $4
           ${articleFilter}
           ${groupFilter}
+          ${branchFilter}
         GROUP BY sdi.article_id
         HAVING SUM(sdi.qty) > 0
       )
@@ -736,29 +753,31 @@ exports.salesSummary = async (req, res, next) => {
       ) aa ON true
       ORDER BY agg.total_qty DESC
     `;
-
+ 
     const { rows } = await pool.query(sql, params);
-
+ 
     const totals = rows.reduce((acc, row) => {
-      acc.total_qty += Number(row.total_qty || 0);
+      acc.total_qty    += Number(row.total_qty    || 0);
       acc.total_amount += Number(row.total_amount || 0);
       return acc;
     }, { total_qty: 0, total_amount: 0 });
-
+ 
     res.json({
       ok: true,
       business_id: String(biz.id),
       from,
       to,
       source,
+      branch_id: rawBranchId || null,   // ← eco del filtro aplicado
       filters: {
-        groupIds: groupIds || null,
+        groupIds:   groupIds   || null,
         articleIds: articleIds || null,
+        branch_id:  rawBranchId || null,
       },
       totals: {
         articles_count: rows.length,
-        total_qty: totals.total_qty,
-        total_amount: totals.total_amount,
+        total_qty:      totals.total_qty,
+        total_amount:   totals.total_amount,
       },
       items: rows,
     });
@@ -767,7 +786,7 @@ exports.salesSummary = async (req, res, next) => {
     next(e);
   }
 };
-
+ 
 /* ══════════════════════════════════════════════════════════
    GET /api/businesses/:id/sales/first-date
 ══════════════════════════════════════════════════════════ */
