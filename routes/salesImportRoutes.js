@@ -101,10 +101,29 @@ router.post('/:businessId/sales/import-csv', authRequired, requireBiz, upload.si
       filePath:     req.file.path,
       originalName: req.file.originalname,
       fileType:     ext.replace('.', ''),
-      branchId,     // ← NUEVO: pasamos al service
+      branchId,
     });
 
-    return res.json(result);
+    // Workaround: asegurarse de que branch_id quede guardado en el header del import
+    // (por si el service no lo persiste internamente todavía)
+    const importId = result?.import_id ?? result?.id ?? result?.data?.id;
+    if (branchId && importId) {
+      try {
+        await pool.query(
+          `UPDATE sales_csv_imports SET branch_id = $1 WHERE id = $2 AND business_id = $3`,
+          [branchId, importId, businessId]
+        );
+        // También actualizar los items de staging
+        await pool.query(
+          `UPDATE sales_csv_import_items SET branch_id = $1 WHERE import_id = $2 AND business_id = $3`,
+          [branchId, importId, businessId]
+        );
+      } catch (e) {
+        console.warn('[salesImport] No se pudo setear branch_id en import:', e.message);
+      }
+    }
+
+    return res.json({ ...result, branch_id: branchId });
   } catch (error) {
     if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch { }
     if (String(error.message || '').includes('límite'))
