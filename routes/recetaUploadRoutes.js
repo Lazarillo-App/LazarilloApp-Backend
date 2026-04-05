@@ -51,7 +51,7 @@ router.post('/:articuloId/upload-token', authRequired, async (req, res, next) =>
       [token, articuloId, supplyId || null, supplyNombre || null, bizId, expiresAt]
     );
 
-    const uploadUrl = `${process.env.FRONTEND_URL}/upload-foto?token=${token}`;
+    // No armamos la URL en el backend — la arma el frontend
 
     return res.json({ token, expiresAt, uploadUrl });
   } catch (err) {
