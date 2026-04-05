@@ -361,11 +361,23 @@ exports.firstDate = async (req, res, next) => {
     if (!rawBizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     const businessId = await resolvePurchaseBusiness(rawBizId);
 
+    const { branch_id } = req.query;
+    const params = [businessId];
+    let branchFilter = '';
+
+    if (branch_id === 'main' || branch_id === 'none') {
+      branchFilter = `AND p.branch_id IS NULL`;
+    } else if (branch_id && branch_id !== 'all') {
+      params.push(Number(branch_id));
+      branchFilter = `AND p.branch_id = $2`;
+    }
+
     const { rows } = await pool.query(
-      `SELECT MIN(fecha)::date AS first_date
-         FROM purchase_items
-        WHERE business_id = $1`,
-      [businessId]
+      `SELECT MIN(pi.fecha)::date AS first_date
+         FROM purchase_items pi
+         JOIN purchases p ON p.id = pi.purchase_id
+        WHERE pi.business_id = $1 ${branchFilter}`,
+      params
     );
 
     res.json({
