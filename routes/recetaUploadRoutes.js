@@ -53,7 +53,8 @@ router.post('/:articuloId/upload-token', authRequired, async (req, res, next) =>
 
     // No armamos la URL en el backend — la arma el frontend
 
-    return res.json({ token, expiresAt, uploadUrl });
+    return res.json({ token, expiresAt });
+
   } catch (err) {
     next(err);
   }
