@@ -28,14 +28,17 @@ exports.listBatches = async (req, res, next) => {
          sci.date_to,
          sci.status,
          sci.rows_inserted,
-         sci.rows_failed
+         sci.rows_failed,
+         sci.branch_id,
+         ab.name                       AS branch_name
        FROM sales_csv_imports sci
-       LEFT JOIN app_businesses b ON b.id = sci.business_id
+       LEFT JOIN app_businesses b  ON b.id  = sci.business_id
+       LEFT JOIN app_branches   ab ON ab.id = sci.branch_id
        WHERE sci.business_id = $1
        ORDER BY sci.created_at DESC`,
       [bizId]
     );
-
+    
     res.json({ ok: true, data: rows });
   } catch (e) {
     console.error('[sales.listBatches] error:', e);
