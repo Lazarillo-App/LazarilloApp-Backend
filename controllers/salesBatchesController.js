@@ -38,7 +38,7 @@ exports.listBatches = async (req, res, next) => {
        ORDER BY sci.created_at DESC`,
       [bizId]
     );
-    
+
     res.json({ ok: true, data: rows });
   } catch (e) {
     console.error('[sales.listBatches] error:', e);
@@ -57,11 +57,11 @@ exports.listBatches = async (req, res, next) => {
  */
 exports.previewBatch = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const { batchId } = req.params;
-    const limit   = Math.min(Number(req.query.limit) || 20, 100);
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
 
-    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
 
     // Verificar que el lote pertenece al negocio
@@ -110,16 +110,16 @@ exports.previewBatch = async (req, res, next) => {
       showing: rows.length,
       meta: {
         original_name: importMeta.original_name,
-        date_from:     importMeta.date_from,
-        date_to:       importMeta.date_to,
-        status:        importMeta.status,
+        date_from: importMeta.date_from,
+        date_to: importMeta.date_to,
+        status: importMeta.status,
       },
     });
   } catch (e) {
     console.error('[sales.previewBatch] ERROR:', {
       message: e.message,
-      code:    e.code,
-      detail:  e.detail,
+      code: e.code,
+      detail: e.detail,
     });
     next(e);
   }
@@ -131,19 +131,21 @@ exports.previewBatch = async (req, res, next) => {
  */
 exports.deleteBatch = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const { batchId } = req.params;
 
-    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Verificar pertenencia
+      // Verificar pertenencia y obtener rango + branch_id del lote
       const { rows: check } = await client.query(
-        `SELECT id FROM sales_csv_imports WHERE id = $1 AND business_id = $2`,
+        `SELECT id, date_from, date_to, branch_id
+   FROM sales_csv_imports
+   WHERE id = $1 AND business_id = $2`,
         [batchId, bizId]
       );
       if (!check.length) {
@@ -151,19 +153,33 @@ exports.deleteBatch = async (req, res, next) => {
         return res.status(404).json({ ok: false, error: 'Lote no encontrado para este negocio' });
       }
 
-      // Eliminar ítems primero (FK)
+      const { date_from, date_to, branch_id } = check[0];
+
+      // 1. Eliminar staging items
       const { rowCount: itemsDeleted } = await client.query(
-        `DELETE FROM sales_csv_import_items WHERE import_id = $1 AND business_id = $2`,
+        `DELETE FROM sales_csv_import_items
+   WHERE import_id = $1 AND business_id = $2`,
         [batchId, bizId]
       );
 
-      // Eliminar también de sales_daily_items los registros de esta importación
-      // (si tienen source = 'csv' y coinciden por business_id + rango de fechas)
-      // Nota: no hay FK directa, así que es best-effort por import_id si existe la columna,
-      // o lo dejamos para una limpieza manual si no hay trazabilidad directa.
-      // Por ahora solo borramos el import header.
+      // 2. Eliminar datos procesados en sales_daily_items
+      //    Filtra por rango de fechas + branch_id del lote (NULL = principal)
+      const { rowCount: dailyDeleted } = await client.query(
+        `DELETE FROM sales_daily_items
+          WHERE business_id = $1
+          AND source = 'csv'
+          AND day BETWEEN $2 AND $3
+          AND (
+          ($4::bigint IS NULL AND branch_id IS NULL)
+          OR branch_id = $4
+     )`,
+        [bizId, date_from, date_to, branch_id]
+      );
+
+      // 3. Eliminar header del import
       const { rowCount: importDeleted } = await client.query(
-        `DELETE FROM sales_csv_imports WHERE id = $1 AND business_id = $2`,
+        `DELETE FROM sales_csv_imports
+         WHERE id = $1 AND business_id = $2`,
         [batchId, bizId]
       );
 
@@ -173,7 +189,8 @@ exports.deleteBatch = async (req, res, next) => {
         ok: true,
         batch_id: batchId,
         import_deleted: importDeleted,
-        items_deleted:  itemsDeleted,
+        items_deleted: itemsDeleted,
+        daily_deleted: dailyDeleted,   // ← nuevo en la respuesta
       });
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch { }
@@ -194,11 +211,11 @@ exports.deleteBatch = async (req, res, next) => {
  */
 exports.moveBatch = async (req, res, next) => {
   try {
-    const bizId            = getBusinessId(req);
-    const { batchId }      = req.params;
+    const bizId = getBusinessId(req);
+    const { batchId } = req.params;
     const targetBusinessId = Number(req.body?.targetBusinessId);
 
-    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
     if (!Number.isFinite(targetBusinessId) || targetBusinessId <= 0)
       return res.status(400).json({ ok: false, error: 'targetBusinessId inválido' });
@@ -242,10 +259,10 @@ exports.moveBatch = async (req, res, next) => {
 
       res.json({
         ok: true,
-        batch_id:        batchId,
+        batch_id: batchId,
         from_business_id: bizId,
-        to_business_id:  targetBusinessId,
-        imports_moved:   moved,
+        to_business_id: targetBusinessId,
+        imports_moved: moved,
       });
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch { }
