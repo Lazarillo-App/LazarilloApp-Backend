@@ -67,11 +67,10 @@ router.post('/:articuloId/fotos', upload.single('file'), (req, res, next) => {
  * Elimina una foto de Cloudinary por su public_id.
  * Body: { publicId: string }
  */
-router.delete('/fotos/:publicId(*)', async (req, res, next) => {
+router.delete('/fotos', async (req, res, next) => {
   try {
-    const publicId = req.params.publicId;
+    const publicId = req.query.publicId || req.body?.publicId;
     if (!publicId) return res.status(400).json({ error: 'missing_public_id' });
-
     await cloudinary.uploader.destroy(publicId);
     return res.json({ ok: true, deleted: publicId });
   } catch (err) {

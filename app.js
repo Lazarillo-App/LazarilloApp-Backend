@@ -37,6 +37,8 @@ const articlePriceConfigRoutes   = require('./routes/articlePriceConfigRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
 const insumosImportRoutes   = require('./routes/insumosImportRoutes');
 const insumosElaboradosRoutes = require('./routes/insumosElaboradosRoutes');
+const recetaFotosRoutes = require('./routes/recetaFotosRoutes');
+const recetaUploadRoutes = require('./routes/recetaUploadRoutes');
 const articulosImportRoutes = require('./routes/articulosImportRoutes');
 const ventasCSVRoutes = require('./routes/ventasCSVRoutes');    
 const purchasesImportRoutes = require('./routes/purchasesImportRoutes');
@@ -159,6 +161,8 @@ app.use('/api/businesses/:businessId/sync', syncRoutes);
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
 app.use('/api/businesses/:businessId/articles/:articleId/receta', recetasRoutes);
+app.use('/api/recetas', recetaFotosRoutes);
+app.use('/api/recetas', recetaUploadRoutes);
 
 // 3) businesses base después
 app.use('/api/businesses', businessRoutes);
