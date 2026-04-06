@@ -32,6 +32,7 @@ const divisionsRoutes = require('./routes/divisionsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 const organizationsRoutes = require('./routes/organizationsRoutes');
 const recetasRoutes       = require('./routes/recetasRoutes');
+const recetasElaboradosRoutes = require('./routes/recetasElaboradosRoutes');
 const recetasImportRoutes        = require('./routes/recetasImportRoutes');
 const articlePriceConfigRoutes   = require('./routes/articlePriceConfigRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
@@ -161,6 +162,7 @@ app.use('/api/businesses/:businessId/sync', syncRoutes);
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
 app.use('/api/businesses/:businessId/articles/:articleId/receta', recetasRoutes);
+app.use('/api/businesses/:businessId/insumos/:insumoId/receta', recetasElaboradosRoutes);
 app.use('/api/recetas', recetaFotosRoutes);
 app.use('/api/recetas', recetaUploadRoutes);
 

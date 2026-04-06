@@ -7,7 +7,7 @@ const pool = require('../config/db');
 ══════════════════════════════════════════════════════════════ */
 exports.getReceta = async (req, res, next) => {
   try {
-    const bizId     = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
 
     if (!bizId || !articleId) {
@@ -108,9 +108,9 @@ exports.getReceta = async (req, res, next) => {
 exports.saveReceta = async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const bizId     = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
-    const uid       = req.user?.id;
+    const uid = req.user?.id;
 
     if (!bizId || !articleId) {
       return res.status(400).json({ ok: false, error: 'invalid_params' });
@@ -119,9 +119,9 @@ exports.saveReceta = async (req, res, next) => {
     const {
       nombre,
       descripcion,
-      porciones        = 1,
-      porcentajeVenta  = 0,
-      items            = [],
+      porciones = 1,
+      porcentajeVenta = 0,
+      items = [],
     } = req.body || {};
 
     // Validar items mínimos
@@ -131,7 +131,7 @@ exports.saveReceta = async (req, res, next) => {
 
     // Calcular costo total desde los items
     const costoTotal = items.reduce((acc, item) => {
-      const cantidad      = Number(item.cantidad      || 0);
+      const cantidad = Number(item.cantidad || 0);
       const costoUnitario = Number(item.costoUnitario || 0);
       return acc + (cantidad * costoUnitario);
     }, 0);
@@ -159,9 +159,9 @@ exports.saveReceta = async (req, res, next) => {
       [
         articleId,
         bizId,
-        nombre?.trim()      || null,
+        nombre?.trim() || null,
         descripcion?.trim() || null,
-        Number(porciones)   || 1,
+        Number(porciones) || 1,
         Number(porcentajeVenta) || 0,
         Math.round(costoTotal * 10000) / 10000,
         uid,
@@ -180,12 +180,12 @@ exports.saveReceta = async (req, res, next) => {
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const supplyId      = Number(item.supplyId);
-      const cantidad      = Number(item.cantidad      || 0);
+      const supplyId = Number(item.supplyId);
+      const cantidad = Number(item.cantidad || 0);
       const costoUnitario = Number(item.costoUnitario || 0);
-      const unidad        = (item.unidad || '').trim() || null;
-      const notas         = (item.notas  || '').trim() || null;
-      const orden         = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
+      const unidad = (item.unidad || '').trim() || null;
+      const notas = (item.notas || '').trim() || null;
+      const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
 
       if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
       if (cantidad <= 0) continue;
@@ -201,9 +201,9 @@ exports.saveReceta = async (req, res, next) => {
         continue;
       }
 
-      const merma        = item.merma    !== false;  // default true
-      const pedido       = item.pedido   !== false;  // default true
-      const tipoCosto    = (item.tipoCosto    || 'total').trim();
+      const merma = item.merma !== false;  // default true
+      const pedido = item.pedido !== false;  // default true
+      const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
 
       const { rows: itemRows } = await client.query(
@@ -213,17 +213,38 @@ exports.saveReceta = async (req, res, next) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
          RETURNING *`,
         [receta.id, supplyId, cantidad, unidad, costoUnitario, notas,
-         observaciones, merma, pedido, tipoCosto, orden]
+          observaciones, merma, pedido, tipoCosto, orden]
       );
 
       savedItems.push({
         ...itemRows[0],
-        supply_id:    supplyId,
+        supply_id: supplyId,
         supply_nombre: insumoCheck[0].nombre,
         supply_medida: insumoCheck[0].unidad_med,
         costo_total_item: Math.round(cantidad * costoUnitario * 10000) / 10000,
       });
     }
+
+    // ── Si el artículo es un insumo elaborado, actualizar su costo en la tabla insumos ──
+    const costoXPorcion = Number(porciones) > 0 ? costoTotal / Number(porciones) : costoTotal;
+    const porcentaje = Number(porcentajeVenta) || 0;
+    const precioSugerido = porcentaje > 0 ? costoXPorcion / (porcentaje / 100) : 0;
+
+    await client.query(
+      `UPDATE insumos
+      SET costo_receta = $1,
+          precio_ref   = $1,
+          tiene_receta = TRUE,
+          updated_at   = NOW()
+    WHERE id = $2
+      AND business_id = $3
+      AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
+      [
+        Math.round(costoXPorcion * 1000) / 1000,
+        articleId,
+        bizId,
+      ]
+    );
 
     await client.query('COMMIT');
 
@@ -237,7 +258,7 @@ exports.saveReceta = async (req, res, next) => {
       },
     });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[saveReceta]', e);
     next(e);
   } finally {
@@ -251,7 +272,7 @@ exports.saveReceta = async (req, res, next) => {
 ══════════════════════════════════════════════════════════════ */
 exports.deleteReceta = async (req, res, next) => {
   try {
-    const bizId     = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
 
     if (!bizId || !articleId) {
@@ -265,6 +286,17 @@ exports.deleteReceta = async (req, res, next) => {
           AND business_id = $2
           AND active = TRUE
         RETURNING id`,
+      [articleId, bizId]
+    );
+
+    await pool.query(
+      `UPDATE insumos
+      SET costo_receta = 0,
+          tiene_receta = FALSE,
+          updated_at   = NOW()
+    WHERE id = $1
+      AND business_id = $2
+      AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
       [articleId, bizId]
     );
 
