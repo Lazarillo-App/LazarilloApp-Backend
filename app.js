@@ -162,6 +162,8 @@ app.use('/api/businesses/:businessId/sync', syncRoutes);
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
 app.use('/api/businesses/:businessId/articles/:articleId/receta', recetasRoutes);
+const { getRecetasElaboradosMapa } = require('./controllers/recetasElaboradosController');
+app.use('/api/businesses/:businessId/recetas-elaborados', authRequired, getRecetasElaboradosMapa);
 app.use('/api/businesses/:businessId/insumos/:insumoId/receta', recetasElaboradosRoutes);
 app.use('/api/recetas', recetaFotosRoutes);
 app.use('/api/recetas', recetaUploadRoutes);

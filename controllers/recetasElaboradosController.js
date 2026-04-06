@@ -273,3 +273,46 @@ exports.deleteRecetaElaborado = async (req, res, next) => {
     next(e);
   }
 };
+
+/* ══════════════════════════════════════════════════════════════
+   GET /api/businesses/:businessId/recetas-elaborados
+   Devuelve mapa { [insumoId]: { costoTotal, porciones, precioSugerido } }
+   para todos los insumos elaborados con receta del negocio
+══════════════════════════════════════════════════════════════ */
+exports.getRecetasElaboradosMapa = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const { rows } = await pool.query(
+      `SELECT
+         r.insumo_id,
+         r.costo_total,
+         r.porciones,
+         r.porcentaje_venta,
+         CASE WHEN r.porciones > 0
+           THEN ROUND((r.costo_total / r.porciones) / NULLIF(r.porcentaje_venta / 100, 0), 2)
+           ELSE 0
+         END AS precio_sugerido
+       FROM recetas r
+      WHERE r.business_id = $1
+        AND r.active = TRUE
+        AND r.insumo_id IS NOT NULL`,
+      [bizId]
+    );
+
+    const mapa = {};
+    rows.forEach(r => {
+      mapa[String(r.insumo_id)] = {
+        costoTotal:     Number(r.costo_total),
+        porciones:      Number(r.porciones),
+        precioSugerido: Number(r.precio_sugerido),
+      };
+    });
+
+    return res.json({ ok: true, data: mapa });
+  } catch (e) {
+    console.error('[getRecetasElaboradosMapa]', e);
+    next(e);
+  }
+}; 
