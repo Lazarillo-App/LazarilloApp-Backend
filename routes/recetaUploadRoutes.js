@@ -132,4 +132,24 @@ router.get('/:articuloId/fotos-pendientes', authRequired, async (req, res, next)
   }
 });
 
+// Validar token sin auth — para que la página móvil pueda verificarlo
+router.get('/upload-publico/validar', async (req, res, next) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ ok: false, error: 'missing_token' });
+
+    const { rows } = await pool.query(
+      `SELECT token, supply_nombre, expires_at 
+       FROM receta_upload_tokens
+       WHERE token = $1 AND expires_at > NOW()`,
+      [token]
+    );
+
+    if (!rows.length) return res.status(401).json({ ok: false, error: 'token_invalido_o_expirado' });
+    return res.json({ ok: true, supplyNombre: rows[0].supply_nombre, expiresAt: rows[0].expires_at });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
