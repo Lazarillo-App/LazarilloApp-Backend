@@ -6,6 +6,7 @@ const batchesCtrl = require('../controllers/purchasesBatchesController');
 
 router.post('/sync',           ctrl.sync);
 router.post('/sync-suppliers', ctrl.syncSuppliers);
+router.get('/',           ctrl.list);
 router.get('/suppliers',       ctrl.listSuppliers);
 router.get('/export/csv',      ctrl.exportCsv);
 router.get('/summary',         ctrl.summary);
