@@ -237,7 +237,18 @@ exports.obtenerAgrupaciones = async (req, res) => {
       // Deduplicar
       orgAssignedIds = [...new Set(orgAssignedIds)];
     }
-
+    console.log('[obtenerAgrupaciones DEBUG]', {
+      businessId,
+      isSubBusiness,
+      agrupacionesCount: agrupaciones.length,
+      agrupaciones: agrupaciones.map(a => ({
+        id: a.id,
+        nombre: a.nombre,
+        business_id: a.business_id,
+        global_from_principal: a.global_from_principal,
+        articulosCount: Array.isArray(a.articulos) ? a.articulos.length : '?'
+      }))
+    });
     return res.json({ ok: true, agrupaciones, orgAssignedIds });
   } catch (e) {
     console.error('obtenerAgrupaciones error', e);
