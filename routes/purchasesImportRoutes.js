@@ -2,15 +2,15 @@
 'use strict';
 
 const express = require('express');
-const router  = express.Router({ mergeParams: true });
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
+const router = express.Router({ mergeParams: true });
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const { importPurchasesToDatabase } = require('../services/csvPurchasesImportService');
-const { authRequired }              = require('../middleware/authMiddleware');
-const { requireBusinessAccess }     = require('../middleware/requireBusinessAccess');
-const { MAX_FILE_SIZE_MB }          = require('../config/features');
+const { authRequired } = require('../middleware/authMiddleware');
+const { requireBusinessAccess } = require('../middleware/requireBusinessAccess');
+const { MAX_FILE_SIZE_MB } = require('../config/features');
 
 const uploadsDir = path.join(__dirname, '../uploads/csv-temp');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -25,7 +25,7 @@ const upload = multer({
   },
 });
 
-const getBizId  = (req) => { const n = Number(req.params.businessId ?? req.params.id); return Number.isFinite(n) && n > 0 ? n : NaN; };
+const getBizId = (req) => { const n = Number(req.params.businessId ?? req.params.id); return Number.isFinite(n) && n > 0 ? n : NaN; };
 const getUserId = (req) => req.user?.id;
 
 /**
@@ -46,15 +46,16 @@ router.post(
 
       if (!req.file) return res.status(400).json({ ok: false, error: 'file_required', message: 'Adjuntá un archivo CSV, XLS o XLSX' });
 
-      const ext      = path.extname(req.file.originalname).toLowerCase();
+      const ext = path.extname(req.file.originalname).toLowerCase();
       const fileType = ext.replace('.', '');
-
+      const branchId = req.body?.branch_id ? Number(req.body.branch_id) : null;
       const result = await importPurchasesToDatabase({
         businessId,
         userId,
-        filePath:     req.file.path,
+        filePath: req.file.path,
         originalName: req.file.originalname,
         fileType,
+        branchId,
       });
 
       return res.json(result);
@@ -63,7 +64,7 @@ router.post(
       if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { } }
 
       if (String(error.message || '').toLowerCase().includes('columnas faltantes') ||
-          String(error.message || '').toLowerCase().includes('formato')) {
+        String(error.message || '').toLowerCase().includes('formato')) {
         return res.status(400).json({ ok: false, error: 'invalid_format', message: error.message });
       }
 

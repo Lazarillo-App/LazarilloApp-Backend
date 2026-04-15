@@ -1,10 +1,6 @@
 // controllers/recetasController.js
 const pool = require('../config/db');
 
-/* ══════════════════════════════════════════════════════════════
-   GET /api/businesses/:businessId/articles/:articleId/receta
-   Devuelve la receta de un artículo en un negocio específico
-══════════════════════════════════════════════════════════════ */
 exports.getReceta = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
@@ -14,24 +10,13 @@ exports.getReceta = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'invalid_params' });
     }
 
-    // Receta principal
     const { rows: recetaRows } = await pool.query(
       `SELECT
-         r.id,
-         r.article_id,
-         r.business_id,
-         r.nombre,
-         r.descripcion,
-         r.porciones,
-         r.porcentaje_venta,
-         r.costo_total,
-         r.active,
-         r.created_at,
-         r.updated_at
+         r.id, r.article_id, r.business_id, r.nombre, r.descripcion,
+         r.porciones, r.porcentaje_venta, r.costo_total, r.active,
+         r.created_at, r.updated_at
        FROM recetas r
-      WHERE r.article_id = $1
-        AND r.business_id = $2
-        AND r.active = TRUE
+      WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE
       LIMIT 1`,
       [articleId, bizId]
     );
@@ -42,27 +27,17 @@ exports.getReceta = async (req, res, next) => {
 
     const receta = recetaRows[0];
 
-    // Items de la receta — usa insumo_id (nuevo) con fallback a supply_id (legacy)
     const { rows: items } = await pool.query(
       `SELECT
-         ri.id,
-         ri.receta_id,
-         COALESCE(ri.insumo_id, ri.supply_id)              AS supply_id,
-         COALESCE(i.nombre,  ri.nombre_insumo_maxi, ms.nombre)   AS supply_nombre,
-         COALESCE(i.unidad_med, ri.unidad, ms.medida)             AS supply_medida,
-         COALESCE(i.precio_ref, 0)                                AS precio_ref_db,
-         ri.cantidad,
-         ri.unidad,
-         ri.costo_unitario,
-         ROUND(ri.cantidad * ri.costo_unitario, 4)         AS costo_total_item,
-         ri.notas,
-         ri.observaciones,
-         ri.merma,
-         ri.pedido,
-         ri.tipo_costo,
-         ri.orden,
-         ri.codigo_maxi_insumo,
-         ri.nombre_insumo_maxi
+         ri.id, ri.receta_id,
+         COALESCE(ri.insumo_id, ri.supply_id)                    AS supply_id,
+         COALESCE(i.nombre, ri.nombre_insumo_maxi, ms.nombre)    AS supply_nombre,
+         COALESCE(i.unidad_med, ri.unidad, ms.medida)            AS supply_medida,
+         COALESCE(i.precio_ref, 0)                               AS precio_ref_db,
+         ri.cantidad, ri.unidad, ri.costo_unitario,
+         ROUND(ri.cantidad * ri.costo_unitario, 4)               AS costo_total_item,
+         ri.notas, ri.observaciones, ri.merma, ri.pedido,
+         ri.tipo_costo, ri.orden, ri.codigo_maxi_insumo, ri.nombre_insumo_maxi
        FROM receta_items ri
        LEFT JOIN insumos i  ON i.id  = ri.insumo_id
        LEFT JOIN maxi_supplies ms ON ms.id = ri.supply_id
@@ -71,40 +46,13 @@ exports.getReceta = async (req, res, next) => {
       [receta.id]
     );
 
-    return res.json({
-      ok: true,
-      receta: {
-        ...receta,
-        items,
-      },
-    });
+    return res.json({ ok: true, receta: { ...receta, items } });
   } catch (e) {
     console.error('[getReceta]', e);
     next(e);
   }
 };
 
-/* ══════════════════════════════════════════════════════════════
-   POST /api/businesses/:businessId/articles/:articleId/receta
-   Crear o actualizar receta (upsert completo con sus items)
-
-   Body: {
-     nombre?: string,
-     descripcion?: string,
-     porciones?: number,
-     porcentajeVenta?: number,    // % de margen de venta
-     items: [
-       {
-         supplyId: number,        // ID en maxi_supplies
-         cantidad: number,
-         unidad: string,          // 'gr', 'kg', 'ml', 'lt', 'u'
-         costoUnitario: number,   // precio que paga ESTE negocio
-         notas?: string,
-         orden?: number,
-       }
-     ]
-   }
-══════════════════════════════════════════════════════════════ */
 exports.saveReceta = async (req, res, next) => {
   const client = await pool.connect();
   try {
@@ -124,22 +72,17 @@ exports.saveReceta = async (req, res, next) => {
       items = [],
     } = req.body || {};
 
-    // Validar items mínimos
     if (!Array.isArray(items)) {
       return res.status(400).json({ ok: false, error: 'items_must_be_array' });
     }
 
-    // Calcular costo total desde los items
     const costoTotal = items.reduce((acc, item) => {
-      const cantidad = Number(item.cantidad || 0);
-      const costoUnitario = Number(item.costoUnitario || 0);
-      return acc + (cantidad * costoUnitario);
+      return acc + (Number(item.cantidad || 0) * Number(item.costoUnitario || 0));
     }, 0);
 
     await client.query('BEGIN');
 
-    // UPSERT de la receta
-    // origen='manual' → el sync de MaxiRest nunca va a pisar los items de esta receta
+    // ── Upsert receta ──
     const { rows: recetaRows } = await client.query(
       `INSERT INTO recetas
          (article_id, business_id, nombre, descripcion, porciones,
@@ -157,8 +100,7 @@ exports.saveReceta = async (req, res, next) => {
          updated_at       = NOW()
        RETURNING *`,
       [
-        articleId,
-        bizId,
+        articleId, bizId,
         nombre?.trim() || null,
         descripcion?.trim() || null,
         Number(porciones) || 1,
@@ -170,11 +112,8 @@ exports.saveReceta = async (req, res, next) => {
 
     const receta = recetaRows[0];
 
-    // Reemplazar items: borrar todos y reinsertar
-    await client.query(
-      `DELETE FROM receta_items WHERE receta_id = $1`,
-      [receta.id]
-    );
+    // ── Reemplazar items ──
+    await client.query(`DELETE FROM receta_items WHERE receta_id = $1`, [receta.id]);
 
     const savedItems = [];
 
@@ -190,7 +129,6 @@ exports.saveReceta = async (req, res, next) => {
       if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
       if (cantidad <= 0) continue;
 
-      // Validar que el insumo existe en tabla insumos (nueva arquitectura)
       const { rows: insumoCheck } = await client.query(
         `SELECT id, nombre, unidad_med FROM insumos WHERE id = $1 LIMIT 1`,
         [supplyId]
@@ -201,8 +139,8 @@ exports.saveReceta = async (req, res, next) => {
         continue;
       }
 
-      const merma = item.merma !== false;  // default true
-      const pedido = item.pedido !== false;  // default true
+      const merma = item.merma !== false;
+      const pedido = item.pedido !== false;
       const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
 
@@ -225,26 +163,30 @@ exports.saveReceta = async (req, res, next) => {
       });
     }
 
-    // ── Si el artículo es un insumo elaborado, actualizar su costo en la tabla insumos ──
+    // ── Actualizar costo en insumos elaborados ──
     const costoXPorcion = Number(porciones) > 0 ? costoTotal / Number(porciones) : costoTotal;
     const porcentaje = Number(porcentajeVenta) || 0;
-    const precioSugerido = porcentaje > 0 ? costoXPorcion / (porcentaje / 100) : 0;
 
     await client.query(
       `UPDATE insumos
-      SET costo_receta = $1,
-          precio_ref   = $1,
-          tiene_receta = TRUE,
-          updated_at   = NOW()
-    WHERE id = $2
-      AND business_id = $3
-      AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
-      [
-        Math.round(costoXPorcion * 1000) / 1000,
-        articleId,
-        bizId,
-      ]
+       SET costo_receta = $1, precio_ref = $1, tiene_receta = TRUE, updated_at = NOW()
+       WHERE id = $2 AND business_id = $3
+         AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
+      [Math.round(costoXPorcion * 1000) / 1000, articleId, bizId]
     );
+
+    // ── Sincronizar porcentajeVenta → price_config como objetivo individual ──
+    if (porcentaje > 0) {
+      await client.query(
+        `INSERT INTO article_price_config
+           (business_id, scope, scope_id, objetivo_pct, updated_at)
+         VALUES ($1, 'articulo', $2, $3, NOW())
+         ON CONFLICT (business_id, scope, scope_id) DO UPDATE SET
+           objetivo_pct = EXCLUDED.objetivo_pct,
+           updated_at   = NOW()`,
+        [bizId, String(articleId), porcentaje]
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -252,10 +194,7 @@ exports.saveReceta = async (req, res, next) => {
 
     return res.json({
       ok: true,
-      receta: {
-        ...receta,
-        items: savedItems,
-      },
+      receta: { ...receta, items: savedItems },
     });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
@@ -266,10 +205,6 @@ exports.saveReceta = async (req, res, next) => {
   }
 };
 
-/* ══════════════════════════════════════════════════════════════
-   DELETE /api/businesses/:businessId/articles/:articleId/receta
-   Soft delete de la receta (active = FALSE)
-══════════════════════════════════════════════════════════════ */
 exports.deleteReceta = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
@@ -282,27 +217,28 @@ exports.deleteReceta = async (req, res, next) => {
     const { rows } = await pool.query(
       `UPDATE recetas
           SET active = FALSE, updated_at = NOW()
-        WHERE article_id = $1
-          AND business_id = $2
-          AND active = TRUE
+        WHERE article_id = $1 AND business_id = $2 AND active = TRUE
         RETURNING id`,
-      [articleId, bizId]
-    );
-
-    await pool.query(
-      `UPDATE insumos
-      SET costo_receta = 0,
-          tiene_receta = FALSE,
-          updated_at   = NOW()
-    WHERE id = $1
-      AND business_id = $2
-      AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
       [articleId, bizId]
     );
 
     if (!rows.length) {
       return res.status(404).json({ ok: false, error: 'receta_not_found' });
     }
+
+    await pool.query(
+      `UPDATE insumos
+       SET costo_receta = 0, tiene_receta = FALSE, updated_at = NOW()
+       WHERE id = $1 AND business_id = $2
+         AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
+      [articleId, bizId]
+    );
+
+    await pool.query(
+      `DELETE FROM article_price_config
+       WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2`,
+      [bizId, String(articleId)]
+    );
 
     console.log(`🗑️ [deleteReceta] Receta ID=${rows[0].id} desactivada`);
 

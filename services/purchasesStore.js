@@ -13,24 +13,22 @@ function generateBatchId() {
   return `${date}-${time}-${rand}`;
 }
 
-async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = null) {
-  // ✅ Si no viene batch_id externo, generar uno nuevo para esta importación
-  const effectiveBatchId = batchId || generateBatchId();
+async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = null) {
+  const effectiveBatchId = generateBatchId();
 
   if (!facturas?.length) return { inserted: 0, updated: 0, items: 0, batch_id: effectiveBatchId };
   const client = await pool.connect();
   let inserted = 0, updated = 0, totalItems = 0;
   try {
     await client.query('BEGIN');
-    const ultimoPrecioMap = new Map(); // insumoId → { precio, fecha }
+    const ultimoPrecioMap = new Map();
     for (const factura of facturas) {
-      if (!factura) continue; // MaxiRest puede mandar nulls en el array
+      if (!factura) continue;
       const facturaKey = String(factura.numero ?? '').trim();
       if (!facturaKey) continue;
       const proveedorId = factura.proveedor ? Number(factura.proveedor) : null;
       const items = Array.isArray(factura.items) ? factura.items : [];
 
-      // Totales desde items (neto unitario*cantidad = preciotot)
       let netoTotal = 0, ivaTotal = 0, impIntTotal = 0;
       for (const it of items) {
         netoTotal   += Number(it.preciotot  ?? 0);
@@ -40,36 +38,34 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = n
       const total = netoTotal + ivaTotal + impIntTotal;
       const fecha = items[0]?.fecha ?? null;
 
-      // ✅ Incluir batch_id en el INSERT y en el ON CONFLICT UPDATE
       const upsertRes = await client.query(
         `INSERT INTO purchases
            (business_id, factura_key, proveedor_id, fecha,
             neto_total, iva_total, imp_int_total, total,
-            batch_id,
+            batch_id, branch_id,
             synced_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
-         ON CONFLICT (business_id, factura_key) DO UPDATE SET
-           proveedor_id  = EXCLUDED.proveedor_id,
-           fecha         = EXCLUDED.fecha,
-           neto_total    = EXCLUDED.neto_total,
-           iva_total     = EXCLUDED.iva_total,
-           imp_int_total = EXCLUDED.imp_int_total,
-           total         = EXCLUDED.total,
-           batch_id      = EXCLUDED.batch_id,
-           synced_at     = NOW(),
-           updated_at    = NOW()
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+            ON CONFLICT (business_id, factura_key, COALESCE(branch_id, -1)) DO UPDATE SET
+            proveedor_id  = EXCLUDED.proveedor_id,
+            fecha         = EXCLUDED.fecha,
+            neto_total    = EXCLUDED.neto_total,
+            iva_total     = EXCLUDED.iva_total,
+            imp_int_total = EXCLUDED.imp_int_total,
+            total         = EXCLUDED.total,
+            synced_at     = NOW(),
+            updated_at    = NOW()
+            -- batch_id y branch_id NO se tocan → queda con el lote que lo subió primero
          RETURNING id, (xmax = 0) AS is_insert`,
         [businessId, facturaKey, proveedorId, fecha,
          netoTotal.toFixed(2), ivaTotal.toFixed(2),
          impIntTotal.toFixed(2), total.toFixed(2),
-         effectiveBatchId]  // ✅ $9
+         effectiveBatchId, branchId ?? null]
       );
 
       const purchaseId = upsertRes.rows[0].id;
       const isInsert   = upsertRes.rows[0].is_insert;
       if (isInsert) inserted++; else updated++;
 
-      // Eliminar items anteriores antes de reinsertar
       await client.query('DELETE FROM purchase_items WHERE purchase_id = $1', [purchaseId]);
 
       for (const it of items) {
@@ -77,18 +73,9 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = n
         const insumoId   = codigoMaxi != null ? (insumoMap.get(codigoMaxi) ?? null) : null;
         const itemFecha  = it.fecha ?? fecha;
 
-        // En MaxiRest:
-        // - it.cantidad  = cantidad real comprada
-        // - it.precio    = precio unitario real (ya es el precio por unidad)
-        // - it.neto      = importe neto de la línea (precio × cantidad, sin IVA)
-        // - it.preciotot = total de la línea incluyendo impuestos internos
-        //
-        // IMPORTANTE: neto NO es un factor de presentación, es el subtotal neto.
-        // No hay que dividir precio por neto ni multiplicar cantidad por neto.
-        const cantidadTotal   = Number(it.cantidad ?? 0);
-        const precioUnitario  = Number(it.precio ?? 0);
-        const factorNeto      = Number(it.neto ?? 0); // guardado como referencia, no se usa en cálculo
-        const itemPrecio      = precioUnitario;
+        const cantidadTotal  = Number(it.cantidad ?? 0);
+        const precioUnitario = Number(it.precio ?? 0);
+        const factorNeto     = Number(it.neto ?? 0);
 
         await client.query(
           `INSERT INTO purchase_items
@@ -98,11 +85,8 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = n
               imp_int, imp_int_total, orden_compra, cpto_caja, referencia)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
           [purchaseId, businessId, insumoId,
-           itemFecha,
-           it.sucursal ?? 0,
-           cantidadTotal,
-           factorNeto,
-           precioUnitario,
+           itemFecha, it.sucursal ?? 0,
+           cantidadTotal, factorNeto, precioUnitario,
            it.preciotot ?? 0,
            it.iva_tasa ?? 0, it.iva ?? 0, it.iva_total ?? 0,
            it.imp_int ?? 0, it.imp_inttot ?? 0,
@@ -110,17 +94,15 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = n
         );
         totalItems++;
 
-        // Rastrear último precio por insumo
-        if (insumoId && itemPrecio > 0 && itemFecha) {
+        if (insumoId && precioUnitario > 0 && itemFecha) {
           const prev = ultimoPrecioMap.get(insumoId);
           if (!prev || itemFecha >= prev.fecha) {
-            ultimoPrecioMap.set(insumoId, { precio: itemPrecio, fecha: itemFecha });
+            ultimoPrecioMap.set(insumoId, { precio: precioUnitario, fecha: itemFecha });
           }
         }
       }
     }
 
-    // Actualizar precio_ref en insumos con el último precio pagado
     let preciosActualizados = 0;
     for (const [insumoId, { precio }] of ultimoPrecioMap.entries()) {
       await client.query(
@@ -129,9 +111,6 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, batchId = n
         [precio.toFixed(4), insumoId, businessId]
       );
       preciosActualizados++;
-    }
-    if (preciosActualizados > 0) {
-      console.log(`[purchases.store] precio_ref actualizado en ${preciosActualizados} insumos`);
     }
 
     await client.query('COMMIT');

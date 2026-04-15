@@ -1165,8 +1165,8 @@ exports.moveItemsBetweenGroups = async (req, res) => {
       return reqBizId;
     };
 
-    const fromBizId = await resolveDiscBizId(fromMeta.nombre, businessId);
-    const toBizId = await resolveDiscBizId(toMeta.nombre, businessId);
+    const fromBizId = await resolveDiscBizId(fromMeta.nombre, Number(fromMeta.business_id));
+    const toBizId = await resolveDiscBizId(toMeta.nombre, Number(toMeta.business_id));
 
     const { rows: fromRows } = await client.query(
       `SELECT id, articulos FROM agrupaciones WHERE id=$1 AND business_id=$2 FOR UPDATE`,
@@ -1539,8 +1539,8 @@ exports.getArticulosOrigenes = async (req, res) => {
       const legacyIds = Array.isArray(ag.app_articles_ids)
         ? ag.app_articles_ids.map(Number)
         : (typeof ag.app_articles_ids === 'string'
-            ? JSON.parse(ag.app_articles_ids || '[]').map(Number)
-            : []);
+          ? JSON.parse(ag.app_articles_ids || '[]').map(Number)
+          : []);
       for (const artId of legacyIds) {
         if (!idsSet.has(artId)) continue;
         if (origenes[artId]) continue; // JSONB tiene prioridad si ya se encontró
