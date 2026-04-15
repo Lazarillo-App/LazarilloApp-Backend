@@ -1143,6 +1143,15 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     const fromMeta = nameRows.find((r) => Number(r.id) === fromId);
     const toMeta = nameRows.find((r) => Number(r.id) === toId);
 
+    console.log('[moveItems DEBUG]', {
+      businessId,
+      fromId,
+      toId,
+      nameRows,
+      fromMeta,
+      toMeta,
+    });
+
     if (!fromMeta || !toMeta) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'Agrupación/es no encontrada/s' });
@@ -1166,7 +1175,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     };
 
     const fromBizId = await resolveDiscBizId(fromMeta.nombre, Number(fromMeta.business_id));
-    const toBizId   = await resolveDiscBizId(toMeta.nombre,   Number(toMeta.business_id));
+    const toBizId = await resolveDiscBizId(toMeta.nombre, Number(toMeta.business_id));
 
     const { rows: fromRows } = await client.query(
       `SELECT id, articulos FROM agrupaciones WHERE id=$1 AND business_id=$2 FOR UPDATE`,
