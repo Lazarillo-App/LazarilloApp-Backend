@@ -1163,7 +1163,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
       businessId,
       fromId,
       toId,
-      nameRows,
+      idsRecibidos: ids,
       fromMeta,
       toMeta,
     });
@@ -1215,6 +1215,14 @@ exports.moveItemsBetweenGroups = async (req, res) => {
 
     const idsSet = new Set(ids);
     const moving = fromList.filter((a) => idsSet.has(Number(a.id)));
+
+    console.log('[moveItems MATCH]', {
+      fromListLength: fromList.length,
+      fromListSample: fromList.slice(0, 3).map(a => ({ id: a.id, tipo: typeof a.id })),
+      idsSetSample: [...idsSet].slice(0, 3),
+      idsSetTipos: [...idsSet].slice(0, 3).map(x => typeof x),
+      movingLength: moving.length,
+    });
 
     if (!moving.length) {
       await client.query('COMMIT');
