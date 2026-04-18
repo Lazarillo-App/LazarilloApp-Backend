@@ -377,10 +377,49 @@ exports.listArticlesFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
-  // Todos los negocios de la org ven los MISMOS artículos — los del negocio principal.
-  // Sin Agrupación y Discontinuados son globales: muestran artículos que no están
-  // en ninguna agrupación nombrada de ningún negocio de la org.
-  const { principalId } = await getOrgArticleContext(biz.id, pool);
+  const { principalId, assignedIds, orgId } = await getOrgArticleContext(biz.id, pool);
+  const isSubBusiness = orgId && Number(biz.id) !== Number(principalId);
+
+  let allowedIds = null;
+  if (isSubBusiness) {
+    // Artículos propios del subnegocio (en sus agrupaciones reales)
+    const { rows: subAgRows } = await pool.query(
+      `SELECT ag.articulos, ag.app_articles_ids
+         FROM agrupaciones ag
+        WHERE ag.business_id = $1
+          AND ag.moved_to_business_id IS NULL
+          AND ag.nombre NOT ILIKE 'Sin Agrupac%'
+          AND ag.nombre NOT ILIKE 'Sin Agrupar%'
+          AND ag.nombre NOT ILIKE 'Discontinuados'
+          AND ag.nombre NOT ILIKE 'Descontinuados'`,
+      [biz.id]
+    );
+
+    allowedIds = new Set();
+    for (const ag of subAgRows) {
+      const arts = Array.isArray(ag.articulos) ? ag.articulos
+        : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+        : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+      for (const a of arts) {
+        const id = Number(a?.id ?? a?.articulo_id ?? a);
+        if (id > 0) allowedIds.add(id);
+      }
+      for (const id of appIds) { const n = Number(id); if (n > 0) allowedIds.add(n); }
+    }
+
+    // Artículos libres (no asignados a ningún subnegocio) también son visibles
+    if (assignedIds) {
+      const { rows: allRows } = await pool.query(
+        `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
+        [principalId]
+      );
+      for (const r of allRows) {
+        const id = Number(r.articulo_id);
+        if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
+      }
+    }
+  }
 
   const { rows } = await pool.query(
     `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
@@ -389,7 +428,12 @@ exports.listArticlesFromDB = async (req, res) => {
       ORDER BY categoria, subrubro, nombre`,
     [principalId]
   );
-  res.json({ items: rows });
+
+  const items = allowedIds !== null
+    ? rows.filter(r => allowedIds.has(Number(r.id)))
+    : rows;
+
+  res.json({ items });
 };
 
 /**
@@ -460,9 +504,53 @@ exports.listArticlesTreeFromDB = async (req, res) => {
   const biz = req.business;
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
   try {
-    // Todos los negocios de la org ven el árbol del negocio principal.
-    // Sin Agrupación = artículos no asignados en ninguna agrupación de ningún negocio de la org.
-    const { principalId } = await getOrgArticleContext(biz.id, pool);
+    const { principalId, assignedIds, orgId } = await getOrgArticleContext(biz.id, pool);
+    const isSubBusiness = orgId && Number(biz.id) !== Number(principalId);
+
+    // Para subnegocios: calcular qué artículos le pertenecen
+    // = los que están en sus propias agrupaciones (no globales)
+    let allowedIds = null; // null = sin filtro (principal o sin org)
+    if (isSubBusiness) {
+      const { rows: subAgRows } = await pool.query(
+        `SELECT ag.articulos, ag.app_articles_ids
+           FROM agrupaciones ag
+          WHERE ag.business_id = $1
+            AND ag.moved_to_business_id IS NULL
+            AND ag.nombre NOT ILIKE 'Sin Agrupac%'
+            AND ag.nombre NOT ILIKE 'Sin Agrupar%'
+            AND ag.nombre NOT ILIKE 'Discontinuados'
+            AND ag.nombre NOT ILIKE 'Descontinuados'`,
+        [biz.id]
+      );
+
+      allowedIds = new Set();
+      for (const ag of subAgRows) {
+        const arts = Array.isArray(ag.articulos) ? ag.articulos
+          : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+          : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+        for (const a of arts) {
+          const id = Number(a?.id ?? a?.articulo_id ?? a);
+          if (id > 0) allowedIds.add(id);
+        }
+        for (const id of appIds) { const n = Number(id); if (n > 0) allowedIds.add(n); }
+      }
+
+      // También incluir artículos sin asignar a ningún subnegocio (son del principal = visibles desde todos)
+      // Un artículo es "sin asignar" si no está en ninguna agrupación real de ningún subnegocio
+      // assignedIds ya tiene TODOS los asignados en la org — los que NO están ahí son libres
+      // Los libres son visibles desde cualquier subnegocio (aparecen en Sin Agrupación global)
+      if (assignedIds) {
+        const { rows: allRows } = await pool.query(
+          `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
+          [principalId]
+        );
+        for (const r of allRows) {
+          const id = Number(r.articulo_id);
+          if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
+        }
+      }
+    }
 
     const { rows } = await pool.query(
       `SELECT articulo_id, nombre, categoria, subrubro, precio
@@ -474,6 +562,9 @@ exports.listArticlesTreeFromDB = async (req, res) => {
 
     const bySub = new Map();
     for (const r of rows) {
+      // Para subnegocios: solo incluir artículos permitidos
+      if (allowedIds !== null && !allowedIds.has(Number(r.articulo_id))) continue;
+
       const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
       const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
       if (!bySub.has(sub)) bySub.set(sub, new Map());

@@ -1,5 +1,6 @@
 // controllers/agrupacionesController.js
 const pool = require('../config/db');
+const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 /* ========================= Helpers ========================= */
 
@@ -615,6 +616,7 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
       [JSON.stringify(merged), id, businessId]
     );
 
+    invalidateCacheForBiz(businessId);
     return res.json(rows[0]);
   } catch (e) {
     console.error('agregarArticulosAgrupacion error:', {
@@ -688,6 +690,7 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
       [JSON.stringify(filtered), id, businessId]
     );
 
+    invalidateCacheForBiz(businessId);
     return res.json(rows[0]);
   } catch (e) {
     console.error('eliminarArticuloDeAgrupacion error:', {
@@ -913,6 +916,8 @@ exports.createOrMoveAgrupacion = async (req, res) => {
     }
 
     await client.query('COMMIT');
+    invalidateCacheForBiz(businessId);
+    if (Number(originalBusinessId) !== Number(businessId)) invalidateCacheForBiz(originalBusinessId);
     return res.json({ ok: true, id: destId, nombre: nombreFinal, moved });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -1240,6 +1245,12 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     );
 
     await client.query('COMMIT');
+
+    // Invalidar caché de artículos para ambos negocios involucrados
+    invalidateCacheForBiz(fromBizId);
+    if (toBizId !== fromBizId) invalidateCacheForBiz(toBizId);
+    invalidateCacheForBiz(businessId);
+
     return res.json({ ok: true, moved: moving.length });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -1639,6 +1650,7 @@ exports.eliminarArticulosDeAgrupacionBulk = async (req, res) => {
       [JSON.stringify(filtered), id, businessId]
     );
 
+    invalidateCacheForBiz(businessId);
     return res.json({ ok: true, removed, remaining: filtered.length, data: rows[0] });
   } catch (e) {
     console.error('eliminarArticulosDeAgrupacionBulk error:', e);
