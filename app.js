@@ -23,10 +23,11 @@ const adminRoutes = require('./routes/admin.routes');
 const adminCronRoutes = require('./routes/adminCronRoutes');
 const adminRebuildAgg = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
+const articleListsRoutes = require('./routes/articleListsRoutes');
 const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
 const purchasesRoutes = require('./routes/purchasesRoutes');
-const salesBatchesRoutes = require('./routes/salesRoutes');          // ← NUEVO
+const salesBatchesRoutes = require('./routes/salesRoutes');          
 const { resolveInsumoBusiness } = require('./middleware/resolveInsumoBusiness');
 const divisionsRoutes = require('./routes/divisionsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
@@ -170,6 +171,7 @@ app.use('/api/recetas', recetaUploadRoutes);
 
 // 3) businesses base después
 app.use('/api/businesses', businessRoutes);
+app.use('/api/businesses', articleListsRoutes);
 
 // 4) genérica al final
 app.use('/api/businesses/:businessId', agrupacionesRoutes);
