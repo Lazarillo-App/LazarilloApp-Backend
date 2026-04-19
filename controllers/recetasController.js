@@ -1,5 +1,6 @@
 // controllers/recetasController.js
 const pool = require('../config/db');
+const { propagateRecipe } = require('../services/linkPropagation');
 
 exports.getReceta = async (req, res, next) => {
   try {
@@ -192,6 +193,15 @@ exports.saveReceta = async (req, res, next) => {
 
     console.log(`✅ [saveReceta] Receta ID=${receta.id} | Art=${articleId} | Biz=${bizId} | ${savedItems.length} items | Costo=$${costoTotal.toFixed(4)}`);
 
+    // ── Propagación a artículos vinculados (fire-and-forget, no bloquea response) ──
+    propagateRecipe({ bizId, articleId, receta, savedItems }).catch(e =>
+      console.warn('[saveReceta] propagateRecipe falló (no crítico):', e.message)
+    );
+
+    return res.json({
+      ok: true,
+      receta: { ...receta, items: savedItems },
+    });
     return res.json({
       ok: true,
       receta: { ...receta, items: savedItems },

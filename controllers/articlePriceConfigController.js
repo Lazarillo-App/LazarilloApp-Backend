@@ -2,6 +2,7 @@
 'use strict';
 
 const pool = require('../config/db');
+const { propagatePrecioManual, propagateObjetivo } = require('../services/linkPropagation');
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/recetas-costos
@@ -186,9 +187,9 @@ exports.savePriceConfig = async (req, res, next) => {
       return res.status(400).json({ ok: false, error: 'scopeId_requerido' });
     }
 
-    const objetivoVal    = objetivo     != null ? Number(objetivo)     : null;
+    const objetivoVal = objetivo != null ? Number(objetivo) : null;
     const precioManualVal = precioManual != null ? Number(precioManual) : null;
-    const scopeIdStr     = String(scopeId).trim();
+    const scopeIdStr = String(scopeId).trim();
 
     await client.query('BEGIN');
 
@@ -212,7 +213,7 @@ exports.savePriceConfig = async (req, res, next) => {
     } else if (objetivo === null && precioManual === null) {
       // Borrar selectivamente según qué keys vinieron en el body
       const bodyKeys = Object.keys(req.body || {});
-      const borrarManual   = bodyKeys.includes('precioManual');
+      const borrarManual = bodyKeys.includes('precioManual');
       const borrarObjetivo = bodyKeys.includes('objetivo');
 
       if (borrarManual && borrarObjetivo) {
@@ -306,6 +307,23 @@ exports.savePriceConfig = async (req, res, next) => {
     }
 
     await client.query('COMMIT');
+
+    // ── Propagación a artículos vinculados ─────────────────────────────────
+    // Solo propagamos cuando es scope='articulo' (cambio individual).
+    // Los cambios de rubro/agrupacion son bulk y no se propagan por vinculación.
+    if (scope === 'articulo') {
+      const artId = Number(scopeIdStr);
+      if (Number.isFinite(artId) && artId > 0) {
+        if (precioManualVal !== null) {
+          propagatePrecioManual({ bizId, articleId: artId, precioManual: precioManualVal })
+            .catch(e => console.warn('[savePriceConfig] propagatePrecioManual falló:', e.message));
+        }
+        if (objetivoVal !== null) {
+          propagateObjetivo({ bizId, articleId: artId, objetivo: objetivoVal })
+            .catch(e => console.warn('[savePriceConfig] propagateObjetivo falló:', e.message));
+        }
+      }
+    }
 
     return res.json({
       ok: true,
