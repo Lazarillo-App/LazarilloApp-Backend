@@ -1,16 +1,8 @@
 // services/linkPropagation.js
-//
-// Helper compartido que usan recetasController y articlePriceConfigController.
-// Detecta si un artículo está vinculado y replica el cambio a los demás miembros.
-
 'use strict';
 
 const pool = require('../config/db');
 
-/**
- * Obtiene los miembros de la vinculación de un artículo (excluyendo al propio artículo).
- * Devuelve null si el artículo no está vinculado.
- */
 async function getLinkSiblings(bizId, articleId) {
   const { rows } = await pool.query(
     `SELECT m2.article_id, g.id AS group_id, g.name AS group_name,
@@ -23,12 +15,9 @@ async function getLinkSiblings(bizId, articleId) {
     [articleId, bizId]
   );
   if (!rows.length) return null;
-  return rows; // [{ article_id, group_id, group_name, sync_recipe, sync_objetivo, sync_precio }]
+  return rows;
 }
 
-/**
- * Registra la propagación en el log (tabla article_link_propagations).
- */
 async function logPropagation(client, { groupId, bizId, triggeredBy, propagatedTo, changeType, changeDetail }) {
   try {
     await client.query(
@@ -38,31 +27,19 @@ async function logPropagation(client, { groupId, bizId, triggeredBy, propagatedT
       [groupId, bizId, triggeredBy, propagatedTo, changeType, JSON.stringify(changeDetail || {})]
     );
   } catch (e) {
-    // Log no es crítico, no romper el flujo principal
-    console.warn('[linkPropagation] Error al loguear propagación:', e.message);
+    console.warn('[linkPropagation] Error al loguear propagacion:', e.message);
   }
 }
 
-/**
- * Propaga una RECETA a todos los artículos vinculados.
- * Copia los items de la receta del artículo origen a cada sibling.
- *
- * @param {object} opts
- * @param {number} opts.bizId
- * @param {number} opts.articleId     — artículo que disparó el cambio
- * @param {object} opts.receta        — receta guardada (con .id, .costo_total, .porciones, etc.)
- * @param {object[]} opts.savedItems  — items de la receta guardada
- */
 async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
   const siblings = await getLinkSiblings(bizId, articleId);
   if (!siblings) return;
 
-  // Filtrar solo los que tienen sync_recipe activo
   const targets = siblings.filter(s => s.sync_recipe !== false);
   if (!targets.length) return;
 
-  const groupId   = targets[0].group_id;
-  const groupName = targets[0].group_name;
+  const groupId      = targets[0].group_id;
+  const groupName    = targets[0].group_name;
   const propagatedTo = targets.map(s => Number(s.article_id));
 
   const client = await pool.connect();
@@ -72,12 +49,13 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
     for (const sibling of targets) {
       const siblingId = Number(sibling.article_id);
 
-      // Upsert receta del sibling (mismos datos, distinto article_id)
+      // Upsert receta del sibling - ahora incluye notas, foto y notas_updated_at
       const { rows: recetaRows } = await client.query(
         `INSERT INTO recetas
            (article_id, business_id, nombre, descripcion, porciones,
-            porcentaje_venta, costo_total, active, origen, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, 'linked', NOW())
+            porcentaje_venta, costo_total, notas, foto, notas_updated_at,
+            active, origen, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'linked', NOW())
          ON CONFLICT (article_id, business_id)
          DO UPDATE SET
            nombre           = EXCLUDED.nombre,
@@ -85,66 +63,76 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
            porciones        = EXCLUDED.porciones,
            porcentaje_venta = EXCLUDED.porcentaje_venta,
            costo_total      = EXCLUDED.costo_total,
+           notas            = EXCLUDED.notas,
+           foto             = EXCLUDED.foto,
+           notas_updated_at = EXCLUDED.notas_updated_at,
            active           = TRUE,
            origen           = 'linked',
            updated_at       = NOW()
          RETURNING id`,
         [
           siblingId, bizId,
-          receta.nombre || null,
-          receta.descripcion || null,
-          receta.porciones || 1,
+          receta.nombre           || null,
+          receta.descripcion      || null,
+          receta.porciones        || 1,
           receta.porcentaje_venta || 0,
           receta.costo_total,
+          receta.notas            || null,
+          receta.foto             || null,
+          receta.notas_updated_at || null,
         ]
       );
 
       const siblingRecetaId = recetaRows[0].id;
 
-      // Reemplazar items
       await client.query(`DELETE FROM receta_items WHERE receta_id = $1`, [siblingRecetaId]);
 
       for (const item of savedItems || []) {
         const insumoId = Number(item.insumo_id ?? item.supply_id);
         if (!Number.isFinite(insumoId) || insumoId <= 0) continue;
 
+        // fotos_urls se propaga igual que observaciones
+        const fotosUrls = Array.isArray(item.fotos_urls)
+          ? item.fotos_urls.filter(u => typeof u === 'string' && u.startsWith('http'))
+          : [];
+
         await client.query(
           `INSERT INTO receta_items
              (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
-              observaciones, merma, pedido, tipo_costo, orden, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())`,
+              observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
+              created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())`,
           [
             siblingRecetaId,
             insumoId,
             item.cantidad,
-            item.unidad || null,
+            item.unidad        || null,
             item.costo_unitario,
-            item.notas || null,
+            item.notas         || null,
             item.observaciones || null,
-            item.merma !== false,
+            fotosUrls,
+            item.merma  !== false,
             item.pedido !== false,
-            item.tipo_costo || 'total',
-            item.orden ?? 0,
+            item.tipo_costo    || 'total',
+            item.orden         ?? 0,
           ]
         );
       }
 
-      console.log(`[propagateRecipe] Receta copiada → artículo ${siblingId} (grupo "${groupName}")`);
+      console.log(`[propagateRecipe] Receta copiada -> articulo ${siblingId} (grupo "${groupName}")`);
     }
 
-    // Log de propagación
     await logPropagation(client, {
-      groupId,
-      bizId,
-      triggeredBy: articleId,
+      groupId, bizId,
+      triggeredBy:  articleId,
       propagatedTo,
-      changeType: 'recipe',
+      changeType:   'recipe',
       changeDetail: { costo_total: receta.costo_total, items_count: (savedItems || []).length },
     });
 
     await client.query('COMMIT');
 
-    console.log(`✅ [propagateRecipe] ${propagatedTo.length} artículos actualizados desde artículo ${articleId}`);
+    console.log(`[propagateRecipe] ${propagatedTo.length} articulos actualizados desde articulo ${articleId}`);
     return { propagatedTo, count: propagatedTo.length };
 
   } catch (e) {
@@ -156,14 +144,6 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
   }
 }
 
-/**
- * Propaga un PRECIO MANUAL a todos los artículos vinculados.
- *
- * @param {object} opts
- * @param {number} opts.bizId
- * @param {number} opts.articleId
- * @param {number} opts.precioManual
- */
 async function propagatePrecioManual({ bizId, articleId, precioManual }) {
   const siblings = await getLinkSiblings(bizId, articleId);
   if (!siblings) return;
@@ -193,17 +173,14 @@ async function propagatePrecioManual({ bizId, articleId, precioManual }) {
     }
 
     await logPropagation(client, {
-      groupId,
-      bizId,
-      triggeredBy: articleId,
+      groupId, bizId,
+      triggeredBy:  articleId,
       propagatedTo,
-      changeType: 'precio_manual',
+      changeType:   'precio_manual',
       changeDetail: { precioManual },
     });
 
     await client.query('COMMIT');
-
-    console.log(`✅ [propagatePrecioManual] precio_manual=${precioManual} → ${propagatedTo.length} artículos desde artículo ${articleId}`);
     return { propagatedTo, count: propagatedTo.length };
 
   } catch (e) {
@@ -215,14 +192,6 @@ async function propagatePrecioManual({ bizId, articleId, precioManual }) {
   }
 }
 
-/**
- * Propaga un OBJETIVO % a todos los artículos vinculados.
- *
- * @param {object} opts
- * @param {number} opts.bizId
- * @param {number} opts.articleId
- * @param {number} opts.objetivo
- */
 async function propagateObjetivo({ bizId, articleId, objetivo }) {
   const siblings = await getLinkSiblings(bizId, articleId);
   if (!siblings) return;
@@ -252,17 +221,14 @@ async function propagateObjetivo({ bizId, articleId, objetivo }) {
     }
 
     await logPropagation(client, {
-      groupId,
-      bizId,
-      triggeredBy: articleId,
+      groupId, bizId,
+      triggeredBy:  articleId,
       propagatedTo,
-      changeType: 'objetivo',
+      changeType:   'objetivo',
       changeDetail: { objetivo },
     });
 
     await client.query('COMMIT');
-
-    console.log(`✅ [propagateObjetivo] objetivo=${objetivo}% → ${propagatedTo.length} artículos desde artículo ${articleId}`);
     return { propagatedTo, count: propagatedTo.length };
 
   } catch (e) {
