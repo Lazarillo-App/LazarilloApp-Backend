@@ -38,24 +38,22 @@ router.post('/:articuloId/upload-token', authRequired, async (req, res, next) =>
   try {
     const { articuloId } = req.params;
     const { supplyId, supplyNombre, bizId } = req.body;
+
     if (!bizId) return res.status(400).json({ error: 'missing_bizId' });
 
     const token = randomUUID();
-    // Usar AT TIME ZONE para que Postgres guarde bien el timestamp
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000) // 1 hora de validez
 
     await pool.query(
       `INSERT INTO receta_upload_tokens
          (token, articulo_id, supply_id, supply_nombre, biz_id, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6::timestamptz)`,
-      [token, articuloId, supplyId || null, supplyNombre || null, bizId, expiresAt.toISOString()]
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [token, articuloId, supplyId || null, supplyNombre || null, bizId, expiresAt]
     );
 
-    // El backend arma la uploadUrl — así no depende de variables del frontend
-    const frontendBase = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
-    const uploadUrl = `${frontendBase}/upload-foto?token=${token}`;
+    // No armamos la URL en el backend — la arma el frontend
 
-    return res.json({ token, expiresAt: expiresAt.toISOString(), uploadUrl });
+    return res.json({ token, expiresAt });
 
   } catch (err) {
     next(err);
