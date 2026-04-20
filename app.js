@@ -118,6 +118,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/dev', devRoutes);
 app.use('/api/diagnostic', diagnosticRoutes);
 
+// ✅ AGREGAR ACÁ — antes del guard global de /api
+app.use('/api/recetas', recetaUploadRoutes);
+
 if (exposeProbe) {
   app.use('/api/dev', devMaxiProbeRoutes);
 }
@@ -167,7 +170,6 @@ const { getRecetasElaboradosMapa } = require('./controllers/recetasElaboradosCon
 app.use('/api/businesses/:businessId/recetas-elaborados', authRequired, getRecetasElaboradosMapa);
 app.use('/api/businesses/:businessId/insumos/:insumoId/receta', recetasElaboradosRoutes);
 app.use('/api/recetas', recetaFotosRoutes);
-app.use('/api/recetas', recetaUploadRoutes);
 
 // 3) businesses base después
 app.use('/api/businesses', businessRoutes);
