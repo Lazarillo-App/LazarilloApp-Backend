@@ -199,7 +199,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     let failed = 0;
     let minDate = null;
     let maxDate = null;
-    const agg = new Map();
+    const items = [];
     const todayUTC = new Date().toISOString().slice(0, 10);
 
     for (let i = 0; i < rows.length; i++) {
@@ -216,22 +216,13 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       if (!minDate || fecha < minDate) minDate = fecha;
       if (!maxDate || fecha > maxDate) maxDate = fecha;
 
-      const key = `${fecha}|${codigo}|${comprob ?? ''}`;
-      if (!agg.has(key)) {
-        agg.set(key, { fecha, codigo, cantidad, importe, nombre, proveedor, comprob, p_prom, medida, cod_pro });
-      } else {
-        const prev = agg.get(key);
-        prev.cantidad += cantidad;
-        prev.importe += importe;
-        if (!prev.nombre && nombre) prev.nombre = nombre;
-        if (!prev.proveedor && proveedor) prev.proveedor = proveedor;
-      }
+      items.push({ fecha, codigo, cantidad, importe, nombre, proveedor, comprob, p_prom, medida, cod_pro: Number.isFinite(cod_pro) ? cod_pro : null });
     }
 
     if (!minDate || !maxDate) {
       await client.query(
         `UPDATE purchases_csv_imports SET status='failed', row_count=$2, rows_failed=$3,
-         error_log=$4::jsonb, processed_at=NOW() WHERE id=$1`,
+     error_log=$4::jsonb, processed_at=NOW() WHERE id=$1`,
         [importId, rows.length, failed, JSON.stringify(errors)]
       );
       await client.query('COMMIT');
@@ -242,8 +233,6 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
         summary: { total_rows: rows.length, failed, date_range: { from: null, to: null } }, errors: errors.slice(0, 20),
       };
     }
-
-    const items = Array.from(agg.values());
 
     // ── Insumos: buscar en credsBizId (lista compartida del principal) ──
     const { rows: insumoRows } = await client.query(
