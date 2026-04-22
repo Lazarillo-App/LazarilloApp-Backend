@@ -99,7 +99,7 @@ exports.previewBatch = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT
          TO_CHAR(p.fecha, 'DD/MM/YYYY')               AS "Fecha",
-         COALESCE(ab.name, '—')                        AS "Sucursal",
+         COALESCE(ab.name, b.name, '—')                        AS "Sucursal",
          COALESCE(s.nombre, s.razon_social, '—')      AS "Proveedor",
          COALESCE(p.factura_key, '—')                 AS "Factura",
          COALESCE(pi.referencia, '—')                 AS "Insumo",

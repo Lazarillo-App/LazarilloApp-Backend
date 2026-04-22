@@ -14,7 +14,7 @@ router.get('/first-date',      ctrl.firstDate);
 
 // ── Gestión de lotes ──────────────────────────────────────────
 router.get   ('/batches',                       batchesCtrl.listBatches);
-router.get   ('/batches/:batchId/preview',      batchesCtrl.previewBatch);   // ← nuevo
+router.get   ('/batches/:batchId/preview',      batchesCtrl.previewBatch);   
 router.delete('/batches/:batchId',              batchesCtrl.deleteBatch);
 router.post  ('/batches/:batchId/move',         batchesCtrl.moveBatch);
 // ─────────────────────────────────────────────────────────────
