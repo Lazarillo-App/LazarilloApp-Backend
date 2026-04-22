@@ -6,7 +6,7 @@ const pool = require('../config/db');
 ══════════════════════════════════════════════════════════════ */
 exports.getRecetaElaborado = async (req, res, next) => {
   try {
-    const bizId    = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const insumoId = Number(req.params.insumoId);
 
     if (!bizId || !insumoId) {
@@ -43,6 +43,7 @@ exports.getRecetaElaborado = async (req, res, next) => {
          ROUND(ri.cantidad * ri.costo_unitario, 4)               AS costo_total_item,
          ri.notas,
          ri.observaciones,
+         ri.fotos_urls
          ri.merma,
          ri.pedido,
          ri.tipo_costo,
@@ -72,9 +73,9 @@ exports.getRecetaElaborado = async (req, res, next) => {
 exports.saveRecetaElaborado = async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const bizId    = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const insumoId = Number(req.params.insumoId);
-    const uid      = req.user?.id;
+    const uid = req.user?.id;
 
     if (!bizId || !insumoId) {
       return res.status(400).json({ ok: false, error: 'invalid_params' });
@@ -94,15 +95,19 @@ exports.saveRecetaElaborado = async (req, res, next) => {
 
     const insumo = insumoRows[0];
     if (!insumo.es_elaborado && !insumo.es_elaborado_manual) {
-      return res.status(400).json({ ok: false, error: 'insumo_no_es_elaborado' });
+      await client.query(
+        `UPDATE insumos SET es_elaborado_manual = TRUE, updated_at = NOW()
+     WHERE id = $1 AND business_id = $2`,
+        [insumoId, bizId]
+      );
     }
 
     const {
       nombre,
       descripcion,
-      porciones       = 1,
+      porciones = 1,
       porcentajeVenta = 0,
-      items           = [],
+      items = [],
     } = req.body || {};
 
     if (!Array.isArray(items)) {
@@ -114,10 +119,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       return acc + (Number(item.cantidad || 0) * Number(item.costoUnitario || 0));
     }, 0);
 
-    const porcionesNum    = Math.max(1, Number(porciones) || 1);
-    const costoXPorcion   = costoTotal / porcionesNum;
-    const porcentajeNum   = Number(porcentajeVenta) || 0;
-    const precioSugerido  = porcentajeNum > 0 ? costoXPorcion / (porcentajeNum / 100) : 0;
+    const porcionesNum = Math.max(1, Number(porciones) || 1);
+    const costoXPorcion = costoTotal / porcionesNum;
+    const porcentajeNum = Number(porcentajeVenta) || 0;
+    const precioSugerido = porcentajeNum > 0 ? costoXPorcion / (porcentajeNum / 100) : 0;
 
     await client.query('BEGIN');
 
@@ -157,13 +162,13 @@ exports.saveRecetaElaborado = async (req, res, next) => {
     const savedItems = [];
 
     for (let i = 0; i < items.length; i++) {
-      const item          = items[i];
-      const supplyId      = Number(item.supplyId);
-      const cantidad      = Number(item.cantidad      || 0);
+      const item = items[i];
+      const supplyId = Number(item.supplyId);
+      const cantidad = Number(item.cantidad || 0);
       const costoUnitario = Number(item.costoUnitario || 0);
-      const unidad        = (item.unidad || '').trim() || null;
-      const notas         = (item.notas  || '').trim() || null;
-      const orden         = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
+      const unidad = (item.unidad || '').trim() || null;
+      const notas = (item.notas || '').trim() || null;
+      const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
 
       if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
       if (cantidad <= 0) continue;
@@ -174,9 +179,9 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       );
       if (!insumoCheck.length) continue;
 
-      const merma        = item.merma        !== false;
-      const pedido       = item.pedido       !== false;
-      const tipoCosto    = (item.tipoCosto    || 'total').trim();
+      const merma = item.merma !== false;
+      const pedido = item.pedido !== false;
+      const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
 
       const { rows: itemRows } = await client.query(
@@ -186,14 +191,14 @@ exports.saveRecetaElaborado = async (req, res, next) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
          RETURNING *`,
         [receta.id, supplyId, cantidad, unidad, costoUnitario, notas,
-         observaciones, merma, pedido, tipoCosto, orden]
+          observaciones, merma, pedido, tipoCosto, orden]
       );
 
       savedItems.push({
         ...itemRows[0],
-        supply_id:       supplyId,
-        supply_nombre:   insumoCheck[0].nombre,
-        supply_medida:   insumoCheck[0].unidad_med,
+        supply_id: supplyId,
+        supply_nombre: insumoCheck[0].nombre,
+        supply_medida: insumoCheck[0].unidad_med,
         costo_total_item: Math.round(cantidad * costoUnitario * 10000) / 10000,
       });
     }
@@ -217,11 +222,11 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       ok: true,
       receta: { ...receta, items: savedItems },
       costo_por_porcion: costoXPorcion,
-      precio_sugerido:   precioSugerido,
-      porciones:         porcionesNum,
+      precio_sugerido: precioSugerido,
+      porciones: porcionesNum,
     });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[saveRecetaElaborado]', e);
     next(e);
   } finally {
@@ -234,7 +239,7 @@ exports.saveRecetaElaborado = async (req, res, next) => {
 ══════════════════════════════════════════════════════════════ */
 exports.deleteRecetaElaborado = async (req, res, next) => {
   try {
-    const bizId    = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const insumoId = Number(req.params.insumoId);
 
     if (!bizId || !insumoId) {
@@ -304,8 +309,8 @@ exports.getRecetasElaboradosMapa = async (req, res, next) => {
     const mapa = {};
     rows.forEach(r => {
       mapa[String(r.insumo_id)] = {
-        costoTotal:     Number(r.costo_total),
-        porciones:      Number(r.porciones),
+        costoTotal: Number(r.costo_total),
+        porciones: Number(r.porciones),
         precioSugerido: Number(r.precio_sugerido),
       };
     });
