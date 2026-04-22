@@ -82,7 +82,6 @@ function buildPurchaseFilters(query, startIndex = 2) {
       where.push(`p.branch_id = $${idx++}`);
     }
   }
-
   return { where, params };
 }
 
@@ -180,15 +179,15 @@ exports.list = async (req, res, next) => {
 
     const { page = 1, limit = 500 } = req.query;
     const hardLimit = Math.min(Math.max(Number(limit), 1), 10000);
-    const offset    = (Math.max(Number(page), 1) - 1) * hardLimit;
+    const offset = (Math.max(Number(page), 1) - 1) * hardLimit;
 
     const baseParams = [businessId];
-    const baseWhere  = ['pi.business_id = $1'];
+    const baseWhere = ['pi.business_id = $1'];
     const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
 
-    const allWhere  = [...baseWhere, ...extraWhere];
+    const allWhere = [...baseWhere, ...extraWhere];
     const allParams = [...baseParams, ...extraParams];
-    const whereSql  = 'WHERE ' + allWhere.join(' AND ');
+    const whereSql = 'WHERE ' + allWhere.join(' AND ');
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -297,10 +296,10 @@ exports.exportCsv = async (req, res, next) => {
     const businessId = await resolvePurchaseBusiness(rawBizId);
 
     const baseParams = [businessId];
-    const baseWhere  = ['pi.business_id = $1'];
+    const baseWhere = ['pi.business_id = $1'];
     const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
 
-    const allWhere  = [...baseWhere, ...extraWhere];
+    const allWhere = [...baseWhere, ...extraWhere];
     const allParams = [...baseParams, ...extraParams];
 
     const { rows } = await pool.query(
