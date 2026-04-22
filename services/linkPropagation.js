@@ -240,4 +240,4 @@ async function propagateObjetivo({ bizId, articleId, objetivo }) {
   }
 }
 
-module.exports = { propagateRecipe, propagatePrecioManual, propagateObjetivo };
+module.exports = { propagateRecipe, propagatePrecioManual, propagateObjetivo, getLinkSiblings };

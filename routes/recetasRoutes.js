@@ -19,4 +19,23 @@ router.post('/',   ctrl.saveReceta);
 // DELETE /api/businesses/:businessId/articles/:articleId/receta
 router.delete('/', ctrl.deleteReceta);
 
+router.post('/propagate-delete', async (req, res, next) => {
+  try {
+    const bizId     = Number(req.params.businessId);
+    const articleId = Number(req.params.articleId);
+    const siblings  = await getLinkSiblings(bizId, articleId);
+    if (!siblings) return res.json({ ok: true, propagated: 0 });
+
+    const targets = siblings.filter(s => s.sync_recipe !== false);
+    for (const s of targets) {
+      await pool.query(
+        `UPDATE recetas SET active = FALSE, updated_at = NOW()
+         WHERE article_id = $1 AND business_id = $2 AND active = TRUE`,
+        [s.article_id, bizId]
+      );
+    }
+    return res.json({ ok: true, propagated: targets.length });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
