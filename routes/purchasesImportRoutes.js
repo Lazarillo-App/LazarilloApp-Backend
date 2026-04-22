@@ -48,7 +48,8 @@ router.post(
 
       const ext = path.extname(req.file.originalname).toLowerCase();
       const fileType = ext.replace('.', '');
-      const branchId = req.body?.branch_id ? Number(req.body.branch_id) : null;
+      const rawBranch = Number(req.body?.branch_id);
+      const branchId = Number.isFinite(rawBranch) && rawBranch > 0 ? rawBranch : null;
       const result = await importPurchasesToDatabase({
         businessId,
         userId,
