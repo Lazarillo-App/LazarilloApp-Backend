@@ -73,11 +73,11 @@ exports.listBatches = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.previewBatch = async (req, res, next) => {
   try {
-    const bizId     = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const { batchId } = req.params;
-    const limit     = Math.min(Number(req.query.limit) || 20, 100);
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
 
-    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
 
     const { rows: check } = await pool.query(
@@ -98,24 +98,25 @@ exports.previewBatch = async (req, res, next) => {
 
     const { rows } = await pool.query(
       `SELECT
-         TO_CHAR(p.fecha, 'DD/MM/YYYY')               AS "Fecha",
-         COALESCE(ab.name, '—')                        AS "Sucursal",
-         COALESCE(s.nombre, s.razon_social, '—')      AS "Proveedor",
-         COALESCE(p.factura_key, '—')                 AS "Factura",
-         COALESCE(pi.referencia, '—')                 AS "Insumo",
-         pi.cantidad                                   AS "Cantidad",
-         pi.precio                                     AS "Precio Unit.",
-         pi.precio_total                               AS "Total Ítem",
-         p.neto_total                                  AS "Neto Compra",
-         p.iva_total                                   AS "IVA Compra",
-         p.total                                       AS "Total Compra"
-       FROM purchases p
-       LEFT JOIN purchase_items pi ON pi.purchase_id = p.id
-       LEFT JOIN app_branches ab   ON ab.id = p.branch_id
-       LEFT JOIN suppliers s       ON s.id = p.proveedor_id
-       WHERE p.batch_id = $1 AND p.business_id = $2
-       ORDER BY p.fecha DESC, p.id, pi.id
-       LIMIT $3`,
+     TO_CHAR(p.fecha, 'DD/MM/YYYY')                        AS "Fecha",
+     COALESCE(ab.name, biz.name, '—')                      AS "Sucursal",
+     COALESCE(s.nombre, s.razon_social, '—')               AS "Proveedor",
+     COALESCE(p.factura_key, '—')                          AS "Factura",
+     COALESCE(pi.referencia, '—')                          AS "Insumo",
+     pi.cantidad                                            AS "Cantidad",
+     pi.precio                                              AS "Precio Unit.",
+     pi.precio_total                                        AS "Total Ítem",
+     p.neto_total                                           AS "Neto Compra",
+     p.iva_total                                            AS "IVA Compra",
+     p.total                                                AS "Total Compra"
+   FROM purchases p
+   LEFT JOIN purchase_items pi  ON pi.purchase_id = p.id
+   LEFT JOIN app_branches ab    ON ab.id = p.branch_id
+   LEFT JOIN app_businesses biz ON biz.id = p.business_id   -- ← este faltaba
+   LEFT JOIN suppliers s        ON s.id = p.proveedor_id
+   WHERE p.batch_id = $1 AND p.business_id = $2
+   ORDER BY p.fecha DESC, p.id, pi.id
+   LIMIT $3`,
       [batchId, bizId, limit]
     );
 
@@ -132,10 +133,10 @@ exports.previewBatch = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.deleteBatch = async (req, res, next) => {
   try {
-    const bizId       = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const { batchId } = req.params;
 
-    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
 
     const client = await pool.connect();
@@ -189,12 +190,12 @@ exports.deleteBatch = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.moveBatch = async (req, res, next) => {
   try {
-    const bizId            = getBusinessId(req);
-    const { batchId }      = req.params;
+    const bizId = getBusinessId(req);
+    const { batchId } = req.params;
     const targetBusinessId = req.body?.targetBusinessId ? Number(req.body.targetBusinessId) : null;
-    const targetBranchId   = req.body?.targetBranchId   ? Number(req.body.targetBranchId)   : null;
+    const targetBranchId = req.body?.targetBranchId ? Number(req.body.targetBranchId) : null;
 
-    if (!bizId)   return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
     if (!batchId) return res.status(400).json({ ok: false, error: 'batchId requerido' });
 
     // Debe especificarse al menos uno de los dos destinos
@@ -314,10 +315,10 @@ exports.getConfig = async (req, res, next) => {
       ok: true,
       business_id: bizId,
       config: {
-        articulos_costo_ideal:  props.articulos_costo_ideal  ?? null,
-        insumos_costo_ideal:    props.insumos_costo_ideal    ?? null,
+        articulos_costo_ideal: props.articulos_costo_ideal ?? null,
+        insumos_costo_ideal: props.insumos_costo_ideal ?? null,
         compras_alerta_semanas: props.compras_alerta_semanas ?? null,
-        ventas_alerta_dias:     props.ventas_alerta_dias     ?? null,
+        ventas_alerta_dias: props.ventas_alerta_dias ?? null,
       },
     });
   } catch (e) { next(e); }
@@ -326,7 +327,7 @@ exports.getConfig = async (req, res, next) => {
 // PATCH /api/businesses/:id/config  (sin cambios)
 exports.saveConfig = async (req, res, next) => {
   try {
-    const bizId   = req.params.id || getBusinessId(req);
+    const bizId = req.params.id || getBusinessId(req);
     const allowed = [
       'articulos_costo_ideal',
       'insumos_costo_ideal',
