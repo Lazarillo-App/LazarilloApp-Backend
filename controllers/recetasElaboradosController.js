@@ -116,7 +116,9 @@ exports.saveRecetaElaborado = async (req, res, next) => {
 
     // Calcular costo total
     const costoTotal = items.reduce((acc, item) => {
-      return acc + (Number(item.cantidad || 0) * Number(item.costoUnitario || 0));
+      const cant = Number(item.cantidad || 0);
+      if (cant === 0) return acc; // solo ignorar cero exacto
+      return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
     const porcionesNum = Math.max(1, Number(porciones) || 1);
@@ -171,7 +173,7 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
 
       if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
-      if (cantidad <= 0) continue;
+      if (cantidad === 0) continue;
 
       const { rows: insumoCheck } = await client.query(
         `SELECT id, nombre, unidad_med FROM insumos WHERE id = $1 LIMIT 1`,

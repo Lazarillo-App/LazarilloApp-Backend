@@ -4,7 +4,7 @@ const { propagateRecipe } = require('../services/linkPropagation');
 
 exports.getReceta = async (req, res, next) => {
   try {
-    const bizId     = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
 
     if (!bizId || !articleId) {
@@ -60,9 +60,9 @@ exports.getReceta = async (req, res, next) => {
 exports.saveReceta = async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const bizId     = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
-    const uid       = req.user?.id;
+    const uid = req.user?.id;
 
     if (!bizId || !articleId) {
       return res.status(400).json({ ok: false, error: 'invalid_params' });
@@ -71,9 +71,9 @@ exports.saveReceta = async (req, res, next) => {
     const {
       nombre,
       descripcion,
-      porciones       = 1,
+      porciones = 1,
       porcentajeVenta = 0,
-      items           = [],
+      items = [],
       notas,
       foto,
       notasUpdatedAt,
@@ -84,7 +84,9 @@ exports.saveReceta = async (req, res, next) => {
     }
 
     const costoTotal = items.reduce((acc, item) => {
-      return acc + (Number(item.cantidad || 0) * Number(item.costoUnitario || 0));
+      const cant = Number(item.cantidad || 0);
+      if (cant === 0) return acc; // solo ignorar cero exacto
+      return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
     await client.query('BEGIN');
@@ -112,13 +114,13 @@ exports.saveReceta = async (req, res, next) => {
        RETURNING *`,
       [
         articleId, bizId,
-        nombre?.trim()      || null,
+        nombre?.trim() || null,
         descripcion?.trim() || null,
-        Number(porciones)   || 1,
+        Number(porciones) || 1,
         Number(porcentajeVenta) || 0,
         Math.round(costoTotal * 10000) / 10000,
         notas?.trim() || null,
-        foto          || null,
+        foto || null,
         notasUpdatedAt || null,
         uid,
       ]
@@ -132,16 +134,16 @@ exports.saveReceta = async (req, res, next) => {
     const savedItems = [];
 
     for (let i = 0; i < items.length; i++) {
-      const item        = items[i];
-      const supplyId    = Number(item.supplyId);
-      const cantidad    = Number(item.cantidad    || 0);
+      const item = items[i];
+      const supplyId = Number(item.supplyId);
+      const cantidad = Number(item.cantidad || 0);
       const costoUnitario = Number(item.costoUnitario || 0);
-      const unidad      = (item.unidad  || '').trim() || null;
-      const notas       = (item.notas   || '').trim() || null;
-      const orden       = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
+      const unidad = (item.unidad || '').trim() || null;
+      const notas = (item.notas || '').trim() || null;
+      const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
 
       if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
-      if (cantidad <= 0) continue;
+      if (cantidad === 0) continue;
 
       const { rows: insumoCheck } = await client.query(
         `SELECT id, nombre, unidad_med FROM insumos WHERE id = $1 LIMIT 1`,
@@ -153,9 +155,9 @@ exports.saveReceta = async (req, res, next) => {
         continue;
       }
 
-      const merma         = item.merma   !== false;
-      const pedido        = item.pedido  !== false;
-      const tipoCosto     = (item.tipoCosto    || 'total').trim();
+      const merma = item.merma !== false;
+      const pedido = item.pedido !== false;
+      const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
 
       // fotos_urls: asegurar que sea array de strings válidos
@@ -178,16 +180,16 @@ exports.saveReceta = async (req, res, next) => {
 
       savedItems.push({
         ...itemRows[0],
-        supply_id:       supplyId,
-        supply_nombre:   insumoCheck[0].nombre,
-        supply_medida:   insumoCheck[0].unidad_med,
+        supply_id: supplyId,
+        supply_nombre: insumoCheck[0].nombre,
+        supply_medida: insumoCheck[0].unidad_med,
         costo_total_item: Math.round(cantidad * costoUnitario * 10000) / 10000,
       });
     }
 
     // ── Actualizar costo en insumos elaborados ──
     const costoXPorcion = Number(porciones) > 0 ? costoTotal / Number(porciones) : costoTotal;
-    const porcentaje    = Number(porcentajeVenta) || 0;
+    const porcentaje = Number(porcentajeVenta) || 0;
 
     await client.query(
       `UPDATE insumos
@@ -234,7 +236,7 @@ exports.saveReceta = async (req, res, next) => {
 
 exports.deleteReceta = async (req, res, next) => {
   try {
-    const bizId     = Number(req.params.businessId);
+    const bizId = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
 
     if (!bizId || !articleId) {
