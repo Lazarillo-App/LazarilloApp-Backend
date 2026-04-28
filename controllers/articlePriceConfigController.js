@@ -232,31 +232,30 @@ exports.savePriceConfig = async (req, res, next) => {
       } else if (borrarObjetivo) {
         await client.query(
           `UPDATE article_price_config
-             SET objetivo_pct = NULL, updated_at = NOW()
-           WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
+       SET objetivo_pct = NULL, updated_at = NOW()
+     WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
           [bizId, scope, scopeIdStr]
         );
-        // ✅ NUEVO: también limpiar objetivo_pct de los artículos individuales
-        // que pertenecen a este scope (agrupacion o rubro)
+
+        // ✅ NUEVO: limpiar también objetivo_pct de artículos individuales
         if (Array.isArray(articleIds) && articleIds.length > 0) {
           const idsNums = articleIds.map(Number).filter(id => Number.isFinite(id) && id > 0);
           if (idsNums.length > 0) {
             await client.query(
               `UPDATE article_price_config
-             SET objetivo_pct = NULL, updated_at = NOW()
-           WHERE business_id = $1
-             AND scope = 'articulo'
-             AND scope_id = ANY($2::text[])`,
+           SET objetivo_pct = NULL, updated_at = NOW()
+         WHERE business_id = $1
+           AND scope = 'articulo'
+           AND scope_id = ANY($2::text[])`,
               [bizId, idsNums.map(String)]
             );
-            // Limpiar filas que quedaron con ambos null
             await client.query(
               `DELETE FROM article_price_config
-           WHERE business_id = $1
-             AND scope = 'articulo'
-             AND scope_id = ANY($2::text[])
-             AND objetivo_pct IS NULL
-             AND precio_manual IS NULL`,
+         WHERE business_id = $1
+           AND scope = 'articulo'
+           AND scope_id = ANY($2::text[])
+           AND objetivo_pct IS NULL
+           AND precio_manual IS NULL`,
               [bizId, idsNums.map(String)]
             );
           }
