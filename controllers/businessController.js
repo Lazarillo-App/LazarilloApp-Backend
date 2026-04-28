@@ -233,9 +233,9 @@ exports.update = async (req, res) => {
   // El branding se mergea a nivel profundo para no perder campos existentes
   const patchParts = [];
   if (branding) patchParts.push({ branding });
-  if (contact)  patchParts.push({ contact });
-  if (address)  patchParts.push({ address });
-  if (social)   patchParts.push({ social });
+  if (contact) patchParts.push({ contact });
+  if (address) patchParts.push({ address });
+  if (social) patchParts.push({ social });
   if (description !== null) patchParts.push({ description });
   if (hasConfigPatch) patchParts.push(configPatch);
   const patchIsEmpty = patchParts.length === 0;
@@ -271,20 +271,20 @@ exports.update = async (req, res) => {
 
   const saved = attachBranding(rows[0]);
 
-  // Si se guardó el % costo ideal global de artículos → limpiar todos los overrides
-  // para que el global aplique a todo (el usuario puede re-hacer overrides después)
+  //solo borrar si pisarTodo=true
   if (configPatch.articulos_costo_ideal !== undefined) {
-    try {
-      await pool.query(
-        `DELETE FROM article_price_config WHERE business_id = $1`,
-        [businessId]
-      );
-      console.log(`[update] Limpiados overrides de article_price_config para biz ${businessId}`);
-    } catch (e) {
-      console.warn('[update] No se pudieron limpiar overrides:', e.message);
+    const pisarTodo = req.body?.pisarTodo === true;
+    if (pisarTodo) {
+      try {
+        await pool.query(
+          `DELETE FROM article_price_config WHERE business_id = $1`,
+          [businessId]
+        );
+      } catch (e) {
+        console.warn('[update] No se pudieron limpiar overrides:', e.message);
+      }
     }
   }
-
   return res.json({ business: saved });
 };
 
