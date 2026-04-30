@@ -537,9 +537,12 @@ exports.eliminarAgrupacion = async (req, res) => {
 // ============================================================================
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
-    let businessId = getBusinessId(req);
-    const id = Number(req.params.id ?? req.params.agrupacionId);
+    let businessId = Number(req.params.businessId);
+    if (!Number.isFinite(businessId)) {
+      businessId = getBusinessId(req);
+    }
 
+    const id = Number(req.params.id ?? req.params.agrupacionId);
     console.log('[agregarArticulos] businessId:', businessId, '| id:', id);
     console.log('[agregarArticulos] req.params:', req.params);
     console.log('[agregarArticulos] req.businessId:', req.businessId);
