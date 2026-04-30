@@ -555,6 +555,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     `;
 
     const { rows } = await pool.query(sql, params);
+    console.log('[exportSalesCsv] rows count:', rows.length);
+    console.log('[exportSalesCsv] first row:', rows[0]);
     console.log('[exportSalesCsv] article_ids raw:', article_ids);
     console.log('[exportSalesCsv] articleFilter aplicado:', articleFilter);
     console.log('[exportSalesCsv] params finales:', params);
