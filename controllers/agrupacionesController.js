@@ -1473,12 +1473,12 @@ exports.getArticuloOrigen = async (req, res) => {
     if (!allRows.length) {
       const { rows: legacyRows } = await pool.query(
         `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre
-           FROM agrupaciones a
-           JOIN app_businesses b ON b.id = a.business_id
-          WHERE a.business_id = ANY($1::int[])
-            AND a.app_articles_ids IS NOT NULL
-            AND $2 = ANY(a.app_articles_ids::int[])
-            ${excludeNames}`,
+       FROM agrupaciones a
+       JOIN app_businesses b ON b.id = a.business_id
+      WHERE a.business_id = ANY($1::int[])
+        AND a.app_articles_ids IS NOT NULL
+        AND a.app_articles_ids @> to_jsonb($2::int)
+        ${excludeNames}`,
         [bizIds, articuloId]
       );
       allRows = legacyRows;
