@@ -577,9 +577,23 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.csv"`
     );
     res.write('\uFEFF');
-    res.write('sep=,\n');  // ← le dice a Excel cuál es el separador
-    const headers = ['codigo', 'nombre', 'unidades', 'importe', 'costo', 'p_total', 'neto', 'tipo_iva', 'fecha'];
-    res.write(headers.join(',') + '\n');
+    res.write('sep=;\n');  // ← era sep=,
+
+    // 2. Headers con ;
+    res.write(headers.join(';') + '\n');  // ← era join(',')
+
+    // 3. Cada fila con ;
+    const line = [
+      csvEscape(r.codigo),
+      csvEscape(r.nombre),
+      csvEscape(Number(r.unidades || 0)),
+      csvEscape(Number(r.importe || 0).toFixed(2)),
+      csvEscape(Number(r.costo || 0)),
+      csvEscape(Number(r.p_total || 0)),
+      csvEscape(Number(r.neto || 0)),
+      csvEscape(r.tipo_iva || ''),
+      csvEscape(fecha),
+    ].join(';');
 
     for (const r of rows) {
       try {
@@ -619,7 +633,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 function csvEscape(val) {
   if (val == null) return '';
   const s = String(val);
-  if (/[,"\n\r]/.test(s)) {
+  if (/[;,"\n\r]/.test(s)) {  // ← agregar ;
     return '"' + s.replace(/"/g, '""') + '"';
   }
   return s;
