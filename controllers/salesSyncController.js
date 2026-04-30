@@ -577,7 +577,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.csv"`
     );
     res.write('\uFEFF');
-
+    res.write('sep=,\n');  // ← le dice a Excel cuál es el separador
     const headers = ['codigo', 'nombre', 'unidades', 'importe', 'costo', 'p_total', 'neto', 'tipo_iva', 'fecha'];
     res.write(headers.join(',') + '\n');
 
