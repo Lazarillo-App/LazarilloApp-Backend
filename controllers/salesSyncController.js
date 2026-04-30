@@ -555,6 +555,10 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     `;
 
     const { rows } = await pool.query(sql, params);
+    console.log('[exportSalesCsv] article_ids raw:', article_ids);
+    console.log('[exportSalesCsv] articleFilter aplicado:', articleFilter);
+    console.log('[exportSalesCsv] params finales:', params);
+    console.log('[exportSalesCsv] sql:', sql);
 
     // ── Nombre de archivo descriptivo ────────────────────────────────────────
     const branchSuffix = rawBranchId ? `_suc${rawBranchId}` : '';
