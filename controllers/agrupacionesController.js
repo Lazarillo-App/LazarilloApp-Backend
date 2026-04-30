@@ -540,6 +540,11 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     let businessId = getBusinessId(req);
     const id = Number(req.params.id ?? req.params.agrupacionId);
 
+    console.log('[agregarArticulos] businessId:', businessId, '| id:', id);
+    console.log('[agregarArticulos] req.params:', req.params);
+    console.log('[agregarArticulos] req.businessId:', req.businessId);
+    console.log('[agregarArticulos] X-Business-Id header:', req.header('X-Business-Id'));
+
     if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
@@ -600,6 +605,7 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
       `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
       [id, businessId]
     );
+    console.log('[agregarArticulos] query result rows:', r0.length, '| params:', [id, businessId]);
 
     if (!r0.length) {
       return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
