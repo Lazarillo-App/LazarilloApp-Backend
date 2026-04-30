@@ -559,6 +559,11 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     // ── Nombre de archivo descriptivo ────────────────────────────────────────
     const branchSuffix = rawBranchId ? `_suc${rawBranchId}` : '';
     const listSuffix = article_ids ? '_lista' : '';
+
+    console.log('[exportSalesCsv] query params:', req.query);
+    console.log('[exportSalesCsv] articleFilter:', articleFilter);
+    console.log('[exportSalesCsv] params array:', params);
+
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
@@ -601,9 +606,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       detail: e?.message || String(e),
     });
   }
-  console.log('[exportSalesCsv] query params:', req.query);
-  console.log('[exportSalesCsv] articleFilter:', articleFilter);
-  console.log('[exportSalesCsv] params array:', params);
+
 };
 
 function csvEscape(val) {
