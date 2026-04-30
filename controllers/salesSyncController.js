@@ -448,7 +448,7 @@ exports.listDailyItems = async (req, res, next) => {
 };
 
 // ============================================================================
-// EXPORTAR CSV
+// EXPORTACIÓN DE VENTAS
 // ============================================================================
 
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
@@ -458,8 +458,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       from,
       to,
       groupIds,
-      article_ids,   // ← NUEVO: IDs de lista, separados por coma "1,2,3"
-      branch_id: rawBranchId = null,  // ← NUEVO: 'main' | número | null
+      article_ids,
+      branch_id: rawBranchId = null,
     } = req.query;
 
     if (!Number.isFinite(rawBizId)) {
@@ -475,15 +475,12 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     );
     const biz = bizRow.rows[0] || { id: rawBizId };
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
-    console.log('[exportSalesCsv] salesBizId:', salesBizId, '| subBizArticleIds:', subBizArticleIds);
 
     const params = [salesBizId, from, to];
     let articleFilter = '';
     let groupFilter = '';
     let branchFilter = '';
 
-    // ── Filtro de artículos ──────────────────────────────────────────────────
-    // Prioridad: article_ids (lista) > subBizArticleIds (sub-negocio)
     if (article_ids) {
       const ids = String(article_ids).split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
       if (ids.length > 0) {
@@ -495,7 +492,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       articleFilter = `AND sdi.article_id = ANY($${params.length})`;
     }
 
-    // ── Filtro de grupos ─────────────────────────────────────────────────────
     if (groupIds) {
       const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
@@ -510,10 +506,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       }
     }
 
-    // ── Filtro de sucursal ───────────────────────────────────────────────────
-    // 'main'  → solo datos del principal (branch_id IS NULL)
-    // número  → solo esa sucursal
-    // null/ausente → todas
     if (rawBranchId === 'main') {
       branchFilter = 'AND sdi.branch_id IS NULL';
     } else if (rawBranchId && rawBranchId !== '' && rawBranchId !== 'null') {
@@ -556,20 +548,9 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     `;
 
     const { rows } = await pool.query(sql, params);
-    console.log('[exportSalesCsv] rows count:', rows.length);
-    console.log('[exportSalesCsv] first row:', rows[0]);
-    console.log('[exportSalesCsv] article_ids raw:', article_ids);
-    console.log('[exportSalesCsv] articleFilter aplicado:', articleFilter);
-    console.log('[exportSalesCsv] params finales:', params);
-    console.log('[exportSalesCsv] sql:', sql);
 
-    // ── Nombre de archivo descriptivo ────────────────────────────────────────
     const branchSuffix = rawBranchId ? `_suc${rawBranchId}` : '';
     const listSuffix = article_ids ? '_lista' : '';
-
-    console.log('[exportSalesCsv] query params:', req.query);
-    console.log('[exportSalesCsv] articleFilter:', articleFilter);
-    console.log('[exportSalesCsv] params array:', params);
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
@@ -577,23 +558,10 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.csv"`
     );
     res.write('\uFEFF');
-    res.write('sep=;\n');  // ← era sep=,
+    res.write('sep=;\n');
 
-    // 2. Headers con ;
-    res.write(headers.join(';') + '\n');  // ← era join(',')
-
-    // 3. Cada fila con ;
-    const line = [
-      csvEscape(r.codigo),
-      csvEscape(r.nombre),
-      csvEscape(Number(r.unidades || 0)),
-      csvEscape(Number(r.importe || 0).toFixed(2)),
-      csvEscape(Number(r.costo || 0)),
-      csvEscape(Number(r.p_total || 0)),
-      csvEscape(Number(r.neto || 0)),
-      csvEscape(r.tipo_iva || ''),
-      csvEscape(fecha),
-    ].join(';');
+    const headers = ['codigo', 'nombre', 'unidades', 'importe', 'costo', 'p_total', 'neto', 'tipo_iva', 'fecha'];
+    res.write(headers.join(';') + '\n');
 
     for (const r of rows) {
       try {
@@ -611,7 +579,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           csvEscape(Number(r.neto || 0)),
           csvEscape(r.tipo_iva || ''),
           csvEscape(fecha),
-        ].join(',');
+        ].join(';');
 
         res.write(line + '\n');
       } catch (rowErr) {
@@ -627,13 +595,12 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       detail: e?.message || String(e),
     });
   }
-
 };
 
 function csvEscape(val) {
   if (val == null) return '';
   const s = String(val);
-  if (/[;,"\n\r]/.test(s)) {  // ← agregar ;
+  if (/[;,"\n\r]/.test(s)) {
     return '"' + s.replace(/"/g, '""') + '"';
   }
   return s;
