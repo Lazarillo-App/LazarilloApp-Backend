@@ -454,7 +454,13 @@ exports.listDailyItems = async (req, res, next) => {
 exports.exportSalesCsv = async function exportSalesCsv(req, res) {
   try {
     const rawBizId = Number(req.params.id);
-    const { from, to, groupIds } = req.query;
+    const {
+      from,
+      to,
+      groupIds,
+      article_ids,   // ← NUEVO: IDs de lista, separados por coma "1,2,3"
+      branch_id: rawBranchId = null,  // ← NUEVO: 'main' | número | null
+    } = req.query;
 
     if (!Number.isFinite(rawBizId)) {
       return res.status(400).json({ error: 'businessId inválido' });
@@ -464,7 +470,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     }
 
     const bizRow = await pool.query(
-      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`, [rawBizId]
+      `SELECT id, created_from, organization_id FROM app_businesses WHERE id = $1`,
+      [rawBizId]
     );
     const biz = bizRow.rows[0] || { id: rawBizId };
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
@@ -472,12 +479,22 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     const params = [salesBizId, from, to];
     let articleFilter = '';
     let groupFilter = '';
+    let branchFilter = '';
 
-    if (subBizArticleIds) {
+    // ── Filtro de artículos ──────────────────────────────────────────────────
+    // Prioridad: article_ids (lista) > subBizArticleIds (sub-negocio)
+    if (article_ids) {
+      const ids = String(article_ids).split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
+      if (ids.length > 0) {
+        params.push(ids);
+        articleFilter = `AND sdi.article_id = ANY($${params.length})`;
+      }
+    } else if (subBizArticleIds) {
       params.push(subBizArticleIds);
       articleFilter = `AND sdi.article_id = ANY($${params.length})`;
     }
 
+    // ── Filtro de grupos ─────────────────────────────────────────────────────
     if (groupIds) {
       const ids = String(groupIds).split(',').map(Number).filter(n => Number.isFinite(n));
       if (ids.length > 0) {
@@ -492,6 +509,20 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       }
     }
 
+    // ── Filtro de sucursal ───────────────────────────────────────────────────
+    // 'main'  → solo datos del principal (branch_id IS NULL)
+    // número  → solo esa sucursal
+    // null/ausente → todas
+    if (rawBranchId === 'main') {
+      branchFilter = 'AND sdi.branch_id IS NULL';
+    } else if (rawBranchId && rawBranchId !== '' && rawBranchId !== 'null') {
+      const bid = Number(rawBranchId);
+      if (Number.isFinite(bid) && bid > 0) {
+        params.push(bid);
+        branchFilter = `AND sdi.branch_id = $${params.length}`;
+      }
+    }
+
     const sql = `
       SELECT
         sdi.article_id AS codigo,
@@ -500,34 +531,38 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           NULLIF(TRIM(MAX(aa.name)), ''),
           'Artículo #' || sdi.article_id::text
         ) AS nombre,
-        SUM(sdi.qty)::numeric AS unidades,
+        SUM(sdi.qty)::numeric    AS unidades,
         SUM(sdi.amount)::numeric AS importe,
-        0 AS costo,
-        0 AS p_total,
-        0 AS neto,
+        0   AS costo,
+        0   AS p_total,
+        0   AS neto,
         NULL AS tipo_iva,
         sdi.day::date AS fecha
       FROM sales_daily_items sdi
       LEFT JOIN maxi_articles ma
         ON ma.business_id = sdi.business_id
-        AND ma.articulo_id = sdi.article_id
+       AND ma.articulo_id = sdi.article_id
       LEFT JOIN app_articles aa
         ON aa.business_id = sdi.business_id
-        AND aa.id = sdi.article_id
+       AND aa.id = sdi.article_id
       WHERE sdi.business_id = $1
         AND sdi.day BETWEEN $2::date AND $3::date
         ${articleFilter}
         ${groupFilter}
+        ${branchFilter}
       GROUP BY sdi.day::date, sdi.article_id
       ORDER BY sdi.day ASC, sdi.article_id ASC;
     `;
 
     const { rows } = await pool.query(sql, params);
 
+    // ── Nombre de archivo descriptivo ────────────────────────────────────────
+    const branchSuffix = rawBranchId ? `_suc${rawBranchId}` : '';
+    const listSuffix = article_ids ? '_lista' : '';
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="ventas_${rawBizId}_${from}_a_${to}.csv"`
+      `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.csv"`
     );
     res.write('\uFEFF');
 
@@ -549,7 +584,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
           csvEscape(Number(r.p_total || 0)),
           csvEscape(Number(r.neto || 0)),
           csvEscape(r.tipo_iva || ''),
-          csvEscape(fecha)
+          csvEscape(fecha),
         ].join(',');
 
         res.write(line + '\n');
@@ -563,7 +598,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     console.error('[exportSalesCsv] error:', e);
     res.status(500).json({
       error: 'Error exportando CSV',
-      detail: e?.message || String(e)
+      detail: e?.message || String(e),
     });
   }
 };

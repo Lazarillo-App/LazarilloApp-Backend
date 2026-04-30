@@ -1,9 +1,4 @@
 // services/csvSalesImportService.js
-// CAMBIOS vs original:
-// 1. insertStagingItems — agrega branch_id a cada fila de staging
-// 2. applyReplaceRange — DELETE filtra por branch_id, INSERT propaga branch_id
-// 3. importFileToDatabase — pasa branchId a ambas funciones
-// El resto del archivo es idéntico al original.
 
 const pool = require('../config/db');
 const XLSX = require('xlsx');
