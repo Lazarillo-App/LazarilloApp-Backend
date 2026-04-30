@@ -475,6 +475,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     );
     const biz = bizRow.rows[0] || { id: rawBizId };
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
+    console.log('[exportSalesCsv] salesBizId:', salesBizId, '| subBizArticleIds:', subBizArticleIds);
 
     const params = [salesBizId, from, to];
     let articleFilter = '';
