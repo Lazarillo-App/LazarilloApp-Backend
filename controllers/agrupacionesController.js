@@ -647,8 +647,12 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 // ============================================================================
 exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   try {
-    let businessId = getBusinessId(req);
-    const id = Number(req.params.id);
+     let businessId = Number(req.params.businessId);
+    if (!Number.isFinite(businessId)) {
+      businessId = getBusinessId(req); // fallback solo si no hay param
+    }
+    
+    const id = Number(req.params.id ?? req.params.agrupacionId);
     const articuloId = Number(req.params.articuloId);
 
     if (!Number.isFinite(businessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
@@ -1615,8 +1619,12 @@ exports.getArticulosOrigenes = async (req, res) => {
 // ============================================================================
 exports.eliminarArticulosDeAgrupacionBulk = async (req, res) => {
   try {
-    let businessId = getBusinessId(req);
-    const id = Number(req.params.id);
+     let businessId = Number(req.params.businessId);
+    if (!Number.isFinite(businessId)) {
+      businessId = getBusinessId(req);
+    }
+    
+    const id = Number(req.params.id ?? req.params.agrupacionId);
     const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
       .map(Number).filter(Number.isFinite);
 
