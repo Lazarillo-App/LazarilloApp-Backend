@@ -723,6 +723,19 @@ exports.eliminarArticuloDeAgrupacion = async (req, res) => {
       [JSON.stringify(filtered), id, businessId]
     );
 
+    // Limpiar también app_articles_ids (columna legacy)
+    await pool.query(
+      `UPDATE agrupaciones
+          SET app_articles_ids = (
+            SELECT jsonb_agg(elem)
+            FROM jsonb_array_elements(COALESCE(app_articles_ids, '[]'::jsonb)) AS elem
+            WHERE elem::int != $1
+          )
+        WHERE id = $2 AND business_id = $3
+          AND app_articles_ids IS NOT NULL`,
+      [articuloId, id, businessId]
+    );
+
     invalidateCacheForBiz(businessId);
     return res.json(rows[0]);
   } catch (e) {
@@ -897,6 +910,18 @@ exports.createOrMoveAgrupacion = async (req, res) => {
           `UPDATE agrupaciones SET articulos=$1::jsonb WHERE id=$2 AND business_id=$3`,
           [JSON.stringify(filtered), gid, businessId]
         );
+        // Limpiar también app_articles_ids (columna legacy)
+        await client.query(
+          `UPDATE agrupaciones
+              SET app_articles_ids = (
+                SELECT jsonb_agg(elem)
+                FROM jsonb_array_elements(COALESCE(app_articles_ids, '[]'::jsonb)) AS elem
+                WHERE elem::int NOT IN (SELECT unnest($1::int[]))
+              )
+            WHERE id = $2 AND business_id = $3
+              AND app_articles_ids IS NOT NULL`,
+          [ids, gid, businessId]
+        );
       }
     }
 
@@ -919,6 +944,18 @@ exports.createOrMoveAgrupacion = async (req, res) => {
           await client.query(
             `UPDATE agrupaciones SET articulos=$1::jsonb WHERE id=$2 AND business_id=$3`,
             [JSON.stringify(filtered), Number(g.id), originalBusinessId]
+          );
+          // Limpiar también app_articles_ids (columna legacy)
+          await client.query(
+            `UPDATE agrupaciones
+                SET app_articles_ids = (
+                  SELECT jsonb_agg(elem)
+                  FROM jsonb_array_elements(COALESCE(app_articles_ids, '[]'::jsonb)) AS elem
+                  WHERE elem::int NOT IN (SELECT unnest($1::int[]))
+                )
+              WHERE id = $2 AND business_id = $3
+                AND app_articles_ids IS NOT NULL`,
+            [ids, Number(g.id), originalBusinessId]
           );
         }
       }
@@ -1278,6 +1315,19 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     await client.query(
       `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
       [JSON.stringify(fromFiltered), fromId, fromBizId]
+    );
+
+    // Limpiar también app_articles_ids (columna legacy) si existe
+    await client.query(
+      `UPDATE agrupaciones
+          SET app_articles_ids = (
+            SELECT jsonb_agg(elem)
+            FROM jsonb_array_elements(COALESCE(app_articles_ids, '[]'::jsonb)) AS elem
+            WHERE elem::int NOT IN (SELECT unnest($1::int[]))
+          )
+        WHERE id = $2 AND business_id = $3
+          AND app_articles_ids IS NOT NULL`,
+      [ids, fromId, fromBizId]
     );
 
     await client.query(
@@ -1693,6 +1743,19 @@ exports.eliminarArticulosDeAgrupacionBulk = async (req, res) => {
         WHERE id = $2 AND business_id = $3
         RETURNING id, nombre, COALESCE(articulos, '[]'::jsonb) AS articulos`,
       [JSON.stringify(filtered), id, businessId]
+    );
+
+    // Limpiar también app_articles_ids (columna legacy)
+    await pool.query(
+      `UPDATE agrupaciones
+          SET app_articles_ids = (
+            SELECT jsonb_agg(elem)
+            FROM jsonb_array_elements(COALESCE(app_articles_ids, '[]'::jsonb)) AS elem
+            WHERE elem::int NOT IN (SELECT unnest($1::int[]))
+          )
+        WHERE id = $2 AND business_id = $3
+          AND app_articles_ids IS NOT NULL`,
+      [Array.from(idsSet), id, businessId]
     );
 
     invalidateCacheForBiz(businessId);
