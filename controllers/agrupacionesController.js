@@ -488,16 +488,18 @@ exports.actualizarAgrupacion = async (req, res) => {
 // ============================================================================
 exports.eliminarAgrupacion = async (req, res) => {
   try {
-    const businessId = getBusinessId(req);
+    const requestBusinessId = getBusinessId(req);
     const id = Number(req.params.id);
 
-    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+    if (!Number.isFinite(requestBusinessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
+    // Buscar el grupo por id solamente: puede pertenecer al negocio principal
+    // (cuando la agrupación "Festejos" original vive en el principal pero se gestiona desde el subnegocio)
     const { rows: prevRows } = await pool.query(
-      `SELECT nombre FROM agrupaciones WHERE id=$1 AND business_id=$2`,
-      [id, businessId]
+      `SELECT nombre, business_id FROM agrupaciones WHERE id=$1`,
+      [id]
     );
 
     if (!prevRows.length) {
@@ -505,6 +507,22 @@ exports.eliminarAgrupacion = async (req, res) => {
     }
 
     const nombre = prevRows[0].nombre || '';
+    const realBusinessId = Number(prevRows[0].business_id);
+
+    // Validar que el negocio del request sea el mismo o pertenezca a la misma organización
+    if (realBusinessId !== requestBusinessId) {
+      const { rows: orgCheck } = await pool.query(
+        `SELECT b1.organization_id AS org1, b2.organization_id AS org2
+           FROM app_businesses b1, app_businesses b2
+          WHERE b1.id = $1 AND b2.id = $2`,
+        [requestBusinessId, realBusinessId]
+      );
+      const sameOrg = orgCheck[0]?.org1 && orgCheck[0]?.org1 === orgCheck[0]?.org2;
+      if (!sameOrg) {
+        return res.status(403).json({ ok: false, error: 'No autorizado para eliminar esta agrupación' });
+      }
+    }
+
     if (isTodoName(nombre) || isDiscontinuadosName(nombre)) {
       return res
         .status(400)
@@ -513,14 +531,14 @@ exports.eliminarAgrupacion = async (req, res) => {
 
     await pool.query(`DELETE FROM agrupaciones WHERE id=$1 AND business_id=$2`, [
       id,
-      businessId,
+      realBusinessId,
     ]);
 
     // Limpieza best-effort de exclusiones si hay tabla
     try {
       await pool.query(
-        `DELETE FROM agrupacion_exclusiones WHERE agrupacion_id=$1 AND business_id=$2`,
-        [id, businessId]
+        `DELETE FROM agrupacion_exclusiones WHERE agrupacion_id=$1`,
+        [id]
       );
     } catch (_) { }
 
@@ -647,38 +665,40 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
 // ============================================================================
 exports.eliminarArticuloDeAgrupacion = async (req, res) => {
   try {
-     let businessId = Number(req.params.businessId);
-    if (!Number.isFinite(businessId)) {
-      businessId = getBusinessId(req); // fallback solo si no hay param
-    }
-    
+    const requestBusinessId = Number(req.params.businessId || 0) || getBusinessId(req);
     const id = Number(req.params.id ?? req.params.agrupacionId);
     const articuloId = Number(req.params.articuloId);
 
-    if (!Number.isFinite(businessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
+    if (!Number.isFinite(requestBusinessId) || !Number.isFinite(id) || !Number.isFinite(articuloId)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
-    // Redirigir al negocio principal si la agrupación es Discontinuados y venimos de un subnegocio
-    {
-      const { rows: agRows } = await pool.query(
-        `SELECT nombre FROM agrupaciones WHERE id = $1`, [id]
+    // Buscar la agrupación por id solo: puede pertenecer al principal o al subnegocio
+    const { rows: agRows } = await pool.query(
+      `SELECT nombre, business_id FROM agrupaciones WHERE id = $1`, [id]
+    );
+    if (!agRows.length) {
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    }
+
+    // Usar SIEMPRE el business_id real de la agrupación (no el del request)
+    let businessId = Number(agRows[0].business_id);
+    const agNombre = agRows[0]?.nombre ?? '';
+
+    // Solo para Discontinuados: redirigir al principal (comportamiento heredado)
+    if (isDiscontinuadosName(agNombre)) {
+      const { rows: bizRows } = await pool.query(
+        `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [requestBusinessId]
       );
-      const agNombre = agRows[0]?.nombre ?? '';
-      if (isDiscontinuadosName(agNombre)) {
-        const { rows: bizRows } = await pool.query(
-          `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
+      const biz = bizRows[0];
+      if (biz?.created_from === 'from_group' && biz?.organization_id) {
+        const { rows: orgBiz } = await pool.query(
+          `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
+          [biz.organization_id]
         );
-        const biz = bizRows[0];
-        if (biz?.created_from === 'from_group' && biz?.organization_id) {
-          const { rows: orgBiz } = await pool.query(
-            `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
-            [biz.organization_id]
-          );
-          if (orgBiz[0]?.id) {
-            console.log(`[eliminarArticuloDeAgrupacion] Redirigiendo Discontinuados de ${businessId} al principal ${orgBiz[0].id}`);
-            businessId = orgBiz[0].id;
-          }
+        if (orgBiz[0]?.id) {
+          console.log(`[eliminarArticuloDeAgrupacion] Redirigiendo Discontinuados de ${requestBusinessId} al principal ${orgBiz[0].id}`);
+          businessId = orgBiz[0].id;
         }
       }
     }
