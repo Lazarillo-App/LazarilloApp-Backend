@@ -50,7 +50,7 @@ async function buildInsumoMap(businessId) {
 // Devuelve { where: string[], params: any[] } listo para interpolación segura.
 // El caller ya pone business_id como $1 antes de llamar a este helper.
 function buildPurchaseFilters(query, startIndex = 2) {
-  const { from, to, proveedor_id, insumo_id, branch_id } = query;
+  const { from, to, proveedor_id, insumo_id, insumo_ids, branch_id } = query;
   const where = [];
   const params = [];
   let idx = startIndex;
@@ -67,7 +67,14 @@ function buildPurchaseFilters(query, startIndex = 2) {
     params.push(Number(proveedor_id));
     where.push(`p.proveedor_id = $${idx++}`);
   }
-  if (insumo_id) {
+  // insumo_ids tiene prioridad sobre insumo_id (array vs singular)
+  if (insumo_ids) {
+    const ids = String(insumo_ids).split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
+    if (ids.length > 0) {
+      params.push(ids);
+      where.push(`pi.insumo_id = ANY($${idx++}::int[])`);
+    }
+  } else if (insumo_id) {
     params.push(Number(insumo_id));
     where.push(`pi.insumo_id = $${idx++}`);
   }
@@ -346,7 +353,7 @@ exports.exportCsv = async (req, res, next) => {
     const filename = `compras_${from ?? 'all'}_${to ?? 'all'}.csv`;
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send('\uFEFF' + lines.join('\r\n'));
+    res.send(Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(lines.join('\r\n'), 'utf8')]));
   } catch (e) {
     console.error('[purchases.exportCsv] error:', e);
     next(e);

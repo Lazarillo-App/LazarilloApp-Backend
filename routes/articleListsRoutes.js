@@ -116,4 +116,11 @@ router.post(
   ensureFn('links.propagateChange', links.propagateChange)
 );
 
+/* ── Listas de Insumos ─────────────────────────────────────────────────────── */
+router.get('/:id/insumo-lists',                          ensureFn('lists.getInsumoLists',    lists.getInsumoLists));
+router.post('/:id/insumo-lists',                         ensureFn('lists.createInsumoList',  lists.createInsumoList));
+router.delete('/:id/insumo-lists/:listId',               ensureFn('lists.deleteInsumoList',  lists.deleteInsumoList));
+router.get('/:id/insumo-lists/:listId/items',            ensureFn('lists.getInsumoListItems', lists.getInsumoListItems));
+router.put('/:id/insumo-lists/:listId/items',            ensureFn('lists.addInsumoListItems', lists.addInsumoListItems));
+
 module.exports = router;

@@ -280,3 +280,126 @@ exports.removeListItem = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+/* ========================= LISTAS DE INSUMOS ========================= */
+
+// GET /businesses/:id/article-lists?scope=insumo
+// (reutiliza getLists con filtro de scope)
+exports.getInsumoLists = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!Number.isFinite(bizId))
+      return res.status(400).json({ ok: false, error: 'businessId inválido' });
+
+    const { rows } = await pool.query(
+      `SELECT
+         l.id, l.name, l.description, l.color, l.created_at, l.updated_at,
+         COUNT(li.id)::int AS item_count
+       FROM article_lists l
+       LEFT JOIN insumo_list_items li ON li.list_id = l.id
+       WHERE l.business_id = $1 AND l.scope = 'insumo'
+       GROUP BY l.id
+       ORDER BY l.created_at DESC`,
+      [bizId]
+    );
+    return res.json({ ok: true, lists: rows });
+  } catch (e) {
+    console.error('[getInsumoLists]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// POST /businesses/:id/insumo-lists  { name }
+exports.createInsumoList = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!Number.isFinite(bizId))
+      return res.status(400).json({ ok: false, error: 'businessId inválido' });
+
+    const name = String(req.body?.name ?? '').trim();
+    if (!name)
+      return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
+
+    const { rows } = await pool.query(
+      `INSERT INTO article_lists (business_id, name, scope)
+       VALUES ($1, $2, 'insumo')
+       RETURNING id, name, scope, created_at`,
+      [bizId, name]
+    );
+    return res.status(201).json({ ok: true, list: rows[0] });
+  } catch (e) {
+    if (e.code === '23505')
+      return res.status(409).json({ ok: false, error: 'Ya existe una lista con ese nombre' });
+    console.error('[createInsumoList]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// DELETE /businesses/:id/insumo-lists/:listId
+exports.deleteInsumoList = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const listId = safeNum(req.params.listId);
+    if (!Number.isFinite(bizId) || !listId)
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+
+    const { rowCount } = await pool.query(
+      `DELETE FROM article_lists WHERE id = $1 AND business_id = $2 AND scope = 'insumo'`,
+      [listId, bizId]
+    );
+    if (!rowCount)
+      return res.status(404).json({ ok: false, error: 'Lista no encontrada' });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[deleteInsumoList]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// GET /businesses/:id/insumo-lists/:listId/items
+exports.getInsumoListItems = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const listId = safeNum(req.params.listId);
+    if (!Number.isFinite(bizId) || !listId)
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+
+    const { rows } = await pool.query(
+      `SELECT ili.insumo_id, i.nombre, i.codigo_maxi, ili.added_at
+       FROM insumo_list_items ili
+       JOIN insumos i ON i.id = ili.insumo_id
+       WHERE ili.list_id = $1
+       ORDER BY ili.added_at ASC`,
+      [listId]
+    );
+    return res.json({ ok: true, items: rows });
+  } catch (e) {
+    console.error('[getInsumoListItems]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// PUT /businesses/:id/insumo-lists/:listId/items  { ids: number[] }
+exports.addInsumoListItems = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const listId = safeNum(req.params.listId);
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map(Number).filter(Number.isFinite);
+
+    if (!Number.isFinite(bizId) || !listId || !ids.length)
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+
+    const values = ids.map((_, i) => `($1, $${i + 2})`).join(', ');
+    const { rowCount } = await pool.query(
+      `INSERT INTO insumo_list_items (list_id, insumo_id)
+       VALUES ${values}
+       ON CONFLICT (list_id, insumo_id) DO NOTHING`,
+      [listId, ...ids]
+    );
+    return res.json({ ok: true, added: rowCount });
+  } catch (e) {
+    console.error('[addInsumoListItems]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
