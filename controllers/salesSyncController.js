@@ -557,7 +557,8 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
       'Content-Disposition',
       `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.csv"`
     );
-    res.write('\uFEFF');
+    // BOM UTF-8 explícito como Buffer (EF BB BF) — garantiza que Excel lo reconozca en todos los SO
+    res.write(Buffer.from([0xEF, 0xBB, 0xBF]));
     res.write('sep=;\n');
 
     const headers = ['codigo', 'nombre', 'unidades', 'importe', 'costo', 'p_total', 'neto', 'tipo_iva', 'fecha'];
