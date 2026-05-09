@@ -23,7 +23,14 @@ const normalizeItem = (o = {}) => {
   const subrubro = String(o.subrubro ?? o.subRubro ?? 'Sin subrubro').trim() || 'Sin subrubro';
   const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
 
-  return { id, nombre, categoria, subrubro, precio };
+  const item = { id, nombre, categoria, subrubro, precio };
+
+  // Preservar metadata de origen si viene (usado al discontinuar)
+  if (o.fromGroupId != null) item.fromGroupId = Number(o.fromGroupId);
+  if (o.fromGroupName != null) item.fromGroupName = String(o.fromGroupName);
+  if (o.fromBizId != null) item.fromBizId = Number(o.fromBizId);
+
+  return item;
 };
 
 const parseJsonArrayLoose = (x) => {
@@ -1654,10 +1661,10 @@ exports.getArticulosOrigenes = async (req, res) => {
             `SELECT name FROM app_businesses WHERE id = $1`, [Number(a.fromBizId)]
           );
           origenes[artId] = {
-            groupId:   Number(a.fromGroupId),
+            groupId: Number(a.fromGroupId),
             groupName: a.fromGroupName || `Agrupación #${a.fromGroupId}`,
-            bizId:     Number(a.fromBizId),
-            bizName:   bizNameRows[0]?.name || `Negocio #${a.fromBizId}`,
+            bizId: Number(a.fromBizId),
+            bizName: bizNameRows[0]?.name || `Negocio #${a.fromBizId}`,
           };
         }
       }
@@ -1695,10 +1702,10 @@ exports.getArticulosOrigenes = async (req, res) => {
           if (!missingSet.has(artId)) continue;
           if (origenes[artId]) continue;
           origenes[artId] = {
-            groupId:   Number(ag.id),
+            groupId: Number(ag.id),
             groupName: ag.nombre,
-            bizId:     Number(ag.business_id),
-            bizName:   ag.business_nombre,
+            bizId: Number(ag.business_id),
+            bizName: ag.business_nombre,
           };
         }
 
@@ -1712,10 +1719,10 @@ exports.getArticulosOrigenes = async (req, res) => {
           if (!missingSet.has(artId)) continue;
           if (origenes[artId]) continue;
           origenes[artId] = {
-            groupId:   Number(ag.id),
+            groupId: Number(ag.id),
             groupName: ag.nombre,
-            bizId:     Number(ag.business_id),
-            bizName:   ag.business_nombre,
+            bizId: Number(ag.business_id),
+            bizName: ag.business_nombre,
           };
         }
       }
@@ -1735,11 +1742,11 @@ exports.getArticulosOrigenes = async (req, res) => {
 // ============================================================================
 exports.eliminarArticulosDeAgrupacionBulk = async (req, res) => {
   try {
-     let businessId = Number(req.params.businessId);
+    let businessId = Number(req.params.businessId);
     if (!Number.isFinite(businessId)) {
       businessId = getBusinessId(req);
     }
-    
+
     const id = Number(req.params.id ?? req.params.agrupacionId);
     const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
       .map(Number).filter(Number.isFinite);
@@ -1820,7 +1827,7 @@ exports.eliminarArticulosDeAgrupacionBulk = async (req, res) => {
 exports.moveCrossBiz = async (req, res) => {
   const businessId = getBusinessId(req);
   const { articleId, toGroupId, toBizId } = req.body || {};
-  
+
   const artId = Number(articleId);
   const toGrpId = Number(toGroupId);
   const toBizIdNum = Number(toBizId);
@@ -1838,7 +1845,7 @@ exports.moveCrossBiz = async (req, res) => {
       `SELECT organization_id FROM app_businesses WHERE id = $1`, [businessId]
     );
     const orgId = bizRows[0]?.organization_id;
-    
+
     let bizIds = [businessId];
     if (orgId) {
       const { rows: orgBizRows } = await client.query(
