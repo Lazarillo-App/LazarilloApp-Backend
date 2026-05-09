@@ -35,7 +35,7 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
   const siblings = await getLinkSiblings(bizId, articleId);
   if (!siblings) return;
 
-  const targets = siblings.filter(s => s.sync_recipe !== false);
+  const targets = [];
   if (!targets.length) return;
 
   const groupId      = targets[0].group_id;

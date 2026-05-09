@@ -28,7 +28,7 @@ router.post('/propagate-delete', async (req, res, next) => {
     const siblings = await getLinkSiblings(bizId, articleId);
     if (!siblings) return res.json({ ok: true, propagated: 0 });
 
-    const targets = siblings.filter(s => s.sync_recipe !== false);
+    const targets = [];
     if (!targets.length) return res.json({ ok: true, propagated: 0 });
 
     for (const s of targets) {
