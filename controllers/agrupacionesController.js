@@ -1594,6 +1594,13 @@ exports.getArticuloOrigen = async (req, res) => {
 // POST /businesses/:businessId/agrupaciones/articulos/origenes
 // Body: { ids: number[] }
 // Devuelve el origen de cada artículo: { [articuloId]: { groupId, groupName, bizId, bizName } }
+//
+// Estrategia (en orden de prioridad):
+//   1. Leer metadata fromGroupId/fromBizId guardada en el JSONB de Discontinuados
+//      (se guarda al momento de discontinuar, es la fuente más confiable)
+//   2. Buscar en qué agrupación real está el artículo actualmente
+//      (fallback para artículos discontinuados antes del fix)
+//   3. Buscar en app_articles_ids (negocios legacy)
 // ============================================================================
 exports.getArticulosOrigenes = async (req, res) => {
   try {
@@ -1619,59 +1626,98 @@ exports.getArticulosOrigenes = async (req, res) => {
       bizIds = orgBizRows.map(r => Number(r.id));
     }
 
-    // Traer todas las agrupaciones relevantes (excluye Discontinuados/Todo/Sin Agrupación)
-    // Incluye app_articles_ids para soporte de negocios legacy (44/45)
-    const { rows: agRows } = await pool.query(
-      `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre,
-              COALESCE(a.articulos, '[]'::jsonb) AS articulos,
-              a.app_articles_ids
+    const idsSet = new Set(ids);
+    const origenes = {};
+
+    // ── PASO 1: Leer metadata de origen desde el JSONB de Discontinuados ──
+    // Cuando discontinuamos ahora guardamos { id, fromGroupId, fromGroupName, fromBizId }
+    const { rows: discRows } = await pool.query(
+      `SELECT a.id AS agrup_id, a.business_id,
+              COALESCE(a.articulos, '[]'::jsonb) AS articulos
          FROM agrupaciones a
-         JOIN app_businesses b ON b.id = a.business_id
         WHERE a.business_id = ANY($1::int[])
-          AND a.nombre NOT ILIKE 'Discontinuados'
-          AND a.nombre NOT ILIKE 'Descontinuados'
-          AND a.nombre NOT ILIKE 'Todo'
-          AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
-          AND a.nombre NOT ILIKE 'Sin Agrupar'
-          AND a.nombre NOT ILIKE 'Sin Grupo'
-          AND (a.is_temporary IS NULL OR a.is_temporary = false)`,
+          AND (a.nombre ILIKE 'Discontinuados' OR a.nombre ILIKE 'Descontinuados')`,
       [bizIds]
     );
 
-    const idsSet = new Set(ids);
-    // mapa: articuloId → origen
-    const origenes = {};
-
-    for (const ag of agRows) {
-      // 1. Buscar en JSONB articulos (negocios nuevos con maxi_articles)
-      const arts = parseJsonArrayLoose(ag.articulos);
-      for (const art of arts) {
-        const artId = Number(art?.id);
+    for (const disc of discRows) {
+      const arts = parseJsonArrayLoose(disc.articulos);
+      for (const a of arts) {
+        const artId = Number(a?.id);
         if (!idsSet.has(artId)) continue;
-        if (origenes[artId]) continue; // ya encontrado
-        origenes[artId] = {
-          groupId: Number(ag.id),
-          groupName: ag.nombre,
-          bizId: Number(ag.business_id),
-          bizName: ag.business_nombre,
-        };
+        if (origenes[artId]) continue;
+
+        // Solo usar si tiene metadata de origen guardada
+        if (a.fromGroupId && a.fromBizId) {
+          // Resolver nombre del negocio
+          const { rows: bizNameRows } = await pool.query(
+            `SELECT name FROM app_businesses WHERE id = $1`, [Number(a.fromBizId)]
+          );
+          origenes[artId] = {
+            groupId:   Number(a.fromGroupId),
+            groupName: a.fromGroupName || `Agrupación #${a.fromGroupId}`,
+            bizId:     Number(a.fromBizId),
+            bizName:   bizNameRows[0]?.name || `Negocio #${a.fromBizId}`,
+          };
+        }
       }
+    }
 
-      // 2. Buscar en app_articles_ids (negocios legacy 44/45 con app_articles)
-      const legacyIds = Array.isArray(ag.app_articles_ids)
-        ? ag.app_articles_ids.map(Number)
-        : (typeof ag.app_articles_ids === 'string'
-          ? JSON.parse(ag.app_articles_ids || '[]').map(Number)
-          : []);
-      for (const artId of legacyIds) {
-        if (!idsSet.has(artId)) continue;
-        if (origenes[artId]) continue; // JSONB tiene prioridad si ya se encontró
-        origenes[artId] = {
-          groupId: Number(ag.id),
-          groupName: ag.nombre,
-          bizId: Number(ag.business_id),
-          bizName: ag.business_nombre,
-        };
+    // ── PASO 2: Fallback — buscar en agrupaciones reales (artículos sin metadata) ──
+    // Para artículos discontinuados antes del fix que no tienen fromGroupId guardado
+    const missingIds = ids.filter(id => !origenes[id]);
+
+    if (missingIds.length > 0) {
+      const { rows: agRows } = await pool.query(
+        `SELECT a.id, a.nombre, a.business_id, b.name AS business_nombre,
+                COALESCE(a.articulos, '[]'::jsonb) AS articulos,
+                a.app_articles_ids
+           FROM agrupaciones a
+           JOIN app_businesses b ON b.id = a.business_id
+          WHERE a.business_id = ANY($1::int[])
+            AND a.nombre NOT ILIKE 'Discontinuados'
+            AND a.nombre NOT ILIKE 'Descontinuados'
+            AND a.nombre NOT ILIKE 'Todo'
+            AND a.nombre NOT ILIKE 'Sin Agrupaci_n'
+            AND a.nombre NOT ILIKE 'Sin Agrupar'
+            AND a.nombre NOT ILIKE 'Sin Grupo'
+            AND (a.is_temporary IS NULL OR a.is_temporary = false)`,
+        [bizIds]
+      );
+
+      const missingSet = new Set(missingIds);
+
+      for (const ag of agRows) {
+        // Buscar en JSONB articulos
+        const arts = parseJsonArrayLoose(ag.articulos);
+        for (const art of arts) {
+          const artId = Number(art?.id);
+          if (!missingSet.has(artId)) continue;
+          if (origenes[artId]) continue;
+          origenes[artId] = {
+            groupId:   Number(ag.id),
+            groupName: ag.nombre,
+            bizId:     Number(ag.business_id),
+            bizName:   ag.business_nombre,
+          };
+        }
+
+        // Buscar en app_articles_ids (legacy)
+        const legacyIds = Array.isArray(ag.app_articles_ids)
+          ? ag.app_articles_ids.map(Number)
+          : (typeof ag.app_articles_ids === 'string'
+            ? JSON.parse(ag.app_articles_ids || '[]').map(Number)
+            : []);
+        for (const artId of legacyIds) {
+          if (!missingSet.has(artId)) continue;
+          if (origenes[artId]) continue;
+          origenes[artId] = {
+            groupId:   Number(ag.id),
+            groupName: ag.nombre,
+            bizId:     Number(ag.business_id),
+            bizName:   ag.business_nombre,
+          };
+        }
       }
     }
 
