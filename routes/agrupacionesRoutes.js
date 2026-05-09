@@ -18,6 +18,7 @@ const {
   getArticuloOrigen,
   getArticulosOrigenes,
   eliminarArticulosDeAgrupacionBulk,
+  moveCrossBiz,
 } = require('../controllers/agrupacionesController');
 
 const { materializeGroupsFromTaxonomy } = require('../services/autoGroupingService');
