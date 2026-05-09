@@ -42,7 +42,7 @@ exports.getLists = async (req, res) => {
          COUNT(li.id)::int AS item_count
        FROM article_lists l
        LEFT JOIN article_list_items li ON li.list_id = l.id
-       WHERE l.business_id = $1
+       WHERE l.business_id = $1 AND l.scope = 'article'
        GROUP BY l.id
        ORDER BY l.created_at DESC`,
       [bizId]
@@ -75,8 +75,8 @@ exports.createList = async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO article_lists (business_id, name, description, color)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO article_lists (business_id, name, description, color, scope)
+       VALUES ($1, $2, $3, $4, 'article')
        RETURNING id, name, description, color, created_at`,
       [bizId, name, description, color]
     );
@@ -121,7 +121,9 @@ exports.updateList = async (req, res) => {
     const sql = `
       UPDATE article_lists
          SET ${sets.join(', ')}, updated_at = NOW()
-       WHERE id = $${vals.length + 1} AND business_id = $${vals.length + 2}
+       WHERE id = $${vals.length + 1}
+         AND business_id = $${vals.length + 2}
+         AND scope = 'article'
        RETURNING id, name, description, color, updated_at`;
 
     const { rows } = await pool.query(sql, [...vals, listId, bizId]);
@@ -153,7 +155,8 @@ exports.deleteList = async (req, res) => {
     }
 
     const { rowCount } = await pool.query(
-      `DELETE FROM article_lists WHERE id = $1 AND business_id = $2`,
+      `DELETE FROM article_lists
+       WHERE id = $1 AND business_id = $2 AND scope = 'article'`,
       [listId, bizId]
     );
 
