@@ -34,7 +34,11 @@ async function fetchMaxiPriceLists({ businessId, req }) {
         throw e;
     }
 
-    const items = Array.isArray(j?.content) ? j.content : [];
+    const items = Array.isArray(j?.content?.articulos)
+  ? j.content.articulos
+  : Array.isArray(j?.content)
+    ? j.content
+    : [];
 
     // Solo los campos que necesitamos
     return items.map(a => ({
