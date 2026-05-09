@@ -1765,3 +1765,88 @@ exports.eliminarArticulosDeAgrupacionBulk = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// POST /businesses/:businessId/agrupaciones/move-cross-biz
+// Body: { articleId, toGroupId, toBizId }
+// Mueve un artículo entre negocios:
+// 1. Agrega al grupo destino
+// 2. Quita de TODAS las agrupaciones de la org (excepto destino)
+exports.moveCrossBiz = async (req, res) => {
+  const businessId = getBusinessId(req);
+  const { articleId, toGroupId, toBizId } = req.body || {};
+  
+  const artId = Number(articleId);
+  const toGrpId = Number(toGroupId);
+  const toBizIdNum = Number(toBizId);
+
+  if (!artId || !toGrpId || !toBizIdNum) {
+    return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Obtener todos los negocios de la org
+    const { rows: bizRows } = await client.query(
+      `SELECT organization_id FROM app_businesses WHERE id = $1`, [businessId]
+    );
+    const orgId = bizRows[0]?.organization_id;
+    
+    let bizIds = [businessId];
+    if (orgId) {
+      const { rows: orgBizRows } = await client.query(
+        `SELECT id FROM app_businesses WHERE organization_id = $1`, [orgId]
+      );
+      bizIds = orgBizRows.map(r => Number(r.id));
+    }
+
+    // 2. Quitar artículo de TODAS las agrupaciones de la org (excepto el grupo destino)
+    const { rows: agrupRows } = await client.query(
+      `SELECT id, articulos, business_id FROM agrupaciones
+       WHERE business_id = ANY($1::int[])
+         AND articulos @> $2::jsonb
+         AND id != $3`,
+      [bizIds, JSON.stringify([{ id: artId }]), toGrpId]
+    );
+
+    for (const ag of agrupRows) {
+      const arts = parseJsonArrayLoose(ag.articulos);
+      const filtered = arts.filter(a => Number(a.id) !== artId);
+      await client.query(
+        `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
+        [JSON.stringify(filtered), ag.id, ag.business_id]
+      );
+      invalidateCacheForBiz(ag.business_id);
+    }
+
+    // 3. Agregar al grupo destino
+    const { rows: toRows } = await client.query(
+      `SELECT id, articulos FROM agrupaciones WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      [toGrpId, toBizIdNum]
+    );
+    if (!toRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Grupo destino no encontrado' });
+    }
+
+    const toList = parseJsonArrayLoose(toRows[0].articulos);
+    if (!toList.some(a => Number(a.id) === artId)) {
+      toList.push({ id: artId });
+      await client.query(
+        `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
+        [JSON.stringify(toList), toGrpId, toBizIdNum]
+      );
+    }
+
+    await client.query('COMMIT');
+    invalidateCacheForBiz(toBizIdNum);
+    return res.json({ ok: true });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('moveCrossBiz error:', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};

@@ -64,5 +64,6 @@ router.delete('/agrupaciones/:id/articulos/:articuloId',safe(eliminarArticuloDeA
 router.get('/agrupaciones/:id/exclusiones', safe(listarExclusiones, 'listarExclusiones'));
 router.post('/agrupaciones/:id/exclusiones', safe(upsertExclusiones, 'upsertExclusiones'));
 router.post('/agrupaciones/:fromId/move-items', safe(moveItemsBetweenGroups, 'moveItemsBetweenGroups'));
+router.post('/agrupaciones/move-cross-biz', safe(moveCrossBiz, 'moveCrossBiz'));
 
 module.exports = router;
