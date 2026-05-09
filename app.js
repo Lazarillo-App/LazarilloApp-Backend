@@ -47,6 +47,7 @@ const purchasesImportRoutes = require('./routes/purchasesImportRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
 const syncRoutes = require('./routes/syncRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
+const priceListsRoutes = require('./routes/priceListsRoutes');
 
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
@@ -146,6 +147,7 @@ app.use('/api/divisions', divisionsRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
 app.use('/api/insumos', insumosElaboradosRoutes);
 app.use("/api/businesses/:bizId/branches", branchesRouter);
+app.use('/api', priceListsRoutes);
 
 /* =========================================================
    ✅ ORDEN IMPORTANTE EN /api/businesses
