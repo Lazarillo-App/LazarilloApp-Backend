@@ -1850,3 +1850,144 @@ exports.moveCrossBiz = async (req, res) => {
     client.release();
   }
 };
+
+// ============================================================================
+// POST /businesses/:businessId/agrupaciones/move-cross-biz
+// Body: { articleIds: number[], toGroupId: number, toBizId: number }
+//
+// Mueve uno o más artículos entre negocios de la misma organización:
+//   1. Los quita de TODAS las agrupaciones de la org (excepto el grupo destino)
+//   2. Los agrega al grupo destino
+//
+// Esto evita duplicados cuando un artículo quedó en múltiples negocios
+// por movimientos anteriores que no limpiaron bien.
+// ============================================================================
+exports.moveCrossBiz = async (req, res) => {
+  const businessId = getBusinessId(req);
+  const { articleIds, toGroupId, toBizId } = req.body || {};
+
+  const artIds = (Array.isArray(articleIds) ? articleIds : [articleIds])
+    .map(Number)
+    .filter(Number.isFinite);
+  const toGrpId = Number(toGroupId);
+  const toBizIdNum = Number(toBizId);
+
+  if (!artIds.length || !Number.isFinite(toGrpId) || !Number.isFinite(toBizIdNum)) {
+    return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Obtener todos los negocios de la organización
+    const { rows: bizRows } = await client.query(
+      `SELECT organization_id FROM app_businesses WHERE id = $1`,
+      [businessId]
+    );
+    const orgId = bizRows[0]?.organization_id;
+
+    let bizIds = [businessId];
+    if (orgId) {
+      const { rows: orgBizRows } = await client.query(
+        `SELECT id FROM app_businesses WHERE organization_id = $1`,
+        [orgId]
+      );
+      bizIds = orgBizRows.map(r => Number(r.id));
+    }
+
+    // 2. Traer todas las agrupaciones de la org excepto el grupo destino
+    const { rows: agrupRows } = await client.query(
+      `SELECT id, articulos, app_articles_ids, business_id
+         FROM agrupaciones
+        WHERE business_id = ANY($1::int[])
+          AND id != $2`,
+      [bizIds, toGrpId]
+    );
+
+    const artIdsSet = new Set(artIds);
+
+    // 3. Quitar los artículos de cada agrupación que los contenga
+    for (const ag of agrupRows) {
+      const arts = parseJsonArrayLoose(ag.articulos);
+      const tieneAlguno = arts.some(a => artIdsSet.has(Number(a.id)));
+
+      // Verificar también en app_articles_ids (legacy)
+      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+        : (typeof ag.app_articles_ids === 'string'
+          ? JSON.parse(ag.app_articles_ids || '[]')
+          : []);
+      const tieneEnLegacy = appIds.some(id => artIdsSet.has(Number(id)));
+
+      if (!tieneAlguno && !tieneEnLegacy) continue;
+
+      if (tieneAlguno) {
+        const filtered = arts.filter(a => !artIdsSet.has(Number(a.id)));
+        await client.query(
+          `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
+          [JSON.stringify(filtered), ag.id, ag.business_id]
+        );
+      }
+
+      if (tieneEnLegacy) {
+        await client.query(
+          `UPDATE agrupaciones
+              SET app_articles_ids = (
+                SELECT jsonb_agg(elem)
+                FROM jsonb_array_elements(COALESCE(app_articles_ids, '[]'::jsonb)) AS elem
+                WHERE elem::int NOT IN (SELECT unnest($1::int[]))
+              )
+            WHERE id = $2 AND business_id = $3
+              AND app_articles_ids IS NOT NULL`,
+          [artIds, ag.id, ag.business_id]
+        );
+      }
+
+      invalidateCacheForBiz(ag.business_id);
+    }
+
+    // 4. Agregar al grupo destino (sin duplicar)
+    const { rows: toRows } = await client.query(
+      `SELECT id, articulos FROM agrupaciones
+        WHERE id = $1 AND business_id = $2
+        FOR UPDATE`,
+      [toGrpId, toBizIdNum]
+    );
+
+    if (!toRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Grupo destino no encontrado' });
+    }
+
+    const toList = parseJsonArrayLoose(toRows[0].articulos);
+    const existingIds = new Set(toList.map(a => Number(a.id)));
+    let added = 0;
+
+    for (const artId of artIds) {
+      if (!existingIds.has(artId)) {
+        toList.push({ id: artId });
+        existingIds.add(artId);
+        added++;
+      }
+    }
+
+    await client.query(
+      `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
+      [JSON.stringify(toList), toGrpId, toBizIdNum]
+    );
+
+    await client.query('COMMIT');
+    invalidateCacheForBiz(toBizIdNum);
+    if (toBizIdNum !== businessId) invalidateCacheForBiz(businessId);
+
+    console.log(`[moveCrossBiz] ${artIds.length} artículo(s) movidos a grupo ${toGrpId} (negocio ${toBizIdNum}), added=${added}`);
+
+    return res.json({ ok: true, moved: artIds.length, added });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('moveCrossBiz error:', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};

@@ -66,5 +66,6 @@ router.get('/agrupaciones/:id/exclusiones', safe(listarExclusiones, 'listarExclu
 router.post('/agrupaciones/:id/exclusiones', safe(upsertExclusiones, 'upsertExclusiones'));
 router.post('/agrupaciones/:fromId/move-items', safe(moveItemsBetweenGroups, 'moveItemsBetweenGroups'));
 router.post('/agrupaciones/move-cross-biz', safe(moveCrossBiz, 'moveCrossBiz'));
+router.post('/agrupaciones/move-cross-biz', safe(moveCrossBiz, 'moveCrossBiz'));
 
 module.exports = router;
