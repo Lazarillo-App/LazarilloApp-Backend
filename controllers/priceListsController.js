@@ -207,6 +207,8 @@ exports.getBusinessPrices = async (req, res, next) => {
 
     // Fetch de Maxi
     const articles = await fetchMaxiPriceLists({ businessId: credsBizId, req });
+    console.log('[getBusinessPrices] articles count:', articles.length);
+    console.log('[getBusinessPrices] sample:', articles.slice(0, 2));
 
     // Armar respuesta: { [codigo]: { precio, precioOriginal, listNumber } }
     const priceKey = `precio${listNumber}`;
