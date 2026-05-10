@@ -211,8 +211,7 @@ exports.savePriceConfig = async (req, res, next) => {
            updated_at    = NOW()`,
         [bizId, scope, scopeIdStr, objetivoVal, precioManualVal]
       );
-    } else if (objetivo === null && precioManual === null) {
-      // Borrar selectivamente según qué keys vinieron en el body
+    } else if (objetivoVal === null && precioManualVal === null) {
       const bodyKeys = Object.keys(req.body || {});
       const borrarManual = bodyKeys.includes('precioManual');
       const borrarObjetivo = bodyKeys.includes('objetivo');
