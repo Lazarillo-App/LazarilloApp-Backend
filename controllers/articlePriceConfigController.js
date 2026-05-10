@@ -168,6 +168,7 @@ exports.savePriceConfig = async (req, res, next) => {
         );
 
         console.log(`[savePriceConfig] scope=global pisarTodo → limpiados todos los objetivos del negocio ${bizId}`);
+        console.log('[savePriceConfig] body:', req.body);
       }
       // Si pisarTodo=false para scope='global', no hacemos nada extra:
       // el global (articulos_costo_ideal en props) ya se guarda aparte
