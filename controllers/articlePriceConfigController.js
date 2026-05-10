@@ -211,7 +211,7 @@ exports.savePriceConfig = async (req, res, next) => {
            updated_at    = NOW()`,
         [bizId, scope, scopeIdStr, objetivoVal, precioManualVal]
       );
-    } else if (objetivoVal === null && precioManualVal === null) {
+    } else if ((objetivo === null || objetivo === undefined) && (precioManual === null || precioManual === undefined)) {
       const bodyKeys = Object.keys(req.body || {});
       const borrarManual = bodyKeys.includes('precioManual');
       const borrarObjetivo = bodyKeys.includes('objetivo');
