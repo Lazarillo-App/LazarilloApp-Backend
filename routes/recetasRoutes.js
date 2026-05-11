@@ -17,33 +17,58 @@ router.get('/',    ctrl.getReceta);
 // POST   /api/businesses/:businessId/articles/:articleId/receta  (create/update)
 router.post('/',   ctrl.saveReceta);
 
+// Agregar después de router.post('/', ctrl.saveReceta):
 const { propagateRecipe } = require('../services/linkPropagation');
-const recetasCtrl = require('../controllers/recetasController');
 
 router.post('/propagate', async (req, res, next) => {
   try {
     const bizId     = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
-    
-    // Leer la receta guardada
-    const { rows: recetaRows } = await pool.query(
-      `SELECT r.*, 
-              json_agg(ri.* ORDER BY ri.orden) FILTER (WHERE ri.id IS NOT NULL) AS items_json
+
+    // Leer receta + items guardados
+    const { rows } = await pool.query(
+      `SELECT r.id, r.nombre, r.porciones, r.porcentaje_venta, r.costo_total,
+              r.notas, r.foto, r.notas_updated_at,
+              COALESCE(
+                json_agg(
+                  json_build_object(
+                    'insumo_id', ri.insumo_id,
+                    'cantidad', ri.cantidad,
+                    'unidad', ri.unidad,
+                    'costo_unitario', ri.costo_unitario,
+                    'observaciones', ri.observaciones,
+                    'fotos_urls', ri.fotos_urls,
+                    'merma', ri.merma,
+                    'pedido', ri.pedido,
+                    'tipo_costo', ri.tipo_costo,
+                    'orden', ri.orden
+                  ) ORDER BY ri.orden
+                ) FILTER (WHERE ri.id IS NOT NULL),
+                '[]'
+              ) AS items_json
          FROM recetas r
          LEFT JOIN receta_items ri ON ri.receta_id = r.id
         WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE
         GROUP BY r.id`,
       [articleId, bizId]
     );
-    
-    if (!recetaRows.length) return res.json({ ok: false, error: 'Receta no encontrada' });
-    
-    const receta = recetaRows[0];
-    const savedItems = receta.items_json || [];
-    
+
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'Receta no encontrada' });
+    }
+
+    const receta    = rows[0];
+    const savedItems = rows[0].items_json || [];
+
+    console.log(`[/propagate] art=${articleId} biz=${bizId} items=${savedItems.length}`);
+
     const result = await propagateRecipe({ bizId, articleId, receta, savedItems });
-    return res.json({ ok: true, propagated: result?.count || 0 });
+
+    console.log(`[/propagate] result:`, result);
+
+    return res.json({ ok: true, propagated: result?.count || 0, to: result?.propagatedTo || [] });
   } catch (err) {
+    console.error('[/propagate]', err);
     next(err);
   }
 });
