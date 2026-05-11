@@ -57,9 +57,21 @@ exports.getRecetaElaborado = async (req, res, next) => {
       [receta.id]
     );
 
+    // Incluir config del negocio para que el front sepa el % objetivo global de insumos
+    let insumosConfigObjetivo = 30;
+    try {
+      const { rows: bizRows } = await pool.query(
+        `SELECT props FROM app_businesses WHERE id = $1 LIMIT 1`, [bizId]
+      );
+      if (bizRows.length) {
+        insumosConfigObjetivo = Number(bizRows[0].props?.insumos_costo_ideal ?? 30);
+      }
+    } catch { /* no crítico */ }
+
     return res.json({
       ok: true,
       receta: { ...receta, items },
+      insumos_costo_ideal: insumosConfigObjetivo,
     });
   } catch (e) {
     console.error('[getRecetaElaborado]', e);
@@ -322,4 +334,4 @@ exports.getRecetasElaboradosMapa = async (req, res, next) => {
     console.error('[getRecetasElaboradosMapa]', e);
     next(e);
   }
-}; 
+};

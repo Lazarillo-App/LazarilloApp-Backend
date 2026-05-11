@@ -168,7 +168,6 @@ exports.savePriceConfig = async (req, res, next) => {
         );
 
         console.log(`[savePriceConfig] scope=global pisarTodo → limpiados todos los objetivos del negocio ${bizId}`);
-        console.log('[savePriceConfig] body:', req.body);
       }
       // Si pisarTodo=false para scope='global', no hacemos nada extra:
       // el global (articulos_costo_ideal en props) ya se guarda aparte
@@ -211,7 +210,8 @@ exports.savePriceConfig = async (req, res, next) => {
            updated_at    = NOW()`,
         [bizId, scope, scopeIdStr, objetivoVal, precioManualVal]
       );
-    } else if ((objetivo === null || objetivo === undefined) && (precioManual === null || precioManual === undefined)) {
+    } else if (objetivo === null && precioManual === null) {
+      // Borrar selectivamente según qué keys vinieron en el body
       const bodyKeys = Object.keys(req.body || {});
       const borrarManual = bodyKeys.includes('precioManual');
       const borrarObjetivo = bodyKeys.includes('objetivo');
@@ -423,10 +423,14 @@ exports.getRecetasAlertas = async (req, res, next) => {
          i.unidad_med,
          MAX(pi.fecha) AS fecha_ultima_compra,
          COUNT(DISTINCT r.article_id)::int AS en_recetas,
-         array_agg(DISTINCT r.article_id) AS article_ids
+         json_agg(DISTINCT jsonb_build_object(
+           'article_id', r.article_id,
+           'nombre', COALESCE(a.name, r.nombre, 'Artículo #' || r.article_id::text)
+         )) FILTER (WHERE r.article_id IS NOT NULL) AS recetas_info
        FROM receta_items ri
        JOIN recetas r   ON r.id = ri.receta_id AND r.business_id = $1 AND r.active = TRUE
        JOIN insumos i   ON i.id = ri.insumo_id
+       LEFT JOIN app_articles a ON a.id = r.article_id AND a.business_id = $1
        LEFT JOIN purchase_items pi ON pi.insumo_id = i.id AND pi.precio > 0
        WHERE ri.tipo_costo != 'nulo'
        GROUP BY i.id, i.nombre, i.unidad_med
@@ -449,7 +453,11 @@ exports.getRecetasAlertas = async (req, res, next) => {
           ? String(r.fecha_ultima_compra).slice(0, 10)
           : null,
         enRecetas: r.en_recetas,
-        articleIds: (r.article_ids || []).map(Number),
+        // Array de { article_id, nombre } para mostrar en el front
+        recetas: (r.recetas_info || []).map(rec => ({
+          articleId: Number(rec.article_id),
+          nombre: rec.nombre,
+        })),
       })),
     });
   } catch (e) {
@@ -457,4 +465,3 @@ exports.getRecetasAlertas = async (req, res, next) => {
     next(e);
   }
 };
-

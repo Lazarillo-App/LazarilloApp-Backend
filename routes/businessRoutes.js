@@ -325,10 +325,39 @@ router.get('/:id/config', async (req, res, next) => {
         articulos_costo_ideal:  Number(props.articulos_costo_ideal  ?? 30),
         insumos_costo_ideal:    Number(props.insumos_costo_ideal    ?? 30),
         compras_alerta_semanas: Number(props.compras_alerta_semanas ?? 4),
+        ventas_alerta_dias:     Number(props.ventas_alerta_dias     ?? 30),
+        precio_costeo_insumos:  props.precio_costeo_insumos         || 'ultima_compra',
       },
     });
   } catch (e) { next(e); }
 });
+
+/* ───────── ABM Manual de artículos ───────── */
+const artABM = require('../controllers/articulosABMController');
+
+// Rubros/categorías del negocio (para formulario de alta)
+router.get('/:id/rubros', ensureFn('artABM.getRubros', artABM.getRubros));
+
+// Artículos: sin-equivalencia debe ir ANTES de /:id/articles/:articleId
+router.get('/:id/articles/sin-equivalencia', ensureFn('artABM.listSinEquivalencia', artABM.listSinEquivalencia));
+
+// Alta manual de artículo
+router.post('/:id/articles/manual', ensureFn('artABM.crearArticulo', artABM.crearArticulo));
+
+// Editar artículo (manual o agregar equivalencia externa)
+router.patch('/:id/articles/:articleId', ensureFn('artABM.actualizarArticulo', artABM.actualizarArticulo));
+
+// Eliminar artículo manual (solo id < 0)
+router.delete('/:id/articles/:articleId', ensureFn('artABM.eliminarArticulo', artABM.eliminarArticulo));
+
+// Alerta de ventas (última fecha con datos)
+router.get('/:id/articles-alertas-ventas', ensureFn('artABM.alertasVentas', artABM.alertasVentas));
+
+/* ───────── Config de precio de costeo de insumos ───────── */
+router.get('/:id/config-costeo', ensureFn('artABM.getConfigCosteo', artABM.getConfigCosteo));
+router.patch('/:id/config-costeo', ensureFn('artABM.saveConfigCosteo', artABM.saveConfigCosteo));
+
+/* ───────── Config endpoint — agregar campos que faltaban ───────── */
 
 /* Por :id */
 router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOne));
