@@ -17,6 +17,37 @@ router.get('/',    ctrl.getReceta);
 // POST   /api/businesses/:businessId/articles/:articleId/receta  (create/update)
 router.post('/',   ctrl.saveReceta);
 
+const { propagateRecipe } = require('../services/linkPropagation');
+const recetasCtrl = require('../controllers/recetasController');
+
+router.post('/propagate', async (req, res, next) => {
+  try {
+    const bizId     = Number(req.params.businessId);
+    const articleId = Number(req.params.articleId);
+    
+    // Leer la receta guardada
+    const { rows: recetaRows } = await pool.query(
+      `SELECT r.*, 
+              json_agg(ri.* ORDER BY ri.orden) FILTER (WHERE ri.id IS NOT NULL) AS items_json
+         FROM recetas r
+         LEFT JOIN receta_items ri ON ri.receta_id = r.id
+        WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE
+        GROUP BY r.id`,
+      [articleId, bizId]
+    );
+    
+    if (!recetaRows.length) return res.json({ ok: false, error: 'Receta no encontrada' });
+    
+    const receta = recetaRows[0];
+    const savedItems = receta.items_json || [];
+    
+    const result = await propagateRecipe({ bizId, articleId, receta, savedItems });
+    return res.json({ ok: true, propagated: result?.count || 0 });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // DELETE /api/businesses/:businessId/articles/:articleId/receta
 router.delete('/', ctrl.deleteReceta);
 
