@@ -35,7 +35,8 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
   const siblings = await getLinkSiblings(bizId, articleId);
   if (!siblings) return;
 
-  const targets = [];
+  // ← CORREGIDO: usar los siblings reales, filtrando solo sync_recipe === false
+  const targets = siblings.filter(s => s.sync_recipe !== false);
   if (!targets.length) return;
 
   const groupId      = targets[0].group_id;
@@ -49,7 +50,9 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
     for (const sibling of targets) {
       const siblingId = Number(sibling.article_id);
 
-      // Upsert receta del sibling - ahora incluye notas, foto y notas_updated_at
+      // Upsert receta del sibling
+      // IMPORTANTE: porcentaje_venta NO se propaga en el UPDATE
+      // (cada gemelo mantiene su propio objetivo de costo)
       const { rows: recetaRows } = await client.query(
         `INSERT INTO recetas
            (article_id, business_id, nombre, descripcion, porciones,
@@ -61,7 +64,6 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
            nombre           = EXCLUDED.nombre,
            descripcion      = EXCLUDED.descripcion,
            porciones        = EXCLUDED.porciones,
-           porcentaje_venta = EXCLUDED.porcentaje_venta,
            costo_total      = EXCLUDED.costo_total,
            notas            = EXCLUDED.notas,
            foto             = EXCLUDED.foto,
@@ -75,7 +77,7 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
           receta.nombre           || null,
           receta.descripcion      || null,
           receta.porciones        || 1,
-          receta.porcentaje_venta || 0,
+          receta.porcentaje_venta || 0,  // solo para INSERT nuevo, ignorado en UPDATE
           receta.costo_total,
           receta.notas            || null,
           receta.foto             || null,
@@ -91,7 +93,6 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
         const insumoId = Number(item.insumo_id ?? item.supply_id);
         if (!Number.isFinite(insumoId) || insumoId <= 0) continue;
 
-        // fotos_urls se propaga igual que observaciones
         const fotosUrls = Array.isArray(item.fotos_urls)
           ? item.fotos_urls.filter(u => typeof u === 'string' && u.startsWith('http'))
           : [];
