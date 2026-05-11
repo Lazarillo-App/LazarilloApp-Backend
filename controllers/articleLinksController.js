@@ -384,3 +384,62 @@ exports.getLinkByArticle = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// POST /businesses/:id/article-links/:groupId/members
+// Body: { articleId: number }
+// Agrega un artículo a un grupo existente
+exports.addMember = async (req, res) => {
+  const bizId = getBusinessId(req);
+  const groupId = Number(req.params.groupId);
+  const articleId = Number(req.body?.articleId);
+ 
+  if (!Number.isFinite(bizId) || !Number.isFinite(groupId) || !Number.isFinite(articleId)) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+ 
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+ 
+    // Verificar que el grupo pertenece al negocio
+    const { rows: groupRows } = await client.query(
+      `SELECT id FROM article_link_groups WHERE id = $1 AND business_id = $2`,
+      [groupId, bizId]
+    );
+    if (!groupRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
+    }
+ 
+    // Verificar que el artículo no esté ya en otro grupo
+    const { rows: existing } = await client.query(
+      `SELECT link_group_id FROM article_link_members WHERE article_id = $1 AND business_id = $2`,
+      [articleId, bizId]
+    );
+    if (existing.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        ok: false,
+        error: 'El artículo ya está vinculado a otro grupo',
+        existingGroupId: Number(existing[0].link_group_id),
+      });
+    }
+ 
+    // Agregar el miembro
+    await client.query(
+      `INSERT INTO article_link_members (link_group_id, article_id, business_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [groupId, articleId, bizId]
+    );
+ 
+    await client.query('COMMIT');
+    return res.json({ ok: true, groupId, articleId });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[addMember]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};

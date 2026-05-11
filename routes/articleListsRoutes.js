@@ -104,6 +104,11 @@ router.delete(
   ensureFn('links.deleteLinkGroup', links.deleteLinkGroup)
 );
 
+router.post(
+'/:id/article-links/:groupId/members',
+  ensureFn('links.addMember', links.addMember)
+);
+
 // DELETE /api/businesses/:id/article-links/:groupId/members/:articleId → sacar 1 artículo
 router.delete(
   '/:id/article-links/:groupId/members/:articleId',
