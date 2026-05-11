@@ -332,6 +332,23 @@ router.get('/:id/config', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* ───────── Import CSV de insumos (alias para UploadInsumosModal) ───────── */
+const multerInsumos = require('multer')({ storage: require('multer').memoryStorage() });
+const insumosCtrl   = require('../controllers/insumosController');
+
+// El front llama a /businesses/:id/insumos/import-csv — lo redirigimos al controller
+router.post(
+  '/:id/insumos/import-csv',
+  multerInsumos.single('file'),
+  async (req, res, next) => {
+    // Inyectar businessId para que getBusinessId() lo tome
+    req.params.businessId = req.params.id;
+    req.businessId = Number(req.params.id);
+    if (!req.business) req.business = { id: Number(req.params.id) };
+    return insumosCtrl.bulkUpsertCSV(req, res, next);
+  }
+);
+
 /* ───────── ABM Manual de artículos ───────── */
 const artABM = require('../controllers/articulosABMController');
 
