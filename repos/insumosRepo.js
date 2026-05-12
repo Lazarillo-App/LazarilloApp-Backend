@@ -149,12 +149,93 @@ async function upsertFromMaxi(businessId, items = [], opts = {}) {
 
     await client.query('COMMIT');
 
+    // ── Reconciliación post-sync ──────────────────────────────────────
+    // Buscar insumos manuales sin codigo_maxi que coincidan por nombre
+    // con alguno de los insumos que llegaron de Maxi en este batch.
+    // Si hay match: asignar el codigo_maxi, actualizar origen a 'maxi',
+    // limpiar sin_equivalencia.
+    let reconciled = 0;
+    try {
+      const reconcileClient = await pool.connect();
+      try {
+        await reconcileClient.query('BEGIN');
+
+        // Insumos manuales sin código de este negocio
+        const { rows: manuales } = await reconcileClient.query(
+          `SELECT id, nombre, lower(trim(nombre)) AS nombre_norm
+             FROM insumos
+            WHERE business_id = $1
+              AND (codigo_maxi IS NULL OR codigo_maxi = '')
+              AND origen IN ('manual', 'csv')
+              AND sin_equivalencia = TRUE`,
+          [businessId]
+        );
+
+        if (manuales.length > 0) {
+          // Insumos que llegaron de Maxi en este sync (tienen codigo_maxi)
+          const { rows: deMaxi } = await reconcileClient.query(
+            `SELECT id, codigo_maxi, nombre, lower(trim(nombre)) AS nombre_norm,
+                    unidad_med, precio_ref, rubro
+               FROM insumos
+              WHERE business_id = $1
+                AND codigo_maxi IS NOT NULL
+                AND codigo_maxi != ''
+                AND origen = 'maxi'`,
+            [businessId]
+          );
+
+          // Índice por nombre normalizado
+          const maxiByNombre = new Map();
+          for (const m of deMaxi) {
+            if (!maxiByNombre.has(m.nombre_norm)) maxiByNombre.set(m.nombre_norm, m);
+          }
+
+          for (const manual of manuales) {
+            const match = maxiByNombre.get(manual.nombre_norm);
+            if (!match) continue;
+
+            // Actualizar el insumo manual con el código de Maxi
+            await reconcileClient.query(
+              `UPDATE insumos SET
+                 codigo_maxi      = $1,
+                 origen           = 'maxi',
+                 sin_equivalencia = FALSE,
+                 unidad_med       = COALESCE(unidad_med, $2),
+                 precio_ref       = COALESCE(precio_ref, $3),
+                 rubro            = COALESCE(rubro, $4),
+                 updated_at       = NOW()
+               WHERE id = $5`,
+              [match.codigo_maxi, match.unidad_med, match.precio_ref, match.rubro, manual.id]
+            );
+
+            // Eliminar el duplicado de Maxi si quedó uno
+            await reconcileClient.query(
+              `DELETE FROM insumos WHERE id = $1`,
+              [match.id]
+            );
+
+            reconciled++;
+          }
+        }
+
+        await reconcileClient.query('COMMIT');
+      } catch (re) {
+        await reconcileClient.query('ROLLBACK');
+        console.warn('[upsertFromMaxi] reconciliación falló (no crítico):', re.message);
+      } finally {
+        reconcileClient.release();
+      }
+    } catch (re) {
+      console.warn('[upsertFromMaxi] reconciliación error:', re.message);
+    }
+
     return {
       inserted,
       updated,
       unchanged,
       skipped,
-      changes, // <- clave para notificar sin agrupar
+      reconciled,
+      changes,
     };
   } catch (e) {
     await client.query('ROLLBACK');

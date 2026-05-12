@@ -22,6 +22,7 @@ router.get('/maxi', ctrl.listarMaxi);
 /* ================== Maxi: RUBROS DE INSUMOS ================== */
 router.post('/maxi/rubros/sync', ctrl.syncRubrosFromMaxi);
 router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
+router.get('/rubros', ctrl.getRubrosInsumos);  // Para ABM — rubros usados en este negocio
 
 /* ================== AGRUPACIONES DE INSUMOS ================== */
 /** Rutas fijas primero */
@@ -54,6 +55,11 @@ router.delete('/:id', ctrl.eliminar);
 /* ================== BULK (JSON / CSV) ================== */
 router.post('/bulk', ctrl.bulkUpsert);
 router.post('/bulk-csv', upload.single('file'), ctrl.bulkUpsertCSV);
+
+/* ================== BATCHES DE SUBIDA MANUAL ================== */
+router.get('/batches',                   ctrl.listBatchesInsumos);
+router.get('/batches/:batchId/preview',  ctrl.previewBatchInsumos);
+router.delete('/batches/:batchId',       ctrl.deleteBatchInsumos);
 
 /* ================== MANTENIMIENTO / UTILIDADES ================== */
 router.post('/admin/cleanup-null', ctrl.__cleanupNullInsumos);

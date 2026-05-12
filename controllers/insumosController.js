@@ -439,40 +439,51 @@ exports.crearManual = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
     }
 
+    // Generar SKU provisorio único: LAZ-{bizId}-{timestamp}-{random}
+    // Nunca choca con Maxi (que usa códigos numéricos cortos)
+    const skuProvisorio = `LAZ-${businessId}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+    // Verificar que no exista ya un insumo con mismo nombre+rubro en este negocio
+    const { rows: existing } = await pool.query(
+      `SELECT id, codigo_maxi, origen FROM insumos
+        WHERE business_id = $1
+          AND lower(trim(nombre)) = lower(trim($2))
+          AND ($3::text IS NULL OR lower(trim(rubro)) = lower(trim($3)))
+        LIMIT 1`,
+      [businessId, b.nombre.trim(), b.rubro ?? null]
+    );
+
+    if (existing.length) {
+      const ex = existing[0];
+      return res.status(409).json({
+        ok: false,
+        error: `Ya existe un insumo con ese nombre${b.rubro ? ' y rubro' : ''}.`,
+        existing: { id: ex.id, codigo_maxi: ex.codigo_maxi, origen: ex.origen },
+      });
+    }
+
     const { rows } = await pool.query(
-      `
-      INSERT INTO insumos
-      (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
-       envase, vencimiento, resumen, cant_ingredientes,
-       agrupacion_base, costo_ref, nota, origen, estado,
-       es_elaborado, es_elaborado_manual)
-      VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-      RETURNING *
-      `,
+      `INSERT INTO insumos
+         (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
+          origen, estado, es_elaborado, es_elaborado_manual,
+          sin_equivalencia, upload_batch_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'activo',$8,$9,TRUE,$10)
+       RETURNING *`,
       [
         businessId,
-        b.codigoMaxi ?? null,
+        skuProvisorio,          // código provisorio de Lazarillo
         b.nombre.trim(),
         b.unidadMed ?? null,
         num(b.precioRef),
         b.rubro ?? null,
-        b.envase ?? null,
-        b.vencimiento ?? null,
-        b.resumen ?? null,
-        b.cantIngredientes ?? null,
-        b.agrupacionBase ?? null,
-        num(b.costoRef),
-        b.nota ?? null,
         b.origen ?? 'manual',
-        'activo',
         b.es_elaborado ?? false,
-        // si lo crean con es_elaborado explícito → marcar como manual
-        b.es_elaborado !== undefined ? true : false,
+        b.es_elaborado !== undefined,
+        `manual-abm-${new Date().toISOString().slice(0, 10)}`, // batch del día
       ]
     );
 
-    res.status(201).json({ ok: true, data: rows[0] });
+    res.status(201).json({ ok: true, data: rows[0], sku: skuProvisorio });
   } catch (e) {
     console.error('crearManual error:', e);
     res.status(500).json({ ok: false, error: e.message });
@@ -573,6 +584,8 @@ exports.bulkUpsert = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Body debe ser un array de insumos' });
     }
 
+    const batchId = req._batchId || `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
     const client = await pool.connect();
     let inserted = 0, updated = 0, skipped = 0;
 
@@ -580,41 +593,74 @@ exports.bulkUpsert = async (req, res) => {
       await client.query('BEGIN');
 
       for (const it of items) {
-        const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
-        if (!codigo || String(codigo).trim() === '') { skipped++; continue; }
+        const nombre = (it.nombre ?? '').trim();
+        if (!nombre) { skipped++; continue; }
 
-        const nombre    = (it.nombre ?? '').trim();
+        const codigo     = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
         const unidad_med = it.unidadMed ?? it.unidad_med ?? null;
         const precio_ref = it.precioRef ?? it.precio_ref ?? null;
-        const rubro     = it.rubro ?? null;
-        const origen    = it.origen ?? 'manual';
+        const rubro      = it.rubro ?? null;
+        const origen     = it.origen ?? 'manual';
+        const esElaborado = it.esElaborado ?? it.es_elaborado ?? false;
+        const sinEquiv   = !codigo;
 
-        const r = await client.query(
-          `INSERT INTO insumos
-           (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'activo')
-           ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
-             nombre      = EXCLUDED.nombre,
-             unidad_med  = EXCLUDED.unidad_med,
-             precio_ref  = EXCLUDED.precio_ref,
-             rubro       = EXCLUDED.rubro,
-             origen      = EXCLUDED.origen,
-             estado      = EXCLUDED.estado,
-             updated_at  = NOW()
-           RETURNING (xmax = 0) AS inserted`,
-          [
-            businessId,
-            String(codigo),
-            nombre,
-            unidad_med,
-            precio_ref == null ? null : Number(precio_ref),
-            rubro,
-            origen,
-          ]
-        );
+        if (codigo) {
+          const r = await client.query(
+            `INSERT INTO insumos
+               (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
+                origen, estado, upload_batch_id, sin_equivalencia, es_elaborado)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'activo',$8,$9,$10)
+             ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
+               nombre          = EXCLUDED.nombre,
+               unidad_med      = EXCLUDED.unidad_med,
+               precio_ref      = COALESCE(EXCLUDED.precio_ref, insumos.precio_ref),
+               rubro           = EXCLUDED.rubro,
+               origen          = EXCLUDED.origen,
+               upload_batch_id = EXCLUDED.upload_batch_id,
+               sin_equivalencia = FALSE,
+               updated_at      = NOW()
+             RETURNING (xmax = 0) AS inserted`,
+            [businessId, String(codigo).trim(), nombre, unidad_med,
+             precio_ref == null ? null : Number(precio_ref),
+             rubro, origen, batchId, sinEquiv, esElaborado]
+          );
+          if (r.rows?.[0]?.inserted) inserted++;
+          else updated++;
+        } else {
+          const { rows: existing } = await client.query(
+            `SELECT id FROM insumos
+              WHERE business_id = $1
+                AND lower(trim(nombre)) = lower(trim($2))
+                AND origen IN ('manual','csv')
+              LIMIT 1`,
+            [businessId, nombre]
+          );
 
-        if (r.rows?.[0]?.inserted) inserted++;
-        else updated++;
+          if (existing.length) {
+            await client.query(
+              `UPDATE insumos SET
+                 unidad_med      = COALESCE($1, unidad_med),
+                 precio_ref      = COALESCE($2, precio_ref),
+                 rubro           = COALESCE($3, rubro),
+                 upload_batch_id = $4,
+                 updated_at      = NOW()
+               WHERE id = $5`,
+              [unidad_med, precio_ref == null ? null : Number(precio_ref), rubro, batchId, existing[0].id]
+            );
+            updated++;
+          } else {
+            await client.query(
+              `INSERT INTO insumos
+                 (business_id, nombre, unidad_med, precio_ref, rubro,
+                  origen, estado, upload_batch_id, sin_equivalencia, es_elaborado)
+               VALUES ($1,$2,$3,$4,$5,$6,'activo',$7,TRUE,$8)`,
+              [businessId, nombre, unidad_med,
+               precio_ref == null ? null : Number(precio_ref),
+               rubro, origen, batchId, esElaborado]
+            );
+            inserted++;
+          }
+        }
       }
 
       await client.query('COMMIT');
@@ -625,7 +671,11 @@ exports.bulkUpsert = async (req, res) => {
       client.release();
     }
 
-    return res.json({ ok: true, summary: { inserted, updated, skipped, total: inserted + updated + skipped } });
+    return res.json({
+      ok: true,
+      batchId,
+      summary: { inserted, updated, skipped, total: inserted + updated + skipped },
+    });
   } catch (e) {
     console.error('bulkUpsert error:', e.message);
     return res.status(500).json({ ok: false, error: e.message });
@@ -638,23 +688,139 @@ exports.bulkUpsertCSV = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Subí un CSV en el campo "file"' });
     }
 
-    const text = req.file.buffer.toString('utf8');
-    const rows = parse(text, { columns: true, skip_empty_lines: true, trim: true });
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const batchId  = req._batchId || `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const fileName = req.file.originalname || 'archivo.csv';
+    const ext      = fileName.toLowerCase().split('.').pop();
+
+    let rows;
+    if (ext === 'csv') {
+      const text = req.file.buffer.toString('utf8');
+      rows = parse(text, { columns: true, skip_empty_lines: true, trim: true });
+    } else if (ext === 'xlsx' || ext === 'xls') {
+      try {
+        const XLSX = require('xlsx');
+        const wb   = XLSX.read(req.file.buffer, { type: 'buffer' });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        rows       = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      } catch {
+        return res.status(400).json({ ok: false, error: 'No se pudo leer el Excel. Instalá el paquete xlsx.' });
+      }
+    } else {
+      return res.status(400).json({ ok: false, error: 'Formato no soportado. Usá CSV, XLS o XLSX.' });
+    }
+
+    if (!rows?.length) {
+      return res.status(400).json({ ok: false, error: 'El archivo está vacío o no tiene filas válidas' });
+    }
+
+    const normalize = (key) => String(key || '').toLowerCase().replace(/[\s_\-]/g, '');
+    const colMap    = {};
+    Object.keys(rows[0] || {}).forEach(k => { colMap[normalize(k)] = k; });
+
+    const getCol = (row, ...aliases) => {
+      for (const alias of aliases) {
+        const key = colMap[normalize(alias)];
+        if (key !== undefined && row[key] !== undefined && String(row[key]).trim() !== '') {
+          return String(row[key]).trim();
+        }
+      }
+      return null;
+    };
 
     req.body = rows.map(r => ({
-      codigoMaxi: r.codigoMaxi ?? r.codigo_maxi ?? r.codigo,
-      nombre:     r.nombre ?? '',
-      unidadMed:  r.unidadMed ?? r.unidad_med ?? null,
-      precioRef:  r.precioRef ?? r.precio_ref ?? null,
-      rubro:      r.rubro ?? null,
-      origen:     r.origen ?? 'csv',
-    }));
+      codigoMaxi: getCol(r, 'codigo', 'CODIGO', 'codigoMaxi', 'codigo_maxi', 'cod', 'SKU', 'sku', 'id'),
+      nombre:     getCol(r, 'nombre', 'NOMBRE', 'descripcion', 'DESCRIPCION', 'name', 'producto') ?? '',
+      unidadMed:  getCol(r, 'unidad', 'UNIDAD', 'medida', 'MEDIDA', 'unidadMed', 'unidad_med', 'um', 'UM'),
+      precioRef:  getCol(r, 'precio', 'PRECIO', 'precioRef', 'precio_ref', 'costo', 'COSTO'),
+      rubro:      getCol(r, 'rubro', 'RUBRO', 'categoria', 'CATEGORIA', 'tipo', 'group'),
+      esElaborado: ['si','sí','yes','1','true','elaborado'].includes(
+        String(getCol(r, 'elaborado', 'ELABORADO', 'esElaborado') || '').toLowerCase()
+      ),
+      origen: 'csv',
+    })).filter(r => r.nombre);
 
+    if (!req.body.length) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No se encontraron filas válidas. El archivo debe tener columna NOMBRE o DESCRIPCION.',
+        columnas_detectadas: Object.keys(rows[0] || {}),
+      });
+    }
+
+    req._batchId  = batchId;
+    req._fileName = fileName;
     return exports.bulkUpsert(req, res);
   } catch (e) {
     console.error('bulkUpsertCSV error:', e.message);
     return res.status(500).json({ ok: false, error: e.message });
   }
+};
+
+/* ── Listar lotes de subida manual de insumos ── */
+exports.listBatchesInsumos = async (req, res, next) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'businessId requerido' });
+
+    const { rows } = await pool.query(
+      `SELECT
+         upload_batch_id                                   AS batch_id,
+         MIN(created_at)                                   AS created_at,
+         COUNT(*)::int                                    AS total_items,
+         COUNT(*) FILTER (WHERE sin_equivalencia)::int    AS sin_equivalencia,
+         COUNT(*) FILTER (WHERE codigo_maxi IS NOT NULL)::int AS con_codigo,
+         string_agg(DISTINCT origen, ', ')                AS origenes
+       FROM insumos
+       WHERE business_id = $1 AND upload_batch_id IS NOT NULL
+       GROUP BY upload_batch_id
+       ORDER BY MIN(created_at) DESC`,
+      [bizId]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) { next(e); }
+};
+
+/* ── Eliminar lote de insumos (solo los sin equivalencia) ── */
+exports.deleteBatchInsumos = async (req, res, next) => {
+  try {
+    const bizId   = getBusinessId(req);
+    const batchId = req.params.batchId;
+    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+
+    const { rowCount } = await pool.query(
+      `DELETE FROM insumos
+        WHERE business_id = $1
+          AND upload_batch_id = $2
+          AND origen IN ('manual', 'csv')
+          AND sin_equivalencia = TRUE`,
+      [bizId, batchId]
+    );
+    return res.json({ ok: true, deleted: rowCount, batchId });
+  } catch (e) { next(e); }
+};
+
+/* ── Vista previa de un lote ── */
+exports.previewBatchInsumos = async (req, res, next) => {
+  try {
+    const bizId   = getBusinessId(req);
+    const batchId = req.params.batchId;
+    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+
+    const { rows } = await pool.query(
+      `SELECT id, nombre, codigo_maxi, unidad_med, precio_ref, rubro,
+              origen, sin_equivalencia, es_elaborado, created_at
+         FROM insumos
+        WHERE business_id = $1 AND upload_batch_id = $2
+        ORDER BY nombre ASC LIMIT 200`,
+      [bizId, batchId]
+    );
+    return res.json({ ok: true, data: rows, total: rows.length });
+  } catch (e) { next(e); }
 };
 
 // ===================== INSUMOS: MANTENIMIENTO =====================
@@ -816,6 +982,27 @@ exports.syncFromMaxi = async (req, res) => {
     console.error('syncFromMaxi error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
+};
+
+/* ── Rubros de insumos del negocio (para ABM) ── */
+exports.getRubrosInsumos = async (req, res, next) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'businessId requerido' });
+
+    const { rows } = await pool.query(
+      `SELECT rubro, COUNT(*)::int AS cantidad
+         FROM insumos
+        WHERE business_id = $1
+          AND rubro IS NOT NULL AND rubro != ''
+          AND estado = 'activo'
+        GROUP BY rubro
+        ORDER BY rubro ASC`,
+      [bizId]
+    );
+
+    return res.json({ ok: true, rubros: rows.map(r => ({ nombre: r.rubro, cantidad: r.cantidad })) });
+  } catch (e) { next(e); }
 };
 
 exports.listarRubrosMaxi = async (req, res) => {
