@@ -95,6 +95,12 @@ router.post('/:businessId/sales/import-csv', authRequired, requireBiz, upload.si
     }
 
     const ext    = path.extname(req.file.originalname).toLowerCase();
+
+    // Mapeo custom enviado desde el front (campo_interno → columna_archivo)
+    const mapeoCustom = req.body?.mapeo
+      ? (() => { try { return JSON.parse(req.body.mapeo); } catch { return {}; } })()
+      : {};
+
     const result = await importFileToDatabase({
       businessId,
       userId,
@@ -102,6 +108,7 @@ router.post('/:businessId/sales/import-csv', authRequired, requireBiz, upload.si
       originalName: req.file.originalname,
       fileType:     ext.replace('.', ''),
       branchId,
+      mapeoCustom,
     });
 
     // Workaround: asegurarse de que branch_id quede guardado en el header del import

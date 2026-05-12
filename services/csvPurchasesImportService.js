@@ -23,7 +23,7 @@ function getCI(obj, keys) {
   return undefined;
 }
 
-async function parseFile(filePath) {
+async function parseFile(filePath, mapeoCustom = {}) {
   const workbook = XLSX.readFile(filePath, { type: 'file', cellDates: true, raw: true });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) throw new Error('El archivo no contiene hojas');
@@ -42,19 +42,33 @@ async function parseFile(filePath) {
 
   if (!cleanedRows.length) throw new Error('El archivo no contiene filas de datos');
 
-  const headers = Object.keys(cleanedRows[0] || {});
+  // Aplicar mapeo custom: renombrar columnas del archivo a nombres internos
+  let rowsFinales = cleanedRows;
+  if (Object.keys(mapeoCustom).length > 0) {
+    rowsFinales = cleanedRows.map(r => {
+      const nueva = { ...r };
+      Object.entries(mapeoCustom).forEach(([campoInterno, colArchivo]) => {
+        if (colArchivo && r[colArchivo] !== undefined) nueva[campoInterno] = r[colArchivo];
+      });
+      return nueva;
+    });
+  }
 
+  const headers = Object.keys(cleanedRows[0] || {});
+  const headersEfectivos = Object.keys(rowsFinales[0] || {});
+  const headersLower = headersEfectivos.map(h => String(h).toLowerCase().trim());
+
+  // Validar columnas requeridas — con mapeo puede que ya estén
   const required = ['codigo', 'cantidad', 'importe', 'fecha'];
-  const headersLower = headers.map(h => String(h).toLowerCase().trim());
   const missing = required.filter(r => !headersLower.includes(r));
   if (missing.length) {
     throw new Error(
-      `Columnas faltantes: ${missing.join(', ')}. ` +
-      `Asegurate de exportar el informe de compras correcto desde MaxiRest (necesita: CODIGO, CANTIDAD, IMPORTE, FECHA).`
+      `Columnas requeridas faltantes: ${missing.join(', ')}. ` +
+      `Columnas detectadas: ${headers.join(', ')}.`
     );
   }
 
-  return { headers, rows: cleanedRows };
+  return { headers, rows: rowsFinales };
 }
 
 function normalizeDate(v) {
@@ -145,7 +159,7 @@ function normalizeRow(row, idx) {
  * - Nunca se importa el día actual
  */
 
-async function importPurchasesToDatabase({ businessId, userId, filePath, originalName, fileType, branchId = null }) {
+async function importPurchasesToDatabase({ businessId, userId, filePath, originalName, fileType, branchId = null, mapeoCustom = {} }) {
   const client = await pool.connect();
   let importId = null;
   let txOpen = false;
@@ -192,7 +206,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     importId = rec.id;
 
     // Parsear
-    const { rows } = await parseFile(filePath);
+    const { rows } = await parseFile(filePath, mapeoCustom);
 
     // Normalizar
     const errors = [];

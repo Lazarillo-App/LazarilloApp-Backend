@@ -172,39 +172,43 @@ async function importArticulosFromFile({ businessId, filePath, originalName, map
     await client.query('BEGIN');
     txOpen = true;
 
+    const batchId = `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     let inserted = 0, updated = 0;
     const CHUNK = 200;
 
     for (let i = 0; i < items.length; i += CHUNK) {
       const chunk = items.slice(i, i + CHUNK);
 
-      // Build bulk upsert
       const values = [];
       const params = [];
       let p = 1;
 
       for (const it of chunk) {
-        values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},'{}'::jsonb,NOW())`);
+        values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},'{}'::jsonb,NOW(),$${p+6},$${p+7})`);
         params.push(
           targetBizId,
           it.articulo_id,
           it.nombre,
           it.categoria,
-          'Sin subrubro',   // subrubro: lo actualiza la sync cuando corra
+          'Sin subrubro',
           it.precio,
+          batchId,
+          'csv',
         );
-        p += 6;
+        p += 8;
       }
 
       const res = await client.query(
         `INSERT INTO maxi_articles
-           (business_id, articulo_id, nombre, categoria, subrubro, precio, raw, updated_at)
+           (business_id, articulo_id, nombre, categoria, subrubro, precio, raw, updated_at, upload_batch_id, origen)
          VALUES ${values.join(',')}
          ON CONFLICT (business_id, articulo_id) DO UPDATE SET
-           nombre     = EXCLUDED.nombre,
-           categoria  = EXCLUDED.categoria,
-           precio     = EXCLUDED.precio,
-           updated_at = NOW()
+           nombre          = EXCLUDED.nombre,
+           categoria       = EXCLUDED.categoria,
+           precio          = EXCLUDED.precio,
+           upload_batch_id = EXCLUDED.upload_batch_id,
+           origen          = EXCLUDED.origen,
+           updated_at      = NOW()
          RETURNING (xmax = 0) AS is_insert`,
         params
       );
@@ -228,6 +232,7 @@ async function importArticulosFromFile({ businessId, filePath, originalName, map
         failed:     errors.length,
         has_errors: errors.length > 0,
         target_business_id: targetBizId,
+        batchId,
       },
       errors: errors.slice(0, 20),
     };

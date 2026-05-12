@@ -43,22 +43,21 @@ async function parseFile(filePath, fileType) {
       console.log('[CSV Parse] Primera fila limpia:', cleanedRows[0]);
     }
 
-    const allowedColumns = [
-      'codigo', 'fecha', 'unidades', 'importe', 'nombre',
-      'costo', 'p_total', 'neto', 'tipo_iva',
-      'article_id', 'date', 'qty', 'amount', 'article_name',
-    ];
-    const allowedLower  = allowedColumns.map(c => c.toLowerCase());
-    const unknownColumns = headers.filter(h => !allowedLower.includes(String(h).toLowerCase().trim()));
-    if (unknownColumns.length > 0) {
-      throw new Error(
-        `Archivo contiene columnas no permitidas: ${unknownColumns.join(', ')}. ` +
-        `Solo se permiten: ${allowedColumns.slice(0, 5).join(', ')}, etc. ` +
-        `Asegurate de exportar el archivo correcto desde MaxiRest.`
-      );
+    // Aplicar mapeo custom si viene del front
+    const mapeoCustom = parseFile._mapeoCustom || {};
+    let rowsFinales = cleanedRows;
+    if (Object.keys(mapeoCustom).length > 0) {
+      rowsFinales = cleanedRows.map(r => {
+        const nueva = { ...r };
+        Object.entries(mapeoCustom).forEach(([campoInterno, colArchivo]) => {
+          if (colArchivo && r[colArchivo] !== undefined) nueva[campoInterno] = r[colArchivo];
+        });
+        return nueva;
+      });
     }
 
-    return { headers, rows: cleanedRows };
+    // Ya no rechazamos columnas desconocidas — simplemente las ignoramos
+    return { headers, rows: rowsFinales };
   } catch (error) {
     throw new Error(`Error parseando archivo: ${error.message}`);
   }
@@ -216,7 +215,7 @@ async function applyReplaceRange(client, { businessId, from, to, importId, branc
 /* ══════════════════════════════════════════════════════════════
    CAMBIO 3: importFileToDatabase — pasa branchId a ambas funciones
 ══════════════════════════════════════════════════════════════ */
-async function importFileToDatabase({ businessId, userId, filePath, originalName, fileType, branchId = null }) {
+async function importFileToDatabase({ businessId, userId, filePath, originalName, fileType, branchId = null, mapeoCustom = {} }) {
   const client = await pool.connect();
   let importId = null;
   let txOpen   = false;
@@ -242,15 +241,17 @@ async function importFileToDatabase({ businessId, userId, filePath, originalName
     if (VERBOSE_IMPORT_LOGS) console.log(`[CSV] Import #${importId} creado (branch_id=${branchId})`);
 
     // 2) Parsear
+    parseFile._mapeoCustom = mapeoCustom; // pasar mapeo al helper
     const { headers, rows } = await parseFile(filePath, fileType);
     if (rows.length === 0) throw new Error('El archivo no contiene filas de datos.');
     if (rows.length > MAX_IMPORT_ROWS)
       throw new Error(`El archivo excede el límite de ${MAX_IMPORT_ROWS} filas. Actual: ${rows.length}.`);
 
-    // 3) Detectar formato
-    const format = detectFormat(headers);
+    // 3) Detectar formato — con mapeo puede haber cambiado los nombres
+    const headersEfectivos = Object.keys(rows[0] || {});
+    const format = detectFormat(headersEfectivos) || detectFormat(headers);
     if (!format)
-      throw new Error(`Formato no reconocido. Columnas: ${headers.join(', ')}. Se esperan: fecha, codigo, unidades, importe`);
+      throw new Error(`Formato no reconocido. Columnas detectadas: ${headers.join(', ')}. Se esperan: fecha, codigo, unidades, importe`);
 
     // 4) Normalizar + agregar por day+article_id
     let failed = 0;

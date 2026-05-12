@@ -360,6 +360,11 @@ router.get('/:id/rubros', ensureFn('artABM.getRubros', artABM.getRubros));
 // Artículos: sin-equivalencia debe ir ANTES de /:id/articles/:articleId
 router.get('/:id/articles/sin-equivalencia', ensureFn('artABM.listSinEquivalencia', artABM.listSinEquivalencia));
 
+// Lotes de artículos importados manualmente
+router.get('/:id/articles/batches',                    ensureFn('artABM.listBatchesArticulos',   artABM.listBatchesArticulos));
+router.get('/:id/articles/batches/:batchId/preview',   ensureFn('artABM.previewBatchArticulos',  artABM.previewBatchArticulos));
+router.delete('/:id/articles/batches/:batchId',        ensureFn('artABM.deleteBatchArticulos',   artABM.deleteBatchArticulos));
+
 // Alta manual de artículo
 router.post('/:id/articles/manual', ensureFn('artABM.crearArticulo', artABM.crearArticulo));
 

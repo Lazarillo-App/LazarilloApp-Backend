@@ -439,3 +439,69 @@ exports.alertasVentas = async (req, res, next) => {
     next(e);
   }
 };
+// ─────────────────────────────────────────────────────────────────
+// GET /businesses/:id/articles/batches
+// Lista lotes de subida manual de artículos
+// ─────────────────────────────────────────────────────────────────
+exports.listBatchesArticulos = async (req, res, next) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId requerido' });
+
+    const { rows } = await pool.query(
+      `SELECT
+         upload_batch_id                              AS batch_id,
+         MIN(updated_at)                              AS created_at,
+         COUNT(*)::int                               AS total_items,
+         string_agg(DISTINCT COALESCE(origen,'maxi'), ', ') AS origenes
+       FROM maxi_articles
+       WHERE business_id = $1 AND upload_batch_id IS NOT NULL
+       GROUP BY upload_batch_id
+       ORDER BY MIN(updated_at) DESC`,
+      [bizId]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) { next(e); }
+};
+
+// ─────────────────────────────────────────────────────────────────
+// GET /businesses/:id/articles/batches/:batchId/preview
+// Vista previa de un lote de artículos
+// ─────────────────────────────────────────────────────────────────
+exports.previewBatchArticulos = async (req, res, next) => {
+  try {
+    const bizId   = getBusinessId(req);
+    const batchId = req.params.batchId;
+    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+
+    const { rows } = await pool.query(
+      `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, origen, updated_at
+         FROM maxi_articles
+        WHERE business_id = $1 AND upload_batch_id = $2
+        ORDER BY nombre ASC LIMIT 200`,
+      [bizId, batchId]
+    );
+    return res.json({ ok: true, data: rows, total: rows.length });
+  } catch (e) { next(e); }
+};
+
+// ─────────────────────────────────────────────────────────────────
+// DELETE /businesses/:id/articles/batches/:batchId
+// Eliminar lote de artículos subidos manualmente
+// ─────────────────────────────────────────────────────────────────
+exports.deleteBatchArticulos = async (req, res, next) => {
+  try {
+    const bizId   = getBusinessId(req);
+    const batchId = req.params.batchId;
+    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+
+    const { rowCount } = await pool.query(
+      `DELETE FROM maxi_articles
+        WHERE business_id = $1
+          AND upload_batch_id = $2
+          AND origen IN ('csv', 'manual')`,
+      [bizId, batchId]
+    );
+    return res.json({ ok: true, deleted: rowCount, batchId });
+  } catch (e) { next(e); }
+};

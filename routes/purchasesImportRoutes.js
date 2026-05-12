@@ -50,6 +50,9 @@ router.post(
       const fileType = ext.replace('.', '');
       const rawBranch = Number(req.body?.branch_id);
       const branchId = Number.isFinite(rawBranch) && rawBranch > 0 ? rawBranch : null;
+      const mapeoCustom = req.body?.mapeo
+        ? (() => { try { return JSON.parse(req.body.mapeo); } catch { return {}; } })()
+        : {};
       const result = await importPurchasesToDatabase({
         businessId,
         userId,
@@ -57,6 +60,7 @@ router.post(
         originalName: req.file.originalname,
         fileType,
         branchId,
+        mapeoCustom,
       });
 
       return res.json(result);
