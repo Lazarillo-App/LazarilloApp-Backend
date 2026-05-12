@@ -222,11 +222,11 @@ exports.updateMainBranch = async (req, res, next) => {
       );
       branch = rows[0];
     } else {
-      // Crear nueva sucursal principal
+      // Crear nueva sucursal principal — color default neutro
       const { rows } = await pool.query(
         `INSERT INTO app_branches
            (business_id, name, color, logo_url, address, contacts, props)
-         VALUES ($1, $2, NULL, $3, $4, $5, $6)
+         VALUES ($1, $2, '#64748b', $3, $4, $5, $6)
          RETURNING *`,
         [bizId, name, logo_url,
          JSON.stringify(address),
