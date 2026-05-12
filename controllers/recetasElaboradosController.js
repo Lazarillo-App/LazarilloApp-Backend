@@ -133,9 +133,22 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
-    const porcionesNum = Math.max(1, Number(porciones) || 1);
+    const porcionesNum  = Math.max(1, Number(porciones) || 1);
     const costoXPorcion = costoTotal / porcionesNum;
-    const porcentajeNum = Number(porcentajeVenta) || 0;
+
+    // Si no viene porcentajeVenta, usar el global de insumos del negocio
+    let porcentajeNum = Number(porcentajeVenta) || 0;
+    if (!porcentajeNum) {
+      try {
+        const { rows: bizRows } = await client.query(
+          `SELECT (props->>'insumos_costo_ideal')::numeric AS pct
+             FROM app_businesses WHERE id = $1 LIMIT 1`,
+          [bizId]
+        );
+        porcentajeNum = Number(bizRows[0]?.pct || 30);
+      } catch { porcentajeNum = 30; }
+    }
+
     const precioSugerido = porcentajeNum > 0 ? costoXPorcion / (porcentajeNum / 100) : 0;
 
     await client.query('BEGIN');
@@ -303,29 +316,43 @@ exports.getRecetasElaboradosMapa = async (req, res, next) => {
     const bizId = Number(req.params.businessId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_params' });
 
+    // Obtener el % costo ideal global de insumos del negocio como fallback
+    const { rows: bizRows } = await pool.query(
+      `SELECT (props->>'insumos_costo_ideal')::numeric AS insumos_costo_ideal
+         FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [bizId]
+    );
+    const globalPct = Number(bizRows[0]?.insumos_costo_ideal || 30);
+
     const { rows } = await pool.query(
       `SELECT
          r.insumo_id,
          r.costo_total,
          r.porciones,
-         r.porcentaje_venta,
-         CASE WHEN r.porciones > 0
-           THEN ROUND((r.costo_total / r.porciones) / NULLIF(r.porcentaje_venta / 100, 0), 2)
+         -- Usar porcentaje_venta guardado, o el global del negocio como fallback
+         COALESCE(NULLIF(r.porcentaje_venta, 0), $2) AS porcentaje_venta,
+         CASE WHEN r.porciones > 0 AND COALESCE(NULLIF(r.porcentaje_venta, 0), $2) > 0
+           THEN ROUND(
+             (r.costo_total / r.porciones) /
+             (COALESCE(NULLIF(r.porcentaje_venta, 0), $2) / 100.0),
+             2
+           )
            ELSE 0
          END AS precio_sugerido
        FROM recetas r
       WHERE r.business_id = $1
         AND r.active = TRUE
         AND r.insumo_id IS NOT NULL`,
-      [bizId]
+      [bizId, globalPct]
     );
 
     const mapa = {};
     rows.forEach(r => {
       mapa[String(r.insumo_id)] = {
-        costoTotal: Number(r.costo_total),
-        porciones: Number(r.porciones),
+        costoTotal:     Number(r.costo_total),
+        porciones:      Number(r.porciones),
         precioSugerido: Number(r.precio_sugerido),
+        porcentajeVenta: Number(r.porcentaje_venta),
       };
     });
 
