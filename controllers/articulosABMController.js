@@ -417,7 +417,7 @@ exports.alertasVentas = async (req, res, next) => {
     const diasAlerta = Number(biz?.props?.ventas_alerta_dias || 30);
 
     const { rows } = await pool.query(
-      `SELECT MAX(date) AS ultima_venta
+      `SELECT MAX(day) AS ultima_venta
          FROM sales_daily_items
         WHERE business_id = $1`,
       [bizId]
