@@ -197,7 +197,9 @@ exports.updateMainBranch = async (req, res, next) => {
     // Buscar si ya existe una branch is_main para este negocio
     const { rows: existing } = await pool.query(
       `SELECT id FROM app_branches
-        WHERE business_id = $1 AND (props->>'is_main')::boolean = true
+        WHERE business_id = $1 
+          AND props IS NOT NULL 
+          AND (props->>'is_main')::boolean = true
         LIMIT 1`,
       [bizId]
     );
