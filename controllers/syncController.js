@@ -422,10 +422,17 @@ exports.listArticlesFromDB = async (req, res) => {
   }
 
   const { rows } = await pool.query(
-    `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
-       FROM public.maxi_articles
-      WHERE business_id = $1
-      ORDER BY categoria, subrubro, nombre`,
+    `SELECT
+       ma.articulo_id AS id, ma.nombre, ma.categoria, ma.subrubro, ma.precio, ma.costo, ma.raw,
+       -- Precios de las 4 listas de Maxi (guardados en app_articles.props al sincronizar)
+       (aa.props->>'precio1')::numeric AS precio1,
+       (aa.props->>'precio2')::numeric AS precio2,
+       (aa.props->>'precio3')::numeric AS precio3,
+       (aa.props->>'precio4')::numeric AS precio4
+       FROM public.maxi_articles ma
+       LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = $1
+      WHERE ma.business_id = $1
+      ORDER BY ma.categoria, ma.subrubro, ma.nombre`,
     [principalId]
   );
 
