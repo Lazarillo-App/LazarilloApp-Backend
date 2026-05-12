@@ -49,10 +49,15 @@ router.post(
         message: 'Adjuntá un archivo CSV, XLS o XLSX exportado desde MaxiRest',
       });
 
+      const mapeoCustom = req.body?.mapeo
+        ? (() => { try { return JSON.parse(req.body.mapeo); } catch { return {}; } })()
+        : {};
+
       const result = await importArticulosFromFile({
         businessId,
         filePath:     req.file.path,
         originalName: req.file.originalname,
+        mapeoCustom,
       });
 
       return res.json(result);

@@ -732,6 +732,28 @@ exports.bulkUpsertCSV = async (req, res) => {
       return null;
     };
 
+    // Mapeo personalizado enviado desde el front (columna_archivo → campo_interno)
+    let mapeoCustom = {};
+    if (req.body?.mapeo) {
+      try { mapeoCustom = JSON.parse(req.body.mapeo); } catch { /* ignorar */ }
+    }
+
+    // Si hay mapeo custom, aplicarlo: invertirlo para que sea campo_interno → columna_archivo
+    // Luego renombrar las columnas en cada fila
+    if (Object.keys(mapeoCustom).length > 0) {
+      rows = rows.map(r => {
+        const nueva = {};
+        Object.entries(mapeoCustom).forEach(([campoInterno, colArchivo]) => {
+          if (colArchivo && r[colArchivo] !== undefined) {
+            // Mapear al alias que el getCol reconoce
+            nueva[campoInterno] = r[colArchivo];
+          }
+        });
+        // Conservar también las columnas originales (getCol las puede usar)
+        return { ...r, ...nueva };
+      });
+    }
+
     req.body = rows.map(r => ({
       codigoMaxi: getCol(r, 'codigo', 'CODIGO', 'codigoMaxi', 'codigo_maxi', 'cod', 'SKU', 'sku', 'id'),
       nombre:     getCol(r, 'nombre', 'NOMBRE', 'descripcion', 'DESCRIPCION', 'name', 'producto') ?? '',

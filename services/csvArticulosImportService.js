@@ -114,7 +114,7 @@ function normalizeRow(row, idx) {
 
 // ── función principal ─────────────────────────────────────────────────────────
 
-async function importArticulosFromFile({ businessId, filePath, originalName }) {
+async function importArticulosFromFile({ businessId, filePath, originalName, mapeoCustom = {} }) {
   const client = await pool.connect();
   let txOpen = false;
 
@@ -136,13 +136,26 @@ async function importArticulosFromFile({ businessId, filePath, originalName }) {
       if (rootRows[0]?.id) targetBizId = Number(rootRows[0].id);
     }
 
-    const rawRows = await parseFile(filePath);
+    const rawRows = await parseFile(filePath, mapeoCustom);
+
+    // Si hay mapeo custom, aplicarlo: renombrar columnas del archivo al nombre interno
+    const rowsNormalizadas = Object.keys(mapeoCustom).length > 0
+      ? rawRows.map(r => {
+          const nueva = { ...r };
+          Object.entries(mapeoCustom).forEach(([campoInterno, colArchivo]) => {
+            if (colArchivo && r[colArchivo] !== undefined) {
+              nueva[campoInterno] = r[colArchivo];
+            }
+          });
+          return nueva;
+        })
+      : rawRows;
 
     // Normalizar
     const errors = [];
     const items  = [];
-    for (let i = 0; i < rawRows.length; i++) {
-      const norm = normalizeRow(rawRows[i], i);
+    for (let i = 0; i < rowsNormalizadas.length; i++) {
+      const norm = normalizeRow(rowsNormalizadas[i], i);
       if (!norm.ok) errors.push({ row: i + 1, error: norm.error });
       else items.push(norm.data);
     }
@@ -151,7 +164,7 @@ async function importArticulosFromFile({ businessId, filePath, originalName }) {
       try { fs.unlinkSync(filePath); } catch { }
       return {
         ok: false, error: 'no_valid_rows',
-        summary: { total_rows: rawRows.length, inserted: 0, updated: 0, failed: errors.length },
+        summary: { total_rows: rowsNormalizadas.length, inserted: 0, updated: 0, failed: errors.length },
         errors: errors.slice(0, 20),
       };
     }
@@ -209,7 +222,7 @@ async function importArticulosFromFile({ businessId, filePath, originalName }) {
     return {
       ok: true,
       summary: {
-        total_rows: rawRows.length,
+        total_rows: rowsNormalizadas.length,
         inserted,
         updated,
         failed:     errors.length,
