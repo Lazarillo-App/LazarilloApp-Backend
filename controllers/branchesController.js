@@ -176,6 +176,72 @@ exports.updateBranch = async (req, res, next) => {
 };
 
 /**
+ * PATCH /api/businesses/:bizId/branches/main
+ * Crea o actualiza la sucursal principal (is_main=true en props).
+ * No toca el negocio padre — son datos completamente independientes.
+ * Body: { name, logo_url?, address?, contacts?, props? }
+ */
+exports.updateMainBranch = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.bizId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'bizId requerido' });
+
+    const name     = trim(req.body?.name);
+    if (!name) return res.status(400).json({ ok: false, error: 'El nombre es requerido' });
+
+    const logo_url = req.body?.logo_url !== undefined ? trim(req.body.logo_url) : null;
+    const address  = req.body?.address  ?? {};
+    const contacts = req.body?.contacts ?? {};
+    const props    = { ...(req.body?.props ?? {}), is_main: true };
+
+    // Buscar si ya existe una branch is_main para este negocio
+    const { rows: existing } = await pool.query(
+      `SELECT id FROM app_branches
+        WHERE business_id = $1 AND (props->>'is_main')::boolean = true
+        LIMIT 1`,
+      [bizId]
+    );
+
+    let branch;
+    if (existing.length) {
+      // Actualizar existente — NO tocar color (la sucursal principal no tiene color propio)
+      const { rows } = await pool.query(
+        `UPDATE app_branches
+            SET name=$1, logo_url=$2, address=$3, contacts=$4,
+                props = props || $5::jsonb,
+                updated_at = NOW()
+          WHERE id=$6 AND business_id=$7
+          RETURNING *`,
+        [name, logo_url,
+         JSON.stringify(address),
+         JSON.stringify(contacts),
+         JSON.stringify(props),
+         existing[0].id, bizId]
+      );
+      branch = rows[0];
+    } else {
+      // Crear nueva sucursal principal
+      const { rows } = await pool.query(
+        `INSERT INTO app_branches
+           (business_id, name, color, logo_url, address, contacts, props)
+         VALUES ($1, $2, NULL, $3, $4, $5, $6)
+         RETURNING *`,
+        [bizId, name, logo_url,
+         JSON.stringify(address),
+         JSON.stringify(contacts),
+         JSON.stringify(props)]
+      );
+      branch = rows[0];
+    }
+
+    res.json({ ok: true, branch });
+  } catch (e) {
+    console.error('[branches] updateMainBranch:', e);
+    next(e);
+  }
+};
+
+/**
  * DELETE /api/businesses/:bizId/branches/:branchId
  * Protegido: no se puede eliminar si tiene ventas o compras asociadas.
  */
