@@ -326,7 +326,9 @@ router.get('/:id/config', async (req, res, next) => {
         insumos_costo_ideal:    Number(props.insumos_costo_ideal    ?? 30),
         compras_alerta_semanas: Number(props.compras_alerta_semanas ?? 4),
         ventas_alerta_dias:     Number(props.ventas_alerta_dias     ?? 30),
-        precio_costeo_insumos:  props.precio_costeo_insumos         || 'ultima_compra',
+        precio_costeo_insumos:  props.precio_costeo_insumos          || 'ultima_compra',
+        redondeo_precios:       props.redondeo_precios               ?? null,
+        divisa:                 props.divisa                         || 'ARS',
       },
     });
   } catch (e) { next(e); }
