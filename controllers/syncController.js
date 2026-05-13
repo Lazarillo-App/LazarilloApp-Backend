@@ -424,17 +424,15 @@ exports.listArticlesFromDB = async (req, res) => {
   const { rows } = await pool.query(
     `SELECT
        ma.articulo_id AS id, ma.nombre, ma.categoria, ma.subrubro, ma.precio, ma.costo, ma.raw,
+       -- Precios de las 4 listas de Maxi (guardados en app_articles.props al sincronizar)
        (aa.props->>'precio1')::numeric AS precio1,
        (aa.props->>'precio2')::numeric AS precio2,
        (aa.props->>'precio3')::numeric AS precio3,
-       (aa.props->>'precio4')::numeric AS precio4,
-       (aa.props->>'sku')              AS sku,
-       (aa.props->>'origen')           AS origen,
-       'maxi' AS origen_tabla
+       (aa.props->>'precio4')::numeric AS precio4
        FROM public.maxi_articles ma
        LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = $1
       WHERE ma.business_id = $1
-      ORDER BY categoria, subrubro, nombre`,
+      ORDER BY ma.categoria, ma.subrubro, ma.nombre`,
     [principalId]
   );
 
@@ -516,10 +514,10 @@ exports.listArticlesTreeFromDB = async (req, res) => {
     const { principalId, assignedIds, orgId } = await getOrgArticleContext(biz.id, pool);
     const isSubBusiness = orgId && Number(biz.id) !== Number(principalId);
 
-    let allowedIds = null; // null = sin filtro (sin org, o principal sin subnegocios)
-
+    // Para subnegocios: calcular qué artículos le pertenecen
+    // = los que están en sus propias agrupaciones (no globales)
+    let allowedIds = null; // null = sin filtro (principal o sin org)
     if (isSubBusiness) {
-      // Subnegocio: solo artículos de sus propias agrupaciones + artículos libres
       const { rows: subAgRows } = await pool.query(
         `SELECT ag.articulos, ag.app_articles_ids
            FROM agrupaciones ag
@@ -540,39 +538,26 @@ exports.listArticlesTreeFromDB = async (req, res) => {
           : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
         for (const a of arts) {
           const id = Number(a?.id ?? a?.articulo_id ?? a);
-          if (Number.isFinite(id) && id !== 0) allowedIds.add(id);
+          if (id > 0) allowedIds.add(id);
         }
-        for (const id of appIds) {
-          const n = Number(id);
-          if (Number.isFinite(n) && n !== 0) allowedIds.add(n);
-        }
+        for (const id of appIds) { const n = Number(id); if (n > 0) allowedIds.add(n); }
       }
 
-      // Artículos libres (no asignados a ningún subnegocio) también son visibles
+      // También incluir artículos sin asignar a ningún subnegocio (son del principal = visibles desde todos)
+      // Un artículo es "sin asignar" si no está en ninguna agrupación real de ningún subnegocio
+      // assignedIds ya tiene TODOS los asignados en la org — los que NO están ahí son libres
+      // Los libres son visibles desde cualquier subnegocio (aparecen en Sin Agrupación global)
       if (assignedIds) {
-        const { rows: allMaxiRows } = await pool.query(
+        const { rows: allRows } = await pool.query(
           `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
           [principalId]
         );
-        for (const r of allMaxiRows) {
+        for (const r of allRows) {
           const id = Number(r.articulo_id);
           if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
         }
       }
-
-    } else if (assignedIds) {
-      // Principal con org: solo artículos NO asignados a ningún subnegocio
-      allowedIds = new Set();
-      const { rows: allMaxiRows } = await pool.query(
-        `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
-        [principalId]
-      );
-      for (const r of allMaxiRows) {
-        const id = Number(r.articulo_id);
-        if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
-      }
     }
-    // else: sin org → allowedIds = null → muestra todo
 
     const { rows } = await pool.query(
       `SELECT articulo_id, nombre, categoria, subrubro, precio
@@ -584,6 +569,7 @@ exports.listArticlesTreeFromDB = async (req, res) => {
 
     const bySub = new Map();
     for (const r of rows) {
+      // Para subnegocios: solo incluir artículos permitidos
       if (allowedIds !== null && !allowedIds.has(Number(r.articulo_id))) continue;
 
       const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
