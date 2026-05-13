@@ -424,15 +424,34 @@ exports.listArticlesFromDB = async (req, res) => {
   const { rows } = await pool.query(
     `SELECT
        ma.articulo_id AS id, ma.nombre, ma.categoria, ma.subrubro, ma.precio, ma.costo, ma.raw,
-       -- Precios de las 4 listas de Maxi (guardados en app_articles.props al sincronizar)
        (aa.props->>'precio1')::numeric AS precio1,
        (aa.props->>'precio2')::numeric AS precio2,
        (aa.props->>'precio3')::numeric AS precio3,
-       (aa.props->>'precio4')::numeric AS precio4
+       (aa.props->>'precio4')::numeric AS precio4,
+       'maxi' AS origen_tabla
        FROM public.maxi_articles ma
        LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = $1
       WHERE ma.business_id = $1
-      ORDER BY ma.categoria, ma.subrubro, ma.nombre`,
+
+     UNION ALL
+
+     -- Artículos creados manualmente (ID negativo, no tienen equivalencia en maxi_articles)
+     SELECT
+       aa.id          AS id,
+       aa.name        AS nombre,
+       aa.rubro       AS categoria,
+       aa.subrubro    AS subrubro,
+       aa.price       AS precio,
+       NULL           AS costo,
+       '{}'::jsonb    AS raw,
+       NULL AS precio1, NULL AS precio2, NULL AS precio3, NULL AS precio4,
+       'manual' AS origen_tabla
+       FROM app_articles aa
+      WHERE aa.business_id = $1
+        AND aa.id < 0
+        AND (aa.props->>'origen') = 'manual'
+
+      ORDER BY categoria, subrubro, nombre`,
     [principalId]
   );
 
@@ -567,8 +586,20 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       [principalId]
     );
 
+    // También traer artículos manuales (ID negativo, origen='manual')
+    const { rows: manualRows } = await pool.query(
+      `SELECT id AS articulo_id, name AS nombre, rubro AS categoria, subrubro, price AS precio
+         FROM app_articles
+        WHERE business_id = $1
+          AND id < 0
+          AND (props->>'origen') = 'manual'
+        ORDER BY subrubro, rubro, name`,
+      [principalId]
+    );
+
+    const allRows = [...rows, ...manualRows];
     const bySub = new Map();
-    for (const r of rows) {
+    for (const r of allRows) {
       // Para subnegocios: solo incluir artículos permitidos
       if (allowedIds !== null && !allowedIds.has(Number(r.articulo_id))) continue;
 
