@@ -147,14 +147,14 @@ exports.crearArticulo = async (req, res, next) => {
     await client.query(
       `INSERT INTO maxi_articles
          (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NULL, '{}'::jsonb, NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb, NOW())
        ON CONFLICT (business_id, articulo_id) DO UPDATE SET
          nombre     = EXCLUDED.nombre,
          categoria  = EXCLUDED.categoria,
          subrubro   = EXCLUDED.subrubro,
          precio     = EXCLUDED.precio,
          updated_at = NOW()`,
-      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0]
+      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, 0]
     );
 
     const articulo = artRows[0];
