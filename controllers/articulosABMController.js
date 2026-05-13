@@ -3,6 +3,7 @@
 'use strict';
 
 const pool = require('../config/db');
+const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 function getBusinessId(req) {
   const ctx = Number(req.businessId);
@@ -190,6 +191,7 @@ exports.crearArticulo = async (req, res, next) => {
     }
 
     await client.query('COMMIT');
+    invalidateCacheForBiz(bizId);
 
     console.log(`[crearArticulo] Artículo manual creado: id=${newId} "${nombre}" biz=${bizId}`);
     return res.status(201).json({ ok: true, articulo, sku: skuProvisorio });
