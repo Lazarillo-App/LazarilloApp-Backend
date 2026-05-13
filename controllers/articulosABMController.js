@@ -129,23 +129,33 @@ exports.crearArticulo = async (req, res, next) => {
     // SKU provisorio: L-BIZ-ID (cuando llegue equivalencia externa se pisa)
     const skuProvisorio = `L-${bizId}-${Math.abs(newId)}`;
 
-    // Insertar el artículo
+    // Insertar en app_articles
     const { rows: artRows } = await client.query(
       `INSERT INTO app_articles
          (id, business_id, name, rubro, subrubro, node_type, price, categoria_id, subrubro_id, props, updated_at)
        VALUES ($1, $2, $3, $4, $5, 'item', $6, $7, $8, $9, NOW())
        RETURNING *`,
       [
-        newId,
-        bizId,
-        nombre.trim(),
-        rubro.trim(),
-        subrubro?.trim() || null,
-        safeNum(precio) ?? 0,
-        categoriaId,
-        subrubroId,
+        newId, bizId, nombre.trim(), rubro.trim(), subrubro?.trim() || null,
+        safeNum(precio) ?? 0, categoriaId, subrubroId,
         JSON.stringify({ origen: 'manual', sku: skuProvisorio, sin_equivalencia: true }),
       ]
+    );
+
+    // Insertar también en maxi_articles para que aparezca en la tabla de artículos
+    // (la tabla lee de maxi_articles para construir el árbol de categorías/subrubros)
+    await client.query(
+      `INSERT INTO maxi_articles
+         (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, upload_batch_id, origen, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, '{}'::jsonb, NULL, 'manual', NOW())
+       ON CONFLICT (business_id, articulo_id) DO UPDATE SET
+         nombre     = EXCLUDED.nombre,
+         categoria  = EXCLUDED.categoria,
+         subrubro   = EXCLUDED.subrubro,
+         precio     = EXCLUDED.precio,
+         origen     = 'manual',
+         updated_at = NOW()`,
+      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0]
     );
 
     const articulo = artRows[0];
