@@ -28,26 +28,29 @@ exports.getRubros = async (req, res, next) => {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
-    // Categorías y subrubros usados en este negocio
+    // Leer rubros/subrubros de AMBAS tablas — maxi_articles tiene los de Maxi,
+    // app_articles tiene los creados manualmente
     const { rows } = await pool.query(
-      `SELECT DISTINCT
-         a.rubro    AS categoria,
-         a.subrubro AS subrubro
-       FROM app_articles a
-       WHERE a.business_id = $1
-         AND a.rubro IS NOT NULL
-         AND a.rubro != ''
-         AND a.rubro NOT ILIKE '%pendiente%'
-       ORDER BY a.rubro, a.subrubro`,
+      `SELECT DISTINCT categoria AS rubro, subrubro
+         FROM maxi_articles
+        WHERE business_id = $1
+          AND categoria IS NOT NULL AND categoria != ''
+          AND categoria NOT ILIKE '%pendiente%'
+       UNION
+       SELECT DISTINCT rubro AS rubro, subrubro
+         FROM app_articles
+        WHERE business_id = $1
+          AND rubro IS NOT NULL AND rubro != ''
+          AND rubro NOT ILIKE '%pendiente%'
+       ORDER BY rubro, subrubro`,
       [bizId]
     );
 
-    // Agrupar por categoría
     const byCategoria = {};
     for (const row of rows) {
-      const cat = row.categoria || 'Sin rubro';
+      const cat = row.rubro || 'Sin rubro';
       if (!byCategoria[cat]) byCategoria[cat] = [];
-      if (row.subrubro && !row.subrubro.includes('[PENDIENTE]')) {
+      if (row.subrubro && !String(row.subrubro).includes('[PENDIENTE]')) {
         byCategoria[cat].push(row.subrubro);
       }
     }
