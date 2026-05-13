@@ -550,33 +550,54 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       );
 
       allowedIds = new Set();
-      for (const ag of subAgRows) {
-        const arts = Array.isArray(ag.articulos) ? ag.articulos
-          : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
-        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
-          : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
-        for (const a of arts) {
-          const id = Number(a?.id ?? a?.articulo_id ?? a);
-          if (id > 0) allowedIds.add(id);
-        }
-        for (const id of appIds) { const n = Number(id); if (n > 0) allowedIds.add(n); }
+    for (const ag of subAgRows) {
+      const arts = Array.isArray(ag.articulos) ? ag.articulos
+        : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+        : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+      for (const a of arts) {
+        const id = Number(a?.id ?? a?.articulo_id ?? a);
+        if (Number.isFinite(id) && id !== 0) allowedIds.add(id); // incluye negativos (manuales)
       }
-
-      // También incluir artículos sin asignar a ningún subnegocio (son del principal = visibles desde todos)
-      // Un artículo es "sin asignar" si no está en ninguna agrupación real de ningún subnegocio
-      // assignedIds ya tiene TODOS los asignados en la org — los que NO están ahí son libres
-      // Los libres son visibles desde cualquier subnegocio (aparecen en Sin Agrupación global)
-      if (assignedIds) {
-        const { rows: allRows } = await pool.query(
-          `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
-          [principalId]
-        );
-        for (const r of allRows) {
-          const id = Number(r.articulo_id);
-          if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
-        }
+      for (const id of appIds) {
+        const n = Number(id);
+        if (Number.isFinite(n) && n !== 0) allowedIds.add(n);
       }
     }
+
+    // Artículos "libres" (no asignados a ningún subnegocio) son visibles desde todos
+    if (assignedIds) {
+      const { rows: allMaxiRows } = await pool.query(
+        `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
+        [principalId]
+      );
+      for (const r of allMaxiRows) {
+        const id = Number(r.articulo_id);
+        if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
+      }
+      // Artículos manuales libres (no asignados)
+      const { rows: manualFreeRows } = await pool.query(
+        `SELECT id FROM app_articles WHERE business_id = $1 AND id < 0 AND (props->>'origen') = 'manual'`,
+        [principalId]
+      );
+      for (const r of manualFreeRows) {
+        const id = Number(r.id);
+        if (!assignedIds.has(id)) allowedIds.add(id);
+      }
+    }
+  } else if (isSubBusiness === false && assignedIds) {
+    // Principal con org: mostrar solo los artículos NO asignados a ningún subnegocio
+    // (los asignados aparecen en sus respectivos subnegocios)
+    allowedIds = new Set();
+    const { rows: allMaxiRows } = await pool.query(
+      `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
+      [principalId]
+    );
+    for (const r of allMaxiRows) {
+      const id = Number(r.articulo_id);
+      if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
+    }
+  } // fin if(isSubBusiness) / else if(principal con org)
 
     const { rows } = await pool.query(
       `SELECT articulo_id, nombre, categoria, subrubro, precio
