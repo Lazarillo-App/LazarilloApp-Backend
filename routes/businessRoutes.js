@@ -317,8 +317,15 @@ router.post('/:id/onboard', async (req, res, next) => {
 /* Config del negocio — props públicas para el front */
 router.get('/:id/config', async (req, res, next) => {
   try {
-    const biz = req.business;
-    const props = biz?.props || {};
+    // Leer SIEMPRE directo de DB — no usar req.business que puede estar cacheado
+    const pool = require('../config/db');
+    const bizId = Number(req.params.id);
+    if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    const { rows } = await pool.query(
+      'SELECT props FROM app_businesses WHERE id = $1 LIMIT 1',
+      [bizId]
+    );
+    const props = rows[0]?.props || {};
     res.json({
       ok: true,
       config: {
