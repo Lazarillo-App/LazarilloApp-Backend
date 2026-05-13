@@ -143,17 +143,16 @@ exports.crearArticulo = async (req, res, next) => {
     );
 
     // Insertar también en maxi_articles para que aparezca en la tabla de artículos
-    // (la tabla lee de maxi_articles para construir el árbol de categorías/subrubros)
+    // Usamos solo las columnas base que siempre existen
     await client.query(
       `INSERT INTO maxi_articles
-         (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, upload_batch_id, origen, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NULL, '{}'::jsonb, NULL, 'manual', NOW())
+         (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, '{}'::jsonb, NOW())
        ON CONFLICT (business_id, articulo_id) DO UPDATE SET
          nombre     = EXCLUDED.nombre,
          categoria  = EXCLUDED.categoria,
          subrubro   = EXCLUDED.subrubro,
          precio     = EXCLUDED.precio,
-         origen     = 'manual',
          updated_at = NOW()`,
       [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0]
     );
