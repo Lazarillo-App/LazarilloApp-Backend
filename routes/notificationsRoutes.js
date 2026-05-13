@@ -95,14 +95,16 @@ router.post('/', authRequired, async (req, res, next) => {
 
     // ✅ Validar kinds permitidos desde UI
     const allowedKinds = new Set([
-      'group_create',
-      'group_rename',
-      'group_delete',
-      'group_move_division',
-      'group_favorite',
-      'group_unfavorite',
+      'group_create', 'group_rename', 'group_delete',
+      'group_move_division', 'group_favorite', 'group_unfavorite',
+      'group_favorite_set', 'group_favorite_unset',
       'discontinue',
-      'move',
+      'move', 'info',
+      'articulo_create', 'articulo_delete', 'articulo_move',
+      'insumo_create', 'insumo_delete', 'insumo_move',
+      'insumo_group_create', 'insumo_group_rename', 'insumo_group_delete',
+      'objetivo_change', 'objetivo_update', 'precio_manual_bulk',
+      'config_change',
     ]);
 
     const k = String(kind || 'ui_action').trim();
