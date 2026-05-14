@@ -358,6 +358,59 @@ router.post(
   }
 );
 
+/* ───────── Preview de headers de un archivo (CSV o Excel) ───────── */
+const multerPreview = require('multer')({ storage: require('multer').memoryStorage() });
+router.post(
+  '/upload/preview-headers',
+  multerPreview.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ ok: false, error: 'Sin archivo' });
+      const { buffer, originalname } = req.file;
+      const ext = (originalname || '').split('.').pop().toLowerCase();
+
+      let headers = [];
+      let rows = [];
+
+      if (ext === 'csv') {
+        const text = buffer.toString('utf-8');
+        const lines = text.split(/\r?\n/).filter(l => l.trim());
+        const sep = lines[0]?.includes(';') ? ';' : ',';
+        headers = (lines[0] || '').split(sep).map(h => h.trim().replace(/^["']|["']$/g, ''));
+        rows = lines.slice(1, 6).map(line => {
+          const vals = line.split(sep).map(v => v.trim().replace(/^["']|["']$/g, ''));
+          const obj = {};
+          headers.forEach((h, i) => { obj[h] = vals[i] ?? ''; });
+          return obj;
+        });
+      } else if (ext === 'xlsx' || ext === 'xls' || ext === 'ods') {
+        const XLSX = require('xlsx');
+        const wb = XLSX.read(buffer, { type: 'buffer' });
+        // Primera hoja no vacía
+        const sheetName = wb.SheetNames.find(n => {
+          const ws = wb.Sheets[n];
+          if (!ws['!ref']) return false;
+          const range = XLSX.utils.decode_range(ws['!ref']);
+          return range.e.c > 0 || range.e.r > 0;
+        }) || wb.SheetNames[0];
+        const ws = wb.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        headers = (data[0] || []).map(h => String(h || '').trim()).filter(Boolean);
+        rows = data.slice(1, 6).map(row => {
+          const obj = {};
+          headers.forEach((h, i) => { obj[h] = String(row[i] ?? ''); });
+          return obj;
+        });
+      }
+
+      return res.json({ ok: true, headers, rows });
+    } catch (e) {
+      console.error('[preview-headers]', e.message);
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+);
+
 /* ───────── ABM Manual de artículos ───────── */
 const artABM = require('../controllers/articulosABMController');
 
