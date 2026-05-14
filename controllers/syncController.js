@@ -319,7 +319,9 @@ exports.syncNow = async (req, res) => {
 
       await client.query('COMMIT');
 
-      // 🆕 AUTO-ASIGNACIÓN POST-SYNC + NOTIFICACIÓN
+      // Invalidar caché para que GET /articles devuelva los datos frescos
+      const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+      invalidateCacheForBiz(biz.id);
       try {
         const result = await autoAssignNewArticles(biz.id);
         autoAssigned = result.assigned;

@@ -999,6 +999,9 @@ exports.syncFromMaxi = async (req, res) => {
       console.error('[syncFromMaxi] autoAssign error:', e.message);
     }
 
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+
     res.json({ ok: true, scope: 'insumos', ...summary, auto_assigned: auto.assigned });
   } catch (e) {
     console.error('syncFromMaxi error:', e);
