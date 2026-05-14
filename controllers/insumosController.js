@@ -791,15 +791,16 @@ exports.listBatchesInsumos = async (req, res, next) => {
 
     const { rows } = await pool.query(
       `SELECT
-         upload_batch_id                                   AS batch_id,
-         MIN(created_at)                                   AS created_at,
-         COUNT(*)::int                                    AS total_items,
-         COUNT(*) FILTER (WHERE sin_equivalencia)::int    AS sin_equivalencia,
+         COALESCE(upload_batch_id, 'sin-batch-' || origen)  AS batch_id,
+         MIN(created_at)                                      AS created_at,
+         COUNT(*)::int                                        AS total_items,
+         COUNT(*) FILTER (WHERE sin_equivalencia)::int       AS sin_equivalencia,
          COUNT(*) FILTER (WHERE codigo_maxi IS NOT NULL)::int AS con_codigo,
-         string_agg(DISTINCT origen, ', ')                AS origenes
+         string_agg(DISTINCT origen, ', ')                   AS origenes
        FROM insumos
-       WHERE business_id = $1 AND upload_batch_id IS NOT NULL
-       GROUP BY upload_batch_id
+       WHERE business_id = $1
+         AND origen IN ('csv', 'manual')
+       GROUP BY COALESCE(upload_batch_id, 'sin-batch-' || origen)
        ORDER BY MIN(created_at) DESC`,
       [bizId]
     );
@@ -807,22 +808,34 @@ exports.listBatchesInsumos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/* ── Eliminar lote de insumos (solo los sin equivalencia) ── */
+/* ── Eliminar lote de insumos ── */
 exports.deleteBatchInsumos = async (req, res, next) => {
   try {
     const bizId   = getBusinessId(req);
     const batchId = req.params.batchId;
     if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
 
-    const { rowCount } = await pool.query(
-      `DELETE FROM insumos
-        WHERE business_id = $1
-          AND upload_batch_id = $2
-          AND origen IN ('manual', 'csv')
-          AND sin_equivalencia = TRUE`,
-      [bizId, batchId]
-    );
-    return res.json({ ok: true, deleted: rowCount, batchId });
+    let result;
+    if (batchId.startsWith('sin-batch-')) {
+      // Lote sintético: insumos sin upload_batch_id agrupados por origen
+      const origen = batchId.replace('sin-batch-', '');
+      result = await pool.query(
+        `DELETE FROM insumos
+          WHERE business_id = $1
+            AND upload_batch_id IS NULL
+            AND origen = $2`,
+        [bizId, origen]
+      );
+    } else {
+      result = await pool.query(
+        `DELETE FROM insumos
+          WHERE business_id = $1
+            AND upload_batch_id = $2
+            AND origen IN ('manual', 'csv')`,
+        [bizId, batchId]
+      );
+    }
+    return res.json({ ok: true, deleted: result.rowCount, batchId });
   } catch (e) { next(e); }
 };
 

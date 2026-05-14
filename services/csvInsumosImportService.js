@@ -169,6 +169,9 @@ async function importInsumosFromFile({ businessId, userId, filePath, originalNam
     await client.query('BEGIN');
     txOpen = true;
 
+    // Generar batch ID único para este import
+    const batchId = `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
     let inserted = 0, updated = 0;
     const CHUNK = 200;
 
@@ -181,18 +184,19 @@ async function importInsumosFromFile({ businessId, userId, filePath, originalNam
 
         const r = await client.query(
           `INSERT INTO insumos
-             (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado)
-           VALUES ($1, $2, $3, $4, $5, $6, 'csv', $7)
+             (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado, upload_batch_id, sin_equivalencia)
+           VALUES ($1, $2, $3, $4, $5, $6, 'csv', $7, $8, false)
            ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
-             nombre     = EXCLUDED.nombre,
-             unidad_med = EXCLUDED.unidad_med,
-             precio_ref = EXCLUDED.precio_ref,
-             rubro      = EXCLUDED.rubro,
-             estado     = EXCLUDED.estado,
-             updated_at = NOW()
+             nombre          = EXCLUDED.nombre,
+             unidad_med      = EXCLUDED.unidad_med,
+             precio_ref      = EXCLUDED.precio_ref,
+             rubro           = EXCLUDED.rubro,
+             estado          = EXCLUDED.estado,
+             upload_batch_id = EXCLUDED.upload_batch_id,
+             updated_at      = NOW()
            RETURNING (xmax = 0) AS is_insert`,
           [targetBizId, it.codigo_maxi, it.nombre, it.unidad_med,
-           it.precio_ref, it.rubro, estado]
+           it.precio_ref, it.rubro, estado, batchId]
         );
 
         if (r.rows[0]?.is_insert) inserted++; else updated++;
@@ -213,6 +217,7 @@ async function importInsumosFromFile({ businessId, userId, filePath, originalNam
         failed:     errors.length,
         has_errors: errors.length > 0,
         target_business_id: targetBizId,
+        batch_id: batchId,
       },
       errors: errors.slice(0, 20),
     };
