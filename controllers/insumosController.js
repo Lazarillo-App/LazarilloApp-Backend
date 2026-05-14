@@ -1050,7 +1050,37 @@ exports.listarRubrosMaxi = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const items = await insumosRubrosRepo.listRubrosForBusiness(businessId);
+    // Rubros de Maxi (tabla insumo_rubros)
+    const maxiItems = await insumosRubrosRepo.listRubrosForBusiness(businessId);
+
+    // Rubros manuales: rubros que existen en insumos.rubro pero NO en insumo_rubros
+    // Necesario para negocios sin Maxi o insumos creados manualmente con rubro nuevo
+    const maxiRubroNames = new Set(maxiItems.map(r => (r.nombre || '').trim().toLowerCase()));
+
+    const { rows: manualRubros } = await pool.query(
+      `SELECT DISTINCT rubro AS nombre, MAX(es_elaborado) AS es_elaborador
+         FROM insumos
+        WHERE business_id = $1
+          AND rubro IS NOT NULL AND rubro != ''
+          AND estado = 'activo'
+        GROUP BY rubro
+        ORDER BY rubro ASC`,
+      [businessId]
+    );
+
+    // Agregar como items sintéticos los rubros manuales que no tienen entrada en insumo_rubros
+    const syntheticItems = manualRubros
+      .filter(r => !maxiRubroNames.has((r.nombre || '').trim().toLowerCase()))
+      .map((r, i) => ({
+        id: null,
+        codigo: `manual_${i}`,
+        nombre: r.nombre,
+        es_elaborador: r.es_elaborador === true,
+        activo: true,
+        origen: 'manual',
+      }));
+
+    const items = [...maxiItems, ...syntheticItems];
     return res.json({ ok: true, business_id: businessId, items });
   } catch (e) {
     console.error('listarRubrosMaxi error:', e);
