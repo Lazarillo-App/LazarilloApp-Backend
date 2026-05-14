@@ -199,6 +199,7 @@ exports.crearArticulo = async (req, res, next) => {
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('[crearArticulo]', e.message);
+    console.error('[crearArticulo]', e.message);
     next(e);
   } finally {
     client.release();
