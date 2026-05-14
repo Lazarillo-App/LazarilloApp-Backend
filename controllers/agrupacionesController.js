@@ -18,7 +18,9 @@ const normalizeItem = (o = {}) => {
 
   if (id == null) return null;
 
-  const nombre = String(o.nombre ?? o.descripcion ?? '').trim() || `#${id}`;
+  // Guardar nombre real si viene; si no, dejar vacío para que el front lo enrichezca desde metaById
+  const rawNombre = String(o.nombre ?? o.descripcion ?? '').trim();
+  const nombre = rawNombre.startsWith('#') ? '' : rawNombre;
   const categoria = String(o.categoria ?? o.rubro ?? 'Sin categoría').trim() || 'Sin categoría';
   const subrubro = String(o.subrubro ?? o.subRubro ?? 'Sin subrubro').trim() || 'Sin subrubro';
   const precio = Number(o.precio ?? o.precioVenta ?? o.importe ?? 0) || 0;
