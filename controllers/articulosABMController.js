@@ -80,7 +80,7 @@ exports.crearArticulo = async (req, res, next) => {
   const { nombre, rubro, subrubro, precio, agrupacionId } = req.body || {};
 
   if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
-  if (!rubro?.trim())  return res.status(400).json({ ok: false, error: 'Rubro requerido' });
+  if (!rubro?.trim()) return res.status(400).json({ ok: false, error: 'Rubro requerido' });
 
   const client = await pool.connect();
   try {
@@ -89,9 +89,8 @@ exports.crearArticulo = async (req, res, next) => {
     // ID negativo secuencial para artículos manuales (no interfiere con IDs de Maxi)
     const { rows: minRows } = await client.query(
       `SELECT COALESCE(MIN(id), 0) - 1 AS next_id
-         FROM app_articles
-        WHERE business_id = $1 AND id < 0`,
-      [bizId]
+     FROM app_articles
+    WHERE id < 0`
     );
     const newId = Math.min(minRows[0].next_id, -1);
 
@@ -199,7 +198,6 @@ exports.crearArticulo = async (req, res, next) => {
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('[crearArticulo]', e.message);
-    console.error('[crearArticulo]', e.message);
     next(e);
   } finally {
     client.release();
@@ -242,7 +240,7 @@ exports.actualizarArticulo = async (req, res, next) => {
 
     // Rubro/subrubro — buscar o crear categoría
     let categoriaId = art.categoria_id;
-    let subrubroId  = art.subrubro_id;
+    let subrubroId = art.subrubro_id;
 
     if (rubro?.trim() && rubro.trim() !== art.rubro) {
       let { rows: catRows } = await client.query(
@@ -485,7 +483,7 @@ exports.listBatchesArticulos = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────
 exports.previewBatchArticulos = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const batchId = req.params.batchId;
     if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
 
@@ -506,7 +504,7 @@ exports.previewBatchArticulos = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────
 exports.deleteBatchArticulos = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const batchId = req.params.batchId;
     if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
 
