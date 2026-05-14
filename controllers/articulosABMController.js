@@ -86,14 +86,6 @@ exports.crearArticulo = async (req, res, next) => {
   try {
     await client.query('BEGIN');
 
-    // ID negativo secuencial para artículos manuales (no interfiere con IDs de Maxi)
-    const { rows: minRows } = await client.query(
-      `SELECT COALESCE(MIN(id), 0) - 1 AS next_id
-     FROM app_articles
-    WHERE id < 0`
-    );
-    const newId = Math.min(minRows[0].next_id, -1);
-
     // Buscar o crear categoria_id
     let { rows: catRows } = await client.query(
       `SELECT id FROM categorias WHERE nombre = $1`, [rubro.trim()]
@@ -126,23 +118,19 @@ exports.crearArticulo = async (req, res, next) => {
       }
     }
 
-    // SKU provisorio: L-BIZ-ID (cuando llegue equivalencia externa se pisa)
-    const skuProvisorio = `L-${bizId}-${Math.abs(newId)}`;
-
-    // Insertar en app_articles
+    // Insertar en app_articles — la secuencia asigna el ID automáticamente
     const { rows: artRows } = await client.query(
       `INSERT INTO app_articles
-         (id, business_id, name, rubro, subrubro, node_type, price, categoria_id, subrubro_id, props, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 'item', $6, $7, $8, $9, NOW())
+         (business_id, name, rubro, subrubro, node_type, price, categoria_id, subrubro_id, props, updated_at)
+       VALUES ($1, $2, $3, $4, 'item', $5, $6, $7, $8, NOW())
        RETURNING *`,
-      [
-        newId, bizId, nombre.trim(), rubro.trim(), subrubro?.trim() || null,
+      [bizId, nombre.trim(), rubro.trim(), subrubro?.trim() || null,
         safeNum(precio) ?? 0, categoriaId, subrubroId,
-        JSON.stringify({ origen: 'manual', sku: skuProvisorio, sin_equivalencia: true }),
-      ]
+        JSON.stringify({ origen: 'manual', sin_equivalencia: true })]
     );
 
-    // Insertar también en maxi_articles para que aparezca en la tabla de artículos
+    const newId = artRows[0].id;
+    const skuProvisorio = `L-${bizId}-${newId}`;    // Insertar también en maxi_articles para que aparezca en la tabla de artículos
     // Usamos solo las columnas base que siempre existen
     await client.query(
       `INSERT INTO maxi_articles
