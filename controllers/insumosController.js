@@ -1058,7 +1058,7 @@ exports.listarRubrosMaxi = async (req, res) => {
     const maxiRubroNames = new Set(maxiItems.map(r => (r.nombre || '').trim().toLowerCase()));
 
     const { rows: manualRubros } = await pool.query(
-      `SELECT DISTINCT rubro AS nombre, MAX(es_elaborado) AS es_elaborador
+      `SELECT DISTINCT rubro AS nombre, BOOL_OR(es_elaborado) AS es_elaborador
          FROM insumos
         WHERE business_id = $1
           AND rubro IS NOT NULL AND rubro != ''
