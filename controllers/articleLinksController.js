@@ -98,12 +98,28 @@ exports.createLinkGroup = async (req, res) => {
     );
 
     if (existing.length) {
+      // Alguno ya está vinculado — buscar el grupo existente y agregar los demás
+      const existingId = Number(existing[0].article_id);
+      const { rows: groupData } = await client.query(
+        `SELECT g.id AS group_id, g.name AS group_name, g.sync_recipe, g.sync_objetivo, g.sync_precio
+           FROM article_link_members m
+           JOIN article_link_groups g ON g.id = m.link_group_id
+          WHERE m.article_id = $1 AND m.business_id = $2 LIMIT 1`,
+        [existingId, bizId]
+      );
       await client.query('ROLLBACK');
-      const alreadyLinked = existing.map(r => Number(r.article_id));
+      if (groupData.length) {
+        return res.status(409).json({
+          ok: false,
+          error: `Artículo ya vinculado`,
+          alreadyLinked: existing.map(r => Number(r.article_id)),
+          existingGroup: { groupId: groupData[0].group_id, groupName: groupData[0].group_name },
+        });
+      }
       return res.status(409).json({
         ok: false,
         error: `${existing.length} artículo(s) ya están vinculados`,
-        alreadyLinked,
+        alreadyLinked: existing.map(r => Number(r.article_id)),
       });
     }
 
@@ -414,7 +430,7 @@ exports.getLinkByArticle = async (req, res) => {
       `SELECT
          m.article_id,
          m.pct_objetivo,
-         COALESCE(ma.nombre, aa.nombre, '#' || m.article_id::text) AS nombre
+         COALESCE(ma.nombre, aa.name, '#' || m.article_id::text) AS nombre
        FROM article_link_members m
        LEFT JOIN maxi_articles ma ON ma.business_id = $2 AND ma.articulo_id = m.article_id
        LEFT JOIN app_articles aa ON aa.business_id = $2 AND aa.id = m.article_id
