@@ -115,10 +115,10 @@ router.delete(
   ensureFn('links.removeMember', links.removeMember)
 );
 
-// PATCH /api/businesses/:id/article-links/:groupId/members/:articleId → actualizar objetivo
+// PATCH  /api/businesses/:id/article-links/:groupId/members/:articleId → actualizar pct_objetivo
 router.patch(
   '/:id/article-links/:groupId/members/:articleId',
-  ensureFn('links.updateMemberObjetivo', links.updateMemberObjetivo)
+  ensureFn('links.updateMember', links.updateMember)
 );
 
 // POST   /api/businesses/:id/article-links/:groupId/propagate → registrar propagación

@@ -44,13 +44,10 @@ exports.getLinkGroups = async (req, res) => {
     const groupIds = groups.map(g => g.id);
 
     const { rows: members } = await pool.query(
-      `SELECT m.link_group_id, m.article_id, m.pct_objetivo,
-              COALESCE(ma.nombre, a.nombre) AS nombre
-       FROM article_link_members m
-       LEFT JOIN maxi_articles ma ON ma.articulo_id = m.article_id AND ma.business_id = m.business_id
-       LEFT JOIN app_articles a ON a.id = m.article_id AND a.business_id = m.business_id
-       WHERE m.link_group_id = ANY($1::bigint[])
-       ORDER BY m.joined_at ASC`,
+      `SELECT link_group_id, article_id
+       FROM article_link_members
+       WHERE link_group_id = ANY($1::bigint[])
+       ORDER BY joined_at ASC`,
       [groupIds]
     );
 
@@ -59,11 +56,7 @@ exports.getLinkGroups = async (req, res) => {
     for (const m of members) {
       const gid = Number(m.link_group_id);
       if (!membersByGroup[gid]) membersByGroup[gid] = [];
-      membersByGroup[gid].push({
-        article_id: Number(m.article_id),
-        nombre: m.nombre || null,
-        pct_objetivo: m.pct_objetivo != null ? Number(m.pct_objetivo) : null,
-      });
+      membersByGroup[gid].push({ article_id: Number(m.article_id) });
     }
 
     const result = groups.map(g => ({
@@ -244,6 +237,41 @@ exports.removeMember = async (req, res) => {
   }
 };
 
+// PATCH /businesses/:id/article-links/:groupId/members/:articleId
+// Body: { pct_objetivo: number | null }
+exports.updateMember = async (req, res) => {
+  const bizId = getBusinessId(req);
+  const groupId = Number(req.params.groupId);
+  const articleId = Number(req.params.articleId);
+  const { pct_objetivo } = req.body || {};
+
+  if (!Number.isFinite(bizId) || !Number.isFinite(groupId) || !Number.isFinite(articleId)) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+
+  try {
+    const val = pct_objetivo != null && Number.isFinite(Number(pct_objetivo))
+      ? Number(pct_objetivo)
+      : null;
+
+    const { rowCount } = await pool.query(
+      `UPDATE article_link_members
+          SET pct_objetivo = $1
+        WHERE link_group_id = $2 AND article_id = $3 AND business_id = $4`,
+      [val, groupId, articleId, bizId]
+    );
+
+    if (!rowCount) {
+      return res.status(404).json({ ok: false, error: 'Miembro no encontrado' });
+    }
+
+    return res.json({ ok: true, article_id: articleId, pct_objetivo: val });
+  } catch (e) {
+    console.error('[updateMember]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
 /* ========================= PROPAGACIÓN ========================= */
 
 // ============================================================================
@@ -354,7 +382,7 @@ exports.getPropagations = async (req, res) => {
 // ============================================================================
 // GET /businesses/:id/article-links/by-article/:articleId
 // Devuelve el grupo de vinculación de un artículo específico (si existe).
-// Útil para el frontend al renderizar el ícono de cadena.
+// Incluye nombre y pct_objetivo de cada miembro para el panel de gemelos.
 // ============================================================================
 exports.getLinkByArticle = async (req, res) => {
   try {
@@ -365,66 +393,53 @@ exports.getLinkByArticle = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
-    const { rows } = await pool.query(
-      `SELECT
-         g.id AS group_id,
-         g.name AS group_name,
-         g.sync_recipe,
-         g.sync_objetivo,
-         g.sync_precio,
-         array_agg(m2.article_id ORDER BY m2.joined_at) AS member_ids
-       FROM article_link_members m
-       JOIN article_link_groups g ON g.id = m.link_group_id
-       JOIN article_link_members m2 ON m2.link_group_id = g.id
-       WHERE m.article_id = $1 AND m.business_id = $2
-       GROUP BY g.id`,
+    // Buscar el grupo del artículo
+    const { rows: groupRows } = await pool.query(
+      `SELECT g.id AS group_id, g.name AS group_name, g.sync_recipe, g.sync_objetivo, g.sync_precio
+         FROM article_link_members m
+         JOIN article_link_groups g ON g.id = m.link_group_id
+        WHERE m.article_id = $1 AND m.business_id = $2
+        LIMIT 1`,
       [articleId, bizId]
     );
 
-    if (!rows.length) {
+    if (!groupRows.length) {
       return res.json({ ok: true, group: null });
     }
 
-    return res.json({ ok: true, group: rows[0] });
-  } catch (e) {
-    console.error('[getLinkByArticle]', e.message);
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-};
+    const group = groupRows[0];
 
-// PATCH /businesses/:id/article-links/:groupId/members/:articleId
-// Actualiza pct_objetivo de un miembro específico del grupo de gemelos
-exports.updateMemberObjetivo = async (req, res) => {
-  const bizId = getBusinessId(req);
-  const groupId = safeNum(req.params.groupId);
-  const articleId = safeNum(req.params.articleId);
-  const pctObjetivo = req.body?.pct_objetivo != null ? Number(req.body.pct_objetivo) : null;
-
-  if (!Number.isFinite(bizId) || !groupId || !articleId) {
-    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
-  }
-
-  try {
-    await pool.query(
-      `UPDATE article_link_members
-          SET pct_objetivo = $1
-        WHERE link_group_id = $2 AND article_id = $3 AND business_id = $4`,
-      [pctObjetivo, groupId, articleId, bizId]
+    // Obtener todos los miembros con nombre y pct_objetivo
+    const { rows: memberRows } = await pool.query(
+      `SELECT
+         m.article_id,
+         m.pct_objetivo,
+         COALESCE(ma.nombre, aa.nombre, '#' || m.article_id::text) AS nombre
+       FROM article_link_members m
+       LEFT JOIN maxi_articles ma ON ma.business_id = $2 AND ma.articulo_id = m.article_id
+       LEFT JOIN app_articles aa ON aa.business_id = $2 AND aa.id = m.article_id
+      WHERE m.link_group_id = $1
+      ORDER BY m.joined_at`,
+      [group.group_id, bizId]
     );
 
-    // También actualizar porcentajeVenta en la receta del artículo
-    if (pctObjetivo != null) {
-      await pool.query(
-        `UPDATE app_recetas
-            SET "porcentajeVenta" = $1, updated_at = NOW()
-          WHERE article_id = $2 AND business_id = $3`,
-        [pctObjetivo, articleId, bizId]
-      );
-    }
-
-    return res.json({ ok: true, article_id: articleId, pct_objetivo: pctObjetivo });
+    return res.json({
+      ok: true,
+      group: {
+        groupId: group.group_id,
+        groupName: group.group_name,
+        syncRecipe: group.sync_recipe,
+        syncObjetivo: group.sync_objetivo,
+        syncPrecio: group.sync_precio,
+        members: memberRows.map(m => ({
+          article_id: Number(m.article_id),
+          nombre: m.nombre,
+          pct_objetivo: m.pct_objetivo != null ? Number(m.pct_objetivo) : null,
+        })),
+      },
+    });
   } catch (e) {
-    console.error('[updateMemberObjetivo]', e.message);
+    console.error('[getLinkByArticle]', e.message);
     return res.status(500).json({ ok: false, error: e.message });
   }
 };

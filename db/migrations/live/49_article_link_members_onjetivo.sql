@@ -1,7 +1,6 @@
--- Agrega objetivo de costo individual por miembro del grupo de gemelos
--- Permite que artículos con la misma receta tengan diferente % objetivo
+-- Agrega pct_objetivo a article_link_members
+-- Permite que cada artículo gemelo tenga su propio objetivo de costo
 ALTER TABLE article_link_members
-  ADD COLUMN IF NOT EXISTS pct_objetivo NUMERIC(6,2) DEFAULT NULL;
+  ADD COLUMN IF NOT EXISTS pct_objetivo numeric(5,2) DEFAULT NULL;
 
-COMMENT ON COLUMN article_link_members.pct_objetivo IS
-  'Objetivo de costo % específico para este miembro. NULL = usa el global del negocio.';
+-- Agrega nombre en el endpoint via join con maxi_articles (no columna, se resuelve en query)
