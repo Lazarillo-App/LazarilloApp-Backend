@@ -44,10 +44,13 @@ exports.getLinkGroups = async (req, res) => {
     const groupIds = groups.map(g => g.id);
 
     const { rows: members } = await pool.query(
-      `SELECT link_group_id, article_id
-       FROM article_link_members
-       WHERE link_group_id = ANY($1::bigint[])
-       ORDER BY joined_at ASC`,
+      `SELECT m.link_group_id, m.article_id, m.pct_objetivo,
+              COALESCE(ma.nombre, a.nombre) AS nombre
+       FROM article_link_members m
+       LEFT JOIN maxi_articles ma ON ma.articulo_id = m.article_id AND ma.business_id = m.business_id
+       LEFT JOIN app_articles a ON a.id = m.article_id AND a.business_id = m.business_id
+       WHERE m.link_group_id = ANY($1::bigint[])
+       ORDER BY m.joined_at ASC`,
       [groupIds]
     );
 
@@ -56,7 +59,11 @@ exports.getLinkGroups = async (req, res) => {
     for (const m of members) {
       const gid = Number(m.link_group_id);
       if (!membersByGroup[gid]) membersByGroup[gid] = [];
-      membersByGroup[gid].push({ article_id: Number(m.article_id) });
+      membersByGroup[gid].push({
+        article_id: Number(m.article_id),
+        nombre: m.nombre || null,
+        pct_objetivo: m.pct_objetivo != null ? Number(m.pct_objetivo) : null,
+      });
     }
 
     const result = groups.map(g => ({
@@ -381,6 +388,43 @@ exports.getLinkByArticle = async (req, res) => {
     return res.json({ ok: true, group: rows[0] });
   } catch (e) {
     console.error('[getLinkByArticle]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// PATCH /businesses/:id/article-links/:groupId/members/:articleId
+// Actualiza pct_objetivo de un miembro específico del grupo de gemelos
+exports.updateMemberObjetivo = async (req, res) => {
+  const bizId = getBusinessId(req);
+  const groupId = safeNum(req.params.groupId);
+  const articleId = safeNum(req.params.articleId);
+  const pctObjetivo = req.body?.pct_objetivo != null ? Number(req.body.pct_objetivo) : null;
+
+  if (!Number.isFinite(bizId) || !groupId || !articleId) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+
+  try {
+    await pool.query(
+      `UPDATE article_link_members
+          SET pct_objetivo = $1
+        WHERE link_group_id = $2 AND article_id = $3 AND business_id = $4`,
+      [pctObjetivo, groupId, articleId, bizId]
+    );
+
+    // También actualizar porcentajeVenta en la receta del artículo
+    if (pctObjetivo != null) {
+      await pool.query(
+        `UPDATE app_recetas
+            SET "porcentajeVenta" = $1, updated_at = NOW()
+          WHERE article_id = $2 AND business_id = $3`,
+        [pctObjetivo, articleId, bizId]
+      );
+    }
+
+    return res.json({ ok: true, article_id: articleId, pct_objetivo: pctObjetivo });
+  } catch (e) {
+    console.error('[updateMemberObjetivo]', e.message);
     return res.status(500).json({ ok: false, error: e.message });
   }
 };

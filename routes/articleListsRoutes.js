@@ -115,6 +115,12 @@ router.delete(
   ensureFn('links.removeMember', links.removeMember)
 );
 
+// PATCH /api/businesses/:id/article-links/:groupId/members/:articleId → actualizar objetivo
+router.patch(
+  '/:id/article-links/:groupId/members/:articleId',
+  ensureFn('links.updateMemberObjetivo', links.updateMemberObjetivo)
+);
+
 // POST   /api/businesses/:id/article-links/:groupId/propagate → registrar propagación
 router.post(
   '/:id/article-links/:groupId/propagate',
