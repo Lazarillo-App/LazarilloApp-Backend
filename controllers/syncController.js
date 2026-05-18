@@ -478,19 +478,20 @@ async function getOrgArticleContext(bizId, pool) {
   );
   const principalId = principalRows[0]?.id || bizId;
 
-  // Todos los IDs asignados en agrupaciones reales de cualquier negocio de la org
-  // (excluyendo Sin Agrupación y Discontinuados — esos son el "flotante")
+  // Solo artículos asignados a SUBNEGOCIOS — excluir agrupaciones del propio principal
+  // El principal puede tener sus propias agrupaciones y debe verlas en su árbol
   const { rows: agRows } = await pool.query(
     `SELECT ag.articulos, ag.app_articles_ids
        FROM agrupaciones ag
        JOIN app_businesses b ON b.id = ag.business_id
       WHERE b.organization_id = $1
+        AND b.id != $2
         AND ag.moved_to_business_id IS NULL
         AND ag.nombre NOT ILIKE 'Sin Agrupac%'
         AND ag.nombre NOT ILIKE 'Sin Agrupar%'
         AND ag.nombre NOT ILIKE 'Discontinuados'
         AND ag.nombre NOT ILIKE 'Descontinuados'`,
-    [biz.organization_id]
+    [biz.organization_id, principalId]
   );
 
   const assignedIds = new Set();
