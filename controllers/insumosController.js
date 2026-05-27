@@ -120,8 +120,6 @@ exports.listar = async (req, res) => {
       `);
     }
 
-    // ✅ FUENTE DE VERDAD ÚNICA: es_elaborado en la tabla insumos
-    // Ya no consultamos insumo_rubros.es_elaborador para este filtro.
     if (elaborados === 'true') {
       where.push(`i.es_elaborado = true`);
     }
@@ -219,8 +217,6 @@ exports.getTreeView = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    // ✅ Contamos insumos separados por es_elaborado (fuente de verdad),
-    //    agrupados por rubro para mantener la estructura del sidebar.
     const { rows: rubros } = await pool.query(
       `
       SELECT 
@@ -258,11 +254,9 @@ exports.getTreeView = async (req, res) => {
       [businessId]
     );
 
-    // Totales globales por es_elaborado (independiente del rubro)
     const totalElaborados = rubros.reduce((sum, r) => sum + (r.count_elaborados || 0), 0);
     const totalNoElaborados = rubros.reduce((sum, r) => sum + (r.count_no_elaborados || 0), 0);
 
-    // Rubros que tienen al menos un elaborado / no elaborado
     const rubrosConElaborados = rubros
       .filter(r => r.count_elaborados > 0)
       .map(r => ({ ...r, count_insumos: r.count_elaborados }));
@@ -309,7 +303,6 @@ exports.getStats = async (req, res) => {
         COUNT(*) FILTER (WHERE estado = 'discontinuado')::int               AS discontinuados,
         COUNT(*) FILTER (WHERE origen = 'maxi')::int                        AS de_maxi,
         COUNT(*) FILTER (WHERE origen = 'manual')::int                      AS manuales,
-        -- ✅ FUENTE DE VERDAD ÚNICA: es_elaborado
         COUNT(*) FILTER (WHERE es_elaborado = true)::int                    AS elaborados,
         COUNT(*) FILTER (WHERE es_elaborado = false OR es_elaborado IS NULL)::int AS no_elaborados,
         COUNT(*) FILTER (WHERE es_elaborado_manual = true)::int             AS sobrescritos_manualmente,
@@ -337,12 +330,7 @@ exports.getStats = async (req, res) => {
   }
 };
 
-// ===================== TOGGLE ELABORADO (marca/desmarca manual) =====================
-/**
- * PATCH /api/insumos/:id/elaborado
- * Marca o desmarca un insumo como elaborado.
- * Setea es_elaborado_manual = true para que el sync de Maxi no lo pise.
- */
+// ===================== TOGGLE ELABORADO =====================
 exports.toggleElaborado = async (req, res) => {
   try {
     const { id } = req.params;
@@ -361,7 +349,7 @@ exports.toggleElaborado = async (req, res) => {
       UPDATE insumos
       SET
         es_elaborado        = $1,
-        es_elaborado_manual = true,   -- el usuario tomó control, el sync no pisa esto
+        es_elaborado_manual = true,
         updated_at          = NOW()
       WHERE id = $2 AND business_id = $3
       RETURNING *
@@ -384,10 +372,6 @@ exports.toggleElaborado = async (req, res) => {
   }
 };
 
-/**
- * POST /api/insumos/elaborado/bulk
- * Marca/desmarca múltiples insumos como elaborados.
- */
 exports.toggleElaboradoBulk = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
@@ -439,11 +423,8 @@ exports.crearManual = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
     }
 
-    // Generar SKU provisorio único: LAZ-{bizId}-{timestamp}-{random}
-    // Nunca choca con Maxi (que usa códigos numéricos cortos)
     const skuProvisorio = `LAZ-${businessId}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
-    // Verificar que no exista ya un insumo con mismo nombre+rubro en este negocio
     const { rows: existing } = await pool.query(
       `SELECT id, codigo_maxi, origen FROM insumos
         WHERE business_id = $1
@@ -471,7 +452,7 @@ exports.crearManual = async (req, res) => {
        RETURNING *`,
       [
         businessId,
-        skuProvisorio,          // código provisorio de Lazarillo
+        skuProvisorio,
         b.nombre.trim(),
         b.unidadMed ?? null,
         num(b.precioRef),
@@ -479,7 +460,7 @@ exports.crearManual = async (req, res) => {
         b.origen ?? 'manual',
         b.es_elaborado ?? false,
         b.es_elaborado !== undefined,
-        `manual-abm-${new Date().toISOString().slice(0, 10)}`, // batch del día
+        `manual-abm-${new Date().toISOString().slice(0, 10)}`,
       ]
     );
 
@@ -514,7 +495,6 @@ exports.actualizar = async (req, res) => {
     if (b.estado !== undefined)    push('estado', b.estado);
     if (b.nota !== undefined)      push('nota', b.nota);
 
-    // ✅ Si actualizan es_elaborado desde este endpoint también, lo respetamos
     if (b.es_elaborado !== undefined) {
       push('es_elaborado', b.es_elaborado);
       push('es_elaborado_manual', true);
@@ -571,7 +551,7 @@ exports.eliminar = async (req, res) => {
   }
 };
 
-// ===================== INSUMOS: BULK (JSON/CSV) =====================
+// ===================== INSUMOS: BULK =====================
 exports.bulkUpsert = async (req, res) => {
   try {
     const businessId = getBusinessId(req);
@@ -732,24 +712,19 @@ exports.bulkUpsertCSV = async (req, res) => {
       return null;
     };
 
-    // Mapeo personalizado enviado desde el front (columna_archivo → campo_interno)
     let mapeoCustom = {};
     if (req.body?.mapeo) {
       try { mapeoCustom = JSON.parse(req.body.mapeo); } catch { /* ignorar */ }
     }
 
-    // Si hay mapeo custom, aplicarlo: invertirlo para que sea campo_interno → columna_archivo
-    // Luego renombrar las columnas en cada fila
     if (Object.keys(mapeoCustom).length > 0) {
       rows = rows.map(r => {
         const nueva = {};
         Object.entries(mapeoCustom).forEach(([campoInterno, colArchivo]) => {
           if (colArchivo && r[colArchivo] !== undefined) {
-            // Mapear al alias que el getCol reconoce
             nueva[campoInterno] = r[colArchivo];
           }
         });
-        // Conservar también las columnas originales (getCol las puede usar)
         return { ...r, ...nueva };
       });
     }
@@ -783,7 +758,7 @@ exports.bulkUpsertCSV = async (req, res) => {
   }
 };
 
-/* ── Listar lotes de subida manual de insumos ── */
+/* ── Listar lotes ── */
 exports.listBatchesInsumos = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -808,7 +783,7 @@ exports.listBatchesInsumos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/* ── Eliminar lote de insumos ── */
+/* ── Eliminar lote ── */
 exports.deleteBatchInsumos = async (req, res, next) => {
   try {
     const bizId   = getBusinessId(req);
@@ -817,7 +792,6 @@ exports.deleteBatchInsumos = async (req, res, next) => {
 
     let result;
     if (batchId.startsWith('sin-batch-')) {
-      // Lote sintético: insumos sin upload_batch_id agrupados por origen
       const origen = batchId.replace('sin-batch-', '');
       result = await pool.query(
         `DELETE FROM insumos
@@ -839,7 +813,7 @@ exports.deleteBatchInsumos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/* ── Vista previa de un lote ── */
+/* ── Vista previa de lote ── */
 exports.previewBatchInsumos = async (req, res, next) => {
   try {
     const bizId   = getBusinessId(req);
@@ -858,7 +832,285 @@ exports.previewBatchInsumos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// ===================== INSUMOS: MANTENIMIENTO =====================
+// ===================== INSUMOS: MAXI SYNC (DB-FIRST) =====================
+exports.listarMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT * FROM insumos WHERE business_id = $1 AND origen = 'maxi' ORDER BY nombre ASC`,
+      [businessId]
+    );
+
+    return res.json({ ok: true, business_id: businessId, items: rows });
+  } catch (e) {
+    console.error('listarMaxi error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+/**
+ * syncFromMaxi — DB-FIRST
+ * Si MaxiRest no está disponible, responde con datos de DB sin error.
+ * Solo actualiza cuando MaxiRest devuelve datos válidos.
+ */
+exports.syncFromMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    const userId = req.user?.id || null;
+
+    // ── 1. Intentar fetch de MaxiRest ──
+    let normItems = [];
+    let maxiAvailable = true;
+    let maxiWarning = null;
+
+    try {
+      const raw = await fetchMaxiInsumos({ businessId, req });
+      normItems = normalizarInsumosMaxi(raw);
+    } catch (fetchErr) {
+      maxiAvailable = false;
+      maxiWarning = `MaxiRest no disponible: ${fetchErr.message}`;
+      console.warn(`[syncFromMaxi] MaxiRest caído, usando DB como fuente: ${fetchErr.message}`);
+    }
+
+    // ── 2. Si MaxiRest no está disponible → responder con datos de DB ──
+    if (!maxiAvailable) {
+      const { rows: dbStats } = await pool.query(
+        `SELECT COUNT(*)::int as total FROM insumos WHERE business_id = $1 AND estado = 'activo'`,
+        [businessId]
+      );
+      return res.json({
+        ok: true,
+        scope: 'insumos',
+        fromCache: true,
+        warning: maxiWarning,
+        inserted: 0,
+        updated: 0,
+        unchanged: dbStats[0]?.total || 0,
+        auto_assigned: 0,
+        message: 'Lazarillo funcionando con datos locales — MaxiRest temporalmente no disponible',
+      });
+    }
+
+    // ── 3. Upsert con detección de cambios ──
+    const summary = await upsertFromMaxi(businessId, normItems, { useIncomingEstado: true });
+
+    // ── 4. Auto-inicializar es_elaborado ──
+    try {
+      const { rowCount: autoMarked } = await pool.query(
+        `UPDATE insumos i
+            SET es_elaborado = true, updated_at = NOW()
+           FROM insumo_rubros ir
+          WHERE ir.business_id = i.business_id
+            AND ir.codigo::text = i.rubro
+            AND ir.es_elaborador = true
+            AND i.business_id = $1
+            AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
+            AND i.es_elaborado IS DISTINCT FROM true`,
+        [businessId]
+      );
+      if (autoMarked > 0) console.log(`[syncFromMaxi] Auto-marcados como elaborados: ${autoMarked} insumos`);
+    } catch (e) {
+      console.error('[syncFromMaxi] auto-mark elaborados error:', e.message);
+    }
+
+    // ── 5. Notificación de resumen ──
+    const changedCount = (summary.inserted || 0) + (summary.updated || 0);
+    if (changedCount > 0) {
+      await createSyncNotificationForBusinessUsers({
+        businessId,
+        type: 'sync_insumos',
+        title: 'Sincronización de insumos completada',
+        message: `Insertados: ${summary.inserted || 0}, Actualizados: ${summary.updated || 0}, Sin cambios: ${summary.unchanged || 0}.`,
+        metadata: { scope: 'insumos', source: 'maxi', inserted: summary.inserted || 0, updated: summary.updated || 0, unchanged: summary.unchanged || 0 },
+        actorUserId: userId,
+      }).catch(e => console.warn('[syncFromMaxi] notif error:', e.message));
+    }
+
+    // ── 6. Notificaciones por ítem (solo review) ──
+    for (const ch of summary.changes || []) {
+      const reviewDiffs = (ch.diffs || []).filter(d => d.policy === 'review');
+      if (!reviewDiffs.length) continue;
+      await createSyncNotificationForBusinessUsers({
+        businessId,
+        type: 'sync_insumos',
+        title: `Cambio en insumo ${ch.codigo_maxi} requiere revisión`,
+        message: reviewDiffs.map(d => `• ${d.field}: "${d.before ?? ''}" → "${d.after ?? ''}"`).join('\n'),
+        metadata: { scope: 'insumos', source: 'maxi', policy: 'review', insumo_id: ch.insumo_id, codigo_maxi: ch.codigo_maxi, diffs: reviewDiffs },
+        actorUserId: userId,
+      }).catch(() => {});
+    }
+
+    // ── 7. Auto-assign ──
+    let auto = { assigned: 0, details: [] };
+    try {
+      auto = await autoAssignNewInsumos(businessId);
+      if (auto.assigned > 0 && userId) {
+        await notifyAutoAssign({ businessId, userId, result: auto, entity: 'insumos' });
+      }
+    } catch (e) {
+      console.error('[syncFromMaxi] autoAssign error:', e.message);
+    }
+
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+
+    res.json({ ok: true, scope: 'insumos', ...summary, auto_assigned: auto.assigned });
+  } catch (e) {
+    console.error('syncFromMaxi error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+/* ── Rubros de insumos (para ABM) ── */
+exports.getRubrosInsumos = async (req, res, next) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'businessId requerido' });
+
+    const { rows } = await pool.query(
+      `SELECT rubro, COUNT(*)::int AS cantidad
+         FROM insumos
+        WHERE business_id = $1
+          AND rubro IS NOT NULL AND rubro != ''
+          AND estado = 'activo'
+        GROUP BY rubro
+        ORDER BY rubro ASC`,
+      [bizId]
+    );
+
+    return res.json({ ok: true, rubros: rows.map(r => ({ nombre: r.rubro, cantidad: r.cantidad })) });
+  } catch (e) { next(e); }
+};
+
+exports.listarRubrosMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    const maxiItems = await insumosRubrosRepo.listRubrosForBusiness(businessId);
+
+    const maxiRubroNames = new Set(maxiItems.map(r => (r.nombre || '').trim().toLowerCase()));
+
+    const { rows: manualRubros } = await pool.query(
+      `SELECT DISTINCT rubro AS nombre, BOOL_OR(es_elaborado) AS es_elaborador
+         FROM insumos
+        WHERE business_id = $1
+          AND rubro IS NOT NULL AND rubro != ''
+          AND estado = 'activo'
+        GROUP BY rubro
+        ORDER BY rubro ASC`,
+      [businessId]
+    );
+
+    const syntheticItems = manualRubros
+      .filter(r => !maxiRubroNames.has((r.nombre || '').trim().toLowerCase()))
+      .map((r, i) => ({
+        id: null,
+        codigo: `manual_${i}`,
+        nombre: r.nombre,
+        es_elaborador: r.es_elaborador === true,
+        activo: true,
+        origen: 'manual',
+      }));
+
+    const items = [...maxiItems, ...syntheticItems];
+    return res.json({ ok: true, business_id: businessId, items });
+  } catch (e) {
+    console.error('listarRubrosMaxi error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+/**
+ * syncRubrosFromMaxi — DB-FIRST
+ * Si MaxiRest no está disponible, responde con datos de DB sin error.
+ */
+exports.syncRubrosFromMaxi = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+
+    // ── 1. Intentar fetch de MaxiRest ──
+    let raw = [];
+    let maxiAvailable = true;
+    let maxiWarning = null;
+
+    try {
+      raw = await fetchMaxiInsumosRubros({ businessId, req });
+    } catch (fetchErr) {
+      maxiAvailable = false;
+      maxiWarning = `MaxiRest no disponible: ${fetchErr.message}`;
+      console.warn(`[syncRubrosFromMaxi] MaxiRest caído, usando DB: ${fetchErr.message}`);
+    }
+
+    // ── 2. Si MaxiRest no está disponible → responder con datos de DB ──
+    if (!maxiAvailable) {
+      const dbRubros = await insumosRubrosRepo.listRubrosForBusiness(businessId);
+      return res.json({
+        ok: true,
+        business_id: businessId,
+        fromCache: true,
+        warning: maxiWarning,
+        received: 0,
+        normalized: 0,
+        inserted: 0,
+        updated: 0,
+        total: dbRubros.length,
+        message: `Lazarillo funcionando con ${dbRubros.length} rubros locales — MaxiRest temporalmente no disponible`,
+      });
+    }
+
+    // ── 3. Upsert en DB ──
+    const norm = normalizarInsumosRubros(raw);
+    const summary = await insumosRubrosRepo.upsertRubrosForBusiness(businessId, norm);
+
+    // ── 4. Auto-marcar es_elaborado ──
+    try {
+      await pool.query(
+        `UPDATE insumos i
+            SET es_elaborado = true, updated_at = NOW()
+           FROM insumo_rubros ir
+          WHERE ir.business_id = i.business_id
+            AND ir.codigo::text = i.rubro
+            AND ir.es_elaborador = true
+            AND i.business_id = $1
+            AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
+            AND i.es_elaborado IS DISTINCT FROM true`,
+        [businessId]
+      );
+    } catch (e) {
+      console.error('[syncRubrosFromMaxi] auto-mark error:', e.message);
+    }
+
+    return res.json({
+      ok: true,
+      business_id: businessId,
+      received: raw.length,
+      normalized: norm.length,
+      ...summary,
+    });
+  } catch (e) {
+    console.error('syncRubrosFromMaxi error:', e);
+    const status = e.status || 500;
+    return res.status(status).json({ ok: false, error: e.message });
+  }
+};
+
+exports.syncDesdeCompras = async (req, res) => {
+  if (String(process.env.ENABLE_SYNC_COMPRAS || 'false').toLowerCase() !== 'true') {
+    return res.status(503).json({ ok: false, error: 'syncDesdeCompras deshabilitado' });
+  }
+  return res.status(501).json({ ok: false, error: 'No implementado' });
+};
+
 exports.__cleanupNullInsumos = async (req, res) => {
   const client = await pool.connect();
   try {
@@ -900,249 +1152,7 @@ exports.__cleanupNullInsumos = async (req, res) => {
   }
 };
 
-// ===================== INSUMOS: MAXI SYNC =====================
-exports.listarMaxi = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-
-    const { rows } = await pool.query(
-      `SELECT * FROM insumos WHERE business_id = $1 AND origen = 'maxi' ORDER BY nombre ASC`,
-      [businessId]
-    );
-
-    return res.json({ ok: true, business_id: businessId, items: rows });
-  } catch (e) {
-    console.error('listarMaxi error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-exports.syncFromMaxi = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    const userId = req.user?.id || null;
-
-    // 1️⃣ Fetch + normalización
-    const raw = await fetchMaxiInsumos({ businessId, req });
-    const normItems = normalizarInsumosMaxi(raw);
-
-    // 2️⃣ Upsert con detección de cambios
-    const summary = await upsertFromMaxi(businessId, normItems, { useIncomingEstado: true });
-
-    // 3️⃣ ✅ Auto-inicializar es_elaborado desde el rubro para insumos NO sobrescritos manualmente
-    //    Solo toca los que es_elaborado_manual = false/null
-    try {
-      const { rowCount: autoMarked } = await pool.query(
-        `
-        UPDATE insumos i
-        SET es_elaborado = true,
-            updated_at   = NOW()
-        FROM insumo_rubros ir
-        WHERE ir.business_id = i.business_id
-          AND ir.codigo::text = i.rubro
-          AND ir.es_elaborador = true
-          AND i.business_id = $1
-          AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
-          AND i.es_elaborado IS DISTINCT FROM true
-        `,
-        [businessId]
-      );
-
-      if (autoMarked > 0) {
-        console.log(`[syncFromMaxi] Auto-marcados como elaborados: ${autoMarked} insumos`);
-      }
-    } catch (e) {
-      console.error('[syncFromMaxi] auto-mark elaborados error:', e.message);
-    }
-
-    // 4️⃣ Notificación de resumen
-    const changedCount = (summary.inserted || 0) + (summary.updated || 0);
-    if (changedCount > 0) {
-      await createSyncNotificationForBusinessUsers({
-        businessId,
-        type: 'sync_insumos',
-        title: 'Sincronización de insumos completada',
-        message:
-          `Insertados: ${summary.inserted || 0}, ` +
-          `Actualizados: ${summary.updated || 0}, ` +
-          `Sin cambios: ${summary.unchanged || 0}.`,
-        metadata: {
-          scope: 'insumos', source: 'maxi',
-          inserted: summary.inserted || 0,
-          updated: summary.updated || 0,
-          unchanged: summary.unchanged || 0,
-        },
-        actorUserId: userId,
-      });
-    }
-
-    // 5️⃣ Notificaciones por ítem (solo si requiere revisión)
-    for (const ch of summary.changes || []) {
-      const reviewDiffs = (ch.diffs || []).filter(d => d.policy === 'review');
-      if (!reviewDiffs.length) continue;
-
-      await createSyncNotificationForBusinessUsers({
-        businessId,
-        type: 'sync_insumos',
-        title: `Cambio en insumo ${ch.codigo_maxi} requiere revisión`,
-        message: reviewDiffs
-          .map(d => `• ${d.field}: "${d.before ?? ''}" → "${d.after ?? ''}"`)
-          .join('\n'),
-        metadata: {
-          scope: 'insumos', source: 'maxi', policy: 'review',
-          insumo_id: ch.insumo_id,
-          codigo_maxi: ch.codigo_maxi,
-          diffs: reviewDiffs,
-        },
-        actorUserId: userId,
-      });
-    }
-
-    // 6️⃣ Auto-assign
-    let auto = { assigned: 0, details: [] };
-    try {
-      auto = await autoAssignNewInsumos(businessId);
-      if (auto.assigned > 0 && userId) {
-        await notifyAutoAssign({ businessId, userId, result: auto, entity: 'insumos' });
-      }
-    } catch (e) {
-      console.error('[syncFromMaxi] autoAssign error:', e.message);
-    }
-
-    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
-    invalidateCacheForBiz(businessId);
-
-    res.json({ ok: true, scope: 'insumos', ...summary, auto_assigned: auto.assigned });
-  } catch (e) {
-    console.error('syncFromMaxi error:', e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-/* ── Rubros de insumos del negocio (para ABM) ── */
-exports.getRubrosInsumos = async (req, res, next) => {
-  try {
-    const bizId = getBusinessId(req);
-    if (!bizId) return res.status(400).json({ ok: false, error: 'businessId requerido' });
-
-    const { rows } = await pool.query(
-      `SELECT rubro, COUNT(*)::int AS cantidad
-         FROM insumos
-        WHERE business_id = $1
-          AND rubro IS NOT NULL AND rubro != ''
-          AND estado = 'activo'
-        GROUP BY rubro
-        ORDER BY rubro ASC`,
-      [bizId]
-    );
-
-    return res.json({ ok: true, rubros: rows.map(r => ({ nombre: r.rubro, cantidad: r.cantidad })) });
-  } catch (e) { next(e); }
-};
-
-exports.listarRubrosMaxi = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-
-    // Rubros de Maxi (tabla insumo_rubros)
-    const maxiItems = await insumosRubrosRepo.listRubrosForBusiness(businessId);
-
-    // Rubros manuales: rubros que existen en insumos.rubro pero NO en insumo_rubros
-    // Necesario para negocios sin Maxi o insumos creados manualmente con rubro nuevo
-    const maxiRubroNames = new Set(maxiItems.map(r => (r.nombre || '').trim().toLowerCase()));
-
-    const { rows: manualRubros } = await pool.query(
-      `SELECT DISTINCT rubro AS nombre, BOOL_OR(es_elaborado) AS es_elaborador
-         FROM insumos
-        WHERE business_id = $1
-          AND rubro IS NOT NULL AND rubro != ''
-          AND estado = 'activo'
-        GROUP BY rubro
-        ORDER BY rubro ASC`,
-      [businessId]
-    );
-
-    // Agregar como items sintéticos los rubros manuales que no tienen entrada en insumo_rubros
-    const syntheticItems = manualRubros
-      .filter(r => !maxiRubroNames.has((r.nombre || '').trim().toLowerCase()))
-      .map((r, i) => ({
-        id: null,
-        codigo: `manual_${i}`,
-        nombre: r.nombre,
-        es_elaborador: r.es_elaborador === true,
-        activo: true,
-        origen: 'manual',
-      }));
-
-    const items = [...maxiItems, ...syntheticItems];
-    return res.json({ ok: true, business_id: businessId, items });
-  } catch (e) {
-    console.error('listarRubrosMaxi error:', e);
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-};
-
-exports.syncRubrosFromMaxi = async (req, res) => {
-  try {
-    const businessId = getBusinessId(req);
-    if (!businessId) {
-      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
-    }
-
-    const raw  = await fetchMaxiInsumosRubros({ businessId, req });
-    const norm = normalizarInsumosRubros(raw);
-    const summary = await insumosRubrosRepo.upsertRubrosForBusiness(businessId, norm);
-
-    // ✅ Después de actualizar rubros, re-inicializar es_elaborado para insumos
-    //    que no fueron sobrescritos manualmente y cuyo nuevo rubro es elaborador.
-    try {
-      await pool.query(
-        `
-        UPDATE insumos i
-        SET es_elaborado = true,
-            updated_at   = NOW()
-        FROM insumo_rubros ir
-        WHERE ir.business_id = i.business_id
-          AND ir.codigo::text = i.rubro
-          AND ir.es_elaborador = true
-          AND i.business_id = $1
-          AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
-          AND i.es_elaborado IS DISTINCT FROM true
-        `,
-        [businessId]
-      );
-    } catch (e) {
-      console.error('[syncRubrosFromMaxi] auto-mark error:', e.message);
-    }
-
-    return res.json({
-      ok: true,
-      business_id: businessId,
-      received: raw.length,
-      normalized: norm.length,
-      ...summary,
-    });
-  } catch (e) {
-    console.error('syncRubrosFromMaxi error:', e);
-    const status = e.status || 500;
-    return res.status(status).json({ ok: false, error: e.message });
-  }
-};
-
-exports.syncDesdeCompras = async (req, res) => {
-  if (String(process.env.ENABLE_SYNC_COMPRAS || 'false').toLowerCase() !== 'true') {
-    return res.status(503).json({ ok: false, error: 'syncDesdeCompras deshabilitado' });
-  }
-  return res.status(501).json({ ok: false, error: 'No implementado' });
-};
-
-// ===================== GROUPS: LISTAR =====================
+// ===================== GROUPS =====================
 exports.groups_list = async (req, res) => {
   console.log('🚀 [groups_list] Listando agrupaciones de insumos');
   const bizId = getBusinessId(req);
@@ -1184,7 +1194,6 @@ exports.groups_list = async (req, res) => {
   }
 };
 
-// ===================== GROUPS: OBTENER UNO =====================
 exports.groups_getOne = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -1225,12 +1234,11 @@ exports.groups_getOne = async (req, res) => {
   }
 };
 
-// ===================== GROUPS: CREAR / EDITAR / BORRAR =====================
 exports.groups_create = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const nombre     = String(req.body.nombre || '').trim();
+  const nombre      = String(req.body.nombre || '').trim();
   const descripcion = req.body.descripcion ?? null;
   if (!nombre) return sendError(res, 400, 'El nombre es obligatorio');
 
@@ -1309,7 +1317,6 @@ exports.groups_remove = async (req, res) => {
   }
 };
 
-// ===================== GROUPS: ITEMS =====================
 exports.groups_replaceItems = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -1432,7 +1439,6 @@ exports.groups_removeItem = async (req, res) => {
   }
 };
 
-// ===================== GROUPS: EXCLUSIONES =====================
 exports.groups_getExclusions = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
@@ -1519,7 +1525,6 @@ exports.groups_removeExclusions = async (req, res) => {
   }
 };
 
-// ===================== GROUPS: CREATE OR MOVE =====================
 exports.groups_createOrMove = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');

@@ -274,8 +274,23 @@ exports.syncNow = async (req, res) => {
 
   const client = await pool.connect();
   try {
-    const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
+    let token;
+    try {
+      const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
+    } catch (loginErr) {
+      // MaxiRest caído — responder con datos de DB
+      const { rows: cached } = await pool.query(
+        `SELECT COUNT(*)::int as total FROM public.maxi_articles WHERE business_id = $1`, [biz.id]
+      );
+      return res.json({
+        ok: true, business_id: biz.id, fromCache: true,
+        warning: `MaxiRest no disponible: ${loginErr.message}`,
+        upserted: 0, mapped: 0, auto_assigned: 0,
+        cached_articles: cached[0]?.total || 0,
+        message: 'Lazarillo funcionando con artículos locales — MaxiRest temporalmente no disponible',
+      });
+    }
     let upserted = 0;
     let mapped = 0;
     let cacheHash = null;
@@ -648,6 +663,9 @@ exports.salesSummaryFromDB = async (req, res, next) => {
 
     const fromYmd = String(from || '').slice(0, 10);
     const toYmd = String(to || '').slice(0, 10);
+
+    let salesBizId = biz.id;
+    let subArticleIds = null;
 
     if (!fromYmd || !toYmd) {
       return res.status(400).json({ ok: false, error: 'from_to_required' });
