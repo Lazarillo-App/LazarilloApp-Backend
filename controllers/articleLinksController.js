@@ -125,9 +125,9 @@ exports.createLinkGroup = async (req, res) => {
 
     // Crear el grupo
     const { rows: groupRows } = await client.query(
-      `INSERT INTO article_link_groups (business_id, name)
-       VALUES ($1, $2)
-       RETURNING id, name, sync_recipe, sync_objetivo, sync_precio`,
+      `INSERT INTO article_link_groups (business_id, name, sync_recipe, sync_objetivo, sync_precio)
+   VALUES ($1, $2, false, false, true)
+   RETURNING id, name, sync_recipe, sync_objetivo, sync_precio`,
       [bizId, name]
     );
     const group = groupRows[0];
@@ -467,15 +467,15 @@ exports.addMember = async (req, res) => {
   const bizId = getBusinessId(req);
   const groupId = Number(req.params.groupId);
   const articleId = Number(req.body?.articleId);
- 
+
   if (!Number.isFinite(bizId) || !Number.isFinite(groupId) || !Number.isFinite(articleId)) {
     return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
   }
- 
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
- 
+
     // Verificar que el grupo pertenece al negocio
     const { rows: groupRows } = await client.query(
       `SELECT id FROM article_link_groups WHERE id = $1 AND business_id = $2`,
@@ -485,7 +485,7 @@ exports.addMember = async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
     }
- 
+
     // Verificar que el artículo no esté ya en otro grupo
     const { rows: existing } = await client.query(
       `SELECT link_group_id FROM article_link_members WHERE article_id = $1 AND business_id = $2`,
@@ -499,7 +499,7 @@ exports.addMember = async (req, res) => {
         existingGroupId: Number(existing[0].link_group_id),
       });
     }
- 
+
     // Agregar el miembro
     await client.query(
       `INSERT INTO article_link_members (link_group_id, article_id, business_id)
@@ -507,7 +507,7 @@ exports.addMember = async (req, res) => {
        ON CONFLICT DO NOTHING`,
       [groupId, articleId, bizId]
     );
- 
+
     await client.query('COMMIT');
     return res.json({ ok: true, groupId, articleId });
   } catch (e) {

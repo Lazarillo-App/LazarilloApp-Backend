@@ -341,10 +341,6 @@ exports.savePriceConfig = async (req, res, next) => {
           propagatePrecioManual({ bizId, articleId: artId, precioManual: precioManualVal })
             .catch(e => console.warn('[savePriceConfig] propagatePrecioManual falló:', e.message));
         }
-        if (objetivoVal !== null) {
-          propagateObjetivo({ bizId, articleId: artId, objetivo: objetivoVal })
-            .catch(e => console.warn('[savePriceConfig] propagateObjetivo falló:', e.message));
-        }
       }
     }
 
