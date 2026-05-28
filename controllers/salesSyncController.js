@@ -517,35 +517,31 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     }
 
     const sql = `
-      SELECT
-        sdi.article_id AS codigo,
-        COALESCE(
-          NULLIF(TRIM(MAX(ma.nombre)), ''),
-          NULLIF(TRIM(MAX(aa.name)), ''),
-          'Artículo #' || sdi.article_id::text
-        ) AS nombre,
-        SUM(sdi.qty)::numeric    AS unidades,
-        SUM(sdi.amount)::numeric AS importe,
-        0   AS costo,
-        0   AS p_total,
-        0   AS neto,
-        NULL AS tipo_iva,
-        sdi.day::date AS fecha
-      FROM sales_daily_items sdi
-      LEFT JOIN maxi_articles ma
-        ON ma.business_id = sdi.business_id
-       AND ma.articulo_id = sdi.article_id
-      LEFT JOIN app_articles aa
-        ON aa.business_id = sdi.business_id
-       AND aa.id = sdi.article_id
-      WHERE sdi.business_id = $1
-        AND sdi.day BETWEEN $2::date AND $3::date
-        ${articleFilter}
-        ${groupFilter}
-        ${branchFilter}
-      GROUP BY sdi.day::date, sdi.article_id
-      ORDER BY sdi.day ASC, sdi.article_id ASC;
-    `;
+  SELECT
+    sdi.article_id AS codigo,
+    COALESCE(
+      NULLIF(TRIM(MAX(ma.nombre)), ''),
+      NULLIF(TRIM(MAX(aa.name)), ''),
+      'Artículo #' || sdi.article_id::text
+    ) AS nombre,
+    SUM(sdi.qty)::numeric    AS unidades,
+    SUM(sdi.amount)::numeric AS importe,
+    AVG(sdi.amount / NULLIF(sdi.qty, 0))::numeric AS precio_unitario
+  FROM sales_daily_items sdi
+  LEFT JOIN maxi_articles ma
+    ON ma.business_id = sdi.business_id
+   AND ma.articulo_id = sdi.article_id
+  LEFT JOIN app_articles aa
+    ON aa.business_id = sdi.business_id
+   AND aa.id = sdi.article_id
+  WHERE sdi.business_id = $1
+    AND sdi.day BETWEEN $2::date AND $3::date
+    ${articleFilter}
+    ${groupFilter}
+    ${branchFilter}
+  GROUP BY sdi.article_id
+  ORDER BY SUM(sdi.qty) DESC;
+`;
 
     const { rows } = await pool.query(sql, params);
 
@@ -561,25 +557,21 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     res.write(Buffer.from([0xEF, 0xBB, 0xBF]));
     res.write('sep=;\n');
 
-    const headers = ['codigo', 'nombre', 'unidades', 'importe', 'costo', 'p_total', 'neto', 'tipo_iva', 'fecha'];
+    const headers = ['codigo', 'nombre', 'cantidad_vendida', 'importe_total', 'precio_unitario'];
     res.write(headers.join(';') + '\n');
 
     for (const r of rows) {
       try {
-        const fecha = r.fecha instanceof Date
-          ? r.fecha.toISOString().slice(0, 10)
-          : String(r.fecha || '').slice(0, 10);
+        const precioUnitario = Number(r.unidades) > 0
+          ? (Number(r.importe) / Number(r.unidades)).toFixed(2)
+          : '0.00';
 
         const line = [
           csvEscape(r.codigo),
           csvEscape(r.nombre),
           csvEscape(Number(r.unidades || 0)),
           csvEscape(Number(r.importe || 0).toFixed(2)),
-          csvEscape(Number(r.costo || 0)),
-          csvEscape(Number(r.p_total || 0)),
-          csvEscape(Number(r.neto || 0)),
-          csvEscape(r.tipo_iva || ''),
-          csvEscape(fecha),
+          csvEscape(precioUnitario),
         ].join(';');
 
         res.write(line + '\n');
@@ -587,7 +579,6 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         console.error('[exportSalesCsv] error fila:', rowErr);
       }
     }
-
     return res.end();
   } catch (e) {
     console.error('[exportSalesCsv] error:', e);
