@@ -41,14 +41,13 @@ exports.getOrgPriceListConfig = async (req, res, next) => {
         if (!orgId) return res.status(400).json({ ok: false, error: 'orgId inválido' });
 
         const { rows } = await pool.query(
-            `SELECT list_number, alias, is_principal, discount_pct
-         FROM org_price_list_config
-        WHERE organization_id = $1
-        ORDER BY list_number ASC`,
+            `SELECT list_number, alias, is_principal, discount_pct, tipo
+   FROM org_price_list_config
+   WHERE organization_id = $1
+   ORDER BY list_number ASC`,
             [orgId]
         );
 
-        // Devolver las 4 listas siempre (con defaults si no existen)
         const config = [1, 2, 3, 4].map(n => {
             const found = rows.find(r => r.list_number === n);
             return {
@@ -56,6 +55,7 @@ exports.getOrgPriceListConfig = async (req, res, next) => {
                 alias: found?.alias ?? `Lista ${n}`,
                 isPrincipal: found?.is_principal ?? (n === 1),
                 discountPct: found?.discount_pct != null ? Number(found.discount_pct) : null,
+                tipo: found?.tipo ?? 'descuento',
             };
         });
 
@@ -68,7 +68,7 @@ exports.getOrgPriceListConfig = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/organizations/:orgId/price-lists/config
-// Body: { lists: [{ listNumber, alias, isPrincipal, discountPct }] }
+// Body: { lists: [{ listNumber, alias, isPrincipal, discountPct, tipo }] }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.saveOrgPriceListConfig = async (req, res, next) => {
     const client = await pool.connect();
@@ -100,8 +100,9 @@ exports.saveOrgPriceListConfig = async (req, res, next) => {
            alias        = EXCLUDED.alias,
            is_principal = EXCLUDED.is_principal,
            discount_pct = EXCLUDED.discount_pct,
+           tipo         = EXCLUDED.tipo,
            updated_at   = NOW()`,
-                [orgId, n, l.alias || `Lista ${n}`, !!l.isPrincipal, l.discountPct ?? null]
+                [orgId, n, l.alias || `Lista ${n}`, !!l.isPrincipal, l.discountPct ?? null, l.tipo ?? 'descuento']
             );
         }
 
@@ -250,11 +251,20 @@ exports.getBusinessPrices = async (req, res, next) => {
 exports.getDiscountExceptions = async (req, res, next) => {
     try {
         const orgId = Number(req.params.orgId);
-        if (!orgId) return res.status(400).json({ ok: false, error: 'orgId inválido' });
+        const listNumber = req.query.list_number ? Number(req.query.list_number) : null;
+
+        const params = [orgId];
+        let filter = '';
+        if (listNumber) {
+            params.push(listNumber);
+            filter = `AND list_number = $${params.length}`;
+        }
 
         const { rows } = await pool.query(
-            `SELECT scope, scope_id FROM price_list_discount_exceptions WHERE organization_id = $1`,
-            [orgId]
+            `SELECT scope, scope_id, list_number 
+       FROM price_list_discount_exceptions 
+       WHERE organization_id = $1 ${filter}`,
+            params
         );
         return res.json({ ok: true, exceptions: rows });
     } catch (e) { next(e); }
@@ -263,17 +273,16 @@ exports.getDiscountExceptions = async (req, res, next) => {
 exports.addDiscountException = async (req, res, next) => {
     try {
         const orgId = Number(req.params.orgId);
-        const { scope, scopeId } = req.body || {};
-
+        const { scope, scopeId, listNumber } = req.body || {};
         if (!orgId || !scope || !scopeId) {
             return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
         }
-
         await pool.query(
-            `INSERT INTO price_list_discount_exceptions (organization_id, scope, scope_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (organization_id, scope, scope_id) DO NOTHING`,
-            [orgId, scope, String(scopeId)]
+            `INSERT INTO price_list_discount_exceptions 
+         (organization_id, scope, scope_id, list_number)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (organization_id, list_number, scope, scope_id) DO NOTHING`,
+            [orgId, scope, String(scopeId), listNumber ?? null]
         );
         return res.json({ ok: true });
     } catch (e) { next(e); }
@@ -282,16 +291,20 @@ exports.addDiscountException = async (req, res, next) => {
 exports.removeDiscountException = async (req, res, next) => {
     try {
         const orgId = Number(req.params.orgId);
-        const { scope, scopeId } = req.body || {};
-
+        const { scope, scopeId, listNumber } = req.body || {};
         if (!orgId || !scope || !scopeId) {
             return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
         }
-
+        const params = [orgId, scope, String(scopeId)];
+        let listFilter = 'AND list_number IS NULL';
+        if (listNumber != null) {
+            params.push(listNumber);
+            listFilter = `AND list_number = $${params.length}`;
+        }
         await pool.query(
             `DELETE FROM price_list_discount_exceptions
-        WHERE organization_id = $1 AND scope = $2 AND scope_id = $3`,
-            [orgId, scope, String(scopeId)]
+       WHERE organization_id = $1 AND scope = $2 AND scope_id = $3 ${listFilter}`,
+            params
         );
         return res.json({ ok: true });
     } catch (e) { next(e); }
