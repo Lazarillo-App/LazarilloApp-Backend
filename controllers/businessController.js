@@ -1011,13 +1011,16 @@ exports.listMine = async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
     const { rows } = await pool.query(`
-      SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, 
-             b.organization_id, b.created_from, b.created_at  -- ← agregar organization_id y created_from
-      FROM app_businesses b
-      LEFT JOIN user_businesses ub ON ub.business_id = b.id
-      WHERE (ub.user_id = $1 OR b.owner_id = $1)
-      ORDER BY b.created_at ASC;
-    `, [uid]);
+  SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, 
+         b.organization_id, b.created_from, b.created_at,
+         o.name AS organization_name  -- ← agregar
+  FROM app_businesses b
+  LEFT JOIN user_businesses ub ON ub.business_id = b.id
+  LEFT JOIN organizations o ON o.id = b.organization_id  -- ← join
+  WHERE (ub.user_id = $1 OR b.owner_id = $1)
+  ORDER BY b.created_at ASC;
+`, [uid]);
+
 
     res.json({ items: rows.map(attachBranding) });
   } catch (e) {
