@@ -30,4 +30,6 @@ router.post('/:businessId/article-price-config', ctrl.savePriceConfig);
 // Body: { scope, scopeId }
 router.delete('/:businessId/article-price-config', ctrl.deletePriceConfig);
 
+router.post('/:businessId/article-price-config/bulk', ctrl.bulkSavePriceConfig);
+
 module.exports = router;

@@ -461,3 +461,57 @@ exports.getRecetasAlertas = async (req, res, next) => {
     next(e);
   }
 };
+
+exports.bulkSavePriceConfig = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const bizId = Number(req.params.businessId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+    const { updates = [], deletes = [] } = req.body || {};
+
+    await client.query('BEGIN');
+
+    // Guardar precios manuales
+    for (const { artId, precioManual } of updates) {
+      const id = Number(artId);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      await client.query(
+        `INSERT INTO article_price_config
+           (business_id, scope, scope_id, precio_manual, updated_at)
+         VALUES ($1, 'articulo', $2, $3, NOW())
+         ON CONFLICT (business_id, scope, scope_id)
+         DO UPDATE SET precio_manual = EXCLUDED.precio_manual, updated_at = NOW()`,
+        [bizId, String(id), Number(precioManual)]
+      );
+    }
+
+    // Borrar precios manuales
+    for (const { artId } of deletes) {
+      const id = Number(artId);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      await client.query(
+        `UPDATE article_price_config
+           SET precio_manual = NULL, updated_at = NOW()
+         WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2`,
+        [bizId, String(id)]
+      );
+      // Limpiar filas vacías
+      await client.query(
+        `DELETE FROM article_price_config
+         WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2
+           AND objetivo_pct IS NULL AND precio_manual IS NULL`,
+        [bizId, String(id)]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, updated: updates.length, deleted: deletes.length });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[bulkSavePriceConfig]', e);
+    next(e);
+  } finally {
+    client.release();
+  }
+};
