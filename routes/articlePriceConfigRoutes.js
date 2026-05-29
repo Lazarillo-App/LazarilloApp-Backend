@@ -30,6 +30,8 @@ router.post('/:businessId/article-price-config', ctrl.savePriceConfig);
 // Body: { scope, scopeId }
 router.delete('/:businessId/article-price-config', ctrl.deletePriceConfig);
 
+// POST /api/businesses/:businessId/article-price-config/bulk
+// Body: { configs: [ { scope, scopeId, objetivo?, precioManual?, articleIds? } ] }
 router.post('/:businessId/article-price-config/bulk', ctrl.bulkSavePriceConfig);
 
 module.exports = router;

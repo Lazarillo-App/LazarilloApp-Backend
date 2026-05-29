@@ -329,13 +329,14 @@ router.get('/:id/config', async (req, res, next) => {
     res.json({
       ok: true,
       config: {
-        articulos_costo_ideal:  Number(props.articulos_costo_ideal  ?? 30),
-        insumos_costo_ideal:    Number(props.insumos_costo_ideal    ?? 30),
+        articulos_costo_ideal: Number(props.articulos_costo_ideal ?? 30),
+        insumos_costo_ideal: Number(props.insumos_costo_ideal ?? 30),
         compras_alerta_semanas: Number(props.compras_alerta_semanas ?? 4),
-        ventas_alerta_dias:     Number(props.ventas_alerta_dias     ?? 30),
-        precio_costeo_insumos:  props.precio_costeo_insumos          || 'ultima_compra',
-        redondeo_precios:       props.redondeo_precios               ?? null,
-        divisa:                 props.divisa                         || 'ARS',
+        ventas_alerta_dias: Number(props.ventas_alerta_dias ?? 30),
+        precio_costeo_insumos: props.precio_costeo_insumos || 'ultima_compra',
+        redondeo_precios: props.redondeo_precios ?? null,
+        redondeo_mostrar_modal: props.redondeo_mostrar_modal ?? true,
+        divisa: props.divisa || 'ARS',
       },
     });
   } catch (e) { next(e); }
@@ -343,7 +344,7 @@ router.get('/:id/config', async (req, res, next) => {
 
 /* ───────── Import CSV de insumos (alias para UploadInsumosModal) ───────── */
 const multerInsumos = require('multer')({ storage: require('multer').memoryStorage() });
-const insumosCtrl   = require('../controllers/insumosController');
+const insumosCtrl = require('../controllers/insumosController');
 
 // El front llama a /businesses/:id/insumos/import-csv — lo redirigimos al controller
 router.post(
@@ -421,9 +422,9 @@ router.get('/:id/rubros', ensureFn('artABM.getRubros', artABM.getRubros));
 router.get('/:id/articles/sin-equivalencia', ensureFn('artABM.listSinEquivalencia', artABM.listSinEquivalencia));
 
 // Lotes de artículos importados manualmente
-router.get('/:id/articles/batches',                    ensureFn('artABM.listBatchesArticulos',   artABM.listBatchesArticulos));
-router.get('/:id/articles/batches/:batchId/preview',   ensureFn('artABM.previewBatchArticulos',  artABM.previewBatchArticulos));
-router.delete('/:id/articles/batches/:batchId',        ensureFn('artABM.deleteBatchArticulos',   artABM.deleteBatchArticulos));
+router.get('/:id/articles/batches', ensureFn('artABM.listBatchesArticulos', artABM.listBatchesArticulos));
+router.get('/:id/articles/batches/:batchId/preview', ensureFn('artABM.previewBatchArticulos', artABM.previewBatchArticulos));
+router.delete('/:id/articles/batches/:batchId', ensureFn('artABM.deleteBatchArticulos', artABM.deleteBatchArticulos));
 
 // Alta manual de artículo
 router.post('/:id/articles/manual', ensureFn('artABM.crearArticulo', artABM.crearArticulo));
