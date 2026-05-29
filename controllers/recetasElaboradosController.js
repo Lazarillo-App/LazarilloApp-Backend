@@ -31,25 +31,16 @@ exports.getRecetaElaborado = async (req, res, next) => {
 
     const { rows: items } = await pool.query(
       `SELECT
-         ri.id,
-         ri.receta_id,
+         ri.id, ri.receta_id,
          COALESCE(ri.insumo_id, ri.supply_id)                    AS supply_id,
          COALESCE(i.nombre, ri.nombre_insumo_maxi)               AS supply_nombre,
          COALESCE(i.unidad_med, ri.unidad)                       AS supply_medida,
          COALESCE(i.precio_ref, 0)                               AS precio_ref_db,
-         ri.cantidad,
-         ri.unidad,
-         ri.costo_unitario,
+         ri.cantidad, ri.unidad, ri.costo_unitario,
          ROUND(ri.cantidad * ri.costo_unitario, 4)               AS costo_total_item,
-         ri.notas,
-         ri.observaciones,
-         ri.fotos_urls,
-         ri.merma,
-         ri.pedido,
-         ri.tipo_costo,
-         ri.orden,
-         ri.codigo_maxi_insumo,
-         ri.nombre_insumo_maxi
+         ri.notas, ri.observaciones, ri.fotos_urls,
+         ri.merma, ri.pedido, ri.tipo_costo, ri.orden,
+         ri.codigo_maxi_insumo, ri.nombre_insumo_maxi
        FROM receta_items ri
        LEFT JOIN insumos i ON i.id = ri.insumo_id
       WHERE ri.receta_id = $1
@@ -57,7 +48,7 @@ exports.getRecetaElaborado = async (req, res, next) => {
       [receta.id]
     );
 
-    // Incluir config del negocio para que el front sepa el % objetivo global de insumos
+    // ← primero cargar insumosConfigObjetivo
     let insumosConfigObjetivo = 30;
     try {
       const { rows: bizRows } = await pool.query(
@@ -68,10 +59,18 @@ exports.getRecetaElaborado = async (req, res, next) => {
       }
     } catch { /* no crítico */ }
 
+    // ← después calcular precio sugerido
+    const costoXPorcion = Number(receta.costo_total) / (Number(receta.porciones) || 1);
+    const pctVenta = Number(receta.porcentaje_venta) || insumosConfigObjetivo;
+    const precioSugerido = pctVenta > 0 ? costoXPorcion / (pctVenta / 100) : 0;
+
     return res.json({
       ok: true,
       receta: { ...receta, items },
       insumos_costo_ideal: insumosConfigObjetivo,
+      precio_sugerido: precioSugerido,
+      costo_por_porcion: costoXPorcion,
+      porciones: Number(receta.porciones),
     });
   } catch (e) {
     console.error('[getRecetaElaborado]', e);
@@ -133,7 +132,7 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
-    const porcionesNum  = Math.max(1, Number(porciones) || 1);
+    const porcionesNum = Math.max(1, Number(porciones) || 1);
     const costoXPorcion = costoTotal / porcionesNum;
 
     // Si no viene porcentajeVenta, usar el global de insumos del negocio
@@ -349,8 +348,8 @@ exports.getRecetasElaboradosMapa = async (req, res, next) => {
     const mapa = {};
     rows.forEach(r => {
       mapa[String(r.insumo_id)] = {
-        costoTotal:     Number(r.costo_total),
-        porciones:      Number(r.porciones),
+        costoTotal: Number(r.costo_total),
+        porciones: Number(r.porciones),
         precioSugerido: Number(r.precio_sugerido),
         porcentajeVenta: Number(r.porcentaje_venta),
       };
