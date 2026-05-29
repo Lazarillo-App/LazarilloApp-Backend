@@ -1004,3 +1004,24 @@ exports.saveMaxiCredentials = async (req, res, next) => {
     next(e);
   }
 };
+
+exports.listMine = async (req, res) => {
+  try {
+    const uid = req.user?.id;
+    if (!uid) return res.status(401).json({ error: 'unauthorized' });
+
+    const { rows } = await pool.query(`
+      SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, 
+             b.organization_id, b.created_from, b.created_at  -- ← agregar organization_id y created_from
+      FROM app_businesses b
+      LEFT JOIN user_businesses ub ON ub.business_id = b.id
+      WHERE (ub.user_id = $1 OR b.owner_id = $1)
+      ORDER BY b.created_at ASC;
+    `, [uid]);
+
+    res.json({ items: rows.map(attachBranding) });
+  } catch (e) {
+    console.error('GET /api/businesses error:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
