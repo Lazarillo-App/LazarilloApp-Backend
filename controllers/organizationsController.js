@@ -61,7 +61,7 @@ exports.getMyOrganization = async (req, res, next) => {
        GROUP BY o.id
        -- Si tiene múltiples orgs, tomar la más reciente
        ORDER BY o.created_at DESC
-       LIMIT 1`,
+       LIMIT 5`,
       [uid]
     );
 
