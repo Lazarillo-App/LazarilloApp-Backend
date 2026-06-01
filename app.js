@@ -167,7 +167,10 @@ app.use('/api/businesses/:businessId/sync', syncRoutes);
 
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
-app.use('/api/businesses/:businessId/articles/:articleId/receta', recetasRoutes);
+app.use('/api/businesses/:businessId/articles/:articleId/receta', (req, res, next) => {
+  console.log('[recetasMount]', req.method, req.path, req.params);
+  next();
+}, recetasRoutes);
 const { getRecetasElaboradosMapa } = require('./controllers/recetasElaboradosController');
 app.use('/api/businesses/:businessId/recetas-elaborados', authRequired, getRecetasElaboradosMapa);
 app.use('/api/businesses/:businessId/insumos/:insumoId/receta', recetasElaboradosRoutes);
