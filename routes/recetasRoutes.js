@@ -28,6 +28,7 @@ router.post('/propagate', async (req, res, next) => {
   try {
     const bizId     = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
+    console.log('[propagate] bizId:', bizId, 'articleId:', articleId);
 
     // Leer receta + items guardados
     const { rows } = await pool.query(
@@ -56,6 +57,7 @@ router.post('/propagate', async (req, res, next) => {
         GROUP BY r.id`,
       [articleId, bizId]
     );
+     console.log('[propagate] rows encontradas:', rows.length);
 
     if (!rows.length) {
       return res.status(404).json({ ok: false, error: 'Receta no encontrada' });
