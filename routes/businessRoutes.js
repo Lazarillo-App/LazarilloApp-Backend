@@ -418,8 +418,43 @@ const artABM = require('../controllers/articulosABMController');
 // Rubros/categorías del negocio (para formulario de alta)
 router.get('/:id/rubros', ensureFn('artABM.getRubros', artABM.getRubros));
 
-// Artículos: sin-equivalencia debe ir ANTES de /:id/articles/:articleId
+// Artículos: sin-equivalencia (para detectar qué falta mapear)
 router.get('/:id/articles/sin-equivalencia', ensureFn('artABM.listSinEquivalencia', artABM.listSinEquivalencia));
+
+router.get('/:id/articles/sin-equivalencia', ensureFn('artABM.listSinEquivalencia', artABM.listSinEquivalencia));
+
+// ← agregar acá
+router.get('/:id/articles/search', async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.id);
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json({ items: [] });
+
+    const pool = require('../config/db');
+    const { rows } = await pool.query(
+      `SELECT 
+         ma.articulo_id AS id,
+         ma.nombre,
+         ma.precio,
+         EXISTS(
+           SELECT 1 FROM recetas r 
+           WHERE r.article_id = ma.articulo_id 
+             AND r.business_id = $1 
+             AND r.active = TRUE
+         ) AS tiene_receta
+       FROM maxi_articles ma
+       WHERE ma.business_id = $1
+         AND (
+           ma.nombre ILIKE $2
+           OR ma.articulo_id::text LIKE $3
+         )
+       ORDER BY ma.nombre
+       LIMIT 20`,
+      [bizId, `%${q}%`, `${q}%`]
+    );
+    return res.json({ items: rows });
+  } catch (e) { next(e); }
+});
 
 // Lotes de artículos importados manualmente
 router.get('/:id/articles/batches', ensureFn('artABM.listBatchesArticulos', artABM.listBatchesArticulos));
