@@ -464,7 +464,9 @@ exports.getLinkByArticle = async (req, res) => {
 // Body: { articleId: number }
 // Agrega un artículo a un grupo existente
 exports.addMember = async (req, res) => {
+  console.log('[addMember] params:', req.params, 'body:', req.body);
   const bizId = getBusinessId(req);
+  console.log('[addMember] bizId:', bizId);
   const groupId = Number(req.params.groupId);
   const articleId = Number(req.body?.articleId);
 
