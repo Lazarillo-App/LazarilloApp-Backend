@@ -93,15 +93,15 @@ exports.saveOrgPriceListConfig = async (req, res, next) => {
 
             await client.query(
                 `INSERT INTO org_price_list_config
-           (organization_id, list_number, alias, is_principal, discount_pct, updated_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
-         ON CONFLICT (organization_id, list_number)
-         DO UPDATE SET
-           alias        = EXCLUDED.alias,
-           is_principal = EXCLUDED.is_principal,
-           discount_pct = EXCLUDED.discount_pct,
-           tipo         = EXCLUDED.tipo,
-           updated_at   = NOW()`,
+     (organization_id, list_number, alias, is_principal, discount_pct, tipo, updated_at)
+   VALUES ($1, $2, $3, $4, $5, $6, NOW())
+   ON CONFLICT (organization_id, list_number)
+   DO UPDATE SET
+     alias        = EXCLUDED.alias,
+     is_principal = EXCLUDED.is_principal,
+     discount_pct = EXCLUDED.discount_pct,
+     tipo         = EXCLUDED.tipo,
+     updated_at   = NOW()`,
                 [orgId, n, l.alias || `Lista ${n}`, !!l.isPrincipal, l.discountPct ?? null, l.tipo ?? 'descuento']
             );
         }
