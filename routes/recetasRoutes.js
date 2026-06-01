@@ -8,6 +8,10 @@ const router  = express.Router({ mergeParams: true }); // mergeParams para hered
 const ctrl    = require('../controllers/recetasController');
 const { authRequired }           = require('../middleware/authMiddleware');
 const { getLinkSiblings } = require('../services/linkPropagation');
+router.use((req, res, next) => {
+  console.log('[recetasRoutes] hit:', req.method, req.path, req.params);
+  next();
+});
 
 router.use(authRequired);
 
