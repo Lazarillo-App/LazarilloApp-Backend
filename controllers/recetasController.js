@@ -277,3 +277,48 @@ exports.deleteReceta = async (req, res, next) => {
     next(e);
   }
 };
+
+exports.propagateReceta = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const articleId = Number(req.params.articleId);
+
+    if (!bizId || !articleId) {
+      return res.status(400).json({ ok: false, error: 'invalid_params' });
+    }
+
+    // Obtener receta existente con sus items
+    const { rows: recetaRows } = await pool.query(
+      `SELECT r.* FROM recetas r
+       WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE
+       LIMIT 1`,
+      [articleId, bizId]
+    );
+
+    if (!recetaRows.length) {
+      return res.json({ ok: true, propagated: 0, reason: 'no_receta' });
+    }
+
+    const receta = recetaRows[0];
+
+    const { rows: itemRows } = await pool.query(
+      `SELECT ri.*, i.nombre AS supply_nombre, i.unidad_med AS supply_medida
+       FROM receta_items ri
+       LEFT JOIN insumos i ON i.id = ri.insumo_id
+       WHERE ri.receta_id = $1`,
+      [receta.id]
+    );
+
+    const result = await propagateRecipe({ 
+      bizId, 
+      articleId, 
+      receta, 
+      savedItems: itemRows 
+    });
+
+    return res.json({ ok: true, propagated: result?.count || 0 });
+  } catch (e) {
+    console.error('[propagateReceta]', e);
+    next(e);
+  }
+};
