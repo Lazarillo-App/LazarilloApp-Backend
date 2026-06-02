@@ -78,7 +78,7 @@ exports.getPriceConfig = async (req, res, next) => {
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const { rows } = await pool.query(
-      `SELECT scope, scope_id, objetivo_pct, precio_manual
+      `SELECT scope, scope_id, objetivo_pct, precio_manual, ultimo_pct
          FROM article_price_config
         WHERE business_id = $1`,
       [bizId]
@@ -92,6 +92,7 @@ exports.getPriceConfig = async (req, res, next) => {
       const entry = {
         objetivo: r.objetivo_pct != null ? Number(r.objetivo_pct) : null,
         precioManual: r.precio_manual != null ? Number(r.precio_manual) : null,
+        ultimoPct: r.ultimo_pct != null ? Number(r.ultimo_pct) : null,
       };
       if (r.scope === 'articulo') {
         byArticle[String(r.scope_id)] = entry;
@@ -137,8 +138,9 @@ exports.savePriceConfig = async (req, res, next) => {
       precioManual,
       articleIds,
       pisarTodo = false,
-      excluirIds = [],   // ← NUEVO: IDs a excluir cuando el usuario eligió "respetar individuales"
-      nuevoGlobal,       // ← NUEVO: valor del nuevo global (solo para scope='global')
+      excluirIds = [],
+      nuevoGlobal,
+      ultimoPct,
     } = req.body || {};
 
     // ── Caso especial: scope='global' con pisarTodo=true ─────────────────────
@@ -163,7 +165,8 @@ exports.savePriceConfig = async (req, res, next) => {
           `DELETE FROM article_price_config
            WHERE business_id = $1
              AND objetivo_pct IS NULL
-             AND precio_manual IS NULL`,
+             AND precio_manual IS NULL
+             AND ultimo_pct IS NULL`,
           [bizId]
         );
 
@@ -190,25 +193,29 @@ exports.savePriceConfig = async (req, res, next) => {
     const objetivoVal = objetivo != null ? Number(objetivo) : null;
     const precioManualVal = precioManual != null ? Number(precioManual) : null;
     const scopeIdStr = String(scopeId).trim();
+    const ultimoPctVal = ultimoPct != null ? Number(ultimoPct) : null;
 
     await client.query('BEGIN');
 
     // ── Upsert del registro principal (scope + scopeId) ──────────────────────
-    if (objetivoVal !== null || precioManualVal !== null) {
+    if (objetivoVal !== null || precioManualVal !== null || ultimoPctVal !== null) {
       await client.query(
         `INSERT INTO article_price_config
-           (business_id, scope, scope_id, objetivo_pct, precio_manual, updated_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
-         ON CONFLICT (business_id, scope, scope_id)
-         DO UPDATE SET
-           objetivo_pct  = CASE WHEN $4::numeric IS NOT NULL
-                           THEN EXCLUDED.objetivo_pct
-                           ELSE article_price_config.objetivo_pct END,
-           precio_manual = CASE WHEN $5::numeric IS NOT NULL
-                           THEN EXCLUDED.precio_manual
-                           ELSE article_price_config.precio_manual END,
-           updated_at    = NOW()`,
-        [bizId, scope, scopeIdStr, objetivoVal, precioManualVal]
+       (business_id, scope, scope_id, objetivo_pct, precio_manual, ultimo_pct, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (business_id, scope, scope_id)
+     DO UPDATE SET
+       objetivo_pct  = CASE WHEN $4::numeric IS NOT NULL
+                       THEN EXCLUDED.objetivo_pct
+                       ELSE article_price_config.objetivo_pct END,
+       precio_manual = CASE WHEN $5::numeric IS NOT NULL
+                       THEN EXCLUDED.precio_manual
+                       ELSE article_price_config.precio_manual END,
+       ultimo_pct    = CASE WHEN $6::numeric IS NOT NULL
+                       THEN EXCLUDED.ultimo_pct
+                       ELSE article_price_config.ultimo_pct END,
+       updated_at    = NOW()`,
+        [bizId, scope, scopeIdStr, objetivoVal, precioManualVal, ultimoPctVal]
       );
     } else if (objetivo === null && precioManual === null) {
       // Borrar selectivamente según qué keys vinieron en el body

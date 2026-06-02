@@ -354,13 +354,12 @@ exports.remove = async (req, res) => {
       return res.status(404).json({ error: 'not_found' });
     }
 
-    // ✅ Restaurar agrupaciones que apuntaban a este subnegocio
-    // Las agrupaciones del principal con moved_to_business_id = bizId vuelven a ser visibles
+    // ✅ Eliminar las agrupaciones que estaban movidas a este subnegocio
+    // Los artículos quedan huérfanos y vuelven automáticamente a "Sin Agrupación"
+    // (no se restauran porque eran agrupaciones propias del subnegocio)
     await client.query(
-      `UPDATE agrupaciones
-       SET moved_to_business_id = NULL,
-           updated_at = NOW()
-       WHERE moved_to_business_id = $1`,
+      `DELETE FROM agrupaciones
+   WHERE moved_to_business_id = $1`,
       [bizId]
     );
 
