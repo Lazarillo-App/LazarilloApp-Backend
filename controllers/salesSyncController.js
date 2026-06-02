@@ -544,65 +544,45 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
     const { rows } = await pool.query(sql, params);
 
-    // ── Construir worksheet ────────────────────────────────────────────────
-    const wsData = [
-      ['Código', 'Nombre', 'Cantidad vendida', 'Importe total', 'Precio unitario'],
-      ...rows.map(r => {
-        const unidades = Number(r.unidades || 0);
-        const importe = Number(r.importe || 0);
-        const precioUnit = unidades > 0 ? importe / unidades : 0;
-        return [
-          Number(r.codigo) || r.codigo,
-          r.nombre || '',
-          unidades,
-          importe,
-          precioUnit,
-        ];
-      }),
-    ];
-
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-
-    // Formato moneda en columnas D (importe) y E (precio unitario)
-    // "$"#,##0.00 → muestra "$ 1.234,56" en Excel con locale es-AR
-    const range = XLSX.utils.decode_range(ws['!ref']);
-    for (let R = 1; R <= range.e.r; ++R) {
-      const cellD = XLSX.utils.encode_cell({ r: R, c: 3 });
-      const cellE = XLSX.utils.encode_cell({ r: R, c: 4 });
-      if (ws[cellD]) { ws[cellD].t = 'n'; ws[cellD].z = '"$"#,##0.00'; }
-      if (ws[cellE]) { ws[cellE].t = 'n'; ws[cellE].z = '"$"#,##0.00'; }
-    }
-
-    // Anchos de columna
-    ws['!cols'] = [
-      { wch: 10 },  // Código
-      { wch: 45 },  // Nombre
-      { wch: 18 },  // Cantidad
-      { wch: 18 },  // Importe
-      { wch: 18 },  // Precio unitario
-    ];
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Ventas');
-
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-
     const branchSuffix = rawBranchId ? `_suc${rawBranchId}` : '';
     const listSuffix = article_ids ? '_lista' : '';
 
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.xlsx"`
+      `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.csv"`
     );
-    return res.send(buf);
+    // BOM UTF-8 para que Excel reconozca los acentos
+    res.write(Buffer.from([0xEF, 0xBB, 0xBF]));
+
+    // Headers (separador estándar coma)
+    const headers = ['codigo', 'nombre', 'cantidad_vendida', 'importe_total', 'precio_unitario'];
+    res.write(headers.join(',') + '\n');
+
+    for (const r of rows) {
+      try {
+        const unidades = Number(r.unidades || 0);
+        const importe = Number(r.importe || 0);
+        const precioUnit = unidades > 0 ? (importe / unidades) : 0;
+
+        const line = [
+          csvEscape(r.codigo),
+          csvEscape(r.nombre),
+          unidades.toFixed(2),
+          importe.toFixed(2),
+          precioUnit.toFixed(2),
+        ].join(',');
+
+        res.write(line + '\n');
+      } catch (rowErr) {
+        console.error('[exportSalesCsv] error fila:', rowErr);
+      }
+    }
+    return res.end();
   } catch (e) {
     console.error('[exportSalesCsv] error:', e);
     res.status(500).json({
-      error: 'Error exportando Excel',
+      error: 'Error exportando CSV',
       detail: e?.message || String(e),
     });
   }
