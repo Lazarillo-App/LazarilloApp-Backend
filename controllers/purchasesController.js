@@ -341,12 +341,17 @@ exports.exportCsv = async (req, res, next) => {
     const lines = [
       headers.join(','),
       ...rows.map((r) => [
-        r.fecha ? String(r.fecha).slice(0, 10) : '',
-        r.factura, r.sucursal, r.proveedor, r.codigo_maxi,
-        r.insumo, r.unidad, r.cantidad,
-        r.precio_unit != null ? Number(r.precio_unit).toFixed(4) : '',
-        r.total_neto,
-      ].map(esc).join(',')),
+        esc(r.fecha ? String(r.fecha).slice(0, 10) : ''),
+        esc(r.factura),
+        esc(r.sucursal),
+        esc(r.proveedor),
+        esc(r.codigo_maxi),
+        esc(r.insumo),
+        esc(r.unidad),
+        Number(r.cantidad || 0).toFixed(2),
+        Number(r.precio_unit || 0).toFixed(2),
+        Number(r.total_neto || 0).toFixed(2),
+      ].join(',')),
     ];
 
     const { from, to } = req.query;
