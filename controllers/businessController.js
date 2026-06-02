@@ -345,24 +345,30 @@ exports.remove = async (req, res) => {
       [uid, bizId]
     );
 
+    // ✅ ANTES de eliminar el negocio:
+    // Eliminar las agrupaciones que estaban movidas a este subnegocio.
+    // El FK tiene ON DELETE SET NULL, así que si dejamos que se ejecute el
+    // DELETE del negocio, esas agrupaciones quedarían con moved_to_business_id=NULL
+    // y volverían a aparecer en el principal. Por eso las borramos primero.
+    const delAgrupaciones = await client.query(
+      `DELETE FROM agrupaciones
+       WHERE moved_to_business_id = $1
+       RETURNING id, nombre`,
+      [bizId]
+    );
+    console.log(`[remove biz=${bizId}] eliminadas ${delAgrupaciones.rowCount} agrupaciones movidas:`,
+      delAgrupaciones.rows.map(r => r.nombre));
+
+    // Ahora sí, eliminar el negocio
+    // (las agrupaciones con business_id = bizId se borran por ON DELETE CASCADE)
     const del = await client.query(
       `DELETE FROM app_businesses WHERE id=$1 AND owner_id=$2`,
       [bizId, uid]
     );
-    
     if (del.rowCount === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'not_found' });
     }
-
-    // ✅ Eliminar las agrupaciones que estaban movidas a este subnegocio
-    // Los artículos quedan huérfanos y vuelven automáticamente a "Sin Agrupación"
-    // (no se restauran porque eran agrupaciones propias del subnegocio)
-    await client.query(
-      `DELETE FROM agrupaciones
-   WHERE moved_to_business_id = $1`,
-      [bizId]
-    );
 
     await client.query('COMMIT');
     res.status(204).end();
