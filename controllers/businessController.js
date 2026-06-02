@@ -349,6 +349,7 @@ exports.remove = async (req, res) => {
       `DELETE FROM app_businesses WHERE id=$1 AND owner_id=$2`,
       [bizId, uid]
     );
+    
     if (del.rowCount === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'not_found' });
