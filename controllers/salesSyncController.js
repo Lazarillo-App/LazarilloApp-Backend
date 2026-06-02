@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 'use strict';
-
+const XLSX = require('xlsx');
 const pool = require('../config/db');
 const { getBearer, fetchSalesRanged } = require('../services/maxiSalesService');
 const { upsertSalesBatch, upsertDailyAggregates } = require('../services/salesStore');
@@ -517,73 +517,92 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
     }
 
     const sql = `
-  SELECT
-    sdi.article_id AS codigo,
-    COALESCE(
-      NULLIF(TRIM(MAX(ma.nombre)), ''),
-      NULLIF(TRIM(MAX(aa.name)), ''),
-      'Artículo #' || sdi.article_id::text
-    ) AS nombre,
-    SUM(sdi.qty)::numeric    AS unidades,
-    SUM(sdi.amount)::numeric AS importe,
-    AVG(sdi.amount / NULLIF(sdi.qty, 0))::numeric AS precio_unitario
-  FROM sales_daily_items sdi
-  LEFT JOIN maxi_articles ma
-    ON ma.business_id = sdi.business_id
-   AND ma.articulo_id = sdi.article_id
-  LEFT JOIN app_articles aa
-    ON aa.business_id = sdi.business_id
-   AND aa.id = sdi.article_id
-  WHERE sdi.business_id = $1
-    AND sdi.day BETWEEN $2::date AND $3::date
-    ${articleFilter}
-    ${groupFilter}
-    ${branchFilter}
-  GROUP BY sdi.article_id
-  ORDER BY SUM(sdi.qty) DESC;
-`;
+      SELECT
+        sdi.article_id AS codigo,
+        COALESCE(
+          NULLIF(TRIM(MAX(ma.nombre)), ''),
+          NULLIF(TRIM(MAX(aa.name)), ''),
+          'Artículo #' || sdi.article_id::text
+        ) AS nombre,
+        SUM(sdi.qty)::numeric    AS unidades,
+        SUM(sdi.amount)::numeric AS importe
+      FROM sales_daily_items sdi
+      LEFT JOIN maxi_articles ma
+        ON ma.business_id = sdi.business_id
+       AND ma.articulo_id = sdi.article_id
+      LEFT JOIN app_articles aa
+        ON aa.business_id = sdi.business_id
+       AND aa.id = sdi.article_id
+      WHERE sdi.business_id = $1
+        AND sdi.day BETWEEN $2::date AND $3::date
+        ${articleFilter}
+        ${groupFilter}
+        ${branchFilter}
+      GROUP BY sdi.article_id
+      ORDER BY SUM(sdi.qty) DESC;
+    `;
 
     const { rows } = await pool.query(sql, params);
+
+    // ── Construir worksheet ────────────────────────────────────────────────
+    const wsData = [
+      ['Código', 'Nombre', 'Cantidad vendida', 'Importe total', 'Precio unitario'],
+      ...rows.map(r => {
+        const unidades = Number(r.unidades || 0);
+        const importe = Number(r.importe || 0);
+        const precioUnit = unidades > 0 ? importe / unidades : 0;
+        return [
+          Number(r.codigo) || r.codigo,
+          r.nombre || '',
+          unidades,
+          importe,
+          precioUnit,
+        ];
+      }),
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+    // Formato moneda en columnas D (importe) y E (precio unitario)
+    // "$"#,##0.00 → muestra "$ 1.234,56" en Excel con locale es-AR
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    for (let R = 1; R <= range.e.r; ++R) {
+      const cellD = XLSX.utils.encode_cell({ r: R, c: 3 });
+      const cellE = XLSX.utils.encode_cell({ r: R, c: 4 });
+      if (ws[cellD]) { ws[cellD].t = 'n'; ws[cellD].z = '"$"#,##0.00'; }
+      if (ws[cellE]) { ws[cellE].t = 'n'; ws[cellE].z = '"$"#,##0.00'; }
+    }
+
+    // Anchos de columna
+    ws['!cols'] = [
+      { wch: 10 },  // Código
+      { wch: 45 },  // Nombre
+      { wch: 18 },  // Cantidad
+      { wch: 18 },  // Importe
+      { wch: 18 },  // Precio unitario
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Ventas');
+
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 
     const branchSuffix = rawBranchId ? `_suc${rawBranchId}` : '';
     const listSuffix = article_ids ? '_lista' : '';
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.csv"`
+      `attachment; filename="ventas_${rawBizId}${branchSuffix}${listSuffix}_${from}_a_${to}.xlsx"`
     );
-    // BOM UTF-8 explícito como Buffer (EF BB BF) — garantiza que Excel lo reconozca en todos los SO
-    res.write(Buffer.from([0xEF, 0xBB, 0xBF]));
-    res.write('sep=;\n');
-
-    const headers = ['codigo', 'nombre', 'cantidad_vendida', 'importe_total', 'precio_unitario'];
-    res.write(headers.join(';') + '\n');
-
-    for (const r of rows) {
-      try {
-        const precioUnitario = Number(r.unidades) > 0
-          ? (Number(r.importe) / Number(r.unidades)).toFixed(2)
-          : '0.00';
-
-        const line = [
-          csvEscape(r.codigo),
-          csvEscape(r.nombre),
-          csvEscape(Number(r.unidades || 0)),
-          csvEscape(Number(r.importe || 0).toFixed(2)),
-          csvEscape(precioUnitario),
-        ].join(';');
-
-        res.write(line + '\n');
-      } catch (rowErr) {
-        console.error('[exportSalesCsv] error fila:', rowErr);
-      }
-    }
-    return res.end();
+    return res.send(buf);
   } catch (e) {
     console.error('[exportSalesCsv] error:', e);
     res.status(500).json({
-      error: 'Error exportando CSV',
+      error: 'Error exportando Excel',
       detail: e?.message || String(e),
     });
   }
