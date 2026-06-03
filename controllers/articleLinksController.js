@@ -431,14 +431,18 @@ exports.getLinkByArticle = async (req, res) => {
     // Obtener todos los miembros con nombre y pct_objetivo
     const { rows: memberRows } = await pool.query(
       `SELECT
-         m.article_id,
-         m.pct_objetivo,
-         COALESCE(ma.nombre, aa.name, '#' || m.article_id::text) AS nombre
-       FROM article_link_members m
-       LEFT JOIN maxi_articles ma ON ma.business_id = $2 AND ma.articulo_id = m.article_id
-       LEFT JOIN app_articles aa ON aa.business_id = $2 AND aa.id = m.article_id
-      WHERE m.link_group_id = $1
-      ORDER BY m.joined_at`,
+     m.article_id,
+     COALESCE(apc.objetivo_pct, m.pct_objetivo) AS pct_objetivo,
+     COALESCE(ma.nombre, aa.name, '#' || m.article_id::text) AS nombre
+   FROM article_link_members m
+   LEFT JOIN maxi_articles ma ON ma.business_id = $2 AND ma.articulo_id = m.article_id
+   LEFT JOIN app_articles aa ON aa.business_id = $2 AND aa.id = m.article_id
+   LEFT JOIN article_price_config apc
+     ON apc.business_id = $2
+    AND apc.scope = 'articulo'
+    AND apc.scope_id = m.article_id::text
+  WHERE m.link_group_id = $1
+  ORDER BY m.joined_at`,
       [group.group_id, bizId]
     );
 
