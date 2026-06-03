@@ -39,8 +39,8 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
   const targets = siblings.filter(s => s.sync_recipe !== false);
   if (!targets.length) return;
 
-  const groupId      = targets[0].group_id;
-  const groupName    = targets[0].group_name;
+  const groupId = targets[0].group_id;
+  const groupName = targets[0].group_name;
   const propagatedTo = targets.map(s => Number(s.article_id));
 
   const client = await pool.connect();
@@ -53,37 +53,33 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
       // Upsert receta del sibling
       // IMPORTANTE: porcentaje_venta NO se propaga en el UPDATE
       // (cada gemelo mantiene su propio objetivo de costo)
-      const { rows: recetaRows } = await client.query(
-        `INSERT INTO recetas
-           (article_id, business_id, nombre, descripcion, porciones,
-            porcentaje_venta, costo_total, notas, foto, notas_updated_at,
-            active, origen, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'linked', NOW())
-         ON CONFLICT (article_id, business_id)
-         DO UPDATE SET
-           nombre           = EXCLUDED.nombre,
-           descripcion      = EXCLUDED.descripcion,
-           porciones        = EXCLUDED.porciones,
-           costo_total      = EXCLUDED.costo_total,
-           notas            = EXCLUDED.notas,
-           foto             = EXCLUDED.foto,
-           notas_updated_at = EXCLUDED.notas_updated_at,
-           active           = TRUE,
-           origen           = 'linked',
-           updated_at       = NOW()
-         RETURNING id`,
-        [
-          siblingId, bizId,
-          receta.nombre           || null,
-          receta.descripcion      || null,
-          receta.porciones        || 1,
-          receta.porcentaje_venta || 0,  // solo para INSERT nuevo, ignorado en UPDATE
-          receta.costo_total,
-          receta.notas            || null,
-          receta.foto             || null,
-          receta.notas_updated_at || null,
-        ]
-      );
+      const { rows: recetaRows } =
+        await client.query(
+          `INSERT INTO recetas
+     (article_id, business_id, nombre, descripcion, porciones,
+      porcentaje_venta, costo_total, notas, foto, notas_updated_at,
+      active, origen, updated_at)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'linked', NOW())
+   ON CONFLICT (article_id, business_id)
+   DO UPDATE SET
+     porciones        = EXCLUDED.porciones,
+     costo_total      = EXCLUDED.costo_total,
+     active           = TRUE,
+     origen           = 'linked',
+     updated_at       = NOW()
+   RETURNING id`,
+          [
+            siblingId, bizId,
+            receta.nombre || null,
+            receta.descripcion || null,
+            receta.porciones || 1,
+            receta.porcentaje_venta || 0,  // solo para INSERT nuevo, ignorado en UPDATE
+            receta.costo_total,
+            receta.notas || null,
+            receta.foto || null,
+            receta.notas_updated_at || null,
+          ]
+        );
 
       const siblingRecetaId = recetaRows[0].id;
 
@@ -107,15 +103,15 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
             siblingRecetaId,
             insumoId,
             item.cantidad,
-            item.unidad        || null,
+            item.unidad || null,
             item.costo_unitario,
-            item.notas         || null,
+            item.notas || null,
             item.observaciones || null,
             fotosUrls,
-            item.merma  !== false,
+            item.merma !== false,
             item.pedido !== false,
-            item.tipo_costo    || 'total',
-            item.orden         ?? 0,
+            item.tipo_costo || 'total',
+            item.orden ?? 0,
           ]
         );
       }
@@ -125,9 +121,9 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
 
     await logPropagation(client, {
       groupId, bizId,
-      triggeredBy:  articleId,
+      triggeredBy: articleId,
       propagatedTo,
-      changeType:   'recipe',
+      changeType: 'recipe',
       changeDetail: { costo_total: receta.costo_total, items_count: (savedItems || []).length },
     });
 
@@ -137,7 +133,7 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
     return { propagatedTo, count: propagatedTo.length };
 
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[propagateRecipe] Error:', e.message);
     return null;
   } finally {
@@ -152,7 +148,7 @@ async function propagatePrecioManual({ bizId, articleId, precioManual }) {
   const targets = siblings.filter(s => s.sync_precio !== false);
   if (!targets.length) return;
 
-  const groupId      = targets[0].group_id;
+  const groupId = targets[0].group_id;
   const propagatedTo = targets.map(s => Number(s.article_id));
 
   const client = await pool.connect();
@@ -175,9 +171,9 @@ async function propagatePrecioManual({ bizId, articleId, precioManual }) {
 
     await logPropagation(client, {
       groupId, bizId,
-      triggeredBy:  articleId,
+      triggeredBy: articleId,
       propagatedTo,
-      changeType:   'precio_manual',
+      changeType: 'precio_manual',
       changeDetail: { precioManual },
     });
 
@@ -185,7 +181,7 @@ async function propagatePrecioManual({ bizId, articleId, precioManual }) {
     return { propagatedTo, count: propagatedTo.length };
 
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[propagatePrecioManual] Error:', e.message);
     return null;
   } finally {
@@ -200,7 +196,7 @@ async function propagateObjetivo({ bizId, articleId, objetivo }) {
   const targets = siblings.filter(s => s.sync_objetivo !== false);
   if (!targets.length) return;
 
-  const groupId      = targets[0].group_id;
+  const groupId = targets[0].group_id;
   const propagatedTo = targets.map(s => Number(s.article_id));
 
   const client = await pool.connect();
@@ -223,9 +219,9 @@ async function propagateObjetivo({ bizId, articleId, objetivo }) {
 
     await logPropagation(client, {
       groupId, bizId,
-      triggeredBy:  articleId,
+      triggeredBy: articleId,
       propagatedTo,
-      changeType:   'objetivo',
+      changeType: 'objetivo',
       changeDetail: { objetivo },
     });
 
@@ -233,7 +229,7 @@ async function propagateObjetivo({ bizId, articleId, objetivo }) {
     return { propagatedTo, count: propagatedTo.length };
 
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[propagateObjetivo] Error:', e.message);
     return null;
   } finally {
