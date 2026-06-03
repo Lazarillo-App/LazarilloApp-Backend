@@ -309,49 +309,51 @@ exports.exportCsv = async (req, res, next) => {
     const allWhere = [...baseWhere, ...extraWhere];
     const allParams = [...baseParams, ...extraParams];
 
+    // Agregado por insumo
     const { rows } = await pool.query(
       `SELECT
-           pi.fecha,
-           p.factura_key                           AS factura,
-           COALESCE(ab.name, '—')                  AS sucursal,
-           COALESCE(s.nombre, pi.referencia)       AS proveedor,
-           i.codigo_maxi,
-           COALESCE(i.nombre, pi.referencia)       AS insumo,
-           COALESCE(i.unidad_med, '')              AS unidad,
-           pi.cantidad,
-           pi.precio                               AS precio_unit,
-           pi.precio_total                         AS total_neto
+           COALESCE(i.codigo_maxi::text, 'INS-' || pi.insumo_id::text) AS codigo,
+           COALESCE(MAX(i.nombre), MAX(pi.referencia), 'Insumo #' || pi.insumo_id::text) AS nombre,
+           COALESCE(MAX(i.unidad_med), '') AS unidad,
+           SUM(pi.cantidad)::numeric        AS cantidad,
+           SUM(pi.precio_total)::numeric    AS neto_total,
+           SUM(COALESCE(pi.iva_total_item, 0))::numeric AS iva_total,
+           SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0))::numeric AS total
          FROM purchase_items pi
          JOIN purchases p        ON p.id = pi.purchase_id
          LEFT JOIN app_branches ab ON ab.id = p.branch_id
          LEFT JOIN suppliers s   ON s.id = p.proveedor_id
          LEFT JOIN insumos   i   ON i.id = pi.insumo_id
          WHERE ${allWhere.join(' AND ')}
-         ORDER BY pi.fecha ASC, p.factura_key, pi.id`,
+         GROUP BY pi.insumo_id, i.codigo_maxi
+         ORDER BY SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0)) DESC NULLS LAST`,
       allParams
     );
 
-    const headers = ['Fecha', 'Factura', 'Sucursal', 'Proveedor', 'Cod.Maxi', 'Insumo', 'Unidad', 'Cantidad', 'Precio unit.', 'Total neto'];
+    const headers = ['Código', 'Nombre', 'Unidad', 'Cantidad', 'Precio unitario', 'Total'];
     const esc = (v) => {
       if (v == null) return '';
       const s = String(v);
       return s.includes(';') || s.includes('"') || s.includes('\n')
         ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
+
     const lines = [
       headers.join(';'),
-      ...rows.map((r) => [
-        esc(r.fecha ? String(r.fecha).slice(0, 10) : ''),
-        esc(r.factura),
-        esc(r.sucursal),
-        esc(r.proveedor),
-        esc(r.codigo_maxi),
-        esc(r.insumo),
-        esc(r.unidad),
-        Number(r.cantidad || 0).toFixed(2).replace('.', ','),
-        Number(r.precio_unit || 0).toFixed(2).replace('.', ','),
-        Number(r.total_neto || 0).toFixed(2).replace('.', ','),
-      ].join(';')),
+      ...rows.map((r) => {
+        const cantidad = Number(r.cantidad || 0);
+        const total = Number(r.total || 0);
+        const precioUnit = cantidad > 0 ? (total / cantidad) : 0;
+
+        return [
+          esc(r.codigo),
+          esc(r.nombre),
+          esc(r.unidad),
+          cantidad.toFixed(2).replace('.', ','),
+          precioUnit.toFixed(2).replace('.', ','),
+          total.toFixed(2).replace('.', ','),
+        ].join(';');
+      }),
     ];
 
     const { from, to } = req.query;
