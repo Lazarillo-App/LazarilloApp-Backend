@@ -81,6 +81,9 @@ exports.createLinkGroup = async (req, res) => {
   const articleIds = (Array.isArray(req.body?.articleIds) ? req.body.articleIds : [])
     .map(Number).filter(Number.isFinite);
   const name = String(req.body?.name ?? '').trim() || null;
+  const syncRecipe = req.body?.syncRecipe === true;
+  const syncObjetivo = req.body?.syncObjetivo === true;
+  const syncPrecio = req.body?.syncPrecio !== false; // default true (compatibilidad)
 
   if (!Number.isFinite(bizId) || articleIds.length < 2) {
     return res.status(400).json({ ok: false, error: 'Se necesitan al menos 2 artículos para vincular' });
@@ -126,9 +129,9 @@ exports.createLinkGroup = async (req, res) => {
     // Crear el grupo
     const { rows: groupRows } = await client.query(
       `INSERT INTO article_link_groups (business_id, name, sync_recipe, sync_objetivo, sync_precio)
-   VALUES ($1, $2, false, false, true)
+   VALUES ($1, $2, $3, $4, $5)
    RETURNING id, name, sync_recipe, sync_objetivo, sync_precio`,
-      [bizId, name]
+      [bizId, name, syncRecipe, syncObjetivo, syncPrecio]
     );
     const group = groupRows[0];
     const groupId = Number(group.id);
