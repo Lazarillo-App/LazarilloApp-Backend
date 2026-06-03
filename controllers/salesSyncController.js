@@ -557,7 +557,7 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
 
     // Headers (separador estándar coma)
     const headers = ['codigo', 'nombre', 'cantidad_vendida', 'importe_total', 'precio_unitario'];
-    res.write(headers.join(',') + '\n');
+    res.write(headers.join(';') + '\n');
 
     for (const r of rows) {
       try {
@@ -568,10 +568,10 @@ exports.exportSalesCsv = async function exportSalesCsv(req, res) {
         const line = [
           csvEscape(r.codigo),
           csvEscape(r.nombre),
-          unidades.toFixed(2),
-          importe.toFixed(2),
-          precioUnit.toFixed(2),
-        ].join(',');
+          unidades.toFixed(2).replace('.', ','),
+          importe.toFixed(2).replace('.', ','),
+          precioUnit.toFixed(2).replace('.', ','),
+        ].join(';');
 
         res.write(line + '\n');
       } catch (rowErr) {

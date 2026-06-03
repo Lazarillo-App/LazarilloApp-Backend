@@ -335,11 +335,11 @@ exports.exportCsv = async (req, res, next) => {
     const esc = (v) => {
       if (v == null) return '';
       const s = String(v);
-      return s.includes(',') || s.includes('"') || s.includes('\n')
+      return s.includes(';') || s.includes('"') || s.includes('\n')
         ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
     const lines = [
-      headers.join(','),
+      headers.join(';'),
       ...rows.map((r) => [
         esc(r.fecha ? String(r.fecha).slice(0, 10) : ''),
         esc(r.factura),
@@ -348,10 +348,10 @@ exports.exportCsv = async (req, res, next) => {
         esc(r.codigo_maxi),
         esc(r.insumo),
         esc(r.unidad),
-        Number(r.cantidad || 0).toFixed(2),
-        Number(r.precio_unit || 0).toFixed(2),
-        Number(r.total_neto || 0).toFixed(2),
-      ].join(',')),
+        Number(r.cantidad || 0).toFixed(2).replace('.', ','),
+        Number(r.precio_unit || 0).toFixed(2).replace('.', ','),
+        Number(r.total_neto || 0).toFixed(2).replace('.', ','),
+      ].join(';')),
     ];
 
     const { from, to } = req.query;
