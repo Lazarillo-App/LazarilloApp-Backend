@@ -162,7 +162,7 @@ exports.crearArticulo = async (req, res, next) => {
          origen          = COALESCE(maxi_articles.origen, 'manual'),
          upload_batch_id = COALESCE(maxi_articles.upload_batch_id, EXCLUDED.upload_batch_id),
          updated_at      = NOW()`,
-      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, manualBatchId]
+       [bizId, Math.abs(newId) + 9000000, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, manualBatchId]
     );
 
     // Si viene agrupacionId, agregar el artículo a esa agrupación

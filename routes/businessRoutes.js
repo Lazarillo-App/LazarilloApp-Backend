@@ -477,6 +477,10 @@ router.get('/:id/articles-alertas-ventas', ensureFn('artABM.alertasVentas', artA
 router.get('/:id/config-costeo', ensureFn('artABM.getConfigCosteo', artABM.getConfigCosteo));
 router.patch('/:id/config-costeo', ensureFn('artABM.saveConfigCosteo', artABM.saveConfigCosteo));
 
+router.get('/:id/articles/batches',                  ensureFn('artABM.listBatchesArticulos',  artABM.listBatchesArticulos));
+router.get('/:id/articles/batches/:batchId/preview', ensureFn('artABM.previewBatchArticulos', artABM.previewBatchArticulos));
+router.delete('/:id/articles/batches/:batchId',      ensureFn('artABM.deleteBatchArticulos',  artABM.deleteBatchArticulos));
+
 /* ───────── Config endpoint — agregar campos que faltaban ───────── */
 
 /* Por :id */

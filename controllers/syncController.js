@@ -556,6 +556,21 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       `SELECT articulo_id, nombre, categoria, subrubro, precio, origen
          FROM public.maxi_articles
         WHERE business_id = $1
+       UNION ALL
+       SELECT ABS(aa.id) + 9000000 AS articulo_id,
+              aa.name              AS nombre,
+              aa.rubro             AS categoria,
+              aa.subrubro          AS subrubro,
+              aa.price             AS precio,
+              'manual'             AS origen
+         FROM app_articles aa
+        WHERE aa.business_id = $1
+          AND aa.id < 0
+          AND NOT EXISTS (
+            SELECT 1 FROM public.maxi_articles ma
+             WHERE ma.business_id = $1
+               AND ma.articulo_id = ABS(aa.id) + 9000000
+          )
         ORDER BY subrubro, categoria, nombre`,
       [principalId]
     );
