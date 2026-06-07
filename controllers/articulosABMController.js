@@ -3,7 +3,6 @@
 'use strict';
 
 const pool = require('../config/db');
-const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 function getBusinessId(req) {
   const ctx = Number(req.businessId);
@@ -29,29 +28,26 @@ exports.getRubros = async (req, res, next) => {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
-    // Leer rubros/subrubros de AMBAS tablas — maxi_articles tiene los de Maxi,
-    // app_articles tiene los creados manualmente
+    // Categorías y subrubros usados en este negocio
     const { rows } = await pool.query(
-      `SELECT DISTINCT categoria AS rubro, subrubro
-         FROM maxi_articles
-        WHERE business_id = $1
-          AND categoria IS NOT NULL AND categoria != ''
-          AND categoria NOT ILIKE '%pendiente%'
-       UNION
-       SELECT DISTINCT rubro AS rubro, subrubro
-         FROM app_articles
-        WHERE business_id = $1
-          AND rubro IS NOT NULL AND rubro != ''
-          AND rubro NOT ILIKE '%pendiente%'
-       ORDER BY rubro, subrubro`,
+      `SELECT DISTINCT
+         a.rubro    AS categoria,
+         a.subrubro AS subrubro
+       FROM app_articles a
+       WHERE a.business_id = $1
+         AND a.rubro IS NOT NULL
+         AND a.rubro != ''
+         AND a.rubro NOT ILIKE '%pendiente%'
+       ORDER BY a.rubro, a.subrubro`,
       [bizId]
     );
 
+    // Agrupar por categoría
     const byCategoria = {};
     for (const row of rows) {
-      const cat = row.rubro || 'Sin rubro';
+      const cat = row.categoria || 'Sin rubro';
       if (!byCategoria[cat]) byCategoria[cat] = [];
-      if (row.subrubro && !String(row.subrubro).includes('[PENDIENTE]')) {
+      if (row.subrubro && !row.subrubro.includes('[PENDIENTE]')) {
         byCategoria[cat].push(row.subrubro);
       }
     }
@@ -80,11 +76,20 @@ exports.crearArticulo = async (req, res, next) => {
   const { nombre, rubro, subrubro, precio, agrupacionId } = req.body || {};
 
   if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
-  if (!rubro?.trim()) return res.status(400).json({ ok: false, error: 'Rubro requerido' });
+  if (!rubro?.trim())  return res.status(400).json({ ok: false, error: 'Rubro requerido' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // ID negativo secuencial para artículos manuales (no interfiere con IDs de Maxi)
+    const { rows: minRows } = await client.query(
+      `SELECT COALESCE(MIN(id), 0) - 1 AS next_id
+         FROM app_articles
+        WHERE business_id = $1 AND id < 0`,
+      [bizId]
+    );
+    const newId = Math.min(minRows[0].next_id, -1);
 
     // Buscar o crear categoria_id
     let { rows: catRows } = await client.query(
@@ -118,25 +123,37 @@ exports.crearArticulo = async (req, res, next) => {
       }
     }
 
-    // Insertar en app_articles — la secuencia asigna el ID automáticamente
+    // SKU provisorio: L-BIZ-ID (cuando llegue equivalencia externa se pisa)
+    const skuProvisorio = `L-${bizId}-${Math.abs(newId)}`;
+
+    // Insertar el artículo
     const { rows: artRows } = await client.query(
       `INSERT INTO app_articles
-         (business_id, name, rubro, subrubro, node_type, price, categoria_id, subrubro_id, props, updated_at)
-       VALUES ($1, $2, $3, $4, 'item', $5, $6, $7, $8, NOW())
+         (id, business_id, name, rubro, subrubro, node_type, price, categoria_id, subrubro_id, props, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'item', $6, $7, $8, $9, NOW())
        RETURNING *`,
-      [bizId, nombre.trim(), rubro.trim(), subrubro?.trim() || null,
-        safeNum(precio) ?? 0, categoriaId, subrubroId,
-        JSON.stringify({ origen: 'manual', sin_equivalencia: true })]
+      [
+        newId,
+        bizId,
+        nombre.trim(),
+        rubro.trim(),
+        subrubro?.trim() || null,
+        safeNum(precio) ?? 0,
+        categoriaId,
+        subrubroId,
+        JSON.stringify({ origen: 'manual', sku: skuProvisorio, sin_equivalencia: true }),
+      ]
     );
 
-    const newId = artRows[0].id;
-    const skuProvisorio = `L-${bizId}-${newId}`;
+    const articulo = artRows[0];
+
+    // Insertar también en maxi_articles con origen='manual' para que aparezca en el árbol
+    // y sea distinguible (se muestra como L{id} en la UI hasta que llegue la sync de MaxiRest)
     const manualBatchId = `manual-abm-${new Date().toISOString().slice(0, 10)}`;
-    // Insertar también en maxi_articles para que aparezca en la tabla de artículos
     await client.query(
       `INSERT INTO maxi_articles
          (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, origen, upload_batch_id, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb, 'manual', $8, NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, 0, '{}'::jsonb, 'manual', $7, NOW())
        ON CONFLICT (business_id, articulo_id) DO UPDATE SET
          nombre          = EXCLUDED.nombre,
          categoria       = EXCLUDED.categoria,
@@ -145,10 +162,8 @@ exports.crearArticulo = async (req, res, next) => {
          origen          = COALESCE(maxi_articles.origen, 'manual'),
          upload_batch_id = COALESCE(maxi_articles.upload_batch_id, EXCLUDED.upload_batch_id),
          updated_at      = NOW()`,
-      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, 0, manualBatchId]
+      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, manualBatchId]
     );
-
-    const articulo = artRows[0];
 
     // Si viene agrupacionId, agregar el artículo a esa agrupación
     if (agrupacionId) {
@@ -181,7 +196,6 @@ exports.crearArticulo = async (req, res, next) => {
     }
 
     await client.query('COMMIT');
-    invalidateCacheForBiz(bizId);
 
     console.log(`[crearArticulo] Artículo manual creado: id=${newId} "${nombre}" biz=${bizId}`);
     return res.status(201).json({ ok: true, articulo, sku: skuProvisorio });
@@ -231,7 +245,7 @@ exports.actualizarArticulo = async (req, res, next) => {
 
     // Rubro/subrubro — buscar o crear categoría
     let categoriaId = art.categoria_id;
-    let subrubroId = art.subrubro_id;
+    let subrubroId  = art.subrubro_id;
 
     if (rubro?.trim() && rubro.trim() !== art.rubro) {
       let { rows: catRows } = await client.query(
@@ -442,83 +456,4 @@ exports.alertasVentas = async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-};
-// ─────────────────────────────────────────────────────────────────
-// GET /businesses/:id/articles/batches
-// Lista lotes de subida manual de artículos
-// ─────────────────────────────────────────────────────────────────
-exports.listBatchesArticulos = async (req, res, next) => {
-  try {
-    const bizId = getBusinessId(req);
-    if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId requerido' });
-
-    const { rows } = await pool.query(
-      `SELECT
-         COALESCE(upload_batch_id, 'manual-sin-lote')  AS batch_id,
-         MIN(updated_at)                               AS created_at,
-         COUNT(*)::int                                AS total_items,
-         string_agg(DISTINCT COALESCE(origen,'manual'), ', ') AS origenes
-       FROM maxi_articles
-       WHERE business_id = $1
-         AND (upload_batch_id IS NOT NULL OR origen IN ('manual','csv'))
-       GROUP BY COALESCE(upload_batch_id, 'manual-sin-lote')
-       ORDER BY MIN(updated_at) DESC`,
-      [bizId]
-    );
-    return res.json({ ok: true, data: rows });
-  } catch (e) { next(e); }
-};
-
-// ─────────────────────────────────────────────────────────────────
-// GET /businesses/:id/articles/batches/:batchId/preview
-// Vista previa de un lote de artículos
-// ─────────────────────────────────────────────────────────────────
-exports.previewBatchArticulos = async (req, res, next) => {
-  try {
-    const bizId = getBusinessId(req);
-    const batchId = req.params.batchId;
-    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
-
-    const isSinLote = batchId === 'manual-sin-lote';
-    const { rows } = await pool.query(
-      isSinLote
-        ? `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, origen, updated_at
-             FROM maxi_articles
-            WHERE business_id = $1 AND upload_batch_id IS NULL AND origen IN ('manual','csv')
-            ORDER BY nombre ASC LIMIT 200`
-        : `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, origen, updated_at
-             FROM maxi_articles
-            WHERE business_id = $1 AND upload_batch_id = $2
-            ORDER BY nombre ASC LIMIT 200`,
-      isSinLote ? [bizId] : [bizId, batchId]
-    );
-    return res.json({ ok: true, data: rows, total: rows.length });
-  } catch (e) { next(e); }
-};
-
-// ─────────────────────────────────────────────────────────────────
-// DELETE /businesses/:id/articles/batches/:batchId
-// Eliminar lote de artículos subidos manualmente
-// ─────────────────────────────────────────────────────────────────
-exports.deleteBatchArticulos = async (req, res, next) => {
-  try {
-    const bizId = getBusinessId(req);
-    const batchId = req.params.batchId;
-    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
-
-    const isSinLote = batchId === 'manual-sin-lote';
-    const { rowCount } = await pool.query(
-      isSinLote
-        ? `DELETE FROM maxi_articles
-            WHERE business_id = $1
-              AND upload_batch_id IS NULL
-              AND origen IN ('csv', 'manual')`
-        : `DELETE FROM maxi_articles
-            WHERE business_id = $1
-              AND upload_batch_id = $2
-              AND origen IN ('csv', 'manual')`,
-      isSinLote ? [bizId] : [bizId, batchId]
-    );
-    return res.json({ ok: true, deleted: rowCount, batchId });
-  } catch (e) { next(e); }
 };

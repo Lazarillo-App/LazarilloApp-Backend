@@ -2,48 +2,60 @@
 'use strict';
 
 /**
- * Importación CSV de artículos desde MaxiRest.
+ * Importación de artículos desde CSV, XLS o XLSX.
  *
- * MaxiRest exporta artículos desde: Artículos → Excel (el listado general)
- * Columnas esperadas (case-insensitive):
- *   COD_RU | CODIGO | NOMBRE | UNIDAD_MED | PRECIO | ULT_COMPRA (opcional)
+ * Columnas reconocidas (case-insensitive, orden de preferencia):
+ *   articulo_id : CODIGO, COD_RUA, cod_ru, codigo, code, id
+ *   nombre      : NOMBRE, nombre, name, descripcion
+ *   categoria   : COD_RUA (si no hay nombre de cat), rubro, categoria, cat
+ *   subrubro    : COD_SUA, subrubro, subcategoria
+ *   precio      : PRECIO1, precio1, PRECIO, precio, price
  *
- * Estrategia:
- *   - Upsert en maxi_articles por (business_id, articulo_id) — igual que la sync de API
- *   - Si el artículo ya existe → actualiza nombre, categoria, precio
- *   - Si no existe → lo crea
- *   - NUNCA borra — solo agrega/actualiza
+ * Estrategia de upsert:
+ *   - Usa CODIGO como articulo_id (PK en maxi_articles)
+ *   - Si ya existe → actualiza nombre, categoria, precio, upload_batch_id
+ *   - Si no existe → inserta
+ *   - NUNCA borra registros existentes
+ *   - categoria: si viene de sincronización previa con nombre real, NO la pisa con un número
  *   - Resuelve siempre al negocio principal de la organización
- *
- * IMPORTANTE: maxi_articles usa "categoria" y "subrubro" como texto libre.
- * El CSV tiene COD_RU (código numérico de rubro) — lo guardamos como categoria.
- * Cuando la sync normal corra después, va a pisar con los valores correctos.
  */
 
 const pool = require('../config/db');
 const XLSX = require('xlsx');
 const fs   = require('fs');
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── detección de columnas case-insensitive ─────────────────────────────────
 
-function getCI(obj, keys) {
+/**
+ * Busca una clave en un objeto de forma case-insensitive.
+ * Acepta lista de candidatos en orden de prioridad.
+ */
+function getCI(obj, candidates) {
   if (!obj || typeof obj !== 'object') return undefined;
   const map = new Map();
-  for (const k of Object.keys(obj)) map.set(String(k).trim().toLowerCase(), k);
-  for (const candidate of keys) {
-    const real = map.get(String(candidate).trim().toLowerCase());
-    if (real != null) return obj[real];
+  for (const k of Object.keys(obj)) {
+    map.set(String(k).trim().toLowerCase(), k);
+  }
+  for (const c of candidates) {
+    const real = map.get(String(c).trim().toLowerCase());
+    if (real != null && obj[real] != null && obj[real] !== '') return obj[real];
   }
   return undefined;
 }
 
 function parseNum(v) {
   if (v == null || v === '') return null;
-  const n = parseFloat(String(v).replace(',', '.'));
+  const n = parseFloat(String(v).replace(/\./g, '').replace(',', '.').replace(/[^\d.\-]/g, ''));
   return Number.isFinite(n) ? n : null;
 }
 
-// ── parseo del archivo ────────────────────────────────────────────────────────
+function cleanStr(v) {
+  if (v == null) return null;
+  const s = String(v).trim().replace(/\s+/g, ' ');
+  return s || null;
+}
+
+// ── parseo del archivo ─────────────────────────────────────────────────────
 
 async function parseFile(filePath) {
   const workbook = XLSX.readFile(filePath, { type: 'file', raw: true, cellDates: true });
@@ -58,8 +70,7 @@ async function parseFile(filePath) {
     .map(row => {
       const out = {};
       for (const k of Object.keys(row)) {
-        const kl = String(k).toLowerCase().trim();
-        if (kl.startsWith('__empty')) continue;
+        if (String(k).toLowerCase().trim().startsWith('__empty')) continue;
         out[k] = row[k];
       }
       return out;
@@ -67,59 +78,67 @@ async function parseFile(filePath) {
     .filter(r => Object.values(r).some(v => v != null && v !== ''));
 
   if (!cleaned.length) throw new Error('El archivo no contiene filas de datos');
-
-  // Validar columnas mínimas
-  const headersLower = Object.keys(cleaned[0] || {}).map(h => h.toLowerCase().trim());
-  const missing = ['codigo', 'nombre'].filter(r => !headersLower.includes(r));
-  if (missing.length) {
-    throw new Error(
-      `Columnas faltantes: ${missing.join(', ')}. ` +
-      `El archivo debe tener al menos: CODIGO y NOMBRE. ` +
-      `Columnas encontradas: ${headersLower.join(', ')}`
-    );
-  }
-
   return cleaned;
 }
 
+// ── normalización de cada fila ─────────────────────────────────────────────
+
 function normalizeRow(row, idx) {
   try {
-    // CODIGO → articulo_id (PK en maxi_articles)
-    const codigoRaw = String(getCI(row, ['codigo', 'code', 'cod', 'id']) ?? '').trim();
-    const articulo_id = parseInt(codigoRaw, 10);
-    if (!codigoRaw || !Number.isFinite(articulo_id) || articulo_id <= 0) {
+    // articulo_id: prioridad CODIGO > COD_RUA > otros alias
+    const codigoRaw = getCI(row, [
+      'codigo', 'cod_rua', 'codrua', 'cod_ru', 'articulo_id', 'art_id', 'code', 'id',
+    ]);
+
+    if (codigoRaw == null) throw new Error('Sin código identificador');
+
+    const articulo_id = parseInt(String(codigoRaw).trim(), 10);
+    if (!Number.isFinite(articulo_id) || articulo_id <= 0) {
       throw new Error(`Código inválido: "${codigoRaw}"`);
     }
 
-    const nombre = String(getCI(row, ['nombre', 'name', 'descripcion', 'descripción']) ?? '').trim();
+    const nombreRaw = getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion']);
+    if (!nombreRaw) throw new Error(`Nombre vacío en código ${articulo_id}`);
+    const nombre = cleanStr(String(nombreRaw)) || '';
     if (!nombre) throw new Error(`Nombre vacío en código ${articulo_id}`);
 
-    // COD_RU → categoría como texto (lo que tiene la sync de Maxi)
-    const codRu     = getCI(row, ['cod_ru', 'rubro', 'categoria', 'categoría', 'cat', 'cod_rub']);
-    const categoria = codRu != null && String(codRu).trim() !== ''
-      ? String(codRu).trim()
+    // Categoría: si hay COD_RUA usarlo como código numérico que luego se cruza con rubros
+    const categoriaRaw = getCI(row, [
+      'categoria', 'categoría', 'rubro', 'cat', 'categoria_nombre', 'rubro_nombre',
+      'cod_rua', 'codrua', 'cod_ru',
+    ]);
+    const categoria = categoriaRaw != null && String(categoriaRaw).trim() !== ''
+      ? String(categoriaRaw).trim()
       : 'Sin categoría';
 
-    const precio      = parseNum(getCI(row, ['precio', 'price', 'precio_ref', 'p_ref'])) ?? 0;
-    const unidad_med  = String(getCI(row, ['unidad_med', 'unidad', 'medida', 'unit', 'u.med']) ?? '').trim() || null;
+    // COD_SUA como subrubro
+    const subrubroRaw = getCI(row, ['subrubro', 'subcategoria', 'sub', 'cod_sua', 'codsua']);
+    const subrubro = subrubroRaw != null && String(subrubroRaw).trim() !== ''
+      ? String(subrubroRaw).trim()
+      : null;
+
+    // Precio: prioridad PRECIO1 > PRECIO > price
+    const precio = parseNum(
+      getCI(row, ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])
+    ) ?? 0;
 
     return {
       ok: true,
-      data: { articulo_id, nombre, categoria, precio, unidad_med },
+      data: { articulo_id, nombre, categoria, subrubro, precio },
     };
   } catch (e) {
     return { ok: false, error: e.message, row: idx + 1 };
   }
 }
 
-// ── función principal ─────────────────────────────────────────────────────────
+// ── función principal ──────────────────────────────────────────────────────
 
-async function importArticulosFromFile({ businessId, filePath, originalName, mapeoCustom = {} }) {
+async function importArticulosFromFile({ businessId, filePath, originalName }) {
   const client = await pool.connect();
   let txOpen = false;
 
   try {
-    // Resolver siempre al negocio principal
+    // Resolver siempre al negocio principal de la organización
     const { rows: bizRows } = await pool.query(
       `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
     );
@@ -136,27 +155,13 @@ async function importArticulosFromFile({ businessId, filePath, originalName, map
       if (rootRows[0]?.id) targetBizId = Number(rootRows[0].id);
     }
 
-    const rawRows = await parseFile(filePath, mapeoCustom);
+    const rawRows = await parseFile(filePath);
 
-    // Si hay mapeo custom, aplicarlo: renombrar columnas del archivo al nombre interno
-    const rowsNormalizadas = Object.keys(mapeoCustom).length > 0
-      ? rawRows.map(r => {
-          const nueva = { ...r };
-          Object.entries(mapeoCustom).forEach(([campoInterno, colArchivo]) => {
-            if (colArchivo && r[colArchivo] !== undefined) {
-              nueva[campoInterno] = r[colArchivo];
-            }
-          });
-          return nueva;
-        })
-      : rawRows;
-
-    // Normalizar
     const errors = [];
     const items  = [];
-    for (let i = 0; i < rowsNormalizadas.length; i++) {
-      const norm = normalizeRow(rowsNormalizadas[i], i);
-      if (!norm.ok) errors.push({ row: i + 1, error: norm.error });
+    for (let i = 0; i < rawRows.length; i++) {
+      const norm = normalizeRow(rawRows[i], i);
+      if (!norm.ok) errors.push({ row: i + 2, error: norm.error }); // +2: header + 1-based
       else items.push(norm.data);
     }
 
@@ -164,15 +169,16 @@ async function importArticulosFromFile({ businessId, filePath, originalName, map
       try { fs.unlinkSync(filePath); } catch { }
       return {
         ok: false, error: 'no_valid_rows',
-        summary: { total_rows: rowsNormalizadas.length, inserted: 0, updated: 0, failed: errors.length },
+        summary: { total_rows: rawRows.length, inserted: 0, updated: 0, failed: errors.length },
         errors: errors.slice(0, 20),
       };
     }
 
+    const batchId = `csv-art-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
     await client.query('BEGIN');
     txOpen = true;
 
-    const batchId = `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     let inserted = 0, updated = 0;
     const CHUNK = 200;
 
@@ -184,18 +190,17 @@ async function importArticulosFromFile({ businessId, filePath, originalName, map
       let p = 1;
 
       for (const it of chunk) {
-        values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},'{}'::jsonb,NOW(),$${p+6},$${p+7})`);
+        values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},'{}'::jsonb,NOW(),$${p+6},'csv')`);
         params.push(
           targetBizId,
           it.articulo_id,
           it.nombre,
           it.categoria,
-          'Sin subrubro',
+          it.subrubro,
           it.precio,
           batchId,
-          'csv',
         );
-        p += 8;
+        p += 7;
       }
 
       const res = await client.query(
@@ -204,10 +209,20 @@ async function importArticulosFromFile({ businessId, filePath, originalName, map
          VALUES ${values.join(',')}
          ON CONFLICT (business_id, articulo_id) DO UPDATE SET
            nombre          = EXCLUDED.nombre,
-           categoria       = EXCLUDED.categoria,
+           categoria       = CASE
+                               WHEN EXCLUDED.categoria !~ '^[0-9]+$'
+                               THEN EXCLUDED.categoria
+                               -- Si viene como número y la cat actual no es número → respetamos la actual
+                               WHEN maxi_articles.categoria IS NOT NULL
+                                AND maxi_articles.categoria !~ '^[0-9]+$'
+                                AND maxi_articles.categoria != 'Sin categoría'
+                               THEN maxi_articles.categoria
+                               ELSE EXCLUDED.categoria
+                             END,
+           subrubro        = COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro),
            precio          = EXCLUDED.precio,
            upload_batch_id = EXCLUDED.upload_batch_id,
-           origen          = EXCLUDED.origen,
+           origen          = COALESCE(maxi_articles.origen, EXCLUDED.origen),
            updated_at      = NOW()
          RETURNING (xmax = 0) AS is_insert`,
         params
@@ -223,23 +238,25 @@ async function importArticulosFromFile({ businessId, filePath, originalName, map
 
     try { fs.unlinkSync(filePath); } catch { }
 
+    console.log(`[csvArticulosImport] biz=${targetBizId} batch=${batchId} inserted=${inserted} updated=${updated} errors=${errors.length}`);
+
     return {
       ok: true,
       summary: {
-        total_rows: rowsNormalizadas.length,
+        total_rows: rawRows.length,
         inserted,
         updated,
-        failed:     errors.length,
+        failed:    errors.length,
         has_errors: errors.length > 0,
         target_business_id: targetBizId,
-        batchId,
+        batch_id: batchId,
       },
       errors: errors.slice(0, 20),
     };
 
   } catch (error) {
     if (txOpen) { try { await client.query('ROLLBACK'); } catch { } }
-    console.error('[CSV Articulos Import] Error fatal:', error);
+    console.error('[CSV Articulos Import] Error fatal:', error.message);
     try { fs.unlinkSync(filePath); } catch { }
     throw error;
   } finally {

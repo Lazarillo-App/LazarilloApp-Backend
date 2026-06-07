@@ -274,23 +274,8 @@ exports.syncNow = async (req, res) => {
 
   const client = await pool.connect();
   try {
+    const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
 
-    let token;
-    try {
-      const token = await maxiLogin({ email: mx.email, password, codcli: mx.codcli });
-    } catch (loginErr) {
-      // MaxiRest caído — responder con datos de DB
-      const { rows: cached } = await pool.query(
-        `SELECT COUNT(*)::int as total FROM public.maxi_articles WHERE business_id = $1`, [biz.id]
-      );
-      return res.json({
-        ok: true, business_id: biz.id, fromCache: true,
-        warning: `MaxiRest no disponible: ${loginErr.message}`,
-        upserted: 0, mapped: 0, auto_assigned: 0,
-        cached_articles: cached[0]?.total || 0,
-        message: 'Lazarillo funcionando con artículos locales — MaxiRest temporalmente no disponible',
-      });
-    }
     let upserted = 0;
     let mapped = 0;
     let cacheHash = null;
@@ -334,9 +319,7 @@ exports.syncNow = async (req, res) => {
 
       await client.query('COMMIT');
 
-      // Invalidar caché para que GET /articles devuelva los datos frescos
-      const { invalidateCacheForBiz } = require('../middleware/cacheJson');
-      invalidateCacheForBiz(biz.id);
+      // 🆕 AUTO-ASIGNACIÓN POST-SYNC + NOTIFICACIÓN
       try {
         const result = await autoAssignNewArticles(biz.id);
         autoAssigned = result.assigned;
@@ -439,16 +422,9 @@ exports.listArticlesFromDB = async (req, res) => {
   }
 
   const { rows } = await pool.query(
-    `SELECT
-       ma.articulo_id AS id, ma.nombre, ma.categoria, ma.subrubro, ma.precio, ma.costo, ma.raw,
-       (aa.props->>'precio1')::numeric AS precio1,
-       (aa.props->>'precio2')::numeric AS precio2,
-       (aa.props->>'precio3')::numeric AS precio3,
-       (aa.props->>'precio4')::numeric AS precio4,
-       'maxi' AS origen_tabla
-       FROM public.maxi_articles ma
-       LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = $1
-      WHERE ma.business_id = $1
+    `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+       FROM public.maxi_articles
+      WHERE business_id = $1
       ORDER BY categoria, subrubro, nombre`,
     [principalId]
   );
@@ -493,20 +469,19 @@ async function getOrgArticleContext(bizId, pool) {
   );
   const principalId = principalRows[0]?.id || bizId;
 
-  // Solo artículos asignados a SUBNEGOCIOS — excluir agrupaciones del propio principal
-  // El principal puede tener sus propias agrupaciones y debe verlas en su árbol
+  // Todos los IDs asignados en agrupaciones reales de cualquier negocio de la org
+  // (excluyendo Sin Agrupación y Discontinuados — esos son el "flotante")
   const { rows: agRows } = await pool.query(
     `SELECT ag.articulos, ag.app_articles_ids
        FROM agrupaciones ag
        JOIN app_businesses b ON b.id = ag.business_id
       WHERE b.organization_id = $1
-        AND b.id != $2
         AND ag.moved_to_business_id IS NULL
         AND ag.nombre NOT ILIKE 'Sin Agrupac%'
         AND ag.nombre NOT ILIKE 'Sin Agrupar%'
         AND ag.nombre NOT ILIKE 'Discontinuados'
         AND ag.nombre NOT ILIKE 'Descontinuados'`,
-    [biz.organization_id, principalId]
+    [biz.organization_id]
   );
 
   const assignedIds = new Set();
@@ -532,10 +507,10 @@ exports.listArticlesTreeFromDB = async (req, res) => {
     const { principalId, assignedIds, orgId } = await getOrgArticleContext(biz.id, pool);
     const isSubBusiness = orgId && Number(biz.id) !== Number(principalId);
 
-    let allowedIds = null; // null = sin filtro
-
+    // Para subnegocios: calcular qué artículos le pertenecen
+    // = los que están en sus propias agrupaciones (no globales)
+    let allowedIds = null; // null = sin filtro (principal o sin org)
     if (isSubBusiness) {
-      // Subnegocio: artículos de sus propias agrupaciones + artículos libres
       const { rows: subAgRows } = await pool.query(
         `SELECT ag.articulos, ag.app_articles_ids
            FROM agrupaciones ag
@@ -558,40 +533,27 @@ exports.listArticlesTreeFromDB = async (req, res) => {
           const id = Number(a?.id ?? a?.articulo_id ?? a);
           if (id > 0) allowedIds.add(id);
         }
-        for (const id of appIds) {
-          const n = Number(id);
-          if (n > 0) allowedIds.add(n);
-        }
+        for (const id of appIds) { const n = Number(id); if (n > 0) allowedIds.add(n); }
       }
 
-      // Artículos libres (no asignados a ningún subnegocio) también visibles
+      // También incluir artículos sin asignar a ningún subnegocio (son del principal = visibles desde todos)
+      // Un artículo es "sin asignar" si no está en ninguna agrupación real de ningún subnegocio
+      // assignedIds ya tiene TODOS los asignados en la org — los que NO están ahí son libres
+      // Los libres son visibles desde cualquier subnegocio (aparecen en Sin Agrupación global)
       if (assignedIds) {
-        const { rows: allMaxiRows } = await pool.query(
+        const { rows: allRows } = await pool.query(
           `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
           [principalId]
         );
-        for (const r of allMaxiRows) {
+        for (const r of allRows) {
           const id = Number(r.articulo_id);
           if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
         }
       }
-
-    } else if (assignedIds) {
-      // Principal con org: solo artículos NO asignados a subnegocios
-      allowedIds = new Set();
-      const { rows: allMaxiRows } = await pool.query(
-        `SELECT articulo_id FROM public.maxi_articles WHERE business_id = $1`,
-        [principalId]
-      );
-      for (const r of allMaxiRows) {
-        const id = Number(r.articulo_id);
-        if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
-      }
     }
-    // else: sin org → allowedIds = null → muestra todo
 
     const { rows } = await pool.query(
-      `SELECT articulo_id, nombre, categoria, subrubro, precio
+      `SELECT articulo_id, nombre, categoria, subrubro, precio, origen
          FROM public.maxi_articles
         WHERE business_id = $1
         ORDER BY subrubro, categoria, nombre`,
@@ -600,6 +562,7 @@ exports.listArticlesTreeFromDB = async (req, res) => {
 
     const bySub = new Map();
     for (const r of rows) {
+      // Para subnegocios: solo incluir artículos permitidos
       if (allowedIds !== null && !allowedIds.has(Number(r.articulo_id))) continue;
 
       const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
@@ -607,7 +570,7 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       if (!bySub.has(sub)) bySub.set(sub, new Map());
       const byCat = bySub.get(sub);
       if (!byCat.has(cat)) byCat.set(cat, []);
-      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null });
+      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null, origen: r.origen ?? null });
     }
 
     const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
@@ -663,9 +626,6 @@ exports.salesSummaryFromDB = async (req, res, next) => {
 
     const fromYmd = String(from || '').slice(0, 10);
     const toYmd = String(to || '').slice(0, 10);
-
-    let salesBizId = biz.id;
-    let subArticleIds = null;
 
     if (!fromYmd || !toYmd) {
       return res.status(400).json({ ok: false, error: 'from_to_required' });
