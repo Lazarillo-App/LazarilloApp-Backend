@@ -12,19 +12,32 @@ exports.overview = async (_req, res) => {
     const [{ count: total_users }] =
       (await db.query(`SELECT COUNT(*)::int count FROM app_users`)).rows;
     const [{ count: active_users }] =
-      (await db.query(`SELECT COUNT(*)::int count FROM app_users WHERE status='active'`)).rows;
+      (await db.query(`SELECT COUNT(*)::int count FROM app_users WHERE account_status IN ('active','trial')`)).rows;
+    const [{ count: pending_users }] =
+      (await db.query(`SELECT COUNT(*)::int count FROM app_users WHERE account_status = 'pending'`)).rows;
+    const [{ count: expired_users }] =
+      (await db.query(`SELECT COUNT(*)::int count FROM app_users WHERE account_status = 'expired'`)).rows;
     const [{ count: total_businesses }] =
       (await db.query(`SELECT COUNT(*)::int count FROM app_businesses`)).rows;
 
     const recentUsers = (await db.query(
       `SELECT id, email, COALESCE(name,'') AS name, COALESCE(role,'owner') AS role,
-              status, created_at
+              status, account_status, created_at
          FROM app_users
         ORDER BY created_at DESC
         LIMIT 5`
     )).rows;
 
-    res.json({ totals: { users: total_users, active_users, businesses: total_businesses }, recentUsers });
+    res.json({
+      totals: {
+        users: total_users,
+        active_users,
+        pending_users,
+        expired_users,
+        businesses: total_businesses,
+      },
+      recentUsers,
+    });
   } catch (e) {
     console.error('ADMIN_OVERVIEW_FAILED:', e);
     res.status(500).json({ error: 'ADMIN_OVERVIEW_FAILED' });
