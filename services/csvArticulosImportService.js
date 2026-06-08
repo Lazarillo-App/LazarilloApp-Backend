@@ -264,4 +264,4 @@ async function importArticulosFromFile({ businessId, filePath, originalName }) {
   }
 }
 
-module.exports = { importArticulosFromFile };
+module.exports = { importArticulosFromFile, parseFile };

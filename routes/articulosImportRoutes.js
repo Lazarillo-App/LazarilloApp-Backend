@@ -7,7 +7,7 @@ const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
 
-const { importArticulosFromFile }      = require('../services/csvArticulosImportService');
+const { importArticulosFromFile, parseFile } = require('../services/csvArticulosImportService');
 const { importRubrosArticulosFromFile} = require('../services/csvArticulosRubrosImportService');
 const { authRequired }                 = require('../middleware/authMiddleware');
 const { requireBusinessAccess }        = require('../middleware/requireBusinessAccess');
@@ -28,6 +28,28 @@ const upload = multer({
 
 const getBizId  = (req) => { const n = Number(req.params.businessId ?? req.params.id); return Number.isFinite(n) && n > 0 ? n : NaN; };
 const getUserId = (req) => req.user?.id;
+
+
+// ── POST /api/businesses/:businessId/articles/preview-columns ─────────────
+// Devuelve las columnas detectadas y una muestra de filas sin importar nada
+router.post(
+  '/:businessId/articles/preview-columns',
+  authRequired,
+  (req, res, next) => requireBusinessAccess(req, res, next),
+  upload.single('file'),
+  async (req, res, next) => {
+    if (!req.file) return res.status(400).json({ ok: false, error: 'file_required' });
+    try {
+      const rows = await parseFile(req.file.path);
+      try { fs.unlinkSync(req.file.path); } catch { }
+      const columnas = rows.length ? Object.keys(rows[0]) : [];
+      return res.json({ ok: true, columnas, muestra: rows.slice(0, 5) });
+    } catch (e) {
+      try { fs.unlinkSync(req.file?.path); } catch { }
+      return res.status(400).json({ ok: false, error: e.message });
+    }
+  }
+);
 
 // ── POST /api/businesses/:businessId/articles/import-csv ──────────────────
 router.post(
