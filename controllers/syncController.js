@@ -111,7 +111,7 @@ async function maxiLogin({ email, password, codcli }) {
  *   app.categoria = subrubro Maxi
  *   app.subrubro  = rubro Maxi
  */
-async function fetchMaxiArticles({ token, from, to }) {
+async function fetchMaxiArticles({ token, from, to, invertirJerarquia = false }) {
   const u = new URL(`${BASE}/menuweb/menuextendido`);
   if (from) u.searchParams.set('fechaInicio', from);
   if (to) u.searchParams.set('fechaFin', to);
@@ -145,11 +145,17 @@ async function fetchMaxiArticles({ token, from, to }) {
     if (!Number.isFinite(id) || seen.has(id)) return;
     seen.add(id);
 
+    // Comportamiento por defecto (todos los negocios): categoria=subrubro Maxi, subrubro=rubro Maxi
+    // Con flag invertir_jerarquia_articulos=true: categoria=rubro Maxi, subrubro=subrubro Maxi
     items.push({
       id,
       nombre: getName(o),
-      categoria: orSinCategoria(subrubroNombre), // SWAP
-      subrubro: orSinSubrubro(rubroNombre),     // SWAP
+      categoria: invertirJerarquia
+        ? orSinCategoria(rubroNombre)
+        : orSinCategoria(subrubroNombre),
+      subrubro: invertirJerarquia
+        ? orSinSubrubro(subrubroNombre)
+        : orSinSubrubro(rubroNombre),
       precio: num(o.precio ?? o.precioVenta ?? o.importe, 0),
       costo: num(o.costo ?? o.costoPromedio, 0),
       raw: o,
@@ -282,7 +288,10 @@ exports.syncNow = async (req, res) => {
     let autoAssigned = 0;
 
     if (scope === 'articles' || scope === 'all') {
-      const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t });
+      // Leer flag de jerarquía invertida del negocio
+      const invertirJerarquia = biz?.props?.invertir_jerarquia_articulos === true;
+      console.log(`[syncNow] bizId=${biz.id} invertirJerarquia=${invertirJerarquia}`);
+      const { items, raw } = await fetchMaxiArticles({ token, from: f, to: t, invertirJerarquia });
 
       const rawStr = JSON.stringify(raw ?? []);
       cacheHash = String(require('crypto').createHash('sha1').update(rawStr).digest('hex'));
@@ -556,21 +565,6 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       `SELECT articulo_id, nombre, categoria, subrubro, precio, origen
          FROM public.maxi_articles
         WHERE business_id = $1
-       UNION ALL
-       SELECT ABS(aa.id) + 9000000 AS articulo_id,
-              aa.name              AS nombre,
-              aa.rubro             AS categoria,
-              aa.subrubro          AS subrubro,
-              aa.price             AS precio,
-              'manual'             AS origen
-         FROM app_articles aa
-        WHERE aa.business_id = $1
-          AND aa.id < 0
-          AND NOT EXISTS (
-            SELECT 1 FROM public.maxi_articles ma
-             WHERE ma.business_id = $1
-               AND ma.articulo_id = ABS(aa.id) + 9000000
-          )
         ORDER BY subrubro, categoria, nombre`,
       [principalId]
     );
