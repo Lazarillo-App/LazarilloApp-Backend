@@ -137,9 +137,12 @@ exports.softDeleteUser = async (req, res) => {
     );
     const target = rows[0];
     if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
-    if (target.role === 'admin') return res.status(403).json({ error: 'CANNOT_DELETE_ADMIN' });
+    if (target.role === 'app_admin') return res.status(403).json({ error: 'CANNOT_DELETE_ADMIN' });
 
-    await db.query(`UPDATE app_users SET status='deleted' WHERE id=$1`, [id]);
+    await db.query(
+      `UPDATE app_users SET status='deleted', account_status='suspended', updated_at=NOW() WHERE id=$1`,
+      [id]
+    );
     Promise.resolve(logAdmin(req.user?.id || null, 'user.soft_delete', 'app_users', String(id))).catch(()=>{});
     res.json({ ok: true });
   } catch (e) {
@@ -147,6 +150,9 @@ exports.softDeleteUser = async (req, res) => {
     res.status(500).json({ error: 'ADMIN_USER_DELETE_FAILED' });
   }
 };
+
+// Alias para el route que lo registra como 'deleteUser'
+exports.deleteUser = exports.softDeleteUser;
 
 exports.resetPassword = async (req, res) => {
   // (si usás tokens en tabla aparte, mantené este flujo;
@@ -158,17 +164,15 @@ exports.resetPassword = async (req, res) => {
 exports.restoreUser = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    // Solo restaura si estaba deleted
     const { rows } = await db.query(
       `UPDATE app_users
-         SET status='active'
+         SET status='active', account_status='active', updated_at=NOW()
        WHERE id=$1 AND status='deleted'
-       RETURNING id, email, name, role, status`,
+       RETURNING id, email, name, role, status, account_status`,
       [id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'NOT_FOUND_OR_NOT_DELETED' });
 
-    // auditar opcional
     Promise.resolve(logAdmin(req.user?.id || null, 'user.restore', 'app_users', String(id))).catch(()=>{});
 
     res.json({ ok: true, user: rows[0] });
