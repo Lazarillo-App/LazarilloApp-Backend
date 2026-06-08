@@ -1,23 +1,6 @@
 // services/csvArticulosRubrosImportService.js
 'use strict';
 
-/**
- * Importación de rubros de artículos desde CSV, XLS o XLSX.
- *
- * Tabla destino: articulo_rubros
- *   Creada automáticamente si no existe.
- *   Misma estructura que insumo_rubros pero para artículos.
- *
- * El archivo típico tiene (ej: "listado_rubros_articulos.xls"):
- *   COD_RUA  → codigo del rubro (ej: 1)
- *   NOMBRE   → nombre del rubro (ej: "Gaseosas")
- *   COD_SUA  → código de subrubro (opcional, ej: 13)
- *   NOMBRE_SUA → nombre del subrubro (opcional)
- *
- * Después de importar, cruza con maxi_articles para reemplazar
- * los códigos numéricos en `categoria` y `subrubro` por nombres reales.
- */
-
 const pool = require('../config/db');
 const XLSX = require('xlsx');
 const fs   = require('fs');
@@ -51,9 +34,7 @@ async function parseFile(filePath) {
   const wb = XLSX.readFile(filePath, { type: 'file', raw: true, cellDates: true });
   const sheetName = wb.SheetNames[0];
   if (!sheetName) throw new Error('El archivo no contiene hojas');
-
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { raw: true, defval: null });
-
   return rows
     .map(row => {
       const out = {};
@@ -66,82 +47,104 @@ async function parseFile(filePath) {
     .filter(r => Object.values(r).some(v => v != null && v !== ''));
 }
 
-// ── asegurar que la tabla existe ───────────────────────────────────────────
-
-async function ensureTable(client) {
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS articulo_rubros (
-      id          SERIAL PRIMARY KEY,
-      business_id BIGINT  NOT NULL REFERENCES app_businesses(id) ON DELETE CASCADE,
-      codigo      INTEGER NOT NULL,
-      nombre      TEXT    NOT NULL,
-      codigo_sua  INTEGER,
-      subrubro    TEXT,
-      activo      BOOLEAN NOT NULL DEFAULT TRUE,
-      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (business_id, codigo)
-    )
-  `);
-  await client.query(`
-    CREATE INDEX IF NOT EXISTS idx_art_rubros_biz ON articulo_rubros(business_id)
-  `);
+// ── crear tabla FUERA de transacción ──────────────────────────────────────
+// Usar una conexión separada sin transacción para el DDL
+async function ensureTable() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS articulo_rubros (
+        id          SERIAL PRIMARY KEY,
+        business_id BIGINT  NOT NULL REFERENCES app_businesses(id) ON DELETE CASCADE,
+        codigo      INTEGER NOT NULL,
+        nombre      TEXT    NOT NULL,
+        codigo_sua  INTEGER,
+        subrubro    TEXT,
+        activo      BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (business_id, codigo)
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_art_rubros_biz ON articulo_rubros(business_id)
+    `);
+    console.log('[csvArticulosRubrosImport] Tabla articulo_rubros verificada OK');
+  } catch (e) {
+    console.error('[csvArticulosRubrosImport] Error al crear tabla:', e.message);
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 // ── función principal ──────────────────────────────────────────────────────
 
 async function importRubrosArticulosFromFile({ businessId, filePath, originalName, mapeo = {} }) {
-  const client  = await pool.connect();
-  let txOpen    = false;
+  // 1. Crear tabla ANTES de cualquier transacción
+  await ensureTable();
+
+  // 2. Resolver negocio principal
+  const { rows: [biz] } = await pool.query(
+    `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
+  );
+  let targetBizId = Number(businessId);
+  if (biz?.created_from === 'from_group' && biz.organization_id) {
+    const { rows: [root] } = await pool.query(
+      `SELECT id FROM app_businesses
+        WHERE organization_id = $1
+          AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
+        ORDER BY id ASC LIMIT 1`,
+      [biz.organization_id]
+    );
+    if (root?.id) targetBizId = Number(root.id);
+  }
+  console.log(`[csvArticulosRubrosImport] bizId=${businessId} → targetBizId=${targetBizId}`);
+
+  // 3. Parsear archivo
+  let rawRows;
+  try {
+    rawRows = await parseFile(filePath);
+  } catch (e) {
+    try { fs.unlinkSync(filePath); } catch { }
+    throw new Error(`Error al leer el archivo: ${e.message}`);
+  }
+
+  console.log(`[csvArticulosRubrosImport] Filas leídas: ${rawRows.length}`);
+  if (!rawRows.length) {
+    try { fs.unlinkSync(filePath); } catch { }
+    return { ok: true, summary: { total: 0, inserted: 0, updated: 0, skipped: 0 }, articulosActualizados: 0 };
+  }
+
+  // Detectar columnas de mapeo del front
+  const colCodigo = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'codigo') : null;
+  const colNombre = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'nombre') : null;
+  console.log(`[csvArticulosRubrosImport] mapeo: colCodigo="${colCodigo}" colNombre="${colNombre}"`);
+
+  // 4. Transacción para insertar rubros
+  const client = await pool.connect();
+  let txOpen = false;
+  let inserted = 0, updated = 0, skipped = 0;
 
   try {
-    // Resolver al negocio principal
-    const { rows: [biz] } = await pool.query(
-      `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
-    );
-    let targetBizId = Number(businessId);
-    if (biz?.created_from === 'from_group' && biz.organization_id) {
-      const { rows: [root] } = await pool.query(
-        `SELECT id FROM app_businesses
-          WHERE organization_id = $1
-            AND (created_from IS NULL OR created_from = 'manual' OR created_from = 'onboarding')
-          ORDER BY id ASC LIMIT 1`,
-        [biz.organization_id]
-      );
-      if (root?.id) targetBizId = Number(root.id);
-    }
-
-    const rawRows = await parseFile(filePath);
-    if (!rawRows.length) {
-      try { fs.unlinkSync(filePath); } catch { }
-      return { ok: true, summary: { total: 0, inserted: 0, updated: 0, skipped: 0 }, articulosActualizados: 0 };
-    }
-
     await client.query('BEGIN');
     txOpen = true;
-    await ensureTable(client);
-
-    let inserted = 0, updated = 0, skipped = 0;
 
     for (const row of rawRows) {
-      // Código del rubro: COD_RUA > codigo > id
-      // Columna asignada como 'codigo' en el mapeo del front, sino autodetectar
-      const _colCodigo = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'codigo') : null;
-      const codRuaRaw = (_colCodigo && row[_colCodigo] != null)
-        ? row[_colCodigo]
+      const codRuaRaw = (colCodigo && row[colCodigo] != null)
+        ? row[colCodigo]
         : getCI(row, ['cod_rua', 'codrua', 'cod_ru', 'codigo', 'code', 'id', 'cod']);
-      const codigo    = safeInt(codRuaRaw);
+
+      const codigo = safeInt(codRuaRaw);
       if (codigo == null) { skipped++; continue; }
 
-      const _colNombre = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'nombre') : null;
-      const nombre = cleanStr(
-        (_colNombre && row[_colNombre] != null ? row[_colNombre] : null) ??
-        getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion', 'categoria', 'rubro'])
-      );
+      const nombreRaw = (colNombre && row[colNombre] != null)
+        ? row[colNombre]
+        : getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion']);
+      const nombre = cleanStr(nombreRaw);
       if (!nombre) { skipped++; continue; }
 
-      // Subrubro (COD_SUA + nombre)
       const codigoSua = safeInt(getCI(row, ['cod_sua', 'codsua', 'codigo_sua', 'sub_id']));
-      const subrubro  = cleanStr(getCI(row, ['nombre_sua', 'subrubro', 'subcategoria', 'desc_sua', 'nombre_subrubro']));
+      const subrubro  = cleanStr(getCI(row, ['nombre_sua', 'subrubro', 'subcategoria', 'desc_sua']));
 
       const { rows: res } = await client.query(
         `INSERT INTO articulo_rubros (business_id, codigo, nombre, codigo_sua, subrubro, updated_at)
@@ -159,69 +162,57 @@ async function importRubrosArticulosFromFile({ businessId, filePath, originalNam
       if (res[0]?.is_insert) inserted++; else updated++;
     }
 
-    // ── Cruzar con maxi_articles: reemplazar códigos numéricos por nombres ──
-    let articulosActualizados = 0;
-    try {
-      // Actualizar categoria donde está guardado como número (COD_RUA)
-      const { rowCount: rc1 } = await client.query(
-        `UPDATE maxi_articles ma
-            SET categoria  = ar.nombre,
-                updated_at = NOW()
-           FROM articulo_rubros ar
-          WHERE ar.business_id = $1
-            AND ma.business_id = $1
-            AND ma.categoria ~ '^[0-9]+$'
-            AND ar.codigo::text = ma.categoria`,
-        [targetBizId]
-      );
-
-      // Actualizar subrubro donde está guardado como número (COD_SUA) y tenemos nombre
-      const { rowCount: rc2 } = await client.query(
-        `UPDATE maxi_articles ma
-            SET subrubro   = ar.subrubro,
-                updated_at = NOW()
-           FROM articulo_rubros ar
-          WHERE ar.business_id = $1
-            AND ma.business_id = $1
-            AND ar.subrubro IS NOT NULL
-            AND ma.subrubro ~ '^[0-9]+$'
-            AND ar.codigo_sua::text = ma.subrubro`,
-        [targetBizId]
-      );
-
-      articulosActualizados = (rc1 || 0) + (rc2 || 0);
-    } catch (crossErr) {
-      console.warn('[importRubrosArticulos] cruce con artículos falló (no crítico):', crossErr.message);
-    }
-
     await client.query('COMMIT');
     txOpen = false;
-
-    try { fs.unlinkSync(filePath); } catch { }
-
-    console.log(`[csvArticulosRubrosImport] biz=${targetBizId} inserted=${inserted} updated=${updated} arts=${articulosActualizados}`);
-
-    return {
-      ok: true,
-      summary: {
-        total:    inserted + updated + skipped,
-        inserted,
-        updated,
-        skipped,
-        target_business_id: targetBizId,
-      },
-      articulosActualizados,
-      message: `${inserted} rubros nuevos, ${updated} actualizados. ${articulosActualizados} artículos cruzados con nombres de categoría.`,
-    };
+    console.log(`[csvArticulosRubrosImport] Rubros: inserted=${inserted} updated=${updated} skipped=${skipped}`);
 
   } catch (error) {
     if (txOpen) { try { await client.query('ROLLBACK'); } catch { } }
-    console.error('[CSV Articulos Rubros Import] Error fatal:', error.message);
-    try { fs.unlinkSync(filePath); } catch { }
-    throw error;
-  } finally {
     client.release();
+    try { fs.unlinkSync(filePath); } catch { }
+    console.error('[csvArticulosRubrosImport] Error en transacción:', error.message);
+    throw error;
   }
+  client.release();
+
+  // 5. Cruce con maxi_articles — conexión separada, sin transacción
+  // Si falla, no es crítico — los rubros ya están guardados
+  let articulosActualizados = 0;
+  const crossClient = await pool.connect();
+  try {
+    const { rowCount: rc1 } = await crossClient.query(
+      `UPDATE maxi_articles ma
+          SET categoria  = ar.nombre,
+              updated_at = NOW()
+         FROM articulo_rubros ar
+        WHERE ar.business_id = $1
+          AND ma.business_id = $1
+          AND ma.categoria ~ '^[0-9]+$'
+          AND ar.codigo::text = ma.categoria`,
+      [targetBizId]
+    );
+    console.log(`[csvArticulosRubrosImport] Cruce categoria: ${rc1} artículos actualizados`);
+    articulosActualizados += (rc1 || 0);
+  } catch (e) {
+    console.warn('[csvArticulosRubrosImport] Cruce categoria falló:', e.message);
+  } finally {
+    crossClient.release();
+  }
+
+  try { fs.unlinkSync(filePath); } catch { }
+
+  return {
+    ok: true,
+    summary: {
+      total: inserted + updated + skipped,
+      inserted,
+      updated,
+      skipped,
+      target_business_id: targetBizId,
+    },
+    articulosActualizados,
+    message: `${inserted} rubros nuevos, ${updated} actualizados. ${articulosActualizados} artículos actualizados con nombre de categoría.`,
+  };
 }
 
 module.exports = { importRubrosArticulosFromFile };
