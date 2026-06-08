@@ -61,8 +61,12 @@ async function authRequired(req, res, next) {
  */
 async function loadActiveBusiness(req, res, next) {
   try {
-    // Los app_admin no usan endpoints tenant (a menos que también vengan como “service”)
+        // Los app_admin no usan endpoints tenant — excepto /api/admin/* y /api/access/*
     if (req.user?.role === 'app_admin' && !req.isService) {
+      const url = req.originalUrl || '';
+      if (url.includes('/api/admin') || url.includes('/api/access')) {
+        return next();
+      }
       return res.status(403).json({ error: 'forbidden_for_app_admin' });
     }
 
