@@ -120,11 +120,17 @@ router.post(
       let mapeoRubros = {};
       try { if (req.body?.mapeo) mapeoRubros = JSON.parse(req.body.mapeo); } catch { }
 
+      // destino: 'categoria' | 'subrubro' — dónde guardar los nombres en maxi_articles
+      const destino = ['categoria', 'subrubro'].includes(req.body?.destino)
+        ? req.body.destino
+        : 'categoria';
+
       const result = await importRubrosArticulosFromFile({
         businessId,
         filePath:     req.file.path,
         originalName: req.file.originalname,
         mapeo:        mapeoRubros,
+        destino,
       });
 
       return res.json(result);

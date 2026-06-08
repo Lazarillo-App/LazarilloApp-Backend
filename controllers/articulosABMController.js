@@ -162,7 +162,7 @@ exports.crearArticulo = async (req, res, next) => {
          origen          = COALESCE(maxi_articles.origen, 'manual'),
          upload_batch_id = COALESCE(maxi_articles.upload_batch_id, EXCLUDED.upload_batch_id),
          updated_at      = NOW()`,
-       [bizId, Math.abs(newId) + 9000000, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, manualBatchId]
+      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, manualBatchId]
     );
 
     // Si viene agrupacionId, agregar el artículo a esa agrupación
@@ -456,4 +456,136 @@ exports.alertasVentas = async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+};
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /businesses/:id/articles/batches
+// Lista lotes de artículos Y rubros importados manualmente
+// ─────────────────────────────────────────────────────────────────────────────
+exports.listBatchesArticulos = async (req, res, next) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId requerido' });
+
+    // Lotes de artículos (maxi_articles)
+    const { rows: artRows } = await pool.query(
+      `SELECT
+         COALESCE(upload_batch_id, 'manual-sin-lote') AS batch_id,
+         MIN(updated_at)                              AS created_at,
+         COUNT(*)::int                                AS total_items,
+         string_agg(DISTINCT COALESCE(origen,'manual'), ', ') AS origenes,
+         'articulos' AS tipo
+       FROM maxi_articles
+       WHERE business_id = $1
+         AND (upload_batch_id IS NOT NULL OR origen IN ('manual','csv'))
+       GROUP BY COALESCE(upload_batch_id, 'manual-sin-lote')
+       ORDER BY MIN(updated_at) DESC`,
+      [bizId]
+    );
+
+    // Lotes de rubros (articulo_rubros) — si existe la tabla
+    let rubRows = [];
+    try {
+      const { rows } = await pool.query(
+        `SELECT
+           COALESCE(upload_batch_id, 'rubros-sin-lote') AS batch_id,
+           MIN(updated_at)                              AS created_at,
+           COUNT(*)::int                                AS total_items,
+           destino                                      AS origenes,
+           'rubros' AS tipo
+         FROM articulo_rubros
+         WHERE business_id = $1
+         GROUP BY COALESCE(upload_batch_id, 'rubros-sin-lote'), destino
+         ORDER BY MIN(updated_at) DESC`,
+        [bizId]
+      );
+      rubRows = rows;
+    } catch { /* tabla puede no existir todavía */ }
+
+    const data = [...artRows, ...rubRows].sort((a, b) =>
+      new Date(b.created_at) - new Date(a.created_at)
+    );
+
+    return res.json({ ok: true, data });
+  } catch (e) { next(e); }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /businesses/:id/articles/batches/:batchId/preview
+// ─────────────────────────────────────────────────────────────────────────────
+exports.previewBatchArticulos = async (req, res, next) => {
+  try {
+    const bizId   = getBusinessId(req);
+    const batchId = req.params.batchId;
+    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+
+    // Detectar si es lote de rubros por el prefijo
+    const esRubros = batchId.startsWith('rubros-');
+    const isSinLote = batchId === 'manual-sin-lote' || batchId === 'rubros-sin-lote';
+
+    let rows = [];
+    if (esRubros) {
+      try {
+        const q = isSinLote
+          ? `SELECT id, codigo AS articulo_id, nombre, destino AS categoria, NULL AS subrubro, NULL AS precio, updated_at
+               FROM articulo_rubros WHERE business_id = $1 AND upload_batch_id IS NULL
+               ORDER BY nombre ASC LIMIT 200`
+          : `SELECT id, codigo AS articulo_id, nombre, destino AS categoria, NULL AS subrubro, NULL AS precio, updated_at
+               FROM articulo_rubros WHERE business_id = $1 AND upload_batch_id = $2
+               ORDER BY nombre ASC LIMIT 200`;
+        const res2 = await pool.query(q, isSinLote ? [bizId] : [bizId, batchId]);
+        rows = res2.rows;
+      } catch { rows = []; }
+    } else {
+      const q = isSinLote
+        ? `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, origen, updated_at
+             FROM maxi_articles
+            WHERE business_id = $1 AND upload_batch_id IS NULL AND origen IN ('manual','csv')
+            ORDER BY nombre ASC LIMIT 200`
+        : `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, origen, updated_at
+             FROM maxi_articles
+            WHERE business_id = $1 AND upload_batch_id = $2
+            ORDER BY nombre ASC LIMIT 200`;
+      const res2 = await pool.query(q, isSinLote ? [bizId] : [bizId, batchId]);
+      rows = res2.rows;
+    }
+
+    return res.json({ ok: true, data: rows, total: rows.length });
+  } catch (e) { next(e); }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /businesses/:id/articles/batches/:batchId
+// ─────────────────────────────────────────────────────────────────────────────
+exports.deleteBatchArticulos = async (req, res, next) => {
+  try {
+    const bizId   = getBusinessId(req);
+    const batchId = req.params.batchId;
+    if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+
+    const esRubros  = batchId.startsWith('rubros-');
+    const isSinLote = batchId === 'manual-sin-lote' || batchId === 'rubros-sin-lote';
+
+    let rowCount = 0;
+    if (esRubros) {
+      try {
+        const r = await pool.query(
+          isSinLote
+            ? `DELETE FROM articulo_rubros WHERE business_id = $1 AND upload_batch_id IS NULL`
+            : `DELETE FROM articulo_rubros WHERE business_id = $1 AND upload_batch_id = $2`,
+          isSinLote ? [bizId] : [bizId, batchId]
+        );
+        rowCount = r.rowCount;
+      } catch { rowCount = 0; }
+    } else {
+      const r = await pool.query(
+        isSinLote
+          ? `DELETE FROM maxi_articles WHERE business_id = $1 AND upload_batch_id IS NULL AND origen IN ('csv','manual')`
+          : `DELETE FROM maxi_articles WHERE business_id = $1 AND upload_batch_id = $2 AND origen IN ('csv','manual')`,
+        isSinLote ? [bizId] : [bizId, batchId]
+      );
+      rowCount = r.rowCount;
+    }
+
+    return res.json({ ok: true, deleted: rowCount, batchId });
+  } catch (e) { next(e); }
 };

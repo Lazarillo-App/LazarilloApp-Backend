@@ -47,27 +47,36 @@ async function parseFile(filePath) {
     .filter(r => Object.values(r).some(v => v != null && v !== ''));
 }
 
-// ── crear tabla FUERA de transacción ──────────────────────────────────────
-// Usar una conexión separada sin transacción para el DDL
+// ── crear/actualizar tabla ────────────────────────────────────────────────
+
 async function ensureTable() {
   const client = await pool.connect();
   try {
     await client.query(`
       CREATE TABLE IF NOT EXISTS articulo_rubros (
-        id          SERIAL PRIMARY KEY,
-        business_id BIGINT  NOT NULL REFERENCES app_businesses(id) ON DELETE CASCADE,
-        codigo      INTEGER NOT NULL,
-        nombre      TEXT    NOT NULL,
-        codigo_sua  INTEGER,
-        subrubro    TEXT,
-        activo      BOOLEAN NOT NULL DEFAULT TRUE,
-        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (business_id, codigo)
+        id              SERIAL PRIMARY KEY,
+        business_id     BIGINT  NOT NULL REFERENCES app_businesses(id) ON DELETE CASCADE,
+        codigo          INTEGER NOT NULL,
+        nombre          TEXT    NOT NULL,
+        codigo_sua      INTEGER,
+        subrubro        TEXT,
+        destino         TEXT    NOT NULL DEFAULT 'categoria',
+        upload_batch_id TEXT,
+        activo          BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (business_id, codigo, destino)
       )
     `);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_art_rubros_biz ON articulo_rubros(business_id)
     `);
+    // Agregar columnas si no existen (para DBs ya existentes)
+    await client.query(`
+      ALTER TABLE articulo_rubros ADD COLUMN IF NOT EXISTS destino TEXT NOT NULL DEFAULT 'categoria'
+    `).catch(() => {});
+    await client.query(`
+      ALTER TABLE articulo_rubros ADD COLUMN IF NOT EXISTS upload_batch_id TEXT
+    `).catch(() => {});
     console.log('[csvArticulosRubrosImport] Tabla articulo_rubros verificada OK');
   } catch (e) {
     console.error('[csvArticulosRubrosImport] Error al crear tabla:', e.message);
@@ -79,8 +88,15 @@ async function ensureTable() {
 
 // ── función principal ──────────────────────────────────────────────────────
 
-async function importRubrosArticulosFromFile({ businessId, filePath, originalName, mapeo = {} }) {
-  // 1. Crear tabla ANTES de cualquier transacción
+/**
+ * destino: 'categoria' | 'subrubro'
+ *   'categoria' → actualiza maxi_articles.categoria con los nombres
+ *   'subrubro'  → actualiza maxi_articles.subrubro con los nombres
+ */
+async function importRubrosArticulosFromFile({
+  businessId, filePath, originalName, mapeo = {}, destino = 'categoria'
+}) {
+  // 1. Crear tabla antes de cualquier transacción
   await ensureTable();
 
   // 2. Resolver negocio principal
@@ -98,7 +114,7 @@ async function importRubrosArticulosFromFile({ businessId, filePath, originalNam
     );
     if (root?.id) targetBizId = Number(root.id);
   }
-  console.log(`[csvArticulosRubrosImport] bizId=${businessId} → targetBizId=${targetBizId}`);
+  console.log(`[csvArticulosRubrosImport] bizId=${businessId} → targetBizId=${targetBizId} destino=${destino}`);
 
   // 3. Parsear archivo
   let rawRows;
@@ -115,10 +131,9 @@ async function importRubrosArticulosFromFile({ businessId, filePath, originalNam
     return { ok: true, summary: { total: 0, inserted: 0, updated: 0, skipped: 0 }, articulosActualizados: 0 };
   }
 
-  // Detectar columnas de mapeo del front
   const colCodigo = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'codigo') : null;
   const colNombre = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'nombre') : null;
-  console.log(`[csvArticulosRubrosImport] mapeo: colCodigo="${colCodigo}" colNombre="${colNombre}"`);
+  const batchId   = `rubros-${destino}-${Date.now()}`;
 
   // 4. Transacción para insertar rubros
   const client = await pool.connect();
@@ -143,20 +158,17 @@ async function importRubrosArticulosFromFile({ businessId, filePath, originalNam
       const nombre = cleanStr(nombreRaw);
       if (!nombre) { skipped++; continue; }
 
-      const codigoSua = safeInt(getCI(row, ['cod_sua', 'codsua', 'codigo_sua', 'sub_id']));
-      const subrubro  = cleanStr(getCI(row, ['nombre_sua', 'subrubro', 'subcategoria', 'desc_sua']));
-
       const { rows: res } = await client.query(
-        `INSERT INTO articulo_rubros (business_id, codigo, nombre, codigo_sua, subrubro, updated_at)
+        `INSERT INTO articulo_rubros
+           (business_id, codigo, nombre, destino, upload_batch_id, updated_at)
          VALUES ($1, $2, $3, $4, $5, NOW())
-         ON CONFLICT (business_id, codigo) DO UPDATE SET
-           nombre     = EXCLUDED.nombre,
-           codigo_sua = COALESCE(EXCLUDED.codigo_sua, articulo_rubros.codigo_sua),
-           subrubro   = COALESCE(EXCLUDED.subrubro,   articulo_rubros.subrubro),
-           activo     = TRUE,
-           updated_at = NOW()
+         ON CONFLICT (business_id, codigo, destino) DO UPDATE SET
+           nombre          = EXCLUDED.nombre,
+           upload_batch_id = EXCLUDED.upload_batch_id,
+           activo          = TRUE,
+           updated_at      = NOW()
          RETURNING (xmax = 0) AS is_insert`,
-        [targetBizId, codigo, nombre, codigoSua, subrubro]
+        [targetBizId, codigo, nombre, destino, batchId]
       );
 
       if (res[0]?.is_insert) inserted++; else updated++;
@@ -164,37 +176,39 @@ async function importRubrosArticulosFromFile({ businessId, filePath, originalNam
 
     await client.query('COMMIT');
     txOpen = false;
-    console.log(`[csvArticulosRubrosImport] Rubros: inserted=${inserted} updated=${updated} skipped=${skipped}`);
+    console.log(`[csvArticulosRubrosImport] inserted=${inserted} updated=${updated} skipped=${skipped}`);
 
   } catch (error) {
     if (txOpen) { try { await client.query('ROLLBACK'); } catch { } }
     client.release();
     try { fs.unlinkSync(filePath); } catch { }
-    console.error('[csvArticulosRubrosImport] Error en transacción:', error.message);
     throw error;
   }
   client.release();
 
-  // 5. Cruce con maxi_articles — conexión separada, sin transacción
-  // Si falla, no es crítico — los rubros ya están guardados
+  // 5. Cruce con maxi_articles según destino
   let articulosActualizados = 0;
   const crossClient = await pool.connect();
   try {
-    const { rowCount: rc1 } = await crossClient.query(
+    // La columna a actualizar depende del destino
+    const colDestino = destino === 'subrubro' ? 'subrubro' : 'categoria';
+
+    const { rowCount } = await crossClient.query(
       `UPDATE maxi_articles ma
-          SET categoria  = ar.nombre,
-              updated_at = NOW()
+          SET ${colDestino} = ar.nombre,
+              updated_at    = NOW()
          FROM articulo_rubros ar
         WHERE ar.business_id = $1
           AND ma.business_id = $1
-          AND ma.categoria ~ '^[0-9]+$'
-          AND ar.codigo::text = ma.categoria`,
-      [targetBizId]
+          AND ar.destino     = $2
+          AND ma.${colDestino} ~ '^[0-9]+$'
+          AND ar.codigo::text = ma.${colDestino}`,
+      [targetBizId, destino]
     );
-    console.log(`[csvArticulosRubrosImport] Cruce categoria: ${rc1} artículos actualizados`);
-    articulosActualizados += (rc1 || 0);
+    articulosActualizados = rowCount || 0;
+    console.log(`[csvArticulosRubrosImport] Cruce ${colDestino}: ${articulosActualizados} artículos actualizados`);
   } catch (e) {
-    console.warn('[csvArticulosRubrosImport] Cruce categoria falló:', e.message);
+    console.warn('[csvArticulosRubrosImport] Cruce falló:', e.message);
   } finally {
     crossClient.release();
   }
@@ -203,16 +217,61 @@ async function importRubrosArticulosFromFile({ businessId, filePath, originalNam
 
   return {
     ok: true,
-    summary: {
-      total: inserted + updated + skipped,
-      inserted,
-      updated,
-      skipped,
-      target_business_id: targetBizId,
-    },
+    batchId,
+    summary: { total: inserted + updated + skipped, inserted, updated, skipped, target_business_id: targetBizId },
     articulosActualizados,
-    message: `${inserted} rubros nuevos, ${updated} actualizados. ${articulosActualizados} artículos actualizados con nombre de categoría.`,
+    destino,
+    message: `${inserted} rubros nuevos, ${updated} actualizados → ${articulosActualizados} artículos con ${destino === 'subrubro' ? 'subrubro' : 'categoría'} actualizado.`,
   };
 }
 
-module.exports = { importRubrosArticulosFromFile };
+// ── listar lotes de rubros ────────────────────────────────────────────────
+
+async function listBatchesRubros(bizId) {
+  const { rows } = await pool.query(
+    `SELECT
+       COALESCE(upload_batch_id, 'rubros-sin-lote') AS batch_id,
+       MIN(updated_at)                              AS created_at,
+       COUNT(*)::int                                AS total_items,
+       destino                                      AS origenes
+     FROM articulo_rubros
+     WHERE business_id = $1
+     GROUP BY COALESCE(upload_batch_id, 'rubros-sin-lote'), destino
+     ORDER BY MIN(updated_at) DESC`,
+    [bizId]
+  );
+  return rows;
+}
+
+async function previewBatchRubros(bizId, batchId) {
+  const isSinLote = batchId === 'rubros-sin-lote';
+  const { rows } = await pool.query(
+    isSinLote
+      ? `SELECT id, codigo, nombre, destino, updated_at FROM articulo_rubros
+          WHERE business_id = $1 AND upload_batch_id IS NULL
+          ORDER BY nombre ASC LIMIT 200`
+      : `SELECT id, codigo, nombre, destino, updated_at FROM articulo_rubros
+          WHERE business_id = $1 AND upload_batch_id = $2
+          ORDER BY nombre ASC LIMIT 200`,
+    isSinLote ? [bizId] : [bizId, batchId]
+  );
+  return rows;
+}
+
+async function deleteBatchRubros(bizId, batchId) {
+  const isSinLote = batchId === 'rubros-sin-lote';
+  const { rowCount } = await pool.query(
+    isSinLote
+      ? `DELETE FROM articulo_rubros WHERE business_id = $1 AND upload_batch_id IS NULL`
+      : `DELETE FROM articulo_rubros WHERE business_id = $1 AND upload_batch_id = $2`,
+    isSinLote ? [bizId] : [bizId, batchId]
+  );
+  return rowCount;
+}
+
+module.exports = {
+  importRubrosArticulosFromFile,
+  listBatchesRubros,
+  previewBatchRubros,
+  deleteBatchRubros,
+};
