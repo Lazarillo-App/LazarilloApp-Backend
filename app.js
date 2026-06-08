@@ -83,6 +83,7 @@ app.use((req, res, next) => {
   const isMultipartUpload = 
     req.headers['content-type']?.includes('multipart/form-data') ||
     req.path.includes('/import-csv') ||
+    req.path.includes('/preview-columns') ||
     req.path.includes('/purchases/import-csv') ||
     req.path.endsWith('/logo');
     
@@ -97,6 +98,8 @@ app.use((req, res, next) => {
   const isMultipartUpload = 
     req.headers['content-type']?.includes('multipart/form-data') ||
     req.path.includes('/import-csv') ||
+    req.path.includes('/preview-columns') ||
+    req.path.includes('/purchases/import-csv') ||
     req.path.endsWith('/logo');
     
   if (isMultipartUpload && req.method === 'POST') {
