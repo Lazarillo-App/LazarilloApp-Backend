@@ -45,6 +45,8 @@ const articulosImportRoutes = require('./routes/articulosImportRoutes');
 const ventasCSVRoutes = require('./routes/ventasCSVRoutes');    
 const purchasesImportRoutes = require('./routes/purchasesImportRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
+const accessRoutes         = require('./routes/accessRoutes');
+const requireActiveAccount = require('./middleware/requireActiveAccount');
 const syncRoutes = require('./routes/syncRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
 const priceListsRoutes = require('./routes/priceListsRoutes');
@@ -83,7 +85,6 @@ app.use((req, res, next) => {
   const isMultipartUpload = 
     req.headers['content-type']?.includes('multipart/form-data') ||
     req.path.includes('/import-csv') ||
-    req.path.includes('/preview-columns') ||
     req.path.includes('/purchases/import-csv') ||
     req.path.endsWith('/logo');
     
@@ -98,8 +99,6 @@ app.use((req, res, next) => {
   const isMultipartUpload = 
     req.headers['content-type']?.includes('multipart/form-data') ||
     req.path.includes('/import-csv') ||
-    req.path.includes('/preview-columns') ||
-    req.path.includes('/purchases/import-csv') ||
     req.path.endsWith('/logo');
     
   if (isMultipartUpload && req.method === 'POST') {
@@ -129,6 +128,9 @@ if (exposeProbe) {
   app.use('/api/dev', devMaxiProbeRoutes);
 }
 
+/* ── Acceso/cupones (status y redeem son semipúblicos) ── */
+app.use('/api/access', accessRoutes);
+
 /* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
 app.use('/api/cron', adminCronRoutes);
 
@@ -140,6 +142,9 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 
 // Guard global de /api (después de /api/cron y /api/admin)
 app.use('/api', authRequired, loadActiveBusiness);
+
+// Verificar estado de cuenta activa (después de auth, antes de las rutas de negocio)
+app.use('/api', requireActiveAccount);
 
 // módulos sin :businessId en la URL
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
@@ -170,10 +175,7 @@ app.use('/api/businesses/:businessId/sync', syncRoutes);
 
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
-app.use('/api/businesses/:businessId/articles/:articleId/receta', (req, res, next) => {
-  console.log('[recetasMount]', req.method, req.path, req.params);
-  next();
-}, recetasRoutes);
+app.use('/api/businesses/:businessId/articles/:articleId/receta', recetasRoutes);
 const { getRecetasElaboradosMapa } = require('./controllers/recetasElaboradosController');
 app.use('/api/businesses/:businessId/recetas-elaborados', authRequired, getRecetasElaboradosMapa);
 app.use('/api/businesses/:businessId/insumos/:insumoId/receta', recetasElaboradosRoutes);

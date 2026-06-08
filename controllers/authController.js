@@ -60,24 +60,28 @@ exports.register = async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
 
     const { rows } = await pool.query(
-      `INSERT INTO app_users (name, email, password_hash)
-       VALUES ($1,$2,$3)
-       RETURNING id, name, email, active_business_id, role, status`,
+      `INSERT INTO app_users (name, email, password_hash, account_status)
+       VALUES ($1,$2,$3,'pending')
+       RETURNING id, name, email, active_business_id, role, status, account_status`,
       [name || null, rawEmail, hash]
     );
 
     const user = rows[0];
-    user.role = user.role || 'owner'; // fallback por si la tabla no tiene DEFAULT
+    user.role = user.role || 'owner';
 
     const token = signToken(user);
 
-    // (OPCIONAL) invalidar tokens de reset históricos para el usuario recién creado
-    // await pool.query(
-    //   `UPDATE app_users SET reset_token_hash=NULL, reset_token_expires_at=NULL WHERE id=$1`,
-    //   [user.id]
-    // );
-
-    res.status(201).json({ token, user });
+    res.status(201).json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        active_business_id: user.active_business_id || null,
+        role: user.role,
+        account_status: 'pending',
+      },
+    });
   } catch (e) {
     console.error('register error:', e);
     res.status(500).json({ error: 'internal' });
@@ -96,25 +100,40 @@ exports.login = async (req, res) => {
     const rawEmail = normEmail(email);
 
     const { rows } = await pool.query(
-      `SELECT id, name, email, password_hash, active_business_id, role, status
+      `SELECT id, name, email, password_hash, active_business_id, role, status,
+              account_status, trial_ends_at, subscription_ends_at
          FROM app_users WHERE email=$1 LIMIT 1`,
       [rawEmail]
     );
     const user = rows[0];
-    if (!user || user.status !== 'active') {
-      return res.status(401).json({ error: 'invalid_credentials' });
+    // Solo bloquear si el usuario no existe o está suspendido explícitamente
+    if (!user) return res.status(401).json({ error: 'invalid_credentials' });
+    if (user.account_status === 'suspended') {
+      return res.status(403).json({ error: 'account_suspended' });
     }
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'invalid_credentials' });
 
-    const token = signToken(user);
+    // Auto-vencer si el tiempo expiró
+    let accountStatus = user.account_status || 'pending';
+    const now = new Date();
+    if (accountStatus === 'trial' && user.trial_ends_at && new Date(user.trial_ends_at) < now) {
+      accountStatus = 'expired';
+      await pool.query(
+        `UPDATE app_users SET account_status = 'expired', updated_at = NOW() WHERE id = $1`,
+        [user.id]
+      ).catch(() => {});
+    }
+    if (accountStatus === 'active' && user.subscription_ends_at && new Date(user.subscription_ends_at) < now) {
+      accountStatus = 'expired';
+      await pool.query(
+        `UPDATE app_users SET account_status = 'expired', updated_at = NOW() WHERE id = $1`,
+        [user.id]
+      ).catch(() => {});
+    }
 
-    // (OPCIONAL) al loguearse, borrar tokens de reset pendientes
-    // await pool.query(
-    //   `UPDATE app_users SET reset_token_hash=NULL, reset_token_expires_at=NULL WHERE id=$1`,
-    //   [user.id]
-    // );
+    const token = signToken(user);
 
     res.json({
       token,
@@ -124,6 +143,9 @@ exports.login = async (req, res) => {
         email: user.email,
         active_business_id: user.active_business_id || null,
         role: user.role || 'owner',
+        account_status: accountStatus,
+        trial_ends_at: user.trial_ends_at || null,
+        subscription_ends_at: user.subscription_ends_at || null,
       },
     });
   } catch (e) {
@@ -135,7 +157,9 @@ exports.login = async (req, res) => {
 exports.me = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, email, active_business_id, role, status FROM app_users WHERE id=$1',
+      `SELECT id, name, email, active_business_id, role, status,
+              account_status, trial_ends_at, subscription_ends_at
+         FROM app_users WHERE id=$1`,
       [req.user.id]
     );
     res.json(rows[0] || null);
