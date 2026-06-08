@@ -70,10 +70,17 @@ router.post(
         message: 'Adjuntá un archivo CSV, XLS o XLSX con el listado de artículos',
       });
 
+      // Leer mapeo enviado por el front { COL: 'codigo'|'nombre'|'precio'|'rubro'|'subrubro'|'ignorar' }
+      let mapeo = {};
+      try {
+        if (req.body?.mapeo) mapeo = JSON.parse(req.body.mapeo);
+      } catch { mapeo = {}; }
+
       const result = await importArticulosFromFile({
         businessId,
         filePath:     req.file.path,
         originalName: req.file.originalname,
+        mapeo,
       });
 
       return res.json(result);

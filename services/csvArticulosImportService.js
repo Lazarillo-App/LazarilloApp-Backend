@@ -83,10 +83,20 @@ async function parseFile(filePath) {
 
 // ── normalización de cada fila ─────────────────────────────────────────────
 
-function normalizeRow(row, idx) {
+// mapeo: { COL_ORIGINAL: 'codigo'|'nombre'|'precio'|'rubro'|'subrubro'|'ignorar' }
+// Si viene mapeo del usuario, buscar directamente por la columna asignada
+function resolverConMapeo(row, mapeo, campo) {
+  if (!mapeo || !Object.keys(mapeo).length) return undefined;
+  for (const [col, rol] of Object.entries(mapeo)) {
+    if (rol === campo && row[col] != null && row[col] !== '') return row[col];
+  }
+  return undefined;
+}
+
+function normalizeRow(row, idx, mapeo = {}) {
   try {
-    // articulo_id: prioridad CODIGO > COD_RUA > otros alias
-    const codigoRaw = getCI(row, [
+    // articulo_id: si hay mapeo del usuario, usarlo; sino detectar automático
+    const codigoRaw = resolverConMapeo(row, mapeo, 'codigo') ?? getCI(row, [
       'codigo', 'cod_rua', 'codrua', 'cod_ru', 'articulo_id', 'art_id', 'code', 'id',
     ]);
 
@@ -97,29 +107,28 @@ function normalizeRow(row, idx) {
       throw new Error(`Código inválido: "${codigoRaw}"`);
     }
 
-    const nombreRaw = getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion']);
+    const nombreRaw = resolverConMapeo(row, mapeo, 'nombre') ?? getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion']);
     if (!nombreRaw) throw new Error(`Nombre vacío en código ${articulo_id}`);
     const nombre = cleanStr(String(nombreRaw)) || '';
     if (!nombre) throw new Error(`Nombre vacío en código ${articulo_id}`);
 
     // Categoría: si hay COD_RUA usarlo como código numérico que luego se cruza con rubros
-    const categoriaRaw = getCI(row, [
+    const categoriaRaw = resolverConMapeo(row, mapeo, 'rubro') ?? getCI(row, [
       'categoria', 'categoría', 'rubro', 'cat', 'categoria_nombre', 'rubro_nombre',
-      'cod_rua', 'codrua', 'cod_ru',
     ]);
     const categoria = categoriaRaw != null && String(categoriaRaw).trim() !== ''
       ? String(categoriaRaw).trim()
       : 'Sin categoría';
 
     // COD_SUA como subrubro
-    const subrubroRaw = getCI(row, ['subrubro', 'subcategoria', 'sub', 'cod_sua', 'codsua']);
+    const subrubroRaw = resolverConMapeo(row, mapeo, 'subrubro') ?? getCI(row, ['subrubro', 'subcategoria', 'sub', 'cod_sua', 'codsua']);
     const subrubro = subrubroRaw != null && String(subrubroRaw).trim() !== ''
       ? String(subrubroRaw).trim()
       : null;
 
-    // Precio: prioridad PRECIO1 > PRECIO > price
+    // Precio: si hay mapeo, usar esa columna; sino detectar
     const precio = parseNum(
-      getCI(row, ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])
+      resolverConMapeo(row, mapeo, 'precio') ?? getCI(row, ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])
     ) ?? 0;
 
     return {
@@ -133,7 +142,7 @@ function normalizeRow(row, idx) {
 
 // ── función principal ──────────────────────────────────────────────────────
 
-async function importArticulosFromFile({ businessId, filePath, originalName }) {
+async function importArticulosFromFile({ businessId, filePath, originalName, mapeo = {} }) {
   const client = await pool.connect();
   let txOpen = false;
 
@@ -160,7 +169,7 @@ async function importArticulosFromFile({ businessId, filePath, originalName }) {
     const errors = [];
     const items  = [];
     for (let i = 0; i < rawRows.length; i++) {
-      const norm = normalizeRow(rawRows[i], i);
+      const norm = normalizeRow(rawRows[i], i, mapeo);
       if (!norm.ok) errors.push({ row: i + 2, error: norm.error }); // +2: header + 1-based
       else items.push(norm.data);
     }
