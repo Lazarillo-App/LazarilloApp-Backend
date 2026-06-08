@@ -17,11 +17,17 @@ function ensureFn(name, fn) {
 // Solo para app_admin
 r.use(requireAppAdmin);
 
+/* OVERVIEW */
+r.get('/overview', ensureFn('overview', adminCtrl?.overview));
+
 /* USUARIOS */
 r.get(   '/users',          ensureFn('listUsers',    adminCtrl?.listUsers));
 r.post(  '/users',          ensureFn('createUser',   adminCtrl?.createUser));
 r.patch( '/users/:id',      ensureFn('updateUser',   adminCtrl?.updateUser));
 r.delete('/users/:id',      ensureFn('deleteUser',   adminCtrl?.deleteUser));
+r.post(  '/users/:id/restore',         ensureFn('restoreUser',   adminCtrl?.restoreUser));
+r.post(  '/users/:id/reset-password',  ensureFn('resetPassword', adminCtrl?.resetPassword));
+r.get(   '/users/:id',                 ensureFn('getUser',       adminCtrl?.getUser));
 
 /* NEGOCIOS */
 r.get(   '/businesses',     ensureFn('listBusinesses',   adminCtrl?.listBusinesses));
