@@ -145,17 +145,17 @@ async function fetchMaxiArticles({ token, from, to, invertirJerarquia = false })
     if (!Number.isFinite(id) || seen.has(id)) return;
     seen.add(id);
 
-    // Si invertirJerarquia=true: categoria=subrubro, subrubro=rubro (SWAP original)
-    // Si invertirJerarquia=false: categoria=rubro, subrubro=subrubro (jerarquía normal)
+    // Comportamiento por defecto (todos los negocios): categoria=subrubro Maxi, subrubro=rubro Maxi
+    // Con flag invertir_jerarquia_articulos=true: categoria=rubro Maxi, subrubro=subrubro Maxi
     items.push({
       id,
       nombre: getName(o),
       categoria: invertirJerarquia
-        ? orSinCategoria(subrubroNombre)
-        : orSinCategoria(rubroNombre),
+        ? orSinCategoria(rubroNombre)
+        : orSinCategoria(subrubroNombre),
       subrubro: invertirJerarquia
-        ? orSinSubrubro(rubroNombre)
-        : orSinSubrubro(subrubroNombre),
+        ? orSinSubrubro(subrubroNombre)
+        : orSinSubrubro(rubroNombre),
       precio: num(o.precio ?? o.precioVenta ?? o.importe, 0),
       costo: num(o.costo ?? o.costoPromedio, 0),
       raw: o,
