@@ -117,10 +117,14 @@ router.post(
         message: 'Adjuntá un archivo CSV, XLS o XLSX con el listado de rubros',
       });
 
+      let mapeoRubros = {};
+      try { if (req.body?.mapeo) mapeoRubros = JSON.parse(req.body.mapeo); } catch { }
+
       const result = await importRubrosArticulosFromFile({
         businessId,
         filePath:     req.file.path,
         originalName: req.file.originalname,
+        mapeo:        mapeoRubros,
       });
 
       return res.json(result);

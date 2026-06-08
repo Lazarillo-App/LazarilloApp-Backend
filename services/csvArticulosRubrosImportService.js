@@ -89,7 +89,7 @@ async function ensureTable(client) {
 
 // ── función principal ──────────────────────────────────────────────────────
 
-async function importRubrosArticulosFromFile({ businessId, filePath, originalName }) {
+async function importRubrosArticulosFromFile({ businessId, filePath, originalName, mapeo = {} }) {
   const client  = await pool.connect();
   let txOpen    = false;
 
@@ -124,11 +124,19 @@ async function importRubrosArticulosFromFile({ businessId, filePath, originalNam
 
     for (const row of rawRows) {
       // Código del rubro: COD_RUA > codigo > id
-      const codRuaRaw = getCI(row, ['cod_rua', 'codrua', 'cod_ru', 'codigo', 'code', 'id', 'cod']);
+      // Columna asignada como 'codigo' en el mapeo del front, sino autodetectar
+      const _colCodigo = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'codigo') : null;
+      const codRuaRaw = (_colCodigo && row[_colCodigo] != null)
+        ? row[_colCodigo]
+        : getCI(row, ['cod_rua', 'codrua', 'cod_ru', 'codigo', 'code', 'id', 'cod']);
       const codigo    = safeInt(codRuaRaw);
       if (codigo == null) { skipped++; continue; }
 
-      const nombre = cleanStr(getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion', 'categoria', 'rubro']));
+      const _colNombre = mapeo ? Object.keys(mapeo).find(k => mapeo[k] === 'nombre') : null;
+      const nombre = cleanStr(
+        (_colNombre && row[_colNombre] != null ? row[_colNombre] : null) ??
+        getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion', 'categoria', 'rubro'])
+      );
       if (!nombre) { skipped++; continue; }
 
       // Subrubro (COD_SUA + nombre)
