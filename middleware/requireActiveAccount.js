@@ -7,8 +7,8 @@ const pool = require('../config/db');
 
 const PUBLIC_PATHS = [
   '/api/auth/',
-  '/api/access/status',
-  '/api/access/redeem',
+  '/api/access/',
+  '/api/admin/',
   '/health',
 ];
 
