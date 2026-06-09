@@ -146,7 +146,9 @@ exports.crearArticulo = async (req, res, next) => {
     }
 
     // SKU provisorio: L-BIZ-ID (cuando llegue equivalencia externa se pisa)
-    const skuProvisorio = `L-${bizId}-${Math.abs(newId)}`;
+    // SKU formato L001, L002, ... L999, L1000 — padding a 3 dígitos mínimo
+    const numStr = String(Math.abs(newId)).padStart(3, '0');
+    const skuProvisorio = `L${numStr}`;
 
     // Insertar el artículo
     const { rows: artRows } = await client.query(

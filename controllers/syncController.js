@@ -540,9 +540,9 @@ exports.listArticlesTreeFromDB = async (req, res) => {
           : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
         for (const a of arts) {
           const id = Number(a?.id ?? a?.articulo_id ?? a);
-          if (id > 0) allowedIds.add(id);
+          if (Number.isFinite(id) && id !== 0) allowedIds.add(id);
         }
-        for (const id of appIds) { const n = Number(id); if (n > 0) allowedIds.add(n); }
+        for (const id of appIds) { const n = Number(id); if (Number.isFinite(n) && n !== 0) allowedIds.add(n); }
       }
 
       // También incluir artículos sin asignar a ningún subnegocio (son del principal = visibles desde todos)
@@ -556,7 +556,7 @@ exports.listArticlesTreeFromDB = async (req, res) => {
         );
         for (const r of allRows) {
           const id = Number(r.articulo_id);
-          if (id > 0 && !assignedIds.has(id)) allowedIds.add(id);
+          if (Number.isFinite(id) && id !== 0 && !assignedIds.has(id)) allowedIds.add(id);
         }
       }
     }
