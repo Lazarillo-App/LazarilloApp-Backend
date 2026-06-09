@@ -80,3 +80,70 @@ router.post(
 );
 
 module.exports = router;
+/**
+ * POST /api/businesses/:businessId/insumos/preview-columns
+ * Analiza columnas del archivo sin importar — reutiliza la lógica de artículos
+ */
+const { previewColumns } = require('../services/csvInsumosImportService');
+router.post(
+  '/:businessId/insumos/preview-columns',
+  authRequired,
+  upload.single('file'),
+  async (req, res) => {
+    const bizId = getBizId(req);
+    if (isNaN(bizId)) return res.status(400).json({ ok: false, error: 'business_id inválido' });
+    if (!req.file)    return res.status(400).json({ ok: false, error: 'No se recibió archivo' });
+    try {
+      const result = await previewColumns(req.file.path);
+      res.json({ ok: true, ...result });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message });
+    } finally {
+      try { require('fs').unlinkSync(req.file.path); } catch {}
+    }
+  }
+);
+
+/**
+ * POST /api/businesses/:businessId/insumos/import-rubros-csv
+ * Importa rubros de insumos desde CSV/XLS
+ */
+const { upsertRubrosForBusiness } = require('../repos/insumosRubrosRepo');
+const { parseFileToRows }         = require('../services/csvInsumosImportService');
+
+router.post(
+  '/:businessId/insumos/import-rubros-csv',
+  authRequired,
+  upload.single('file'),
+  async (req, res) => {
+    const bizId = getBizId(req);
+    if (isNaN(bizId)) return res.status(400).json({ ok: false, error: 'business_id inválido' });
+    if (!req.file)    return res.status(400).json({ ok: false, error: 'No se recibió archivo' });
+
+    let mapeo = {};
+    try { mapeo = JSON.parse(req.body.mapeo || '{}'); } catch {}
+
+    try {
+      const rows = await parseFileToRows(req.file.path);
+      const items = [];
+
+      for (const row of rows) {
+        let codigo = null, nombre = null;
+        for (const [col, rol] of Object.entries(mapeo)) {
+          if (rol === 'codigo') codigo = row[col];
+          if (rol === 'nombre') nombre = row[col];
+        }
+        if (codigo == null || nombre == null) continue;
+        items.push({ codigo, nombre });
+      }
+
+      const result = await upsertRubrosForBusiness(bizId, items);
+      res.json({ ok: true, ...result });
+    } catch (e) {
+      console.error('[import-rubros-insumos]', e);
+      res.status(500).json({ ok: false, error: e.message });
+    } finally {
+      try { require('fs').unlinkSync(req.file.path); } catch {}
+    }
+  }
+);

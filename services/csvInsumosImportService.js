@@ -169,9 +169,6 @@ async function importInsumosFromFile({ businessId, userId, filePath, originalNam
     await client.query('BEGIN');
     txOpen = true;
 
-    // Generar batch ID único para este import
-    const batchId = `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-
     let inserted = 0, updated = 0;
     const CHUNK = 200;
 
@@ -184,19 +181,18 @@ async function importInsumosFromFile({ businessId, userId, filePath, originalNam
 
         const r = await client.query(
           `INSERT INTO insumos
-             (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado, upload_batch_id, sin_equivalencia)
-           VALUES ($1, $2, $3, $4, $5, $6, 'csv', $7, $8, false)
+             (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado)
+           VALUES ($1, $2, $3, $4, $5, $6, 'csv', $7)
            ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
-             nombre          = EXCLUDED.nombre,
-             unidad_med      = EXCLUDED.unidad_med,
-             precio_ref      = EXCLUDED.precio_ref,
-             rubro           = EXCLUDED.rubro,
-             estado          = EXCLUDED.estado,
-             upload_batch_id = EXCLUDED.upload_batch_id,
-             updated_at      = NOW()
+             nombre     = EXCLUDED.nombre,
+             unidad_med = EXCLUDED.unidad_med,
+             precio_ref = EXCLUDED.precio_ref,
+             rubro      = EXCLUDED.rubro,
+             estado     = EXCLUDED.estado,
+             updated_at = NOW()
            RETURNING (xmax = 0) AS is_insert`,
           [targetBizId, it.codigo_maxi, it.nombre, it.unidad_med,
-           it.precio_ref, it.rubro, estado, batchId]
+           it.precio_ref, it.rubro, estado]
         );
 
         if (r.rows[0]?.is_insert) inserted++; else updated++;
@@ -217,7 +213,6 @@ async function importInsumosFromFile({ businessId, userId, filePath, originalNam
         failed:     errors.length,
         has_errors: errors.length > 0,
         target_business_id: targetBizId,
-        batch_id: batchId,
       },
       errors: errors.slice(0, 20),
     };
@@ -232,4 +227,54 @@ async function importInsumosFromFile({ businessId, userId, filePath, originalNam
   }
 }
 
-module.exports = { importInsumosFromFile };
+/**
+ * Parsea el archivo y devuelve las columnas + muestra de filas (para preview)
+ */
+async function previewColumns(filePath) {
+  const XLSX = require('xlsx');
+  const workbook = XLSX.readFile(filePath, { type: 'file', raw: true });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) throw new Error('El archivo no contiene hojas');
+
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: true, defval: null });
+  const cleaned = rows
+    .map(row => {
+      const out = {};
+      for (const k of Object.keys(row)) {
+        if (String(k).toLowerCase().trim().startsWith('__empty')) continue;
+        out[k] = row[k];
+      }
+      return out;
+    })
+    .filter(r => Object.values(r).some(v => v != null && v !== ''));
+
+  if (!cleaned.length) throw new Error('El archivo no contiene filas de datos');
+
+  const columnas = Object.keys(cleaned[0]);
+  const muestra  = cleaned.slice(0, 5);
+  return { columnas, muestra };
+}
+
+/**
+ * Parsea el archivo y devuelve todas las filas como array de objetos
+ */
+async function parseFileToRows(filePath) {
+  const XLSX = require('xlsx');
+  const workbook = XLSX.readFile(filePath, { type: 'file', raw: true });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) throw new Error('El archivo no contiene hojas');
+
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: true, defval: null });
+  return rows
+    .map(row => {
+      const out = {};
+      for (const k of Object.keys(row)) {
+        if (String(k).toLowerCase().trim().startsWith('__empty')) continue;
+        out[k] = row[k];
+      }
+      return out;
+    })
+    .filter(r => Object.values(r).some(v => v != null && v !== ''));
+}
+
+module.exports = { importInsumosFromFile, previewColumns, parseFileToRows };
