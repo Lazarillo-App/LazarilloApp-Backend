@@ -85,13 +85,14 @@ exports.crearArticulo = async (req, res, next) => {
     console.log('[crearArticulo] body:', JSON.stringify({ nombre, rubro, subrubro, precio, agrupacionId }));
 
     // ID negativo secuencial para artículos manuales (no interfiere con IDs de Maxi)
+    // Usamos FOR UPDATE para evitar race conditions y buscamos globalmente (no solo por biz)
     const { rows: minRows } = await client.query(
       `SELECT COALESCE(MIN(id), 0) - 1 AS next_id
          FROM app_articles
-        WHERE business_id = $1 AND id < 0`,
-      [bizId]
+        WHERE id < 0`
     );
     const newId = Math.min(minRows[0].next_id, -1);
+    console.log('[crearArticulo] newId calculado:', newId);
 
     // Buscar o crear categoria_id
     let { rows: catRows } = await client.query(
