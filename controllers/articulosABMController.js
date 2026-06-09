@@ -3,6 +3,7 @@
 'use strict';
 
 const pool = require('../config/db');
+const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 function getBusinessId(req) {
   const ctx = Number(req.businessId);
@@ -85,7 +86,7 @@ exports.crearArticulo = async (req, res, next) => {
   const { nombre, rubro, subrubro, precio, agrupacionId } = req.body || {};
 
   if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
-  if (!rubro?.trim())  return res.status(400).json({ ok: false, error: 'Rubro requerido' });
+  if (!rubro?.trim()) return res.status(400).json({ ok: false, error: 'Rubro requerido' });
 
   // Leer flag de jerarquía invertida del negocio
   const { rows: bizRows } = await pool.query(
@@ -96,7 +97,7 @@ exports.crearArticulo = async (req, res, next) => {
   // Con jerarquía invertida: el "rubro" que ve el usuario va en subrubro de maxi_articles
   // y el "subrubro" va en categoria — porque el árbol lee subrubro→categoria
   const maxiCategoria = invertir ? (subrubro?.trim() || null) : rubro.trim();
-  const maxiSubrubro  = invertir ? rubro.trim() : (subrubro?.trim() || null);
+  const maxiSubrubro = invertir ? rubro.trim() : (subrubro?.trim() || null);
 
   const client = await pool.connect();
   try {
@@ -221,6 +222,9 @@ exports.crearArticulo = async (req, res, next) => {
 
     await client.query('COMMIT');
 
+    // Invalidar caché del tree/articles para que el manual aparezca inmediatamente
+    invalidateCacheForBiz(bizId);
+
     console.log(`[crearArticulo] Artículo manual creado: id=${newId} "${nombre}" biz=${bizId}`);
     return res.status(201).json({ ok: true, articulo, sku: skuProvisorio });
 
@@ -269,7 +273,7 @@ exports.actualizarArticulo = async (req, res, next) => {
 
     // Rubro/subrubro — buscar o crear categoría
     let categoriaId = art.categoria_id;
-    let subrubroId  = art.subrubro_id;
+    let subrubroId = art.subrubro_id;
 
     if (rubro?.trim() && rubro.trim() !== art.rubro) {
       let { rows: catRows } = await client.query(
@@ -538,7 +542,7 @@ exports.listBatchesArticulos = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.previewBatchArticulos = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const batchId = req.params.batchId;
     if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
 
@@ -582,11 +586,11 @@ exports.previewBatchArticulos = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.deleteBatchArticulos = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const batchId = req.params.batchId;
     if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
 
-    const esRubros  = batchId.startsWith('rubros-');
+    const esRubros = batchId.startsWith('rubros-');
     const isSinLote = batchId === 'manual-sin-lote' || batchId === 'rubros-sin-lote';
 
     let rowCount = 0;
