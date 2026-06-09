@@ -28,28 +28,36 @@ exports.getRubros = async (req, res, next) => {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
-    // Categorías y subrubros — solo de maxi_articles (fuente principal)
-    // app_articles no siempre tiene columna subrubro consistente
+    // Leer flag de jerarquía invertida
+    const { rows: bizRows } = await pool.query(
+      `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
+    );
+    const invertir = bizRows[0]?.props?.invertir_jerarquia_articulos === true;
+
+    // Con jerarquía invertida: el rubro visible es subrubro en maxi_articles
+    // el subrubro visible es categoria en maxi_articles
     const { rows } = await pool.query(
       `SELECT DISTINCT
-         COALESCE(categoria, '') AS categoria,
-         COALESCE(subrubro,  '') AS subrubro
+         COALESCE(subrubro,  '') AS col_rubro,
+         COALESCE(categoria, '') AS col_subrubro
        FROM maxi_articles
        WHERE business_id = $1
-         AND categoria IS NOT NULL
-         AND categoria != ''
-         AND categoria NOT ILIKE '%pendiente%'
+         AND subrubro IS NOT NULL
+         AND subrubro != ''
+         AND subrubro NOT ILIKE '%pendiente%'
        ORDER BY 1, 2`,
       [bizId]
     );
 
-    // Agrupar por categoría
+    // Sin invertir: rubro=categoria, subrubro=subrubro
+    // Con invertir: rubro=subrubro (col_rubro), subrubro=categoria (col_subrubro)
     const byCategoria = {};
     for (const row of rows) {
-      const cat = row.categoria || 'Sin rubro';
+      const cat = (invertir ? row.col_rubro : row.col_subrubro) || 'Sin rubro';
+      const sub = invertir ? row.col_subrubro : row.col_rubro;
       if (!byCategoria[cat]) byCategoria[cat] = [];
-      if (row.subrubro && !row.subrubro.includes('[PENDIENTE]')) {
-        byCategoria[cat].push(row.subrubro);
+      if (sub && !sub.includes('[PENDIENTE]') && sub !== '') {
+        byCategoria[cat].push(sub);
       }
     }
 
@@ -79,10 +87,21 @@ exports.crearArticulo = async (req, res, next) => {
   if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
   if (!rubro?.trim())  return res.status(400).json({ ok: false, error: 'Rubro requerido' });
 
+  // Leer flag de jerarquía invertida del negocio
+  const { rows: bizRows } = await pool.query(
+    `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
+  );
+  const invertir = bizRows[0]?.props?.invertir_jerarquia_articulos === true;
+
+  // Con jerarquía invertida: el "rubro" que ve el usuario va en subrubro de maxi_articles
+  // y el "subrubro" va en categoria — porque el árbol lee subrubro→categoria
+  const maxiCategoria = invertir ? (subrubro?.trim() || null) : rubro.trim();
+  const maxiSubrubro  = invertir ? rubro.trim() : (subrubro?.trim() || null);
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    console.log('[crearArticulo] body:', JSON.stringify({ nombre, rubro, subrubro, precio, agrupacionId }));
+    console.log('[crearArticulo] body:', JSON.stringify({ nombre, rubro, subrubro, precio, invertir }));
 
     // ID negativo secuencial para artículos manuales (no interfiere con IDs de Maxi)
     // Usamos FOR UPDATE para evitar race conditions y buscamos globalmente (no solo por biz)
@@ -165,7 +184,7 @@ exports.crearArticulo = async (req, res, next) => {
          origen          = COALESCE(maxi_articles.origen, 'manual'),
          upload_batch_id = COALESCE(maxi_articles.upload_batch_id, EXCLUDED.upload_batch_id),
          updated_at      = NOW()`,
-      [bizId, newId, nombre.trim(), rubro.trim(), subrubro?.trim() || null, safeNum(precio) ?? 0, manualBatchId]
+      [bizId, newId, nombre.trim(), maxiCategoria, maxiSubrubro, safeNum(precio) ?? 0, manualBatchId]
     );
 
     // Si viene agrupacionId, agregar el artículo a esa agrupación
