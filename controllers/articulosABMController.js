@@ -82,6 +82,7 @@ exports.crearArticulo = async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    console.log('[crearArticulo] body:', JSON.stringify({ nombre, rubro, subrubro, precio, agrupacionId }));
 
     // ID negativo secuencial para artículos manuales (no interfiere con IDs de Maxi)
     const { rows: minRows } = await client.query(
