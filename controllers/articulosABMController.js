@@ -28,18 +28,21 @@ exports.getRubros = async (req, res, next) => {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
-    // Categorías y subrubros usados en este negocio
+    // Categorías y subrubros — de app_articles Y maxi_articles
     const { rows } = await pool.query(
-      `SELECT DISTINCT
-         a.rubro    AS categoria,
-         a.subrubro AS subrubro
-       FROM app_articles a
-       WHERE a.business_id = $1
-         AND a.rubro IS NOT NULL
-         AND a.rubro != ''
-         AND a.rubro NOT ILIKE '%pendiente%'
-       ORDER BY a.rubro, a.subrubro`,
-      [bizId]
+      `SELECT DISTINCT categoria AS categoria, subrubro AS subrubro
+         FROM maxi_articles
+        WHERE business_id = $1
+          AND categoria IS NOT NULL AND categoria != ''
+          AND categoria NOT ILIKE '%pendiente%'
+       UNION
+       SELECT DISTINCT rubro AS categoria, subrubro AS subrubro
+         FROM app_articles
+        WHERE business_id = $1
+          AND rubro IS NOT NULL AND rubro != ''
+          AND rubro NOT ILIKE '%pendiente%'
+       ORDER BY categoria, subrubro`,
+      [bizId, bizId]
     );
 
     // Agrupar por categoría
