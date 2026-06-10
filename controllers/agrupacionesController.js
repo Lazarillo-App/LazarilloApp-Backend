@@ -240,11 +240,11 @@ exports.obtenerAgrupaciones = async (req, res) => {
           : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
         for (const a of arts) {
           const id = Number(a?.id ?? a?.articulo_id ?? a);
-          if (id > 0) orgAssignedIds.push(id);
+          // id !== 0 — acepta negativos (artículos manuales)
+          if (Number.isFinite(id) && id !== 0) orgAssignedIds.push(id);
         }
-        for (const id of appIds) { const n = Number(id); if (n > 0) orgAssignedIds.push(n); }
+        for (const id of appIds) { const n = Number(id); if (Number.isFinite(n) && n !== 0) orgAssignedIds.push(n); }
       }
-      // Deduplicar
       orgAssignedIds = [...new Set(orgAssignedIds)];
     }
     console.log('[obtenerAgrupaciones DEBUG]', {

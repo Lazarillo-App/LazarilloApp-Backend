@@ -287,7 +287,7 @@ exports.syncNow = async (req, res) => {
     let mapped = 0;
     let cacheHash = null;
     let autoAssigned = 0;
-    let reconcileSummary = null;  
+    let reconcileSummary = null;
 
     if (scope === 'articles' || scope === 'all') {
       // Leer flag de jerarquía invertida del negocio
@@ -514,9 +514,10 @@ async function getOrgArticleContext(bizId, pool) {
       : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
     for (const a of arts) {
       const id = Number(a?.id ?? a?.articulo_id ?? a);
-      if (id > 0) assignedIds.add(id);
+      // id !== 0 — acepta negativos (artículos manuales)
+      if (Number.isFinite(id) && id !== 0) assignedIds.add(id);
     }
-    for (const id of appIds) { const n = Number(id); if (n > 0) assignedIds.add(n); }
+    for (const id of appIds) { const n = Number(id); if (Number.isFinite(n) && n !== 0) assignedIds.add(n); }
   }
 
   return { principalId, assignedIds, orgId: biz.organization_id };
