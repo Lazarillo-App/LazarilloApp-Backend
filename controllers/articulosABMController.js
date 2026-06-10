@@ -88,11 +88,30 @@ exports.crearArticulo = async (req, res, next) => {
   if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
   if (!rubro?.trim()) return res.status(400).json({ ok: false, error: 'Rubro requerido' });
 
-  // Leer flag de jerarquía invertida del negocio
+  // 🆕 RESOLVER NEGOCIO DE ALMACENAMIENTO (Opción B)
+  // Si bizId es subnegocio (tiene organization_id), los artículos físicamente
+  // viven en el principal de la org. El subnegocio solo los "ve" via agrupaciones.
   const { rows: bizRows } = await pool.query(
-    `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
+    `SELECT props, organization_id FROM app_businesses WHERE id = $1`, [bizId]
   );
-  const invertir = bizRows[0]?.props?.invertir_jerarquia_articulos === true;
+  if (!bizRows.length) return res.status(404).json({ ok: false, error: 'Negocio no encontrado' });
+
+  let storageBizId = bizId;
+  if (bizRows[0].organization_id) {
+    const { rows: pRows } = await pool.query(
+      `SELECT id FROM app_businesses
+        WHERE organization_id = $1 AND created_from != 'from_group'
+        ORDER BY created_at ASC LIMIT 1`,
+      [bizRows[0].organization_id]
+    );
+    if (pRows[0]?.id) storageBizId = Number(pRows[0].id);
+  }
+
+  // Leer flag de jerarquía invertida del negocio de almacenamiento (el principal)
+  const { rows: storageBizRows } = await pool.query(
+    `SELECT props FROM app_businesses WHERE id = $1`, [storageBizId]
+  );
+  const invertir = storageBizRows[0]?.props?.invertir_jerarquia_articulos === true;
 
   // Con jerarquía invertida: el "rubro" que ve el usuario va en subrubro de maxi_articles
   // y el "subrubro" va en categoria — porque el árbol lee subrubro→categoria
@@ -152,6 +171,7 @@ exports.crearArticulo = async (req, res, next) => {
     const skuProvisorio = `L${numStr}`;
 
     // Insertar el artículo
+    // Insertar el artículo (en el principal si bizId es subnegocio)
     const { rows: artRows } = await client.query(
       `INSERT INTO app_articles
          (id, business_id, name, rubro, subrubro, node_type, price, categoria_id, subrubro_id, props, updated_at)
@@ -159,7 +179,7 @@ exports.crearArticulo = async (req, res, next) => {
        RETURNING *`,
       [
         newId,
-        bizId,
+        storageBizId,  // 🆕 principal de la org, no el subnegocio
         nombre.trim(),
         rubro.trim(),
         subrubro?.trim() || null,
@@ -187,7 +207,7 @@ exports.crearArticulo = async (req, res, next) => {
          origen          = COALESCE(maxi_articles.origen, 'manual'),
          upload_batch_id = COALESCE(maxi_articles.upload_batch_id, EXCLUDED.upload_batch_id),
          updated_at      = NOW()`,
-      [bizId, newId, nombre.trim(), maxiCategoria, maxiSubrubro, safeNum(precio) ?? 0, manualBatchId]
+      [storageBizId, newId, nombre.trim(), maxiCategoria, maxiSubrubro, safeNum(precio) ?? 0, manualBatchId]
     );
 
     // Si viene agrupacionId, agregar el artículo a esa agrupación
@@ -224,6 +244,7 @@ exports.crearArticulo = async (req, res, next) => {
 
     // Invalidar caché del tree/articles para que el manual aparezca inmediatamente
     invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
     console.log(`[crearArticulo] Artículo manual creado: id=${newId} "${nombre}" biz=${bizId}`);
     return res.status(201).json({ ok: true, articulo, sku: skuProvisorio });
