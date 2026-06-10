@@ -4,6 +4,7 @@ const { decryptSecretCompat } = require('../utils/cryptoField');
 const { autoAssignNewArticles } = require('../services/autoGroupAssignment');
 const { notifyAutoAssign } = require('../services/notificationService');
 const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
+const { reconcileManualsAfterSync } = require('../services/manualReconciliation');
 
 // fetch nativo (Node 18+) o fallback a node-fetch
 const fetchNative =
@@ -286,6 +287,7 @@ exports.syncNow = async (req, res) => {
     let mapped = 0;
     let cacheHash = null;
     let autoAssigned = 0;
+    let reconcileSummary = null;  
 
     if (scope === 'articles' || scope === 'all') {
       // Leer flag de jerarquía invertida del negocio
@@ -328,6 +330,16 @@ exports.syncNow = async (req, res) => {
 
       await client.query('COMMIT');
 
+      // 🆕 RECONCILIACIÓN DE MANUALES (id negativo) ↔ MaxiRest (id positivo)
+      try {
+        reconcileSummary = await reconcileManualsAfterSync(biz.id);
+        if (reconcileSummary.reconciled || reconcileSummary.pending) {
+          console.log(`[syncNow] Reconciliación: auto=${reconcileSummary.reconciled} pending=${reconcileSummary.pending} errors=${reconcileSummary.errors}`);
+        }
+      } catch (recErr) {
+        console.error('[syncNow] Error en reconciliación (no crítico):', recErr.message);
+      }
+
       // 🆕 AUTO-ASIGNACIÓN POST-SYNC + NOTIFICACIÓN
       try {
         const result = await autoAssignNewArticles(biz.id);
@@ -360,7 +372,8 @@ exports.syncNow = async (req, res) => {
       upserted,
       mapped,
       cacheHash,
-      auto_assigned: autoAssigned // 🆕
+      auto_assigned: autoAssigned,
+      reconciliation: reconcileSummary  // { reconciled, pending, none, errors, items }
     });
 
   } catch (e) {

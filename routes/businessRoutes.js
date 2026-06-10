@@ -267,6 +267,20 @@ router.post(
 /* ───────── Sync catálogo (manual) ───────── */
 router.post('/:id/sync', ensureFn('syncNow', syncNow));
 
+/* ───────── Reconciliación manual ↔ Maxi (sin pasar por sync de Maxi) ───────── */
+router.post('/:id/reconcile-manuals', async (req, res) => {
+  const bizId = Number(req.params.id);
+  if (!Number.isFinite(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
+  try {
+    const { reconcileManualsAfterSync } = require('../services/manualReconciliation');
+    const summary = await reconcileManualsAfterSync(bizId);
+    return res.json({ ok: true, summary });
+  } catch (e) {
+    console.error('[reconcile-manuals] error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* Default group helpers */
 router.get('/:id/default-group', (req, res) => {
   const biz = req.business;
