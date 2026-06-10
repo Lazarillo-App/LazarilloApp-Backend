@@ -773,13 +773,14 @@ function extractArticuloId(a) {
   // si viene como número directo
   if (typeof a === 'number') {
     const n = Number(a);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    // n !== 0 — acepta negativos (artículos manuales)
+    return Number.isFinite(n) && n !== 0 ? n : null;
   }
 
   // si viene como string numérica
   if (typeof a === 'string') {
     const n = Number(a);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    return Number.isFinite(n) && n !== 0 ? n : null;
   }
 
   // si viene como objeto con distintas keys
@@ -795,7 +796,7 @@ function extractArticuloId(a) {
       a.code;
 
     const n = Number(raw);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    return Number.isFinite(n) && n !== 0 ? n : null;
   }
 
   return null;
@@ -806,7 +807,8 @@ exports.createOrMoveAgrupacion = async (req, res) => {
   const nombre = String(req.body?.nombre || '').trim();
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
     .map(Number)
-    .filter((n) => Number.isFinite(n) && n > 0);
+    // n !== 0 — acepta negativos (artículos manuales)
+    .filter((n) => Number.isFinite(n) && n !== 0);
 
   if (!Number.isFinite(businessId) || !nombre || !ids.length) {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
