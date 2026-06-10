@@ -20,6 +20,25 @@ function safeNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Resuelve dónde "físicamente" viven los artículos para un business.
+ * Para subnegocios (con organization_id), devuelve el principal de la org.
+ * Para principales o standalone, devuelve el mismo bizId.
+ */
+async function resolveStorageBizId(bizId) {
+  const { rows } = await pool.query(
+    `SELECT organization_id FROM app_businesses WHERE id = $1`, [bizId]
+  );
+  if (!rows[0]?.organization_id) return bizId;
+  const { rows: pRows } = await pool.query(
+    `SELECT id FROM app_businesses
+      WHERE organization_id = $1 AND created_from != 'from_group'
+      ORDER BY created_at ASC LIMIT 1`,
+    [rows[0].organization_id]
+  );
+  return pRows[0]?.id ? Number(pRows[0].id) : bizId;
+}
+
 // ─────────────────────────────────────────────────────────────
 // GET /businesses/:id/rubros
 // Devuelve categorias + subrubros del negocio (de app_articles)
@@ -272,12 +291,15 @@ exports.actualizarArticulo = async (req, res, next) => {
 
   const { nombre, rubro, subrubro, precio, codigoExterno } = req.body || {};
 
+  // 🆕 Si bizId es subnegocio, el artículo vive en el principal
+  const storageBizId = await resolveStorageBizId(bizId);
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const { rows } = await client.query(
-      `SELECT * FROM app_articles WHERE id = $1 AND business_id = $2`, [articleId, bizId]
+      `SELECT * FROM app_articles WHERE id = $1 AND business_id = $2`, [articleId, storageBizId]
     );
     if (!rows.length) {
       await client.query('ROLLBACK');
@@ -348,7 +370,7 @@ exports.actualizarArticulo = async (req, res, next) => {
     }
 
     sets.push(`updated_at = NOW()`);
-    vals.push(articleId, bizId);
+    vals.push(articleId, storageBizId);  // 🆕
 
     const { rows: updated } = await client.query(
       `UPDATE app_articles SET ${sets.join(', ')}
@@ -358,6 +380,11 @@ exports.actualizarArticulo = async (req, res, next) => {
     );
 
     await client.query('COMMIT');
+
+    // Invalidar cache del subnegocio (donde mira el usuario) y del principal (donde vive el artículo)
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+
     return res.json({ ok: true, articulo: updated[0] });
 
   } catch (e) {
@@ -384,15 +411,40 @@ exports.eliminarArticulo = async (req, res, next) => {
     return res.status(400).json({ ok: false, error: 'Solo se pueden eliminar artículos creados manualmente' });
   }
 
+  // 🆕 Si bizId es subnegocio, el artículo vive en el principal
+  const storageBizId = await resolveStorageBizId(bizId);
+
+  const client = await pool.connect();
   try {
-    const { rowCount } = await pool.query(
-      `DELETE FROM app_articles WHERE id = $1 AND business_id = $2`, [articleId, bizId]
+    await client.query('BEGIN');
+
+    // Borrar de app_articles
+    const { rowCount } = await client.query(
+      `DELETE FROM app_articles WHERE id = $1 AND business_id = $2`, [articleId, storageBizId]
     );
-    if (!rowCount) return res.status(404).json({ ok: false, error: 'Artículo no encontrado' });
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Artículo no encontrado' });
+    }
+
+    // 🆕 Borrar también de maxi_articles (antes quedaba huérfano)
+    await client.query(
+      `DELETE FROM maxi_articles WHERE business_id = $1 AND articulo_id = $2`,
+      [storageBizId, articleId]
+    );
+
+    await client.query('COMMIT');
+
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+
     return res.json({ ok: true, deleted: articleId });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[eliminarArticulo]', e.message);
     next(e);
+  } finally {
+    client.release();
   }
 };
 
@@ -404,6 +456,9 @@ exports.listSinEquivalencia = async (req, res, next) => {
   const bizId = getBusinessId(req);
   if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
+  // 🆕 Si bizId es subnegocio, los artículos viven en el principal
+  const storageBizId = await resolveStorageBizId(bizId);
+
   try {
     const { rows } = await pool.query(
       `SELECT id, name, rubro, subrubro, price, props, updated_at
@@ -414,7 +469,7 @@ exports.listSinEquivalencia = async (req, res, next) => {
             OR (props->>'origen' = 'manual' AND (props->>'codigo_externo') IS NULL)
           )
         ORDER BY name`,
-      [bizId]
+      [storageBizId]
     );
     return res.json({ ok: true, articulos: rows });
   } catch (e) {
