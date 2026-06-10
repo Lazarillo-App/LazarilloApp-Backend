@@ -48,25 +48,68 @@ exports.getRubros = async (req, res, next) => {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
-    // Leer flag de jerarquía invertida
+    // 🆕 Resolver storage (principal de la org si bizId es subnegocio)
+    const storageBizId = await resolveStorageBizId(bizId);
+    const isSubnegocio = storageBizId !== bizId;
+
+    // Leer flag de jerarquía del principal (el catálogo vive ahí)
     const { rows: bizRows } = await pool.query(
-      `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
+      `SELECT props FROM app_businesses WHERE id = $1`, [storageBizId]
     );
     const invertir = bizRows[0]?.props?.invertir_jerarquia_articulos === true;
 
-    // Con jerarquía invertida: el rubro visible es subrubro en maxi_articles
-    // el subrubro visible es categoria en maxi_articles
+    // 🆕 Si bizId es subnegocio, restringir a rubros de artículos asignados a sus agrupaciones reales
+    let articleIdFilter = null; // null = sin filtro (todos del principal)
+    if (isSubnegocio) {
+      const { rows: subAgRows } = await pool.query(
+        `SELECT articulos, app_articles_ids
+           FROM agrupaciones
+          WHERE business_id = $1
+            AND nombre NOT ILIKE 'Sin Agrupac%'
+            AND nombre NOT ILIKE 'Sin Agrupar%'
+            AND nombre NOT ILIKE 'Discontinuados'
+            AND nombre NOT ILIKE 'Descontinuados'`,
+        [bizId]
+      );
+      const ids = new Set();
+      for (const ag of subAgRows) {
+        const arts = Array.isArray(ag.articulos) ? ag.articulos
+          : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+        const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+          : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+        for (const a of arts) {
+          const n = Number(a?.id ?? a?.articulo_id ?? a);
+          if (Number.isFinite(n) && n !== 0) ids.add(n);
+        }
+        for (const raw of appIds) {
+          const n = Number(raw);
+          if (Number.isFinite(n) && n !== 0) ids.add(n);
+        }
+      }
+      // Si el subnegocio tiene artículos asignados, filtrar. Si está vacío,
+      // fallback a todo el catálogo del principal (para poder crear el primer artículo).
+      if (ids.size > 0) articleIdFilter = Array.from(ids);
+    }
+
+    const params = [storageBizId];
+    let extraWhere = '';
+    if (articleIdFilter) {
+      params.push(articleIdFilter);
+      extraWhere = ` AND articulo_id = ANY($2::int[])`;
+    }
+
     const { rows } = await pool.query(
       `SELECT DISTINCT
          COALESCE(subrubro,  '') AS col_rubro,
          COALESCE(categoria, '') AS col_subrubro
        FROM maxi_articles
        WHERE business_id = $1
+         ${extraWhere}
          AND subrubro IS NOT NULL
          AND subrubro != ''
          AND subrubro NOT ILIKE '%pendiente%'
        ORDER BY 1, 2`,
-      [bizId]
+      params
     );
 
     // Sin invertir: rubro=categoria, subrubro=subrubro
