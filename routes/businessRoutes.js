@@ -20,6 +20,7 @@ const loadBusiness = require('../middleware/loadBusiness');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 const { refreshMenu } = require('../controllers/maxiMenuController');
 const viewPrefsCtrl = require('../controllers/viewPrefsController');
+const { searchPadrino } = require('../controllers/articulosABMController');
 const syncRoutes = require('./syncRoutes');
 
 // 🔴 ÚNICA importación del controlador de ventas
@@ -477,6 +478,9 @@ router.delete('/:id/articles/batches/:batchId', ensureFn('artABM.deleteBatchArti
 
 // Alta manual de artículo
 router.post('/:id/articles/manual', ensureFn('artABM.crearArticulo', artABM.crearArticulo));
+
+// Padrino de Articulo: buscar artículo en Maxi para mapear (sin crear manual)
+router.get('/:id/articles/search-padrino', searchPadrino);
 
 // Editar artículo (manual o agregar equivalencia externa)
 router.patch('/:id/articles/:articleId', ensureFn('artABM.actualizarArticulo', artABM.actualizarArticulo));

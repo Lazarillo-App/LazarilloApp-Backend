@@ -736,3 +736,94 @@ exports.deleteBatchArticulos = async (req, res, next) => {
     return res.json({ ok: true, deleted: rowCount, batchId });
   } catch (e) { next(e); }
 };
+
+// GET /businesses/:id/articles/search-padrino?q=texto
+// Busca artículos candidatos para usar como "padrino" (referencia de alta manual).
+// Busca en el principal de la org, excluye discontinuados de cualquier biz de la org.
+exports.searchPadrino = async (req, res) => {
+  try {
+    const bizId = Number(req.params.id || req.params.businessId);
+    const q = String(req.query.q || '').trim();
+
+    if (!Number.isFinite(bizId)) {
+      return res.status(400).json({ ok: false, error: 'business_id inválido' });
+    }
+    if (q.length < 2) {
+      return res.json({ ok: true, candidatos: [] });
+    }
+
+    // Los artículos viven en el principal (Opción B)
+    const storageBizId = await resolveStorageBizId(bizId);
+
+    // Recolectar IDs de discontinuados de toda la org
+    const { rows: bizRows } = await pool.query(
+      `SELECT organization_id FROM app_businesses WHERE id = $1`, [storageBizId]
+    );
+    const orgId = bizRows[0]?.organization_id;
+
+    let allBizIds = [storageBizId];
+    if (orgId) {
+      const { rows: orgBizs } = await pool.query(
+        `SELECT id FROM app_businesses WHERE organization_id = $1`, [orgId]
+      );
+      allBizIds = orgBizs.map(r => Number(r.id));
+    }
+
+    const { rows: discRows } = await pool.query(
+      `SELECT COALESCE(a.articulos, '[]'::jsonb) AS articulos
+         FROM agrupaciones a
+        WHERE a.business_id = ANY($1::int[])
+          AND (a.nombre ILIKE 'Discontinuados' OR a.nombre ILIKE 'Descontinuados')`,
+      [allBizIds]
+    );
+
+    const discontinuadosIds = new Set();
+    for (const disc of discRows) {
+      const arts = Array.isArray(disc.articulos) ? disc.articulos
+        : (typeof disc.articulos === 'string' ? JSON.parse(disc.articulos || '[]') : []);
+      for (const a of arts) {
+        const id = Number(a?.id);
+        if (Number.isFinite(id)) discontinuadosIds.add(id);
+      }
+    }
+
+    // Búsqueda por nombre o SKU, prioriza prefijo
+    const likeQuery = `%${q}%`;
+    const prefixQuery = `${q}%`;
+    const { rows: artRows } = await pool.query(
+      `SELECT
+         ma.articulo_id AS id,
+         ma.nombre,
+         ma.sku,
+         ma.subrubro AS rubro,
+         ma.categoria AS subrubro,
+         ma.precio
+       FROM maxi_articles ma
+      WHERE ma.business_id = $1
+        AND (ma.nombre ILIKE $2 OR ma.sku ILIKE $2)
+      ORDER BY
+        CASE WHEN ma.nombre ILIKE $3 THEN 0 ELSE 1 END,
+        LENGTH(ma.nombre),
+        ma.nombre
+      LIMIT 30`,
+      [storageBizId, likeQuery, prefixQuery]
+    );
+
+    const candidatos = artRows
+      .filter(r => !discontinuadosIds.has(Number(r.id)))
+      .slice(0, 15)
+      .map(r => ({
+        id: Number(r.id),
+        nombre: r.nombre,
+        sku: r.sku,
+        rubro: r.rubro || null,
+        subrubro: r.subrubro || null,
+        precio: Number(r.precio) || 0,
+      }));
+
+    return res.json({ ok: true, candidatos });
+  } catch (e) {
+    console.error('searchPadrino error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
