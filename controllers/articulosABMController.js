@@ -788,19 +788,20 @@ exports.searchPadrino = async (req, res) => {
     }
 
     // Búsqueda por nombre o SKU, prioriza prefijo
+   // Búsqueda por nombre, prioriza prefijo
     const likeQuery = `%${q}%`;
     const prefixQuery = `${q}%`;
     const { rows: artRows } = await pool.query(
       `SELECT
          ma.articulo_id AS id,
          ma.nombre,
-         ma.sku,
          ma.subrubro AS rubro,
          ma.categoria AS subrubro,
          ma.precio
        FROM maxi_articles ma
       WHERE ma.business_id = $1
-        AND (ma.nombre ILIKE $2 OR ma.sku ILIKE $2)
+        AND ma.nombre ILIKE $2
+        AND ma.is_active = true
       ORDER BY
         CASE WHEN ma.nombre ILIKE $3 THEN 0 ELSE 1 END,
         LENGTH(ma.nombre),
@@ -815,7 +816,6 @@ exports.searchPadrino = async (req, res) => {
       .map(r => ({
         id: Number(r.id),
         nombre: r.nombre,
-        sku: r.sku,
         rubro: r.rubro || null,
         subrubro: r.subrubro || null,
         precio: Number(r.precio) || 0,
