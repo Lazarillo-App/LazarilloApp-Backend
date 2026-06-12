@@ -753,13 +753,15 @@ exports.searchPadrino = async (req, res) => {
     }
 
     // Los artículos viven en el principal (Opción B)
+    // Los artículos viven en el principal (Opción B)
     const storageBizId = await resolveStorageBizId(bizId);
 
-    // Recolectar IDs de discontinuados de toda la org
-    const { rows: bizRows } = await pool.query(
-      `SELECT organization_id FROM app_businesses WHERE id = $1`, [storageBizId]
+    // Leer flag invertir_jerarquia del principal (define la convención rubro↔subrubro de la org)
+    const { rows: storageRows } = await pool.query(
+      `SELECT props, organization_id FROM app_businesses WHERE id = $1`, [storageBizId]
     );
-    const orgId = bizRows[0]?.organization_id;
+    const invertir = storageRows[0]?.props?.invertir_jerarquia_articulos === true;
+    const orgId = storageRows[0]?.organization_id;
 
     let allBizIds = [storageBizId];
     if (orgId) {
@@ -791,12 +793,17 @@ exports.searchPadrino = async (req, res) => {
    // Búsqueda por nombre, prioriza prefijo
     const likeQuery = `%${q}%`;
     const prefixQuery = `${q}%`;
+    // Respetar el flag invertir_jerarquia: si está activo,
+    // "rubro" de la UI corresponde a ma.categoria, y "subrubro" a ma.subrubro
+    const colRubro = invertir ? 'ma.categoria' : 'ma.subrubro';
+    const colSubrubro = invertir ? 'ma.subrubro' : 'ma.categoria';
+
     const { rows: artRows } = await pool.query(
       `SELECT
          ma.articulo_id AS id,
          ma.nombre,
-         ma.subrubro AS rubro,
-         ma.categoria AS subrubro,
+         ${colRubro} AS rubro,
+         ${colSubrubro} AS subrubro,
          ma.precio
        FROM maxi_articles ma
       WHERE ma.business_id = $1
