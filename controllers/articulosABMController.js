@@ -173,17 +173,15 @@ exports.crearArticulo = async (req, res, next) => {
   const { rows: storageBizRows } = await pool.query(
     `SELECT props FROM app_businesses WHERE id = $1`, [storageBizId]
   );
-  const invertir = storageBizRows[0]?.props?.invertir_jerarquia_articulos === true;
-
-  // Con jerarquía invertida: el "rubro" que ve el usuario va en subrubro de maxi_articles
-  // y el "subrubro" va en categoria — porque el árbol lee subrubro→categoria
-  const maxiCategoria = invertir ? (subrubro?.trim() || null) : rubro.trim();
-  const maxiSubrubro = invertir ? rubro.trim() : (subrubro?.trim() || null);
+  // Convención del sistema (alineada con sidebar/árbol):
+  // "rubro" UI corresponde a ma.subrubro DB
+  // "subrubro" UI corresponde a ma.categoria DB
+  const maxiCategoria = subrubro?.trim() || null;
+  const maxiSubrubro = rubro.trim();
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    console.log('[crearArticulo] body:', JSON.stringify({ nombre, rubro, subrubro, precio, invertir }));
 
     // ID negativo secuencial para artículos manuales (no interfiere con IDs de Maxi)
     // Usamos FOR UPDATE para evitar race conditions y buscamos globalmente (no solo por biz)
@@ -760,7 +758,7 @@ exports.searchPadrino = async (req, res) => {
     const { rows: storageRows } = await pool.query(
       `SELECT props, organization_id FROM app_businesses WHERE id = $1`, [storageBizId]
     );
-    const invertir = storageRows[0]?.props?.invertir_jerarquia_articulos === true;
+    
     const orgId = storageRows[0]?.organization_id;
 
     let allBizIds = [storageBizId];
@@ -790,13 +788,13 @@ exports.searchPadrino = async (req, res) => {
     }
 
     // Búsqueda por nombre o SKU, prioriza prefijo
-   // Búsqueda por nombre, prioriza prefijo
+    // Búsqueda por nombre, prioriza prefijo
     const likeQuery = `%${q}%`;
     const prefixQuery = `${q}%`;
     // Respetar el flag invertir_jerarquia: si está activo,
     // "rubro" de la UI corresponde a ma.categoria, y "subrubro" a ma.subrubro
-    const colRubro = invertir ? 'ma.categoria' : 'ma.subrubro';
-    const colSubrubro = invertir ? 'ma.subrubro' : 'ma.categoria';
+    const colRubro = 'ma.subrubro';
+    const colSubrubro = 'ma.categoria';
 
     const { rows: artRows } = await pool.query(
       `SELECT
