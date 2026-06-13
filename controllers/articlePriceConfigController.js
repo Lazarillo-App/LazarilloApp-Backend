@@ -482,7 +482,7 @@ exports.bulkSavePriceConfig = async (req, res, next) => {
     // Guardar precios manuales
     for (const { artId, precioManual } of updates) {
       const id = Number(artId);
-      if (!Number.isFinite(id) || id <= 0) continue;
+      if (!Number.isFinite(id) || id === 0) continue;
       await client.query(
         `INSERT INTO article_price_config
            (business_id, scope, scope_id, precio_manual, updated_at)
@@ -496,7 +496,7 @@ exports.bulkSavePriceConfig = async (req, res, next) => {
     // Borrar precios manuales
     for (const { artId } of deletes) {
       const id = Number(artId);
-      if (!Number.isFinite(id) || id <= 0) continue;
+      if (!Number.isFinite(id) || id === 0) continue;
       await client.query(
         `UPDATE article_price_config
            SET precio_manual = NULL, updated_at = NOW()
