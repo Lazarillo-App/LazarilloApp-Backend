@@ -22,7 +22,6 @@ const { refreshMenu } = require('../controllers/maxiMenuController');
 const viewPrefsCtrl = require('../controllers/viewPrefsController');
 const { searchPadrino } = require('../controllers/articulosABMController');
 const syncRoutes = require('./syncRoutes');
-const recetasBulkCtrl = require('../controllers/recetasBulkController');
 
 // 🔴 ÚNICA importación del controlador de ventas
 const sales = require('../controllers/salesSyncController');
@@ -503,11 +502,5 @@ router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOn
 router.patch('/:id', ensureFn('businesses.update', businesses.update));
 router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
 router.post('/:id/select', ensureFn('businesses.select', businesses.select));
-
-// Preview cuántas recetas se borrarían
-router.get('/businesses/:businessId/recetas/bulk-preview', recetasBulkCtrl.previewBulkDelete);
-
-// Borrar masivo
-router.delete('/businesses/:businessId/recetas/bulk', recetasBulkCtrl.bulkDelete);
 
 module.exports = router;

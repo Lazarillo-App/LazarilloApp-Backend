@@ -8,6 +8,7 @@ const router  = express.Router({ mergeParams: true }); // mergeParams para hered
 const ctrl    = require('../controllers/recetasController');
 const { authRequired }           = require('../middleware/authMiddleware');
 const { getLinkSiblings } = require('../services/linkPropagation');
+const recetasBulkCtrl = require('../controllers/recetasBulkController');
 router.use((req, res, next) => {
   console.log('[recetasRoutes] hit:', req.method, req.path, req.params);
   next();
@@ -115,5 +116,11 @@ router.post('/propagate-delete', async (req, res, next) => {
     next(err);
   }
 });
+
+// Preview cuántas recetas se borrarían
+router.get('/businesses/:businessId/recetas/bulk-preview', recetasBulkCtrl.previewBulkDelete);
+
+// Borrar masivo
+router.delete('/businesses/:businessId/recetas/bulk', recetasBulkCtrl.bulkDelete);
 
 module.exports = router;
