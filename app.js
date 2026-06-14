@@ -33,6 +33,7 @@ const divisionsRoutes = require('./routes/divisionsRoutes');
 const diagnosticRoutes = require('./routes/diagnosticRoutes');
 const organizationsRoutes = require('./routes/organizationsRoutes');
 const recetasRoutes       = require('./routes/recetasRoutes');
+const recetasBulkRoutes   = require('./routes/recetasBulkRoutes');
 const recetasElaboradosRoutes = require('./routes/recetasElaboradosRoutes');
 const recetasImportRoutes        = require('./routes/recetasImportRoutes');
 const articlePriceConfigRoutes   = require('./routes/articlePriceConfigRoutes');
@@ -176,6 +177,7 @@ app.use('/api/businesses/:businessId/sync', syncRoutes);
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
 app.use('/api/businesses/:businessId/articles/:articleId/receta', recetasRoutes);
+app.use('/api/businesses/:businessId/recetas', recetasBulkRoutes);
 const { getRecetasElaboradosMapa } = require('./controllers/recetasElaboradosController');
 app.use('/api/businesses/:businessId/recetas-elaborados', authRequired, getRecetasElaboradosMapa);
 app.use('/api/businesses/:businessId/insumos/:insumoId/receta', recetasElaboradosRoutes);
