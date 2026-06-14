@@ -1641,7 +1641,7 @@ exports.getArticulosOrigenes = async (req, res) => {
     const origenes = {};
 
     // ── PASO 1: Leer metadata de origen desde el JSONB de Discontinuados ──
-    // Cuando discontinuamos ahora guardamos { id, fromGroupId, fromGroupName, fromBizId }
+    // Cuando discontinuamos guardamos { id, fromGroupId, fromGroupName, fromBizId }
     const { rows: discRows } = await pool.query(
       `SELECT a.id AS agrup_id, a.business_id,
               COALESCE(a.articulos, '[]'::jsonb) AS articulos
@@ -1651,6 +1651,43 @@ exports.getArticulosOrigenes = async (req, res) => {
       [bizIds]
     );
 
+    // ── 1a) Recolectar todos los fromBizId/fromGroupId referenciados ──
+    const refBizIds = new Set();
+    const refGroupIds = new Set();
+    for (const disc of discRows) {
+      const arts = parseJsonArrayLoose(disc.articulos);
+      for (const a of arts) {
+        const artId = Number(a?.id);
+        if (!idsSet.has(artId)) continue;
+        if (a.fromBizId) refBizIds.add(Number(a.fromBizId));
+        if (a.fromGroupId) refGroupIds.add(Number(a.fromGroupId));
+      }
+    }
+
+    // ── 1b) Validar cuáles siguen existiendo ──
+    const aliveBizIds = new Set();
+    const aliveGroupIds = new Set();
+    const bizNamesById = new Map();
+
+    if (refBizIds.size) {
+      const { rows: liveBizRows } = await pool.query(
+        `SELECT id, name FROM app_businesses WHERE id = ANY($1::int[])`,
+        [Array.from(refBizIds)]
+      );
+      for (const r of liveBizRows) {
+        aliveBizIds.add(Number(r.id));
+        bizNamesById.set(Number(r.id), r.name);
+      }
+    }
+    if (refGroupIds.size) {
+      const { rows: liveGroupRows } = await pool.query(
+        `SELECT id FROM agrupaciones WHERE id = ANY($1::int[])`,
+        [Array.from(refGroupIds)]
+      );
+      for (const r of liveGroupRows) aliveGroupIds.add(Number(r.id));
+    }
+
+    // ── 1c) Asignar origen solo si negocio Y grupo siguen vivos ──
     for (const disc of discRows) {
       const arts = parseJsonArrayLoose(disc.articulos);
       for (const a of arts) {
@@ -1658,19 +1695,24 @@ exports.getArticulosOrigenes = async (req, res) => {
         if (!idsSet.has(artId)) continue;
         if (origenes[artId]) continue;
 
-        // Solo usar si tiene metadata de origen guardada
-        if (a.fromGroupId && a.fromBizId) {
-          // Resolver nombre del negocio
-          const { rows: bizNameRows } = await pool.query(
-            `SELECT name FROM app_businesses WHERE id = $1`, [Number(a.fromBizId)]
-          );
-          origenes[artId] = {
-            groupId: Number(a.fromGroupId),
-            groupName: a.fromGroupName || `Agrupación #${a.fromGroupId}`,
-            bizId: Number(a.fromBizId),
-            bizName: bizNameRows[0]?.name || `Negocio #${a.fromBizId}`,
-          };
+        if (!a.fromGroupId || !a.fromBizId) continue;
+
+        const fromBizId = Number(a.fromBizId);
+        const fromGroupId = Number(a.fromGroupId);
+
+        // Si el negocio o el grupo ya no existen → tratar como sin origen
+        // (caerá al paso 2 o se quedará en Sin Agrupación)
+        if (!aliveBizIds.has(fromBizId) || !aliveGroupIds.has(fromGroupId)) {
+          console.log(`[getArticulosOrigenes] Artículo ${artId} con origen huérfano (biz=${fromBizId}, grp=${fromGroupId}) — ignorado`);
+          continue;
         }
+
+        origenes[artId] = {
+          groupId: fromGroupId,
+          groupName: a.fromGroupName || `Agrupación #${fromGroupId}`,
+          bizId: fromBizId,
+          bizName: bizNamesById.get(fromBizId) || `Negocio #${fromBizId}`,
+        };
       }
     }
 
