@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-
+const team = require('../controllers/teamController');
 const authCtrl = require('../controllers/authController');
 const { authRequired } = require('../middleware/authMiddleware');  
 
@@ -9,6 +9,7 @@ router.post('/register',        authCtrl.register);
 router.post('/login',           authCtrl.login);
 router.post('/forgot-password', authCtrl.requestPasswordReset);
 router.post('/reset-password',  authCtrl.resetPassword);
+router.post('/accept-invitation', team.acceptInvitation);
 
 // Protegido
 router.get('/me',  authRequired, authCtrl.me);

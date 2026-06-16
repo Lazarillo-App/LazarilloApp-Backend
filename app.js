@@ -51,6 +51,7 @@ const requireActiveAccount = require('./middleware/requireActiveAccount');
 const syncRoutes = require('./routes/syncRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
 const priceListsRoutes = require('./routes/priceListsRoutes');
+const teamRoutes = require('./routes/teamRoutes');
 
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
@@ -146,6 +147,9 @@ app.use('/api', authRequired, loadActiveBusiness);
 
 // Verificar estado de cuenta activa (después de auth, antes de las rutas de negocio)
 app.use('/api', requireActiveAccount);
+
+// rutas con auth
+app.use('/api/team', teamRoutes);
 
 // módulos sin :businessId en la URL
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
