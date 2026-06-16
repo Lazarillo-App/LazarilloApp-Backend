@@ -165,8 +165,10 @@ exports.createLinkGroup = async (req, res) => {
 // ============================================================================
 // DELETE /businesses/:id/article-links/:groupId
 // Elimina el grupo completo — todos los artículos quedan independientes.
+// Si era de receta, todos los artículos quedan también sin receta.
 // ============================================================================
 exports.deleteLinkGroup = async (req, res) => {
+  const client = await pool.connect();
   try {
     const bizId = getBusinessId(req);
     const groupId = safeNum(req.params.groupId);
@@ -175,20 +177,67 @@ exports.deleteLinkGroup = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
-    const { rowCount } = await pool.query(
+    await client.query('BEGIN');
+
+    // Leer el grupo y sus miembros antes de borrar
+    const { rows: groupRows } = await client.query(
+      `SELECT sync_recipe FROM article_link_groups
+        WHERE id = $1 AND business_id = $2`,
+      [groupId, bizId]
+    );
+    if (!groupRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Grupo de vinculación no encontrado' });
+    }
+    const isRecipeLink = groupRows[0].sync_recipe === true;
+
+    let memberIds = [];
+    if (isRecipeLink) {
+      const { rows: m } = await client.query(
+        `SELECT article_id FROM article_link_members WHERE link_group_id = $1`,
+        [groupId]
+      );
+      memberIds = m.map(r => Number(r.article_id)).filter(Number.isFinite);
+    }
+
+    // Borrar el grupo (CASCADE elimina los miembros)
+    const { rowCount } = await client.query(
       `DELETE FROM article_link_groups WHERE id = $1 AND business_id = $2`,
       [groupId, bizId]
     );
 
     if (!rowCount) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'Grupo de vinculación no encontrado' });
     }
 
-    // Los miembros se eliminan por CASCADE en la FK
-    return res.json({ ok: true });
+    // Si era de receta, desactivar las recetas de todos los miembros
+    let recipesDeleted = 0;
+    if (isRecipeLink && memberIds.length) {
+      const { rowCount: r } = await client.query(
+        `UPDATE recetas
+            SET active = FALSE, updated_at = NOW()
+          WHERE article_id = ANY($1::bigint[]) AND business_id = $2 AND active = TRUE`,
+        [memberIds, bizId]
+      );
+      recipesDeleted = r || 0;
+      await client.query(
+        `UPDATE insumos
+            SET costo_receta = 0, tiene_receta = FALSE, updated_at = NOW()
+          WHERE id = ANY($1::bigint[]) AND business_id = $2
+            AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
+        [memberIds, bizId]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, recipesDeleted, affectedArticles: memberIds });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
     console.error('[deleteLinkGroup]', e.message);
     return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 
@@ -196,6 +245,8 @@ exports.deleteLinkGroup = async (req, res) => {
 // DELETE /businesses/:id/article-links/:groupId/members/:articleId
 // Saca un artículo de la vinculación sin eliminar el grupo.
 // Si quedan menos de 2 miembros, elimina el grupo completo.
+// Si el grupo era de receta (sync_recipe=true), borra también la receta del
+// artículo desvinculado — pierde sentido sin la vinculación.
 // ============================================================================
 exports.removeMember = async (req, res) => {
   const bizId = getBusinessId(req);
@@ -210,22 +261,45 @@ exports.removeMember = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Verificar que el grupo pertenezca al negocio
+    // Verificar que el grupo pertenezca al negocio y obtener el tipo de sync
     const { rows: groupRows } = await client.query(
-      `SELECT id FROM article_link_groups WHERE id = $1 AND business_id = $2`,
+      `SELECT id, sync_recipe FROM article_link_groups
+        WHERE id = $1 AND business_id = $2`,
       [groupId, bizId]
     );
     if (!groupRows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
     }
+    const isRecipeLink = groupRows[0].sync_recipe === true;
 
     // Eliminar el miembro
     await client.query(
       `DELETE FROM article_link_members
-       WHERE link_group_id = $1 AND article_id = $2 AND business_id = $3`,
+        WHERE link_group_id = $1 AND article_id = $2 AND business_id = $3`,
       [groupId, articleId, bizId]
     );
+
+    // Si era vinculación de receta, borrar la receta del artículo desvinculado.
+    // El artículo queda limpio — sin receta y sin link.
+    let recipeDeleted = false;
+    if (isRecipeLink) {
+      const { rowCount: recDel } = await client.query(
+        `UPDATE recetas
+            SET active = FALSE, updated_at = NOW()
+          WHERE article_id = $1 AND business_id = $2 AND active = TRUE`,
+        [articleId, bizId]
+      );
+      recipeDeleted = recDel > 0;
+      // Limpiar también los flags de elaborados (por si el artículo era usado como insumo)
+      await client.query(
+        `UPDATE insumos
+            SET costo_receta = 0, tiene_receta = FALSE, updated_at = NOW()
+          WHERE id = $1 AND business_id = $2
+            AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
+        [articleId, bizId]
+      );
+    }
 
     // Contar miembros restantes
     const { rows: countRows } = await client.query(
@@ -246,7 +320,12 @@ exports.removeMember = async (req, res) => {
 
     await client.query('COMMIT');
 
-    return res.json({ ok: true, groupDeleted, remainingMembers: remaining });
+    return res.json({
+      ok: true,
+      groupDeleted,
+      remainingMembers: remaining,
+      recipeDeleted,
+    });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('[removeMember]', e.message);
