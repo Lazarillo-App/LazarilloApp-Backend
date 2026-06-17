@@ -16,6 +16,7 @@ const {
   getEffectiveRoleOnScope,
   ROLE_LEVEL,
 } = require('../services/auth/accessControl');
+const { logAudit } = require('../services/audit/auditLog');
 
 // ────────────────────────────────────────────────────────────────────
 // Helpers
