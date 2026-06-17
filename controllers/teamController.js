@@ -256,10 +256,10 @@ exports.createInvitation = async (req, res, next) => {
             isNewUser = true;
             const { rows: inserted } = await client.query(
                 `INSERT INTO app_users
-     (name, email, password_hash, account_status,
-      invited_by_user_id, invitation_token_hash, invitation_expires_at)
-   VALUES ($1, $2, NULL, 'invited', $3, $4, $5)
-   RETURNING id`,
+                    (name, email, password_hash, account_status,
+                    invited_by_user_id, invitation_token_hash, invitation_expires_at, role)
+                    VALUES ($1, $2, NULL, 'invited', $3, $4, $5, 'staff')
+                RETURNING id`,
                 [alias.trim(), rawEmail, uid, tokenHash, expiresAt]
             );
             userId = inserted[0].id;
@@ -589,44 +589,44 @@ exports.revokeAssignment = async (req, res, next) => {
    active_business_id si tiene un solo negocio accesible.
 ═════════════════════════════════════════════════════════════════════ */
 exports.acceptInvitation = async (req, res, next) => {
-  const client = await pool.connect();
-  try {
-    const { token = '', email = '', password = '' } = req.body || {};
-    if (!token || !email || !password) {
-      return res.status(400).json({ ok: false, error: 'missing_fields' });
-    }
-    if (password.length < 6) {
-      return res.status(400).json({ ok: false, error: 'password_too_short' });
-    }
+    const client = await pool.connect();
+    try {
+        const { token = '', email = '', password = '' } = req.body || {};
+        if (!token || !email || !password) {
+            return res.status(400).json({ ok: false, error: 'missing_fields' });
+        }
+        if (password.length < 6) {
+            return res.status(400).json({ ok: false, error: 'password_too_short' });
+        }
 
-    const rawEmail = normEmail(email);
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+        const rawEmail = normEmail(email);
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-    await client.query('BEGIN');
+        await client.query('BEGIN');
 
-    const { rows } = await client.query(
-      `SELECT id, email, invitation_expires_at, account_status
+        const { rows } = await client.query(
+            `SELECT id, email, invitation_expires_at, account_status
          FROM app_users
         WHERE email = $1 AND invitation_token_hash = $2
         LIMIT 1`,
-      [rawEmail, tokenHash]
-    );
-    if (!rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ ok: false, error: 'invalid_token' });
-    }
+            [rawEmail, tokenHash]
+        );
+        if (!rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ ok: false, error: 'invalid_token' });
+        }
 
-    const user = rows[0];
-    if (user.invitation_expires_at && new Date(user.invitation_expires_at) < new Date()) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ ok: false, error: 'expired_token' });
-    }
+        const user = rows[0];
+        if (user.invitation_expires_at && new Date(user.invitation_expires_at) < new Date()) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ ok: false, error: 'expired_token' });
+        }
 
-    const hash = await bcrypt.hash(password, 10);
+        const hash = await bcrypt.hash(password, 10);
 
-    // Resolver active_business_id: primer assignment activo del usuario
-    const { rows: firstBiz } = await client.query(
-      `
+        // Resolver active_business_id: primer assignment activo del usuario
+        const { rows: firstBiz } = await client.query(
+            `
       WITH first_biz AS (
         SELECT ua.scope_id AS biz_id, ua.created_at
           FROM user_assignments ua
@@ -649,12 +649,12 @@ exports.acceptInvitation = async (req, res, next) => {
       SELECT biz_id FROM first_org_biz
       LIMIT 1
       `,
-      [user.id]
-    );
-    const activeBizId = firstBiz[0]?.biz_id || null;
+            [user.id]
+        );
+        const activeBizId = firstBiz[0]?.biz_id || null;
 
-    await client.query(
-      `UPDATE app_users
+        await client.query(
+            `UPDATE app_users
           SET password_hash          = $1,
               account_status         = 'active',
               invitation_token_hash  = NULL,
@@ -662,17 +662,17 @@ exports.acceptInvitation = async (req, res, next) => {
               invitation_accepted_at = NOW(),
               active_business_id     = COALESCE($2, active_business_id)
         WHERE id = $3`,
-      [hash, activeBizId, user.id]
-    );
+            [hash, activeBizId, user.id]
+        );
 
-    await client.query('COMMIT');
+        await client.query('COMMIT');
 
-    return res.json({ ok: true, active_business_id: activeBizId });
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.error('[acceptInvitation]', e);
-    next(e);
-  } finally {
-    client.release();
-  }
+        return res.json({ ok: true, active_business_id: activeBizId });
+    } catch (e) {
+        try { await client.query('ROLLBACK'); } catch { }
+        console.error('[acceptInvitation]', e);
+        next(e);
+    } finally {
+        client.release();
+    }
 };

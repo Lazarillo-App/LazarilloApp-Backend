@@ -64,14 +64,14 @@ exports.register = async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
 
     const { rows } = await pool.query(
-      `INSERT INTO app_users (name, email, password_hash, account_status)
-       VALUES ($1,$2,$3,'pending')
+      `INSERT INTO app_users (name, email, password_hash, account_status, role)
+       VALUES ($1,$2,$3,'pending','owner')
        RETURNING id, name, email, active_business_id, role, status, account_status`,
       [name || null, rawEmail, hash]
     );
 
     const user = rows[0];
-    user.role = user.role || 'owner';
+    // user.role ya viene 'owner' del INSERT — no sobreescribir
 
     const token = signToken(user);
 
@@ -82,7 +82,7 @@ exports.register = async (req, res) => {
         name: user.name,
         email: user.email,
         active_business_id: user.active_business_id || null,
-        role: user.role,
+        role: user.role === 'app_admin' ? 'app_admin' : null,
         account_status: 'pending',
       },
     });

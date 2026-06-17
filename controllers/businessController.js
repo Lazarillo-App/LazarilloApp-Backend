@@ -1016,17 +1016,46 @@ exports.listMine = async (req, res) => {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
 
+    // Negocios accesibles via:
+    //  1) owner_id (legacy)
+    //  2) user_businesses (legacy)
+    //  3) user_assignments scope='business'
+    //  4) user_assignments scope='organization' → expandido a todos sus negocios
     const { rows } = await pool.query(`
-  SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, 
-         b.organization_id, b.created_from, b.created_at,
-         o.name AS organization_name  -- ← agregar
-  FROM app_businesses b
-  LEFT JOIN user_businesses ub ON ub.business_id = b.id
-  LEFT JOIN organizations o ON o.id = b.organization_id  -- ← join
-  WHERE (ub.user_id = $1 OR b.owner_id = $1)
-  ORDER BY b.created_at ASC;
-`, [uid]);
+      WITH accessible AS (
+        SELECT b.id
+          FROM app_businesses b
+         WHERE b.owner_id = $1
 
+        UNION
+        SELECT ub.business_id AS id
+          FROM user_businesses ub
+         WHERE ub.user_id = $1
+
+        UNION
+        SELECT ua.scope_id AS id
+          FROM user_assignments ua
+         WHERE ua.user_id = $1
+           AND ua.scope_type = 'business'
+           AND ua.revoked_at IS NULL
+
+        UNION
+        SELECT b.id
+          FROM user_assignments ua
+          JOIN app_businesses b ON b.organization_id = ua.scope_id
+         WHERE ua.user_id = $1
+           AND ua.scope_type = 'organization'
+           AND ua.revoked_at IS NULL
+      )
+      SELECT DISTINCT
+             b.id, b.name, b.slug, b.props, b.owner_id,
+             b.organization_id, b.created_from, b.created_at,
+             o.name AS organization_name
+        FROM app_businesses b
+        JOIN accessible a ON a.id = b.id
+        LEFT JOIN organizations o ON o.id = b.organization_id
+       ORDER BY b.created_at ASC
+    `, [uid]);
 
     res.json({ items: rows.map(attachBranding) });
   } catch (e) {
