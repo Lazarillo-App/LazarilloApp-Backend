@@ -1,13 +1,14 @@
 // middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
+const { getEffectiveRole } = require('../services/auth/accessControl');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret';
 const SERVICE_BEARER = (process.env.SERVICE_BEARER || '').trim();
 
 /** Requiere auth por:
- *  - Bearer <SERVICE_BEARER>  -> usuario “service” (id:0) sin chequeo de membresía
- *  - Bearer <JWT>             -> usuario normal (payload { uid, email, role })
+ *  - Bearer <SERVICE_BEARER>  -> usuario "service" (id:0) sin chequeo de membresía
+ *  - Bearer <JWT>             -> usuario normal (payload { uid, email })
  */
 async function authRequired(req, res, next) {
   try {
@@ -32,7 +33,7 @@ async function authRequired(req, res, next) {
       return res.status(401).json({ error: 'invalid_token' });
     }
 
-    // ✅ Normalizar uid/id a integer
+    // Normalizar uid/id a integer
     const rawUid = payload.uid ?? payload.id ?? null;
     const uidNum = Number(rawUid);
 
@@ -40,10 +41,25 @@ async function authRequired(req, res, next) {
       return res.status(401).json({ error: 'invalid_token_payload' });
     }
 
+    // ─── Rol de PLATAFORMA (no de negocio) ───
+    // Si el JWT trae role='app_admin' (superuser de Anthropic), lo respetamos.
+    // El rol de negocio se resuelve en loadActiveBusiness a partir de user_assignments.
+    let platformRole = null;
+    if (payload.role === 'app_admin') {
+      platformRole = 'app_admin';
+    } else {
+      // Verificar en DB por si lo subimos después de emitir el token
+      const { rows } = await pool.query(
+        `SELECT role FROM app_users WHERE id = $1 LIMIT 1`,
+        [uidNum]
+      );
+      if (rows[0]?.role === 'app_admin') platformRole = 'app_admin';
+    }
+
     req.user = {
       id: uidNum,
       email: payload.email || null,
-      role: payload.role || null,
+      role: platformRole,           // null para usuarios normales
     };
 
     req.isService = false;
@@ -55,13 +71,14 @@ async function authRequired(req, res, next) {
 }
 
 /** Resuelve negocio activo y lo adjunta como req.businessId / req.business.
- *  Orden de resolución: X-Business-Id -> ?businessId -> :businessId|:id -> active_business_id (usuario real).
- *  - Usuarios “service”: sólo se verifica existencia del business (no membresía).
- *  - Usuarios reales: se verifica owner o vínculo en user_businesses.
+ *  Orden de resolución: X-Business-Id -> ?businessId -> :businessId|:id -> active_business_id.
+ *  - Usuarios "service": sólo se verifica existencia.
+ *  - Usuarios reales: se verifica acceso vía user_assignments / owner_id / herencia de org.
+ *  - Adjunta req.businessRole con el rol efectivo (owner|admin|staff).
  */
 async function loadActiveBusiness(req, res, next) {
   try {
-        // Los app_admin no usan endpoints tenant — excepto /api/admin/* y /api/access/*
+    // app_admin no usa endpoints tenant — excepto /api/admin/* y /api/access/*
     if (req.user?.role === 'app_admin' && !req.isService) {
       const url = req.originalUrl || '';
       if (url.includes('/api/admin') || url.includes('/api/access')) {
@@ -82,7 +99,6 @@ async function loadActiveBusiness(req, res, next) {
     else if (queryId) { bizId = Number(queryId); source = 'query'; }
     else if (paramId) { bizId = Number(paramId); source = 'param'; }
     else if (!req.isService) {
-      // sólo usuarios reales: usar active_business_id
       const { rows } = await pool.query(
         'SELECT active_business_id FROM app_users WHERE id=$1 LIMIT 1',
         [uid]
@@ -94,10 +110,11 @@ async function loadActiveBusiness(req, res, next) {
     if (!Number.isFinite(bizId)) {
       req.businessId = null;
       req.business = null;
+      req.businessRole = null;
       return next();
     }
 
-    // “service”: no checa membresía, sólo existencia
+    // service: no checa membresía
     if (req.isService) {
       const { rows } = await pool.query('SELECT * FROM app_businesses WHERE id=$1 LIMIT 1', [bizId]);
       if (!rows[0]) return res.status(404).json({ error: 'business_not_found' });
@@ -106,25 +123,29 @@ async function loadActiveBusiness(req, res, next) {
       if (!props.maxi) props.maxi = {};
       req.businessId = row.id;
       req.business = { ...row, props };
+      req.businessRole = 'service';
       return next();
     }
 
-    // usuario real: validar owner o membresía
-    const { rows } = await pool.query(`
-      SELECT b.*
-        FROM app_businesses b
-        LEFT JOIN user_businesses ub ON ub.business_id=b.id AND ub.user_id=$2
-       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id IS NOT NULL)
-       LIMIT 1
-    `, [bizId, uid]);
-
-    if (!rows[0]) {
+    // usuario real: validar acceso vía accessControl (owner_id OR assignment OR org-inherited)
+    const effectiveRole = await getEffectiveRole(uid, bizId);
+    if (!effectiveRole) {
       if (['header', 'query', 'param'].includes(source)) {
         return res.status(403).json({ error: 'no_access_to_business' });
       }
       req.businessId = null;
       req.business = null;
+      req.businessRole = null;
       return next();
+    }
+
+    // Cargar datos del negocio
+    const { rows } = await pool.query(
+      `SELECT * FROM app_businesses WHERE id=$1 LIMIT 1`,
+      [bizId]
+    );
+    if (!rows[0]) {
+      return res.status(404).json({ error: 'business_not_found' });
     }
 
     const row = rows[0];
@@ -132,6 +153,7 @@ async function loadActiveBusiness(req, res, next) {
     if (!props.maxi) props.maxi = {};
     req.businessId = row.id;
     req.business = { ...row, props };
+    req.businessRole = effectiveRole;   // 'owner' | 'admin' | 'staff'
     next();
   } catch (e) {
     console.error('loadActiveBusiness error:', e);
@@ -139,4 +161,17 @@ async function loadActiveBusiness(req, res, next) {
   }
 }
 
-module.exports = { authRequired, loadActiveBusiness };
+/** Middleware factory: requiere al menos cierto rol en el negocio activo.
+ *  Uso:  app.use('/api/algo', authRequired, loadActiveBusiness, requireBusinessRole('admin'), handler)
+ */
+function requireBusinessRole(minRole = 'staff') {
+  const LVL = { owner: 3, admin: 2, staff: 1, service: 99 };
+  return (req, res, next) => {
+    const has = LVL[req.businessRole] ?? 0;
+    const need = LVL[minRole] ?? 0;
+    if (has >= need) return next();
+    return res.status(403).json({ error: 'forbidden', need: minRole, has: req.businessRole });
+  };
+}
+
+module.exports = { authRequired, loadActiveBusiness, requireBusinessRole };

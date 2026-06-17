@@ -21,7 +21,11 @@ const makeFrontUrl = (p = '') => {
 // Firmado de JWT con iss/aud (puede validarse luego en el middleware)
 function signToken(user) {
   const opts = { expiresIn: '7d', issuer: 'lazarillo-api', audience: 'lazarillo-web' };
-  return jwt.sign({ uid: user.id, email: user.email, role: user.role }, SECRET, opts);
+  // Solo incluimos role si es app_admin (rol de plataforma).
+  // Los roles de negocio se resuelven con /api/me/access.
+  const payload = { uid: user.id, email: user.email };
+  if (user.role === 'app_admin') payload.role = 'app_admin';
+  return jwt.sign(payload, SECRET, opts);
 }
 
 /* ===================== OPCIONAL: rate-limit simple de login ===================== */
@@ -142,7 +146,7 @@ exports.login = async (req, res) => {
         name: user.name,
         email: user.email,
         active_business_id: user.active_business_id || null,
-        role: user.role || 'owner',
+        role: user.role === 'app_admin' ? 'app_admin' : null,
         account_status: accountStatus,
         trial_ends_at: user.trial_ends_at || null,
         subscription_ends_at: user.subscription_ends_at || null,

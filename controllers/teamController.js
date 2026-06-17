@@ -585,52 +585,94 @@ exports.revokeAssignment = async (req, res, next) => {
 /* ════════════════════════════════════════════════════════════════════
    POST /api/auth/accept-invitation
    body: { token, email, password }
-   Endpoint PÚBLICO: activa la cuenta de un invitado.
+   Endpoint PÚBLICO: activa la cuenta de un invitado y autoasigna
+   active_business_id si tiene un solo negocio accesible.
 ═════════════════════════════════════════════════════════════════════ */
 exports.acceptInvitation = async (req, res, next) => {
-    try {
-        const { token = '', email = '', password = '' } = req.body || {};
-        if (!token || !email || !password) {
-            return res.status(400).json({ ok: false, error: 'missing_fields' });
-        }
-        if (password.length < 6) {
-            return res.status(400).json({ ok: false, error: 'password_too_short' });
-        }
-
-        const rawEmail = normEmail(email);
-        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-
-        const { rows } = await pool.query(
-            `SELECT id, email, invitation_expires_at, account_status
-         FROM app_users
-        WHERE email = $1
-          AND invitation_token_hash = $2
-        LIMIT 1`,
-            [rawEmail, tokenHash]
-        );
-        if (!rows.length) return res.status(400).json({ ok: false, error: 'invalid_token' });
-
-        const user = rows[0];
-        if (user.invitation_expires_at && new Date(user.invitation_expires_at) < new Date()) {
-            return res.status(400).json({ ok: false, error: 'expired_token' });
-        }
-
-        const hash = await bcrypt.hash(password, 10);
-
-        await pool.query(
-            `UPDATE app_users
-          SET password_hash         = $1,
-              account_status        = 'active',
-              invitation_token_hash = NULL,
-              invitation_expires_at = NULL,
-              invitation_accepted_at = NOW()
-        WHERE id = $2`,
-            [hash, user.id]
-        );
-
-        return res.json({ ok: true });
-    } catch (e) {
-        console.error('[acceptInvitation]', e);
-        next(e);
+  const client = await pool.connect();
+  try {
+    const { token = '', email = '', password = '' } = req.body || {};
+    if (!token || !email || !password) {
+      return res.status(400).json({ ok: false, error: 'missing_fields' });
     }
+    if (password.length < 6) {
+      return res.status(400).json({ ok: false, error: 'password_too_short' });
+    }
+
+    const rawEmail = normEmail(email);
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `SELECT id, email, invitation_expires_at, account_status
+         FROM app_users
+        WHERE email = $1 AND invitation_token_hash = $2
+        LIMIT 1`,
+      [rawEmail, tokenHash]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'invalid_token' });
+    }
+
+    const user = rows[0];
+    if (user.invitation_expires_at && new Date(user.invitation_expires_at) < new Date()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'expired_token' });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+
+    // Resolver active_business_id: primer assignment activo del usuario
+    const { rows: firstBiz } = await client.query(
+      `
+      WITH first_biz AS (
+        SELECT ua.scope_id AS biz_id, ua.created_at
+          FROM user_assignments ua
+         WHERE ua.user_id = $1
+           AND ua.scope_type = 'business'
+           AND ua.revoked_at IS NULL
+         ORDER BY ua.created_at ASC LIMIT 1
+      ),
+      first_org_biz AS (
+        SELECT b.id AS biz_id, b.created_at
+          FROM user_assignments ua
+          JOIN app_businesses b ON b.organization_id = ua.scope_id
+         WHERE ua.user_id = $1
+           AND ua.scope_type = 'organization'
+           AND ua.revoked_at IS NULL
+         ORDER BY b.created_at ASC LIMIT 1
+      )
+      SELECT biz_id FROM first_biz
+      UNION ALL
+      SELECT biz_id FROM first_org_biz
+      LIMIT 1
+      `,
+      [user.id]
+    );
+    const activeBizId = firstBiz[0]?.biz_id || null;
+
+    await client.query(
+      `UPDATE app_users
+          SET password_hash          = $1,
+              account_status         = 'active',
+              invitation_token_hash  = NULL,
+              invitation_expires_at  = NULL,
+              invitation_accepted_at = NOW(),
+              active_business_id     = COALESCE($2, active_business_id)
+        WHERE id = $3`,
+      [hash, activeBizId, user.id]
+    );
+
+    await client.query('COMMIT');
+
+    return res.json({ ok: true, active_business_id: activeBizId });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error('[acceptInvitation]', e);
+    next(e);
+  } finally {
+    client.release();
+  }
 };

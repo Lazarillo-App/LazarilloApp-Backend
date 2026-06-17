@@ -52,7 +52,7 @@ const syncRoutes = require('./routes/syncRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
 const priceListsRoutes = require('./routes/priceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
-
+const meRoutes = require('./routes/meRoutes');
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
 const devMaxiProbeRoutes = exposeProbe ? require('./routes/devMaxiProbeRoutes') : null;
 
@@ -147,6 +147,7 @@ app.use('/api', authRequired, loadActiveBusiness);
 
 // Verificar estado de cuenta activa (después de auth, antes de las rutas de negocio)
 app.use('/api', requireActiveAccount);
+app.use('/api/me', meRoutes);
 
 // rutas con auth
 app.use('/api/team', teamRoutes);
