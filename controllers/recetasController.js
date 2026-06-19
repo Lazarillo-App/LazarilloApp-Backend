@@ -16,6 +16,7 @@ exports.getReceta = async (req, res, next) => {
          r.id, r.article_id, r.business_id, r.nombre, r.descripcion,
          r.porciones, r.porcentaje_venta, r.costo_total, r.active,
          r.notas, r.foto, r.notas_updated_at,
+         r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
          r.created_at, r.updated_at
        FROM recetas r
       WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE
@@ -73,11 +74,25 @@ exports.saveReceta = async (req, res, next) => {
       descripcion,
       porciones = 1,
       porcentajeVenta = 0,
+      rendimientoUnidad = 'porcion',
+      rendimientoPeso = null,
+      unidadPeso = null,
       items = [],
       notas,
       foto,
       notasUpdatedAt,
     } = req.body || {};
+
+    // Normalizar y validar campos del rendimiento del lote
+    const VALID_RU = ['porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
+    const VALID_UP = ['gr', 'kg'];
+    const ruFinal = VALID_RU.includes(rendimientoUnidad) ? rendimientoUnidad : 'porcion';
+    // Peso solo aplica cuando la unidad es lt/ml/u (las demás no lo necesitan)
+    const aplicaPeso = ['lt', 'ml', 'u'].includes(ruFinal);
+    const rpFinal = aplicaPeso && rendimientoPeso != null && Number(rendimientoPeso) > 0
+      ? Number(rendimientoPeso)
+      : null;
+    const upFinal = aplicaPeso && VALID_UP.includes(unidadPeso) ? unidadPeso : null;
 
     if (!Array.isArray(items)) {
       return res.status(400).json({ ok: false, error: 'items_must_be_array' });
@@ -96,21 +111,25 @@ exports.saveReceta = async (req, res, next) => {
       `INSERT INTO recetas
          (article_id, business_id, nombre, descripcion, porciones,
           porcentaje_venta, costo_total, notas, foto, notas_updated_at,
+          rendimiento_unidad, rendimiento_peso, unidad_peso,
           active, origen, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'manual', $11, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE, 'manual', $14, NOW(), NOW())
        ON CONFLICT (article_id, business_id)
        DO UPDATE SET
-         nombre           = EXCLUDED.nombre,
-         descripcion      = EXCLUDED.descripcion,
-         porciones        = EXCLUDED.porciones,
-         porcentaje_venta = EXCLUDED.porcentaje_venta,
-         costo_total      = EXCLUDED.costo_total,
-         notas            = EXCLUDED.notas,
-         foto             = EXCLUDED.foto,
-         notas_updated_at = EXCLUDED.notas_updated_at,
-         active           = TRUE,
-         origen           = 'manual',
-         updated_at       = NOW()
+         nombre             = EXCLUDED.nombre,
+         descripcion        = EXCLUDED.descripcion,
+         porciones          = EXCLUDED.porciones,
+         porcentaje_venta   = EXCLUDED.porcentaje_venta,
+         costo_total        = EXCLUDED.costo_total,
+         notas              = EXCLUDED.notas,
+         foto               = EXCLUDED.foto,
+         notas_updated_at   = EXCLUDED.notas_updated_at,
+         rendimiento_unidad = EXCLUDED.rendimiento_unidad,
+         rendimiento_peso   = EXCLUDED.rendimiento_peso,
+         unidad_peso        = EXCLUDED.unidad_peso,
+         active             = TRUE,
+         origen             = 'manual',
+         updated_at         = NOW()
        RETURNING *`,
       [
         articleId, bizId,
@@ -122,10 +141,13 @@ exports.saveReceta = async (req, res, next) => {
         notas?.trim() || null,
         foto || null,
         notasUpdatedAt || null,
+        ruFinal,
+        rpFinal,
+        upFinal,
         uid,
       ]
     );
-
+    
     const receta = recetaRows[0];
 
     // ── Reemplazar items ──

@@ -118,12 +118,25 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       descripcion,
       porciones = 1,
       porcentajeVenta = 0,
+      rendimientoUnidad = 'porcion',
+      rendimientoPeso = null,
+      unidadPeso = null,
       items = [],
     } = req.body || {};
 
     if (!Array.isArray(items)) {
       return res.status(400).json({ ok: false, error: 'items_must_be_array' });
     }
+
+    // Normalizar y validar campos del rendimiento del lote
+    const VALID_RU = ['porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
+    const VALID_UP = ['gr', 'kg'];
+    const ruFinal = VALID_RU.includes(rendimientoUnidad) ? rendimientoUnidad : 'porcion';
+    const aplicaPeso = ['lt', 'ml', 'u'].includes(ruFinal);
+    const rpFinal = aplicaPeso && rendimientoPeso != null && Number(rendimientoPeso) > 0
+      ? Number(rendimientoPeso)
+      : null;
+    const upFinal = aplicaPeso && VALID_UP.includes(unidadPeso) ? unidadPeso : null;
 
     // Calcular costo total
     const costoTotal = items.reduce((acc, item) => {
@@ -156,18 +169,23 @@ exports.saveRecetaElaborado = async (req, res, next) => {
     const { rows: recetaRows } = await client.query(
       `INSERT INTO recetas
          (insumo_id, business_id, nombre, descripcion, porciones,
-          porcentaje_venta, costo_total, active, origen, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, 'manual', $8, NOW(), NOW())
+          porcentaje_venta, costo_total,
+          rendimiento_unidad, rendimiento_peso, unidad_peso,
+          active, origen, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'manual', $11, NOW(), NOW())
        ON CONFLICT ON CONSTRAINT recetas_insumo_biz_key
        DO UPDATE SET
-         nombre           = EXCLUDED.nombre,
-         descripcion      = EXCLUDED.descripcion,
-         porciones        = EXCLUDED.porciones,
-         porcentaje_venta = EXCLUDED.porcentaje_venta,
-         costo_total      = EXCLUDED.costo_total,
-         active           = TRUE,
-         origen           = 'manual',
-         updated_at       = NOW()
+         nombre             = EXCLUDED.nombre,
+         descripcion        = EXCLUDED.descripcion,
+         porciones          = EXCLUDED.porciones,
+         porcentaje_venta   = EXCLUDED.porcentaje_venta,
+         costo_total        = EXCLUDED.costo_total,
+         rendimiento_unidad = EXCLUDED.rendimiento_unidad,
+         rendimiento_peso   = EXCLUDED.rendimiento_peso,
+         unidad_peso        = EXCLUDED.unidad_peso,
+         active             = TRUE,
+         origen             = 'manual',
+         updated_at         = NOW()
        RETURNING *`,
       [
         insumoId, bizId,
@@ -176,6 +194,9 @@ exports.saveRecetaElaborado = async (req, res, next) => {
         porcionesNum,
         porcentajeNum,
         Math.round(costoTotal * 10000) / 10000,
+        ruFinal,
+        rpFinal,
+        upFinal,
         uid,
       ]
     );
