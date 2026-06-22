@@ -1,9 +1,9 @@
 // routes/articleListsRoutes.js
 
 const express = require('express');
-const router  = express.Router();
+const router = express.Router();
 
-const { authRequired }              = require('../middleware/authMiddleware');
+const { authRequired } = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
 
 const lists = require('../controllers/articleListsController');
@@ -32,6 +32,12 @@ router.get(
   ensureFn('lists.getLists', lists.getLists)
 );
 
+// GET /api/businesses/:id/article-lists/full-state → todas las listas + ajustes + exclusiones
+router.get(
+  '/:id/article-lists/full-state',
+  ensureFn('lists.getFullState', lists.getFullState)
+);
+
 // POST   /api/businesses/:id/article-lists              → crear lista
 router.post(
   '/:id/article-lists',
@@ -42,6 +48,12 @@ router.post(
 router.put(
   '/:id/article-lists/:listId',
   ensureFn('lists.updateList', lists.updateList)
+);
+
+// POST /api/businesses/:id/article-lists/:listId/set-favorite
+router.post(
+  '/:id/article-lists/:listId/set-favorite',
+  ensureFn('lists.setFavorite', lists.setFavorite)
 );
 
 // DELETE /api/businesses/:id/article-lists/:listId      → eliminar lista
@@ -105,7 +117,7 @@ router.delete(
 );
 
 router.post(
-'/:id/article-links/:groupId/members',
+  '/:id/article-links/:groupId/members',
   ensureFn('links.addMember', links.addMember)
 );
 
@@ -128,10 +140,10 @@ router.post(
 );
 
 /* ── Listas de Insumos ─────────────────────────────────────────────────────── */
-router.get('/:id/insumo-lists',                          ensureFn('lists.getInsumoLists',    lists.getInsumoLists));
-router.post('/:id/insumo-lists',                         ensureFn('lists.createInsumoList',  lists.createInsumoList));
-router.delete('/:id/insumo-lists/:listId',               ensureFn('lists.deleteInsumoList',  lists.deleteInsumoList));
-router.get('/:id/insumo-lists/:listId/items',            ensureFn('lists.getInsumoListItems', lists.getInsumoListItems));
-router.put('/:id/insumo-lists/:listId/items',            ensureFn('lists.addInsumoListItems', lists.addInsumoListItems));
+router.get('/:id/insumo-lists', ensureFn('lists.getInsumoLists', lists.getInsumoLists));
+router.post('/:id/insumo-lists', ensureFn('lists.createInsumoList', lists.createInsumoList));
+router.delete('/:id/insumo-lists/:listId', ensureFn('lists.deleteInsumoList', lists.deleteInsumoList));
+router.get('/:id/insumo-lists/:listId/items', ensureFn('lists.getInsumoListItems', lists.getInsumoListItems));
+router.put('/:id/insumo-lists/:listId/items', ensureFn('lists.addInsumoListItems', lists.addInsumoListItems));
 
 module.exports = router;

@@ -78,9 +78,10 @@ exports.getPriceConfig = async (req, res, next) => {
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
 
     const { rows } = await pool.query(
-      `SELECT scope, scope_id, objetivo_pct, precio_manual, ultimo_pct
+      `SELECT scope, scope_id, list_id, objetivo_pct, ajuste_pct, precio_manual, ultimo_pct, excluido
          FROM article_price_config
-        WHERE business_id = $1`,
+        WHERE business_id = $1
+          AND list_id IS NULL`,
       [bizId]
     );
 
@@ -91,16 +92,14 @@ exports.getPriceConfig = async (req, res, next) => {
     for (const r of rows) {
       const entry = {
         objetivo: r.objetivo_pct != null ? Number(r.objetivo_pct) : null,
+        ajuste:   r.ajuste_pct   != null ? Number(r.ajuste_pct)   : null,
         precioManual: r.precio_manual != null ? Number(r.precio_manual) : null,
         ultimoPct: r.ultimo_pct != null ? Number(r.ultimo_pct) : null,
+        excluido: !!r.excluido,
       };
-      if (r.scope === 'articulo') {
-        byArticle[String(r.scope_id)] = entry;
-      } else if (r.scope === 'rubro') {
-        byRubro[String(r.scope_id)] = entry;
-      } else if (r.scope === 'agrupacion') {
-        byAgrupacion[String(r.scope_id)] = entry;
-      }
+      if (r.scope === 'articulo')   byArticle[String(r.scope_id)]   = entry;
+      else if (r.scope === 'rubro') byRubro[String(r.scope_id)]     = entry;
+      else if (r.scope === 'agrupacion') byAgrupacion[String(r.scope_id)] = entry;
     }
 
     return res.json({ ok: true, byArticle, byRubro, byAgrupacion });
@@ -197,25 +196,40 @@ exports.savePriceConfig = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // ── Upsert del registro principal (scope + scopeId) ──────────────────────
-    if (objetivoVal !== null || precioManualVal !== null || ultimoPctVal !== null) {
+    // ── Campos nuevos del modelo de listas ────────────────────────────────────
+    const ajusteVal = req.body?.ajuste != null ? Number(req.body.ajuste) : null;
+    const listIdVal = req.body?.listId != null ? Number(req.body.listId) : null;
+    const excluidoVal = req.body?.excluido === true ? true
+                     : req.body?.excluido === false ? false
+                     : null;
+    const listIdKey = listIdVal != null ? Number(listIdVal) : 0; // 0 = NULL para el UNIQUE
+
+    // ── Upsert del registro principal (scope + scopeId + list_id) ────────────
+    if (objetivoVal !== null || precioManualVal !== null || ultimoPctVal !== null
+        || ajusteVal !== null || excluidoVal !== null) {
       await client.query(
         `INSERT INTO article_price_config
-       (business_id, scope, scope_id, objetivo_pct, precio_manual, ultimo_pct, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
-     ON CONFLICT (business_id, scope, scope_id)
+       (business_id, scope, scope_id, list_id, objetivo_pct, ajuste_pct, precio_manual, ultimo_pct, excluido, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::boolean, FALSE), NOW())
+     ON CONFLICT (business_id, scope, scope_id, COALESCE(list_id, 0))
      DO UPDATE SET
-       objetivo_pct  = CASE WHEN $4::numeric IS NOT NULL
+       objetivo_pct  = CASE WHEN $5::numeric IS NOT NULL
                        THEN EXCLUDED.objetivo_pct
                        ELSE article_price_config.objetivo_pct END,
-       precio_manual = CASE WHEN $5::numeric IS NOT NULL
+       ajuste_pct    = CASE WHEN $6::numeric IS NOT NULL
+                       THEN EXCLUDED.ajuste_pct
+                       ELSE article_price_config.ajuste_pct END,
+       precio_manual = CASE WHEN $7::numeric IS NOT NULL
                        THEN EXCLUDED.precio_manual
                        ELSE article_price_config.precio_manual END,
-       ultimo_pct    = CASE WHEN $6::numeric IS NOT NULL
+       ultimo_pct    = CASE WHEN $8::numeric IS NOT NULL
                        THEN EXCLUDED.ultimo_pct
                        ELSE article_price_config.ultimo_pct END,
+       excluido      = CASE WHEN $9::boolean IS NOT NULL
+                       THEN EXCLUDED.excluido
+                       ELSE article_price_config.excluido END,
        updated_at    = NOW()`,
-        [bizId, scope, scopeIdStr, objetivoVal, precioManualVal, ultimoPctVal]
+        [bizId, scope, scopeIdStr, listIdVal, objetivoVal, ajusteVal, precioManualVal, ultimoPctVal, excluidoVal]
       );
     } else {
       // Borrar selectivamente según qué keys vinieron en el body
