@@ -125,6 +125,7 @@ exports.getPriceConfig = async (req, res, next) => {
                               (se usa desde ConfiguracionMain al pisar todo)
 ══════════════════════════════════════════════════════════════ */
 exports.savePriceConfig = async (req, res, next) => {
+  console.log('[savePriceConfig] VERSION 2026-06-23 con jerarquía agrupacion→rubro');  // ← temporal
   const client = await pool.connect();
   try {
     const bizId = Number(req.params.businessId);
