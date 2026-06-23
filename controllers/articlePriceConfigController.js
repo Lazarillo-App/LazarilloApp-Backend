@@ -499,9 +499,9 @@ exports.bulkSavePriceConfig = async (req, res, next) => {
       if (!Number.isFinite(id) || id === 0) continue;
       await client.query(
         `INSERT INTO article_price_config
-           (business_id, scope, scope_id, precio_manual, updated_at)
-         VALUES ($1, 'articulo', $2, $3, NOW())
-         ON CONFLICT (business_id, scope, scope_id)
+           (business_id, scope, scope_id, list_id, precio_manual, updated_at)
+         VALUES ($1, 'articulo', $2, NULL, $3, NOW())
+         ON CONFLICT (business_id, scope, scope_id, COALESCE(list_id, 0))
          DO UPDATE SET precio_manual = EXCLUDED.precio_manual, updated_at = NOW()`,
         [bizId, String(id), Number(precioManual)]
       );
