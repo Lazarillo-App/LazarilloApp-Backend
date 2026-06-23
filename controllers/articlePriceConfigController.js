@@ -283,6 +283,41 @@ exports.savePriceConfig = async (req, res, next) => {
         }
       }
     }
+    // ── Jerarquía "el padre pisa al hijo" ─────────────────────────────────────
+    // Cuando se guarda un objetivo a nivel rubro o agrupación, borramos los
+    // overrides individuales (scope='articulo') del bloque. No se materializa
+    // nada: los artículos van a heredar el nuevo objetivo por jerarquía de lectura.
+    // Los precios manuales NO se tocan — son independientes del objetivo.
+    if (objetivoVal !== null && (scope === 'rubro' || scope === 'agrupacion')
+        && Array.isArray(articleIds) && articleIds.length > 0) {
+      const idsNums = articleIds.map(Number).filter(id => Number.isFinite(id) && id !== 0);
+      if (idsNums.length > 0) {
+        await client.query(
+          `UPDATE article_price_config
+             SET objetivo_pct = NULL, updated_at = NOW()
+           WHERE business_id = $1
+             AND scope = 'articulo'
+             AND scope_id = ANY($2::text[])
+             AND list_id IS NULL`,
+          [bizId, idsNums.map(String)]
+        );
+        // Limpiar filas que quedaron sin ningún dato útil
+        await client.query(
+          `DELETE FROM article_price_config
+           WHERE business_id = $1
+             AND scope = 'articulo'
+             AND scope_id = ANY($2::text[])
+             AND list_id IS NULL
+             AND objetivo_pct IS NULL
+             AND precio_manual IS NULL
+             AND ajuste_pct IS NULL
+             AND ultimo_pct IS NULL
+             AND excluido = FALSE`,
+          [bizId, idsNums.map(String)]
+        );
+        console.log(`[savePriceConfig] ${scope}/${scopeIdStr} → limpiados overrides individuales de ${idsNums.length} artículos`);
+      }
+    }
 
     await client.query('COMMIT');
 
