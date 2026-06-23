@@ -316,6 +316,7 @@ exports.savePriceConfig = async (req, res, next) => {
           [bizId, idsNums.map(String)]
         );
         console.log(`[savePriceConfig] ${scope}/${scopeIdStr} → limpiados overrides individuales de ${idsNums.length} artículos`);
+         console.log(`[DEBUG] scope === 'agrupacion'?`, scope === 'agrupacion');
 
         // Si es agrupación, además limpiar todos los rubros que contienen estos artículos.
         if (scope === 'agrupacion') {
