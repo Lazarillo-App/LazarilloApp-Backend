@@ -302,7 +302,7 @@ exports.savePriceConfig = async (req, res, next) => {
           [bizId, idsNums.map(String)]
         );
         // Limpiar filas que quedaron sin ningún dato útil
-        await client.query(
+       await client.query(
           `DELETE FROM article_price_config
            WHERE business_id = $1
              AND scope = 'articulo'
@@ -316,6 +316,48 @@ exports.savePriceConfig = async (req, res, next) => {
           [bizId, idsNums.map(String)]
         );
         console.log(`[savePriceConfig] ${scope}/${scopeIdStr} → limpiados overrides individuales de ${idsNums.length} artículos`);
+
+        // Si es agrupación, además limpiar todos los rubros que contienen estos artículos.
+        if (scope === 'agrupacion') {
+          const { rows: rubrosDelBloque } = await client.query(
+            `SELECT DISTINCT subrubro, categoria FROM maxi_articles
+               WHERE business_id = $1 AND articulo_id = ANY($2::int[])
+             UNION
+             SELECT DISTINCT subrubro, rubro AS categoria FROM app_articles
+               WHERE business_id = $1 AND id = ANY($2::int[])`,
+            [bizId, idsNums]
+          );
+          const rubroKeys = new Set();
+          for (const r of rubrosDelBloque) {
+            if (r.subrubro) rubroKeys.add(String(r.subrubro));
+            if (r.categoria) rubroKeys.add(String(r.categoria));
+          }
+          if (rubroKeys.size > 0) {
+            await client.query(
+              `UPDATE article_price_config
+                 SET objetivo_pct = NULL, updated_at = NOW()
+               WHERE business_id = $1
+                 AND scope = 'rubro'
+                 AND scope_id = ANY($2::text[])
+                 AND list_id IS NULL`,
+              [bizId, Array.from(rubroKeys)]
+            );
+            await client.query(
+              `DELETE FROM article_price_config
+               WHERE business_id = $1
+                 AND scope = 'rubro'
+                 AND scope_id = ANY($2::text[])
+                 AND list_id IS NULL
+                 AND objetivo_pct IS NULL
+                 AND precio_manual IS NULL
+                 AND ajuste_pct IS NULL
+                 AND ultimo_pct IS NULL
+                 AND excluido = FALSE`,
+              [bizId, Array.from(rubroKeys)]
+            );
+            console.log(`[savePriceConfig] agrupacion/${scopeIdStr} → limpiados ${rubroKeys.size} rubros del bloque`);
+          }
+        }
       }
     }
 
