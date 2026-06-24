@@ -1582,3 +1582,184 @@ exports.groups_createOrMove = async (req, res) => {
     client.release();
   }
 };
+
+/**
+ * POST /businesses/:id/insumos/import-csv-paired
+ * Body multipart con dos archivos:
+ *   - rubros: xls/xlsx de rubros (opcional, si ya están en DB se omite)
+ *   - insumos: xls/xlsx de insumos (requerido)
+ *
+ * Cruza COD_RUI ↔ codigo de rubro para asignar el rubro correcto.
+ * Marca es_elaborado = true en insumos cuyo rubro tenga es_elaborador = true.
+ */
+exports.importCsvPaired = async (req, res) => {
+  const businessId = getBusinessId(req);
+  if (!businessId) return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+
+  const filesArr = Array.isArray(req.files) ? req.files : [];
+  const fileRubros = filesArr.find(f => f.fieldname === 'rubros') || req.files?.rubros?.[0] || null;
+  const fileInsumos = filesArr.find(f => f.fieldname === 'insumos') || req.files?.insumos?.[0] || null;
+
+  if (!fileInsumos) {
+    return res.status(400).json({ ok: false, error: 'El archivo de insumos es requerido (campo "insumos")' });
+  }
+
+  // ── Parser xlsx/xls/csv común ──
+  const XLSX = require('xlsx');
+  const parseFile = (file) => {
+    const ext = file.originalname.toLowerCase().split('.').pop();
+    if (ext === 'csv') {
+      const { parse } = require('csv-parse/sync');
+      const text = file.buffer.toString('utf8');
+      return parse(text, { columns: true, skip_empty_lines: true, trim: true });
+    }
+    const wb = XLSX.read(file.buffer, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_json(ws, { defval: '' });
+  };
+
+  const normKey = (k) => String(k || '').toLowerCase().replace(/[\s_\-.]/g, '');
+  const getCol = (row, ...aliases) => {
+    const map = {};
+    Object.keys(row).forEach(k => { map[normKey(k)] = k; });
+    for (const a of aliases) {
+      const k = map[normKey(a)];
+      if (k !== undefined && row[k] !== undefined && String(row[k]).trim() !== '') {
+        return String(row[k]).trim();
+      }
+    }
+    return null;
+  };
+
+  const batchId = `paired-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // ── 1. RUBROS (opcional) ──
+    let rubrosInserted = 0, rubrosUpdated = 0;
+    if (fileRubros) {
+      const rows = parseFile(fileRubros);
+      for (const row of rows) {
+        const codigo = Number(getCol(row, 'codigo', 'cod', 'id'));
+        const nombre = getCol(row, 'nombre', 'descripcion', 'name');
+        if (!Number.isFinite(codigo) || !nombre) continue;
+
+        const esElaborador = /^elaborad/i.test(nombre.trim());
+        const r = await client.query(
+          `INSERT INTO insumo_rubros (business_id, codigo, codigo_maxi, nombre, es_elaborador, activo)
+           VALUES ($1, $2, $2, $3, $4, true)
+           ON CONFLICT (business_id, codigo) DO UPDATE SET
+             nombre = EXCLUDED.nombre,
+             es_elaborador = EXCLUDED.es_elaborador,
+             activo = true,
+             updated_at = NOW()
+           RETURNING (xmax = 0) AS inserted`,
+          [businessId, codigo, nombre.trim(), esElaborador]
+        );
+        if (r.rows[0]?.inserted) rubrosInserted++;
+        else rubrosUpdated++;
+      }
+    }
+
+    // ── 2. INSUMOS ──
+    const insumosRows = parseFile(fileInsumos);
+    let insumosInserted = 0, insumosUpdated = 0, insumosSkipped = 0;
+
+    for (const row of insumosRows) {
+      const codigo = getCol(row, 'codigo', 'cod', 'sku', 'id');
+      const nombre = getCol(row, 'nombre', 'descripcion', 'name');
+      if (!nombre) { insumosSkipped++; continue; }
+
+      const codRui = getCol(row, 'cod_rui', 'codrui', 'cod_ru', 'rubro_codigo', 'codigo_rubro');
+      const unidadMed = getCol(row, 'unidad_med', 'unidadmed', 'unidad', 'medida', 'um');
+      const precio = getCol(row, 'precio', 'precio_ref', 'precioref', 'p_prom');
+
+      // El rubro se guarda como STRING del código (convención actual del proyecto)
+      // El JOIN con insumo_rubros lo resuelve por ir.codigo::text = i.rubro
+      const rubroVal = codRui && codRui !== '0' ? String(codRui).trim() : null;
+      const precioNum = precio != null && Number.isFinite(Number(precio)) ? Number(precio) : null;
+
+      if (codigo) {
+        const r = await client.query(
+          `INSERT INTO insumos
+             (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
+              origen, estado, upload_batch_id, sin_equivalencia, es_elaborado)
+           VALUES ($1, $2, $3, $4, $5, $6, 'csv', 'activo', $7, false, false)
+           ON CONFLICT (business_id, codigo_maxi) DO UPDATE SET
+             nombre = EXCLUDED.nombre,
+             unidad_med = COALESCE(EXCLUDED.unidad_med, insumos.unidad_med),
+             precio_ref = COALESCE(EXCLUDED.precio_ref, insumos.precio_ref),
+             rubro = COALESCE(EXCLUDED.rubro, insumos.rubro),
+             upload_batch_id = EXCLUDED.upload_batch_id,
+             sin_equivalencia = false,
+             updated_at = NOW()
+           RETURNING (xmax = 0) AS inserted`,
+          [businessId, String(codigo).trim(), nombre.trim(),
+           unidadMed?.trim() || null, precioNum, rubroVal, batchId]
+        );
+        if (r.rows[0]?.inserted) insumosInserted++;
+        else insumosUpdated++;
+      } else {
+        // Sin código → solo insertar si no existe por nombre
+        const ex = await client.query(
+          `SELECT id FROM insumos WHERE business_id = $1 AND lower(trim(nombre)) = lower($2) LIMIT 1`,
+          [businessId, nombre.trim()]
+        );
+        if (ex.rows.length) { insumosUpdated++; continue; }
+        await client.query(
+          `INSERT INTO insumos
+             (business_id, nombre, unidad_med, precio_ref, rubro,
+              origen, estado, upload_batch_id, sin_equivalencia, es_elaborado)
+           VALUES ($1, $2, $3, $4, $5, 'csv', 'activo', $6, true, false)`,
+          [businessId, nombre.trim(), unidadMed?.trim() || null, precioNum, rubroVal, batchId]
+        );
+        insumosInserted++;
+      }
+    }
+
+    // ── 3. Auto-marcar es_elaborado por rubro ──
+    const { rowCount: autoMarked } = await client.query(
+      `UPDATE insumos i
+          SET es_elaborado = true, updated_at = NOW()
+         FROM insumo_rubros ir
+        WHERE ir.business_id = i.business_id
+          AND ir.codigo::text = i.rubro
+          AND ir.es_elaborador = true
+          AND i.business_id = $1
+          AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
+          AND i.es_elaborado IS DISTINCT FROM true`,
+      [businessId]
+    );
+
+    await client.query('COMMIT');
+
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+
+    return res.json({
+      ok: true,
+      batchId,
+      rubros: { inserted: rubrosInserted, updated: rubrosUpdated },
+      insumos: {
+        inserted: insumosInserted,
+        updated: insumosUpdated,
+        skipped: insumosSkipped,
+        total: insumosInserted + insumosUpdated + insumosSkipped,
+      },
+      autoMarked,
+      summary: {
+        inserted: insumosInserted,
+        updated: insumosUpdated,
+        skipped: insumosSkipped,
+      },
+    });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('importCsvPaired error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};

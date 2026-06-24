@@ -129,7 +129,8 @@ exports.saveReceta = async (req, res, next) => {
          unidad_peso        = EXCLUDED.unidad_peso,
          active             = TRUE,
          origen             = 'manual',
-         updated_at         = NOW()
+         updated_at         = NOW(),
+         createby            = COALESCE(recetas.created_by, EXCLUDED.created_by)    
        RETURNING *`,
       [
         articleId, bizId,
@@ -147,7 +148,7 @@ exports.saveReceta = async (req, res, next) => {
         uid,
       ]
     );
-    
+    //
     const receta = recetaRows[0];
 
     // ── Reemplazar items ──
