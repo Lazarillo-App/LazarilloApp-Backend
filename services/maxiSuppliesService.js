@@ -268,7 +268,7 @@ function normalizarInsumosRubros(items = []) {
         codigo,
         nombre,
         cpto_caja,
-        es_elaborador,
+        es_elaborador: false,
         activo: true,
       };
     })

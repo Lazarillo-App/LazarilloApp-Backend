@@ -488,12 +488,12 @@ exports.actualizar = async (req, res) => {
       sets.push(`${c} = $${vals.length}`);
     };
 
-    if (b.nombre !== undefined)    push('nombre', b.nombre);
+    if (b.nombre !== undefined) push('nombre', b.nombre);
     if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
-    if (b.rubro !== undefined)     push('rubro', b.rubro);
-    if (b.estado !== undefined)    push('estado', b.estado);
-    if (b.nota !== undefined)      push('nota', b.nota);
+    if (b.rubro !== undefined) push('rubro', b.rubro);
+    if (b.estado !== undefined) push('estado', b.estado);
+    if (b.nota !== undefined) push('nota', b.nota);
 
     if (b.es_elaborado !== undefined) {
       push('es_elaborado', b.es_elaborado);
@@ -576,13 +576,13 @@ exports.bulkUpsert = async (req, res) => {
         const nombre = (it.nombre ?? '').trim();
         if (!nombre) { skipped++; continue; }
 
-        const codigo     = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
+        const codigo = it.codigoMaxi ?? it.codigo_maxi ?? it.codigo ?? null;
         const unidad_med = it.unidadMed ?? it.unidad_med ?? null;
         const precio_ref = it.precioRef ?? it.precio_ref ?? null;
-        const rubro      = it.rubro ?? null;
-        const origen     = it.origen ?? 'manual';
+        const rubro = it.rubro ?? null;
+        const origen = it.origen ?? 'manual';
         const esElaborado = it.esElaborado ?? it.es_elaborado ?? false;
-        const sinEquiv   = !codigo;
+        const sinEquiv = !codigo;
 
         if (codigo) {
           const r = await client.query(
@@ -601,8 +601,8 @@ exports.bulkUpsert = async (req, res) => {
                updated_at      = NOW()
              RETURNING (xmax = 0) AS inserted`,
             [businessId, String(codigo).trim(), nombre, unidad_med,
-             precio_ref == null ? null : Number(precio_ref),
-             rubro, origen, batchId, sinEquiv, esElaborado]
+              precio_ref == null ? null : Number(precio_ref),
+              rubro, origen, batchId, sinEquiv, esElaborado]
           );
           if (r.rows?.[0]?.inserted) inserted++;
           else updated++;
@@ -635,8 +635,8 @@ exports.bulkUpsert = async (req, res) => {
                   origen, estado, upload_batch_id, sin_equivalencia, es_elaborado)
                VALUES ($1,$2,$3,$4,$5,$6,'activo',$7,TRUE,$8)`,
               [businessId, nombre, unidad_med,
-               precio_ref == null ? null : Number(precio_ref),
-               rubro, origen, batchId, esElaborado]
+                precio_ref == null ? null : Number(precio_ref),
+                rubro, origen, batchId, esElaborado]
             );
             inserted++;
           }
@@ -673,9 +673,9 @@ exports.bulkUpsertCSV = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
     }
 
-    const batchId  = req._batchId || `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const batchId = req._batchId || `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const fileName = req.file.originalname || 'archivo.csv';
-    const ext      = fileName.toLowerCase().split('.').pop();
+    const ext = fileName.toLowerCase().split('.').pop();
 
     let rows;
     if (ext === 'csv') {
@@ -684,9 +684,9 @@ exports.bulkUpsertCSV = async (req, res) => {
     } else if (ext === 'xlsx' || ext === 'xls') {
       try {
         const XLSX = require('xlsx');
-        const wb   = XLSX.read(req.file.buffer, { type: 'buffer' });
-        const ws   = wb.Sheets[wb.SheetNames[0]];
-        rows       = XLSX.utils.sheet_to_json(ws, { defval: '' });
+        const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       } catch {
         return res.status(400).json({ ok: false, error: 'No se pudo leer el Excel. Instalá el paquete xlsx.' });
       }
@@ -699,7 +699,7 @@ exports.bulkUpsertCSV = async (req, res) => {
     }
 
     const normalize = (key) => String(key || '').toLowerCase().replace(/[\s_\-]/g, '');
-    const colMap    = {};
+    const colMap = {};
     Object.keys(rows[0] || {}).forEach(k => { colMap[normalize(k)] = k; });
 
     const getCol = (row, ...aliases) => {
@@ -731,11 +731,11 @@ exports.bulkUpsertCSV = async (req, res) => {
 
     req.body = rows.map(r => ({
       codigoMaxi: getCol(r, 'codigo', 'CODIGO', 'codigoMaxi', 'codigo_maxi', 'cod', 'SKU', 'sku', 'id'),
-      nombre:     getCol(r, 'nombre', 'NOMBRE', 'descripcion', 'DESCRIPCION', 'name', 'producto') ?? '',
-      unidadMed:  getCol(r, 'unidad', 'UNIDAD', 'medida', 'MEDIDA', 'unidadMed', 'unidad_med', 'um', 'UM'),
-      precioRef:  getCol(r, 'precio', 'PRECIO', 'precioRef', 'precio_ref', 'costo', 'COSTO'),
-      rubro:      getCol(r, 'rubro', 'RUBRO', 'categoria', 'CATEGORIA', 'tipo', 'group'),
-      esElaborado: ['si','sí','yes','1','true','elaborado'].includes(
+      nombre: getCol(r, 'nombre', 'NOMBRE', 'descripcion', 'DESCRIPCION', 'name', 'producto') ?? '',
+      unidadMed: getCol(r, 'unidad', 'UNIDAD', 'medida', 'MEDIDA', 'unidadMed', 'unidad_med', 'um', 'UM'),
+      precioRef: getCol(r, 'precio', 'PRECIO', 'precioRef', 'precio_ref', 'costo', 'COSTO'),
+      rubro: getCol(r, 'rubro', 'RUBRO', 'categoria', 'CATEGORIA', 'tipo', 'group'),
+      esElaborado: ['si', 'sí', 'yes', '1', 'true', 'elaborado'].includes(
         String(getCol(r, 'elaborado', 'ELABORADO', 'esElaborado') || '').toLowerCase()
       ),
       origen: 'csv',
@@ -749,7 +749,7 @@ exports.bulkUpsertCSV = async (req, res) => {
       });
     }
 
-    req._batchId  = batchId;
+    req._batchId = batchId;
     req._fileName = fileName;
     return exports.bulkUpsert(req, res);
   } catch (e) {
@@ -786,7 +786,7 @@ exports.listBatchesInsumos = async (req, res, next) => {
 /* ── Eliminar lote ── */
 exports.deleteBatchInsumos = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const batchId = req.params.batchId;
     if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
 
@@ -816,7 +816,7 @@ exports.deleteBatchInsumos = async (req, res, next) => {
 /* ── Vista previa de lote ── */
 exports.previewBatchInsumos = async (req, res, next) => {
   try {
-    const bizId   = getBusinessId(req);
+    const bizId = getBusinessId(req);
     const batchId = req.params.batchId;
     if (!bizId || !batchId) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
 
@@ -898,25 +898,6 @@ exports.syncFromMaxi = async (req, res) => {
     // ── 3. Upsert con detección de cambios ──
     const summary = await upsertFromMaxi(businessId, normItems, { useIncomingEstado: true });
 
-    // ── 4. Auto-inicializar es_elaborado ──
-    try {
-      const { rowCount: autoMarked } = await pool.query(
-        `UPDATE insumos i
-            SET es_elaborado = true, updated_at = NOW()
-           FROM insumo_rubros ir
-          WHERE ir.business_id = i.business_id
-            AND ir.codigo::text = i.rubro
-            AND ir.es_elaborador = true
-            AND i.business_id = $1
-            AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
-            AND i.es_elaborado IS DISTINCT FROM true`,
-        [businessId]
-      );
-      if (autoMarked > 0) console.log(`[syncFromMaxi] Auto-marcados como elaborados: ${autoMarked} insumos`);
-    } catch (e) {
-      console.error('[syncFromMaxi] auto-mark elaborados error:', e.message);
-    }
-
     // ── 5. Notificación de resumen ──
     const changedCount = (summary.inserted || 0) + (summary.updated || 0);
     if (changedCount > 0) {
@@ -941,7 +922,7 @@ exports.syncFromMaxi = async (req, res) => {
         message: reviewDiffs.map(d => `• ${d.field}: "${d.before ?? ''}" → "${d.after ?? ''}"`).join('\n'),
         metadata: { scope: 'insumos', source: 'maxi', policy: 'review', insumo_id: ch.insumo_id, codigo_maxi: ch.codigo_maxi, diffs: reviewDiffs },
         actorUserId: userId,
-      }).catch(() => {});
+      }).catch(() => { });
     }
 
     // ── 7. Auto-assign ──
@@ -1071,24 +1052,6 @@ exports.syncRubrosFromMaxi = async (req, res) => {
     // ── 3. Upsert en DB ──
     const norm = normalizarInsumosRubros(raw);
     const summary = await insumosRubrosRepo.upsertRubrosForBusiness(businessId, norm);
-
-    // ── 4. Auto-marcar es_elaborado ──
-    try {
-      await pool.query(
-        `UPDATE insumos i
-            SET es_elaborado = true, updated_at = NOW()
-           FROM insumo_rubros ir
-          WHERE ir.business_id = i.business_id
-            AND ir.codigo::text = i.rubro
-            AND ir.es_elaborador = true
-            AND i.business_id = $1
-            AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
-            AND i.es_elaborado IS DISTINCT FROM true`,
-        [businessId]
-      );
-    } catch (e) {
-      console.error('[syncRubrosFromMaxi] auto-mark error:', e.message);
-    }
 
     return res.json({
       ok: true,
@@ -1238,7 +1201,7 @@ exports.groups_create = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const nombre      = String(req.body.nombre || '').trim();
+  const nombre = String(req.body.nombre || '').trim();
   const descripcion = req.body.descripcion ?? null;
   if (!nombre) return sendError(res, 400, 'El nombre es obligatorio');
 
@@ -1264,21 +1227,21 @@ exports.groups_update = async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return sendError(res, 400, 'ID inválido');
 
-  const nombre      = req.body.nombre != null ? String(req.body.nombre).trim() : null;
+  const nombre = req.body.nombre != null ? String(req.body.nombre).trim() : null;
   const descripcion = req.body.descripcion ?? null;
-  const esFavorita  = req.body.es_favorita;
+  const esFavorita = req.body.es_favorita;
 
   if (!nombre && descripcion == null && esFavorita == null) {
     return sendError(res, 400, 'Nada para actualizar');
   }
 
-  const sets   = [];
+  const sets = [];
   const values = [id, bizId];
   let idx = values.length;
 
-  if (nombre != null && nombre !== '') { idx++; sets.push(`nombre = $${idx}`);      values.push(nombre); }
-  if (descripcion !== undefined)        { idx++; sets.push(`descripcion = $${idx}`); values.push(descripcion); }
-  if (esFavorita !== undefined)         { idx++; sets.push(`es_favorita = $${idx}`); values.push(Boolean(esFavorita)); }
+  if (nombre != null && nombre !== '') { idx++; sets.push(`nombre = $${idx}`); values.push(nombre); }
+  if (descripcion !== undefined) { idx++; sets.push(`descripcion = $${idx}`); values.push(descripcion); }
+  if (esFavorita !== undefined) { idx++; sets.push(`es_favorita = $${idx}`); values.push(Boolean(esFavorita)); }
   sets.push('updated_at = now()');
 
   try {
@@ -1321,7 +1284,7 @@ exports.groups_replaceItems = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId   = Number(req.params.id);
+  const groupId = Number(req.params.id);
   if (!Number.isFinite(groupId)) return sendError(res, 400, 'ID inválido');
 
   const insumoIds = (req.body.insumoIds || [])
@@ -1337,7 +1300,7 @@ exports.groups_replaceItems = async (req, res) => {
     await client.query('DELETE FROM insumo_group_items WHERE group_id = $1', [groupId]);
 
     if (insumoIds.length) {
-      const ph  = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
+      const ph = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
       const val = insumoIds.flatMap(id => [groupId, id]);
       await client.query(
         `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${ph} ON CONFLICT DO NOTHING`,
@@ -1349,7 +1312,7 @@ exports.groups_replaceItems = async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error('[groups_replaceItems] error:', err);
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     return sendError(res, 500, 'Error al actualizar items de la agrupación');
   } finally {
     client.release();
@@ -1357,12 +1320,12 @@ exports.groups_replaceItems = async (req, res) => {
 };
 
 exports.groups_addItem = async (req, res) => {
-  const bizId    = getBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId  = Number(req.params.id);
+  const groupId = Number(req.params.id);
   const insumoId = Number(req.body.insumoId);
-  if (!Number.isFinite(groupId)  || groupId  <= 0) return sendError(res, 400, 'IDs inválidos');
+  if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'IDs inválidos');
   if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'IDs inválidos');
 
   try {
@@ -1384,7 +1347,7 @@ exports.groups_addMultiple = async (req, res) => {
   const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId   = Number(req.params.id);
+  const groupId = Number(req.params.id);
   const insumoIds = Array.isArray(req.body?.insumoIds)
     ? req.body.insumoIds.map(Number).filter(n => Number.isFinite(n) && n > 0)
     : [];
@@ -1398,7 +1361,7 @@ exports.groups_addMultiple = async (req, res) => {
     if (!ok) return sendError(res, 404, 'not_found');
 
     await client.query('BEGIN');
-    const ph  = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
+    const ph = insumoIds.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
     const val = insumoIds.flatMap(id => [groupId, id]);
     const r = await client.query(
       `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${ph} ON CONFLICT DO NOTHING`,
@@ -1407,7 +1370,7 @@ exports.groups_addMultiple = async (req, res) => {
     await client.query('COMMIT');
     return res.json({ ok: true, added: r.rowCount || 0 });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('[groups_addMultiple] error:', err);
     return sendError(res, 500, err.message || 'Error al agregar insumos en bulk');
   } finally {
@@ -1416,12 +1379,12 @@ exports.groups_addMultiple = async (req, res) => {
 };
 
 exports.groups_removeItem = async (req, res) => {
-  const bizId    = getBusinessId(req);
+  const bizId = getBusinessId(req);
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
-  const groupId  = Number(req.params.id);
+  const groupId = Number(req.params.id);
   const insumoId = Number(req.params.insumoId);
-  if (!Number.isFinite(groupId)  || groupId  <= 0) return sendError(res, 400, 'ID inválido');
+  if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'ID inválido');
   if (!Number.isFinite(insumoId) || insumoId <= 0) return sendError(res, 400, 'ID inválido');
 
   try {
@@ -1530,7 +1493,7 @@ exports.groups_createOrMove = async (req, res) => {
   if (!bizId) return sendError(res, 400, 'business_id requerido');
 
   const nombre = String(req.body?.nombre || '').trim();
-  const ids    = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
     .map(Number)
     .filter(n => Number.isFinite(n) && n > 0);
 
@@ -1564,7 +1527,7 @@ exports.groups_createOrMove = async (req, res) => {
       [bizId, destId, ids]
     );
 
-    const ph  = ids.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
+    const ph = ids.map((_, i) => `($${2 * i + 1}, $${2 * i + 2})`).join(', ');
     const val = ids.flatMap(id => [destId, id]);
     await client.query(
       `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ${ph} ON CONFLICT DO NOTHING`,
@@ -1646,18 +1609,17 @@ exports.importCsvPaired = async (req, res) => {
         const nombre = getCol(row, 'nombre', 'descripcion', 'name');
         if (!Number.isFinite(codigo) || !nombre) continue;
 
-        const esElaborador = /^elaborad/i.test(nombre.trim());
         const r = await client.query(
           `INSERT INTO insumo_rubros (business_id, codigo, codigo_maxi, nombre, es_elaborador, activo)
-           VALUES ($1, $2, $2, $3, $4, true)
+           VALUES ($1, $2, $2, $3, false, true)
            ON CONFLICT (business_id, codigo) DO UPDATE SET
              nombre = EXCLUDED.nombre,
-             es_elaborador = EXCLUDED.es_elaborador,
              activo = true,
              updated_at = NOW()
            RETURNING (xmax = 0) AS inserted`,
-          [businessId, codigo, nombre.trim(), esElaborador]
+          [businessId, codigo, nombre.trim()]
         );
+
         if (r.rows[0]?.inserted) rubrosInserted++;
         else rubrosUpdated++;
       }
@@ -1697,7 +1659,7 @@ exports.importCsvPaired = async (req, res) => {
              updated_at = NOW()
            RETURNING (xmax = 0) AS inserted`,
           [businessId, String(codigo).trim(), nombre.trim(),
-           unidadMed?.trim() || null, precioNum, rubroVal, batchId]
+            unidadMed?.trim() || null, precioNum, rubroVal, batchId]
         );
         if (r.rows[0]?.inserted) insumosInserted++;
         else insumosUpdated++;
@@ -1719,20 +1681,6 @@ exports.importCsvPaired = async (req, res) => {
       }
     }
 
-    // ── 3. Auto-marcar es_elaborado por rubro ──
-    const { rowCount: autoMarked } = await client.query(
-      `UPDATE insumos i
-          SET es_elaborado = true, updated_at = NOW()
-         FROM insumo_rubros ir
-        WHERE ir.business_id = i.business_id
-          AND ir.codigo::text = i.rubro
-          AND ir.es_elaborador = true
-          AND i.business_id = $1
-          AND (i.es_elaborado_manual = false OR i.es_elaborado_manual IS NULL)
-          AND i.es_elaborado IS DISTINCT FROM true`,
-      [businessId]
-    );
-
     await client.query('COMMIT');
 
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
@@ -1748,7 +1696,6 @@ exports.importCsvPaired = async (req, res) => {
         skipped: insumosSkipped,
         total: insumosInserted + insumosUpdated + insumosSkipped,
       },
-      autoMarked,
       summary: {
         inserted: insumosInserted,
         updated: insumosUpdated,
@@ -1756,7 +1703,7 @@ exports.importCsvPaired = async (req, res) => {
       },
     });
   } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('importCsvPaired error:', e);
     return res.status(500).json({ ok: false, error: e.message });
   } finally {
