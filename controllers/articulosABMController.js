@@ -145,7 +145,7 @@ exports.crearArticulo = async (req, res, next) => {
   const bizId = getBusinessId(req);
   if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
-  const { nombre, rubro, subrubro, precio, agrupacionId } = req.body || {};
+  const { nombre, rubro, subrubro, precio, agrupacionId, skuExterno } = req.body || {};
 
   if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
   if (!rubro?.trim()) return res.status(400).json({ ok: false, error: 'Rubro requerido' });
@@ -227,8 +227,11 @@ exports.crearArticulo = async (req, res, next) => {
 
     // SKU provisorio: L-BIZ-ID (cuando llegue equivalencia externa se pisa)
     // SKU formato L001, L002, ... L999, L1000 — padding a 3 dígitos mínimo
+    // Si vino skuExterno (código de Maxi), usarlo. Sino, generar provisorio L001, L002...
     const numStr = String(Math.abs(newId)).padStart(3, '0');
     const skuProvisorio = `L${numStr}`;
+    const skuFinal = skuExterno?.trim() || skuProvisorio;
+    const tieneSkuExterno = !!skuExterno?.trim();
 
     // Insertar el artículo
     // Insertar el artículo (en el principal si bizId es subnegocio)
@@ -246,11 +249,22 @@ exports.crearArticulo = async (req, res, next) => {
         safeNum(precio) ?? 0,
         categoriaId,
         subrubroId,
-        JSON.stringify({ origen: 'manual', sku: skuProvisorio, sin_equivalencia: true }),
+        JSON.stringify({
+          origen: 'manual',
+          sku: skuFinal,
+          codigo_externo: tieneSkuExterno ? skuExterno.trim() : null,
+          sin_equivalencia: !tieneSkuExterno,
+        }),
       ]
     );
 
     const articulo = artRows[0];
+
+    // Guardar también el SKU en la columna codigo
+    await client.query(
+      `UPDATE app_articles SET codigo = $1 WHERE id = $2 AND business_id = $3`,
+      [skuFinal, newId, storageBizId]
+    );
 
     // Insertar también en maxi_articles con origen='manual' para que aparezca en el árbol
     // y sea distinguible (se muestra como L{id} en la UI hasta que llegue la sync de MaxiRest)
@@ -307,7 +321,7 @@ exports.crearArticulo = async (req, res, next) => {
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
     console.log(`[crearArticulo] Artículo manual creado: id=${newId} "${nombre}" biz=${bizId}`);
-    return res.status(201).json({ ok: true, articulo, sku: skuProvisorio });
+    return res.status(201).json({ ok: true, articulo, sku: skuFinal });
 
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
@@ -796,14 +810,46 @@ exports.searchPadrino = async (req, res) => {
     const colRubro = 'ma.subrubro';
     const colSubrubro = 'ma.categoria';
 
+    // Buscar agrupaciones de TODA la org (incluye subnegocios)
+    // y mapear cada articulo_id → primera agrupación real encontrada.
+    const { rows: agRows } = await pool.query(
+      `SELECT id, nombre, business_id, articulos, app_articles_ids
+         FROM agrupaciones
+        WHERE business_id = ANY($1::int[])
+          AND nombre NOT ILIKE 'Sin Agrupac%'
+          AND nombre NOT ILIKE 'Sin Agrupar%'
+          AND nombre NOT ILIKE 'Discontinuados'
+          AND nombre NOT ILIKE 'Descontinuados'`,
+      [allBizIds]
+    );
+
+    const articleToAgrup = new Map(); // articleId → { id, nombre, business_id }
+    for (const ag of agRows) {
+      const arts = Array.isArray(ag.articulos) ? ag.articulos
+        : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+        : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+      const ids = new Set([
+        ...arts.map(a => Number(a?.id ?? a?.articulo_id ?? a)).filter(n => Number.isFinite(n)),
+        ...appIds.map(Number).filter(n => Number.isFinite(n)),
+      ]);
+      for (const id of ids) {
+        if (!articleToAgrup.has(id)) {
+          articleToAgrup.set(id, { id: Number(ag.id), nombre: ag.nombre, business_id: Number(ag.business_id) });
+        }
+      }
+    }
+
     const { rows: artRows } = await pool.query(
       `SELECT
          ma.articulo_id AS id,
          ma.nombre,
          ${colRubro} AS rubro,
          ${colSubrubro} AS subrubro,
-         ma.precio
+         ma.precio,
+         aa.codigo AS sku
        FROM maxi_articles ma
+       LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = ma.business_id
       WHERE ma.business_id = $1
         AND ma.nombre ILIKE $2
         AND ma.is_active = true
@@ -818,13 +864,19 @@ exports.searchPadrino = async (req, res) => {
     const candidatos = artRows
       .filter(r => !discontinuadosIds.has(Number(r.id)))
       .slice(0, 15)
-      .map(r => ({
-        id: Number(r.id),
-        nombre: r.nombre,
-        rubro: r.rubro || null,
-        subrubro: r.subrubro || null,
-        precio: Number(r.precio) || 0,
-      }));
+      .map(r => {
+        const ag = articleToAgrup.get(Number(r.id)) || null;
+        return {
+          id: Number(r.id),
+          nombre: r.nombre,
+          rubro: r.rubro || null,
+          subrubro: r.subrubro || null,
+          precio: Number(r.precio) || 0,
+          sku: r.sku || null,
+          agrupacion_id: ag?.id ?? null,
+          agrupacion_nombre: ag?.nombre ?? null,
+        };
+      });
 
     return res.json({ ok: true, candidatos });
   } catch (e) {
