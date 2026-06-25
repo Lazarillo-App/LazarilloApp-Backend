@@ -108,46 +108,44 @@ exports.saveReceta = async (req, res, next) => {
 
     // ── Upsert receta ──
     const { rows: recetaRows } = await client.query(
-      `INSERT INTO recetas
-         (article_id, business_id, nombre, descripcion, porciones,
-          porcentaje_venta, costo_total, notas, foto, notas_updated_at,
-          rendimiento_unidad, rendimiento_peso, unidad_peso,
-          active, origen, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE, 'manual', $14, NOW(), NOW())
-       ON CONFLICT (article_id, business_id)
-       DO UPDATE SET
-         nombre             = EXCLUDED.nombre,
-         descripcion        = EXCLUDED.descripcion,
-         porciones          = EXCLUDED.porciones,
-         porcentaje_venta   = EXCLUDED.porcentaje_venta,
-         costo_total        = EXCLUDED.costo_total,
-         notas              = EXCLUDED.notas,
-         foto               = EXCLUDED.foto,
-         notas_updated_at   = EXCLUDED.notas_updated_at,
-         rendimiento_unidad = EXCLUDED.rendimiento_unidad,
-         rendimiento_peso   = EXCLUDED.rendimiento_peso,
-         unidad_peso        = EXCLUDED.unidad_peso,
-         active             = TRUE,
-         origen             = 'manual',
-         updated_at         = NOW(),
-         createby            = COALESCE(recetas.created_by, EXCLUDED.created_by)    
-       RETURNING *`,
-      [
-        articleId, bizId,
-        nombre?.trim() || null,
-        descripcion?.trim() || null,
-        Number(porciones) || 1,
-        Number(porcentajeVenta) || 0,
-        Math.round(costoTotal * 10000) / 10000,
-        notas?.trim() || null,
-        foto || null,
-        notasUpdatedAt || null,
-        ruFinal,
-        rpFinal,
-        upFinal,
-        uid,
-      ]
-    );
+  `INSERT INTO recetas
+     (article_id, business_id, nombre, descripcion, porciones,
+      porcentaje_venta, costo_total, notas, foto, notas_updated_at,
+      rendimiento_unidad, rendimiento_peso, unidad_peso,
+      active, origen, created_at, updated_at)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE, 'manual', NOW(), NOW())
+   ON CONFLICT (article_id, business_id)
+   DO UPDATE SET
+     nombre             = EXCLUDED.nombre,
+     descripcion        = EXCLUDED.descripcion,
+     porciones          = EXCLUDED.porciones,
+     porcentaje_venta   = EXCLUDED.porcentaje_venta,
+     costo_total        = EXCLUDED.costo_total,
+     notas              = EXCLUDED.notas,
+     foto               = EXCLUDED.foto,
+     notas_updated_at   = EXCLUDED.notas_updated_at,
+     rendimiento_unidad = EXCLUDED.rendimiento_unidad,
+     rendimiento_peso   = EXCLUDED.rendimiento_peso,
+     unidad_peso        = EXCLUDED.unidad_peso,
+     active             = TRUE,
+     origen             = 'manual',
+     updated_at         = NOW()
+   RETURNING *`,
+  [
+    articleId, bizId,
+    nombre?.trim() || null,
+    descripcion?.trim() || null,
+    Number(porciones) || 1,
+    Number(porcentajeVenta) || 0,
+    Math.round(costoTotal * 10000) / 10000,
+    notas?.trim() || null,
+    foto || null,
+    notasUpdatedAt || null,
+    ruFinal,
+    rpFinal,
+    upFinal,
+  ]
+);
     //
     const receta = recetaRows[0];
 
