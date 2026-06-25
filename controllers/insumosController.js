@@ -518,7 +518,8 @@ exports.actualizar = async (req, res) => {
     if (!rows.length) {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
-
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
     res.json({ ok: true, data: rows[0] });
   } catch (e) {
     console.error('actualizar error:', e);
