@@ -485,6 +485,10 @@ router.get('/:id/articles/search-padrino', searchPadrino);
 // Editar artículo (manual o agregar equivalencia externa)
 router.patch('/:id/articles/:articleId', ensureFn('artABM.actualizarArticulo', artABM.actualizarArticulo));
 
+// Editar Insumo (manual o agregar equivalencia externa)
+router.put('/:id/articles/rubros/rename', ensureFn('artABM.renombrarRubro', artABM.renombrarRubro));
+router.put('/:id/articles/subrubros/rename', ensureFn('artABM.renombrarSubrubro', artABM.renombrarSubrubro));
+
 // Eliminar artículo manual (solo id < 0)
 router.delete('/:id/articles/:articleId', ensureFn('artABM.eliminarArticulo', artABM.eliminarArticulo));
 

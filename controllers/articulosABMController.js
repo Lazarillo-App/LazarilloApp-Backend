@@ -927,3 +927,121 @@ exports.searchPadrino = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /businesses/:id/articles/rubros/rename
+// Body: { old: string, new: string }
+// Renombra el "rubro" UI (que en DB es maxi_articles.subrubro y app_articles.rubro).
+// Afecta todas las filas del negocio que tenían el nombre viejo.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.renombrarRubro = async (req, res, next) => {
+  const bizId = getBusinessId(req);
+  const oldName = String(req.body?.old ?? '').trim();
+  const newName = String(req.body?.new ?? '').trim();
+
+  if (!Number.isFinite(bizId) || !oldName || !newName) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+  if (oldName === newName) {
+    return res.json({ ok: true, message: 'Sin cambios' });
+  }
+
+  const storageBizId = await resolveStorageBizId(bizId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Rubro UI = maxi_articles.subrubro (convención invertida del proyecto)
+    const r1 = await client.query(
+      `UPDATE maxi_articles SET subrubro = $1, updated_at = NOW()
+        WHERE business_id = $2 AND subrubro = $3`,
+      [newName, storageBizId, oldName]
+    );
+    // En app_articles la columna se llama "rubro"
+    const r2 = await client.query(
+      `UPDATE app_articles SET rubro = $1, updated_at = NOW()
+        WHERE business_id = $2 AND rubro = $3`,
+      [newName, storageBizId, oldName]
+    );
+
+    await client.query('COMMIT');
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+
+    return res.json({
+      ok: true,
+      maxi_updated: r1.rowCount,
+      app_updated: r2.rowCount,
+    });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[renombrarRubro]', e.message);
+    next(e);
+  } finally {
+    client.release();
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /businesses/:id/articles/subrubros/rename
+// Body: { old: string, new: string, rubro?: string }
+// Renombra el "subrubro" UI (maxi_articles.categoria y app_articles.subrubro).
+// El parámetro opcional "rubro" limita el rename a un rubro padre específico
+// (útil si el mismo subrubro existe bajo varios rubros).
+// ─────────────────────────────────────────────────────────────────────────────
+exports.renombrarSubrubro = async (req, res, next) => {
+  const bizId = getBusinessId(req);
+  const oldName = String(req.body?.old ?? '').trim();
+  const newName = String(req.body?.new ?? '').trim();
+  const rubroFilter = req.body?.rubro != null ? String(req.body.rubro).trim() : null;
+
+  if (!Number.isFinite(bizId) || !oldName || !newName) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+  if (oldName === newName) {
+    return res.json({ ok: true, message: 'Sin cambios' });
+  }
+
+  const storageBizId = await resolveStorageBizId(bizId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Subrubro UI = maxi_articles.categoria (convención invertida).
+    // Si vino "rubro", limitamos por maxi_articles.subrubro (el rubro UI).
+    const maxiArgs = [newName, storageBizId, oldName];
+    let maxiSql = `UPDATE maxi_articles SET categoria = $1, updated_at = NOW()
+                    WHERE business_id = $2 AND categoria = $3`;
+    if (rubroFilter) {
+      maxiArgs.push(rubroFilter);
+      maxiSql += ` AND subrubro = $4`;
+    }
+    const r1 = await client.query(maxiSql, maxiArgs);
+
+    // En app_articles la columna se llama "subrubro" (y "rubro" para filtrar el padre).
+    const appArgs = [newName, storageBizId, oldName];
+    let appSql = `UPDATE app_articles SET subrubro = $1, updated_at = NOW()
+                   WHERE business_id = $2 AND subrubro = $3`;
+    if (rubroFilter) {
+      appArgs.push(rubroFilter);
+      appSql += ` AND rubro = $4`;
+    }
+    const r2 = await client.query(appSql, appArgs);
+
+    await client.query('COMMIT');
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+
+    return res.json({
+      ok: true,
+      maxi_updated: r1.rowCount,
+      app_updated: r2.rowCount,
+    });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[renombrarSubrubro]', e.message);
+    next(e);
+  } finally {
+    client.release();
+  }
+};
