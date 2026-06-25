@@ -142,4 +142,54 @@ router.post(
   }
 );
 
+const { importPaired } = require('../services/csvArticulosImportPairedService');
+
+// ── POST /api/businesses/:businessId/articles/import-csv-paired ──────────
+// Recibe hasta 3 archivos: rubros (opcional), subrubros (opcional), articulos (requerido)
+// Hace el cruce automático COD_RUA/COD_SUA → nombres de rubro/subrubro
+router.post(
+  '/:businessId/articles/import-csv-paired',
+  authRequired,
+  (req, res, next) => requireBusinessAccess(req, res, next),
+  upload.fields([
+    { name: 'rubros', maxCount: 1 },
+    { name: 'subrubros', maxCount: 1 },
+    { name: 'articulos', maxCount: 1 },
+  ]),
+  async (req, res, next) => {
+    try {
+      const businessId = getBizId(req);
+      if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+
+      const fileRubros = req.files?.rubros?.[0];
+      const fileSubrubros = req.files?.subrubros?.[0];
+      const fileArticulos = req.files?.articulos?.[0];
+
+      if (!fileArticulos) {
+        return res.status(400).json({
+          ok: false,
+          error: 'articulos_file_required',
+          message: 'Adjuntá al menos el archivo de artículos',
+        });
+      }
+
+      const result = await importPaired({
+        businessId,
+        rubrosFilePath: fileRubros?.path || null,
+        subrubrosFilePath: fileSubrubros?.path || null,
+        articulosFilePath: fileArticulos.path,
+      });
+
+      return res.json(result);
+    } catch (error) {
+      // Limpiar archivos en caso de error
+      for (const fileKey of ['rubros', 'subrubros', 'articulos']) {
+        const f = req.files?.[fileKey]?.[0];
+        if (f?.path) { try { fs.unlinkSync(f.path); } catch {} }
+      }
+      return next(error);
+    }
+  }
+);
+
 module.exports = router;
