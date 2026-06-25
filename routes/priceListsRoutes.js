@@ -1,22 +1,31 @@
-'use strict';
+// routes/priceListsRoutes.js
+// Listas de precios custom de Lazarillo (Salon, Mostrador, etc).
+
 const router = require('express').Router({ mergeParams: true });
-const ctrl   = require('../controllers/priceListsController');
-const { authRequired } = require('../middleware/authMiddleware');
-const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+const ctrl = require('../controllers/priceListsController');
 
-router.use(authRequired);
+const noop = (_req, _res, next) => next();
+const safe = (name) => (typeof ctrl[name] === 'function' ? ctrl[name] : (req, res) => {
+  console.warn(`[routes/priceLists] Handler faltante: ${name}`);
+  res.status(501).json({ ok: false, error: `not_implemented:${name}` });
+});
 
-// ── Por organización ──────────────────────────────────────────────────────
-router.get ('/organizations/:orgId/price-lists/config',               ctrl.getOrgPriceListConfig);
-router.put ('/organizations/:orgId/price-lists/config',               ctrl.saveOrgPriceListConfig);
-router.get ('/organizations/:orgId/price-lists/discount-exceptions',  ctrl.getDiscountExceptions);
-router.post('/organizations/:orgId/price-lists/discount-exceptions',  ctrl.addDiscountException);
-router.delete('/organizations/:orgId/price-lists/discount-exceptions', ctrl.removeDiscountException);
+// GET    /api/businesses/:id/price-lists                      → listas del negocio
+router.get('/:id/price-lists', safe('getLists'));
 
-// ── Por negocio ──────────────────────────────────────────────────────────
-router.param('businessId', requireBusinessAccessParam);
-router.get('/businesses/:businessId/price-list',        ctrl.getBusinessPriceList);
-router.put('/businesses/:businessId/price-list',        ctrl.setBusinessPriceList);
-router.get('/businesses/:businessId/price-list/prices', ctrl.getBusinessPrices);
+// GET    /api/businesses/:id/price-lists/full-state           → listas + price_config
+router.get('/:id/price-lists/full-state', safe('getFullState'));
+
+// POST   /api/businesses/:id/price-lists                      → crear lista
+router.post('/:id/price-lists', safe('createList'));
+
+// PUT    /api/businesses/:id/price-lists/:listId              → actualizar
+router.put('/:id/price-lists/:listId', safe('updateList'));
+
+// POST   /api/businesses/:id/price-lists/:listId/set-favorite → marcar favorita
+router.post('/:id/price-lists/:listId/set-favorite', safe('setFavorite'));
+
+// DELETE /api/businesses/:id/price-lists/:listId              → eliminar
+router.delete('/:id/price-lists/:listId', safe('deleteList'));
 
 module.exports = router;

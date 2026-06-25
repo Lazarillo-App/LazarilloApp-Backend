@@ -39,7 +39,7 @@ exports.getLists = async (req, res) => {
          COUNT(li.id)::int AS item_count
        FROM article_lists l
        LEFT JOIN article_list_items li ON li.list_id = l.id
-       WHERE l.business_id = $1 AND l.scope = 'article'
+       WHERE l.business_id = $1 AND l.scope = 'price'
        GROUP BY l.id
        ORDER BY l.orden ASC, l.created_at ASC`,
       [bizId]
@@ -76,7 +76,7 @@ exports.createList = async (req, res) => {
     const { rows: maxOrden } = await pool.query(
       `SELECT COALESCE(MAX(orden), 0) AS max_orden
          FROM article_lists
-        WHERE business_id = $1 AND scope = 'article'`,
+        WHERE business_id = $1 AND scope = 'price'`,
       [bizId]
     );
     const nextOrden = Number(maxOrden[0]?.max_orden || 0) + 1;
@@ -84,7 +84,7 @@ exports.createList = async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO article_lists
          (business_id, name, description, color, scope, ajuste_pct, is_favorite, orden)
-       VALUES ($1, $2, $3, $4, 'article', $5, FALSE, $6)
+       VALUES ($1, $2, $3, $4, 'price', $5, FALSE, $6)
        RETURNING id, name, description, color, ajuste_pct, is_favorite, orden, created_at`,
       [bizId, name, description, color, ajustePct, nextOrden]
     );
@@ -155,7 +155,7 @@ exports.updateList = async (req, res) => {
          SET ${sets.join(', ')}, updated_at = NOW()
        WHERE id = $${vals.length + 1}
          AND business_id = $${vals.length + 2}
-         AND scope = 'article'
+         AND scope = 'price'
        RETURNING id, name, description, color, ajuste_pct, is_favorite, orden, updated_at`;
 
     const { rows } = await pool.query(sql, [...vals, listId, bizId]);
@@ -188,7 +188,7 @@ exports.deleteList = async (req, res) => {
 
     const { rows: chk } = await pool.query(
       `SELECT id FROM article_lists
-        WHERE id = $1 AND business_id = $2 AND scope = 'article'`,
+        WHERE id = $1 AND business_id = $2 AND scope = 'price'`,
       [listId, bizId]
     );
     if (!chk.length) {
@@ -199,7 +199,7 @@ exports.deleteList = async (req, res) => {
 
     await pool.query(
       `DELETE FROM article_lists
-       WHERE id = $1 AND business_id = $2 AND scope = 'article'`,
+       WHERE id = $1 AND business_id = $2 AND scope = 'price'`,
       [listId, bizId]
     );
 

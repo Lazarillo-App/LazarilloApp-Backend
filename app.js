@@ -24,6 +24,7 @@ const adminCronRoutes = require('./routes/adminCronRoutes');
 const adminRebuildAgg = require('./routes/adminRebuildAggRoutes');
 const agrupacionesRoutes = require('./routes/agrupacionesRoutes');
 const articleListsRoutes = require('./routes/articleListsRoutes');
+const priceListsRoutes = require('./routes/priceListsRoutes');
 const ventasRoutes = require('./routes/ventasRoutes');
 const insumosRoutes = require('./routes/insumosRoutes');
 const purchasesRoutes = require('./routes/purchasesRoutes');
@@ -50,7 +51,7 @@ const accessRoutes         = require('./routes/accessRoutes');
 const requireActiveAccount = require('./middleware/requireActiveAccount');
 const syncRoutes = require('./routes/syncRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
-const priceListsRoutes = require('./routes/priceListsRoutes');
+const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
 const meRoutes = require('./routes/meRoutes');
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
@@ -161,7 +162,7 @@ app.use('/api/divisions', divisionsRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
 app.use('/api/insumos', insumosElaboradosRoutes);
 app.use("/api/businesses/:bizId/branches", branchesRouter);
-app.use('/api', priceListsRoutes);
+app.use('/api', maxiPriceListsRoutes);
 
 /* =========================================================
    ✅ ORDEN IMPORTANTE EN /api/businesses
@@ -190,6 +191,7 @@ app.use('/api/recetas', recetaFotosRoutes);
 
 // 3) businesses base después
 app.use('/api/businesses', businessRoutes);
+app.use('/api/businesses', priceListsRoutes);
 app.use('/api/businesses', articleListsRoutes);
 
 // 4) genérica al final
