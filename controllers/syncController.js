@@ -146,46 +146,37 @@ async function fetchMaxiArticles({ token, from, to, invertirJerarquia = false })
       const res2 = await fetchWithRetry(u2.toString(), { headers });
       const j2 = await res2.json().catch(() => ({}));
       console.log(`[fetchMaxiArticles] fallback raw:`, JSON.stringify(j2).slice(0, 300));
-      if (j2?.resultCode === 'SUCCESS' && Array.isArray(j2?.content)) {
-        // Convertir lista plana al formato que espera el parser
-        // cod_rua/cod_sua quedan como referencia, sin nombres de rubro
-        root = (j2.content || [])
-          .filter(a => a?.codigo && !a?.borrado)
-          .map(a => ({
-            // Simular estructura de rubro para que el parser existente lo procese
-            nombre: `Rubro ${a.cod_rua || 0}`,
-            subrubros: [{
-              nombre: `Subrubro ${a.cod_sua || 0}`,
-              articulos: [{
-                id: a.codigo,
-                nombre: a.nombre,
-                precio: a.precio1 ?? 0,
-                costo: a.costo ?? 0,
-                node_type: 'ARTICULO',
-                ...a,
-              }],
-            }],
-          }));
-        // Agrupar por cod_rua para no crear un nodo por cada artículo
+const articulosFlat = Array.isArray(j2?.content?.articulos) ? j2.content.articulos : [];
+      if (j2?.resultCode === 'SUCCESS' && articulosFlat.length > 0) {
+        // estadisticasmaster/articulos devuelve lista plana en content.articulos
+        // Agrupar por cod_rua / cod_sua para simular la estructura jerárquica
+        // que espera el parser de menuextendido (rubro → subrubros → articulos)
         const rubroMap = new Map();
-        for (const a of (j2.content || []).filter(x => x?.codigo && !x?.borrado)) {
+        for (const a of articulosFlat) {
+          if (!a?.codigo || a?.borrado) continue;
           const rKey = a.cod_rua || 0;
           const sKey = a.cod_sua || 0;
-          if (!rubroMap.has(rKey)) rubroMap.set(rKey, { nombre: `Rubro ${rKey}`, subrubros: new Map() });
+          if (!rubroMap.has(rKey)) {
+            rubroMap.set(rKey, { nombre: `Rubro ${rKey}`, subrubros: new Map() });
+          }
           const rubro = rubroMap.get(rKey);
-          if (!rubro.subrubros.has(sKey)) rubro.subrubros.set(sKey, { nombre: `Subrubro ${sKey}`, articulos: [] });
+          if (!rubro.subrubros.has(sKey)) {
+            rubro.subrubros.set(sKey, { nombre: `Subrubro ${sKey}`, articulos: [] });
+          }
           rubro.subrubros.get(sKey).articulos.push({
-            id: a.codigo, nombre: a.nombre,
-            precio: a.precio1 ?? 0, costo: a.costo ?? 0,
+            codigo: a.codigo,
+            nombre: a.nombre,
+            precio: a.precio1 ?? 0,
+            costo: a.costo ?? 0,
           });
         }
         root = Array.from(rubroMap.values()).map(r => ({
-          ...r,
+          nombre: r.nombre,
           subrubros: Array.from(r.subrubros.values()),
         }));
-        console.log(`[fetchMaxiArticles] ✅ fallback OK, ${root.length} rubros`);
+        console.log(`[fetchMaxiArticles] ✅ fallback OK, ${root.length} rubros, ${articulosFlat.length} artículos`);
       } else {
-        console.warn(`[fetchMaxiArticles] ❌ fallback también falló`);
+        console.warn(`[fetchMaxiArticles] ❌ fallback también falló:`, j2?.resultDescription || 'sin artículos');
       }
     } catch (e2) {
       console.warn(`[fetchMaxiArticles] ❌ fallback error: ${e2.message}`);
