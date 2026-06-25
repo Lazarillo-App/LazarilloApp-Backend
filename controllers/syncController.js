@@ -145,6 +145,7 @@ async function fetchMaxiArticles({ token, from, to, invertirJerarquia = false })
       const u2 = new URL(`${BASE}/estadisticasmaster/articulos`);
       const res2 = await fetchWithRetry(u2.toString(), { headers });
       const j2 = await res2.json().catch(() => ({}));
+      console.log(`[fetchMaxiArticles] fallback raw:`, JSON.stringify(j2).slice(0, 300));
       if (j2?.resultCode === 'SUCCESS' && Array.isArray(j2?.content)) {
         // Convertir lista plana al formato que espera el parser
         // cod_rua/cod_sua quedan como referencia, sin nombres de rubro
