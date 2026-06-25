@@ -2,16 +2,16 @@
 'use strict';
 
 const express = require('express');
-const router  = express.Router({ mergeParams: true });
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
+const router = express.Router({ mergeParams: true });
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const { importArticulosFromFile, parseFile } = require('../services/csvArticulosImportService');
-const { importRubrosArticulosFromFile} = require('../services/csvArticulosRubrosImportService');
-const { authRequired }                 = require('../middleware/authMiddleware');
-const { requireBusinessAccess }        = require('../middleware/requireBusinessAccess');
-const { MAX_FILE_SIZE_MB }             = require('../config/features');
+const { importRubrosArticulosFromFile } = require('../services/csvArticulosRubrosImportService');
+const { authRequired } = require('../middleware/authMiddleware');
+const { requireBusinessAccess } = require('../middleware/requireBusinessAccess');
+const { MAX_FILE_SIZE_MB } = require('../config/features');
 
 const uploadsDir = path.join(__dirname, '../uploads/csv-temp');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -26,7 +26,7 @@ const upload = multer({
   },
 });
 
-const getBizId  = (req) => { const n = Number(req.params.businessId ?? req.params.id); return Number.isFinite(n) && n > 0 ? n : NaN; };
+const getBizId = (req) => { const n = Number(req.params.businessId ?? req.params.id); return Number.isFinite(n) && n > 0 ? n : NaN; };
 const getUserId = (req) => req.user?.id;
 
 
@@ -78,7 +78,7 @@ router.post(
 
       const result = await importArticulosFromFile({
         businessId,
-        filePath:     req.file.path,
+        filePath: req.file.path,
         originalName: req.file.originalname,
         mapeo,
       });
@@ -89,7 +89,7 @@ router.post(
       if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { } }
 
       if (String(error.message || '').includes('Columnas faltantes') ||
-          String(error.message || '').toLowerCase().includes('formato')) {
+        String(error.message || '').toLowerCase().includes('formato')) {
         return res.status(400).json({ ok: false, error: 'invalid_format', message: error.message });
       }
 
@@ -127,9 +127,9 @@ router.post(
 
       const result = await importRubrosArticulosFromFile({
         businessId,
-        filePath:     req.file.path,
+        filePath: req.file.path,
         originalName: req.file.originalname,
-        mapeo:        mapeoRubros,
+        mapeo: mapeoRubros,
         destino,
       });
 
@@ -142,7 +142,17 @@ router.post(
   }
 );
 
-const { importPaired } = require('../services/csvArticulosImportPairedService');
+const { importPaired } = require('../services/csvArticulosImportService');
+
+const uploadPaired = multer({
+  dest: uploadsDir,
+  limits: { fileSize: (Number(MAX_FILE_SIZE_MB) || 10) * 1024 * 1024, files: 3 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (['.csv', '.xls', '.xlsx'].includes(ext)) cb(null, true);
+    else cb(new Error('Solo se permiten archivos CSV, XLS o XLSX'));
+  },
+});
 
 // ── POST /api/businesses/:businessId/articles/import-csv-paired ──────────
 // Recibe hasta 3 archivos: rubros (opcional), subrubros (opcional), articulos (requerido)
@@ -151,7 +161,7 @@ router.post(
   '/:businessId/articles/import-csv-paired',
   authRequired,
   (req, res, next) => requireBusinessAccess(req, res, next),
-  upload.fields([
+  uploadPaired.fields([
     { name: 'rubros', maxCount: 1 },
     { name: 'subrubros', maxCount: 1 },
     { name: 'articulos', maxCount: 1 },
@@ -173,11 +183,18 @@ router.post(
         });
       }
 
+      const mapeoRubros = req.body?.mapeoRubros ? JSON.parse(req.body.mapeoRubros) : {};
+      const mapeoSubrubros = req.body?.mapeoSubrubros ? JSON.parse(req.body.mapeoSubrubros) : {};
+      const mapeoArticulos = req.body?.mapeoArticulos ? JSON.parse(req.body.mapeoArticulos) : {};
+
       const result = await importPaired({
         businessId,
         rubrosFilePath: fileRubros?.path || null,
         subrubrosFilePath: fileSubrubros?.path || null,
         articulosFilePath: fileArticulos.path,
+        mapeoRubros,
+        mapeoSubrubros,
+        mapeoArticulos,
       });
 
       return res.json(result);
@@ -185,7 +202,7 @@ router.post(
       // Limpiar archivos en caso de error
       for (const fileKey of ['rubros', 'subrubros', 'articulos']) {
         const f = req.files?.[fileKey]?.[0];
-        if (f?.path) { try { fs.unlinkSync(f.path); } catch {} }
+        if (f?.path) { try { fs.unlinkSync(f.path); } catch { } }
       }
       return next(error);
     }

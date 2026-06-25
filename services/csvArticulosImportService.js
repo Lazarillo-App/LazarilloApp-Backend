@@ -77,8 +77,8 @@ async function ensureRubrosTable() {
       )
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_art_rubros_biz ON articulo_rubros(business_id)`);
-    await client.query(`ALTER TABLE articulo_rubros ADD COLUMN IF NOT EXISTS destino TEXT NOT NULL DEFAULT 'categoria'`).catch(() => {});
-    await client.query(`ALTER TABLE articulo_rubros ADD COLUMN IF NOT EXISTS upload_batch_id TEXT`).catch(() => {});
+    await client.query(`ALTER TABLE articulo_rubros ADD COLUMN IF NOT EXISTS destino TEXT NOT NULL DEFAULT 'categoria'`).catch(() => { });
+    await client.query(`ALTER TABLE articulo_rubros ADD COLUMN IF NOT EXISTS upload_batch_id TEXT`).catch(() => { });
   } finally {
     client.release();
   }
@@ -102,47 +102,70 @@ async function resolveTargetBizId(businessId) {
   return Number(businessId);
 }
 
-// ── Lectura de archivos a estructuras intermedias ─────────────────────────
+// ── Aplicar mapeo del usuario primero, luego alias automáticos como fallback ──
+function resolverCampo(row, mapeo, campo, aliases) {
+  // Si el usuario asignó explícitamente una columna a este campo, usar esa.
+  if (mapeo && typeof mapeo === 'object') {
+    for (const [col, rol] of Object.entries(mapeo)) {
+      if (rol === campo && row[col] != null && row[col] !== '') {
+        return row[col];
+      }
+    }
+  }
+  // Fallback: detectar por alias automático
+  return getCI(row, aliases);
+}
 
-function parseRubrosFile(filePath) {
+function parseRubrosFile(filePath, mapeo = {}) {
   const rows = parseFile(filePath);
-  const out = new Map(); // codigo → nombre
+  const out = new Map();
   for (const row of rows) {
-    const cod = safeInt(getCI(row, ['codigo', 'cod_rua', 'codrua', 'code', 'id', 'cod']));
-    const nombre = cleanStr(getCI(row, ['nombre', 'name', 'descripcion', 'descripción']));
+    const cod = safeInt(resolverCampo(row, mapeo, 'codigo', ['codigo', 'cod_rua', 'codrua', 'code', 'id', 'cod']));
+    const nombre = cleanStr(resolverCampo(row, mapeo, 'nombre', ['nombre', 'name', 'descripcion', 'descripción']));
     if (cod == null || !nombre) continue;
     out.set(cod, nombre);
   }
   return out;
 }
 
-function parseSubrubrosFile(filePath) {
+function parseSubrubrosFile(filePath, mapeo = {}) {
   const rows = parseFile(filePath);
-  const out = new Map(); // codigo (COD_SUA) → { nombre, rubroCodigo }
+  const out = new Map();
   for (const row of rows) {
-    const cod = safeInt(getCI(row, ['codigo', 'cod_sua', 'codsua', 'code', 'id']));
-    const nombre = cleanStr(getCI(row, ['nombre', 'name', 'descripcion', 'descripción']));
-    const rubroCod = safeInt(getCI(row, ['cod_rua', 'codrua', 'cod_ru', 'rubro', 'rubro_codigo']));
+    const cod = safeInt(resolverCampo(row, mapeo, 'codigo', ['codigo', 'cod_sua', 'codsua', 'code', 'id']));
+    const nombre = cleanStr(resolverCampo(row, mapeo, 'nombre', ['nombre', 'name', 'descripcion', 'descripción']));
+    const rubroCod = safeInt(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro', 'rubro_codigo']));
     if (cod == null || !nombre) continue;
     out.set(cod, { nombre, rubroCodigo: rubroCod });
   }
   return out;
 }
 
-function parseArticulosFile(filePath) {
+function parseArticulosFile(filePath, mapeo = {}) {
   const rows = parseFile(filePath);
   const out = [];
   const errors = [];
+  // Si el usuario no mapeó código, vamos a generar IDs negativos secuenciales
+  // (como artículos manuales) para que igual se puedan insertar.
+  let nextManualId = -1;
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const cod = safeInt(getCI(row, ['codigo', 'cod_rua', 'codrua', 'cod_ru', 'articulo_id', 'art_id', 'code', 'id']));
-    const nombre = cleanStr(getCI(row, ['nombre', 'name', 'descripcion', 'descripción', 'denominacion']));
-    if (cod == null) { errors.push({ row: i + 2, error: 'Sin código' }); continue; }
-    if (!nombre) { errors.push({ row: i + 2, error: `Sin nombre (cod ${cod})` }); continue; }
+    let cod = safeInt(resolverCampo(row, mapeo, 'codigo', ['codigo', 'cod_rua', 'codrua', 'cod_ru', 'articulo_id', 'art_id', 'code', 'id']));
+    const nombre = cleanStr(resolverCampo(row, mapeo, 'nombre', ['nombre', 'name', 'descripcion', 'descripción', 'denominacion']));
 
-    const codRubro = safeInt(getCI(row, ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro']));
-    const codSubrubro = safeInt(getCI(row, ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro']));
-    const precio = parseNum(getCI(row, ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])) ?? 0;
+    if (!nombre) {
+      errors.push({ row: i + 2, error: 'Sin nombre' });
+      continue;
+    }
+    if (cod == null) {
+      // Sin código → asignar ID negativo (manual)
+      cod = nextManualId--;
+    }
+
+    const codRubro = safeInt(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro']));
+    const codSubrubro = safeInt(resolverCampo(row, mapeo, 'subrubro', ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro']));
+    const precio = parseNum(resolverCampo(row, mapeo, 'precio', ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])) ?? 0;
 
     out.push({
       articulo_id: cod,
@@ -166,19 +189,23 @@ function parseArticulosFile(filePath) {
  * @param {string|null} params.subrubrosFilePath - archivo de subrubros (opcional)
  * @param {string} params.articulosFilePath - archivo de artículos (requerido)
  */
-async function importPaired({ businessId, rubrosFilePath, subrubrosFilePath, articulosFilePath }) {
-  if (!articulosFilePath) {
-    throw new Error('El archivo de artículos es requerido');
-  }
+async function importPaired({
+  businessId,
+  rubrosFilePath, mapeoRubros = {},
+  subrubrosFilePath, mapeoSubrubros = {},
+  articulosFilePath, mapeoArticulos = {},
+}) {
+
+  let rubrosMap = new Map();
+  let subrubrosMap = new Map();
+  let articulosData = { items: [], errors: [] };
+  if (rubrosFilePath) rubrosMap = parseRubrosFile(rubrosFilePath, mapeoRubros);
+  if (subrubrosFilePath) subrubrosMap = parseSubrubrosFile(subrubrosFilePath, mapeoSubrubros);
+  articulosData = parseArticulosFile(articulosFilePath, mapeoArticulos);
 
   await ensureRubrosTable();
   const targetBizId = await resolveTargetBizId(businessId);
   const batchId = `paired-art-${Date.now()}`;
-
-  // ── 1. Parsear archivos ────────────────────────────────────────────────
-  let rubrosMap = new Map();
-  let subrubrosMap = new Map();
-  let articulosData = { items: [], errors: [] };
 
   try {
     if (rubrosFilePath) rubrosMap = parseRubrosFile(rubrosFilePath);
@@ -187,7 +214,7 @@ async function importPaired({ businessId, rubrosFilePath, subrubrosFilePath, art
   } catch (e) {
     // Limpiar archivos antes de propagar
     [rubrosFilePath, subrubrosFilePath, articulosFilePath].forEach(p => {
-      if (p) try { fs.unlinkSync(p); } catch {}
+      if (p) try { fs.unlinkSync(p); } catch { }
     });
     throw new Error(`Error al leer archivo: ${e.message}`);
   }
@@ -273,7 +300,7 @@ async function importPaired({ businessId, rubrosFilePath, subrubrosFilePath, art
           ? subrubroNombreByCod.get(it.cod_subrubro) || null
           : null;
 
-        values.push(`($${p},$${p+1},$${p+2},$${p+3},$${p+4},$${p+5},'{}'::jsonb,NOW(),$${p+6},'csv')`);
+        values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},'{}'::jsonb,NOW(),$${p + 6},'csv')`);
         params.push(targetBizId, it.articulo_id, it.nombre, rubroNombre, subrubroNombre, it.precio, batchId);
         p += 7;
       }
@@ -332,13 +359,13 @@ async function importPaired({ businessId, rubrosFilePath, subrubrosFilePath, art
     };
 
   } catch (e) {
-    if (txOpen) { try { await client.query('ROLLBACK'); } catch {} }
+    if (txOpen) { try { await client.query('ROLLBACK'); } catch { } }
     throw e;
   } finally {
     client.release();
     // Limpiar archivos temporales
     [rubrosFilePath, subrubrosFilePath, articulosFilePath].forEach(p => {
-      if (p) try { fs.unlinkSync(p); } catch {}
+      if (p) try { fs.unlinkSync(p); } catch { }
     });
   }
 }

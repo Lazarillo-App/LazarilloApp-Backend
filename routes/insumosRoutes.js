@@ -8,6 +8,7 @@ const upload = multer({
 
 // ✅ CONTROLADOR UNIFICADO Y OPTIMIZADO
 const ctrl = require('../controllers/insumosController');
+const { authRequired } = require('../middleware/authMiddleware');
 
 /* ================== VISTAS Y ESTADÍSTICAS (NUEVAS) ================== */
 router.get('/tree-view', ctrl.getTreeView);
@@ -40,13 +41,7 @@ router.get('/groups/:id/exclusions', ctrl.groups_getExclusions);
 router.post('/groups/:id/exclusions', ctrl.groups_addExclusions);
 router.delete('/groups/:id/exclusions', ctrl.groups_removeExclusions);
 
-/* ================== CRUD MANUAL INSUMOS ================== */
-router.post('/', ctrl.crearManual);
-router.get('/', ctrl.listar);
-router.put('/:id', ctrl.actualizar);
-router.delete('/:id', ctrl.eliminar);
-
-/* ================== IMPORT PAIRED (rubros + insumos) ================== */
+/* ================== IMPORT PAIRED + PREVIEW (rutas específicas antes de CRUD) ================== */
 router.post(
   '/import-csv-paired',
   upload.fields([
@@ -55,6 +50,32 @@ router.post(
   ]),
   ctrl.importCsvPaired
 );
+
+router.post(
+  '/preview-columns',
+  authRequired,
+  upload.single('file'),
+  async (req, res) => {
+    if (!req.file) return res.status(400).json({ ok: false, error: 'file_required' });
+    try {
+      const XLSX = require('xlsx');
+      const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      const columnas = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('__EMPTY')) : [];
+      const muestra = rows.slice(0, 5);
+      return res.json({ ok: true, columnas, muestra });
+    } catch (e) {
+      return res.status(400).json({ ok: false, error: e.message });
+    }
+  }
+);
+
+/* ================== CRUD MANUAL INSUMOS ================== */
+router.post('/', ctrl.crearManual);
+router.get('/', ctrl.listar);
+router.put('/:id', ctrl.actualizar);
+router.delete('/:id', ctrl.eliminar);
 
 /* ================== BULK (JSON / CSV) ================== */
 router.post('/bulk', ctrl.bulkUpsert);
