@@ -113,21 +113,89 @@ async function maxiLogin({ email, password, codcli }) {
  *   app.subrubro  = rubro Maxi
  */
 async function fetchMaxiArticles({ token, from, to, invertirJerarquia = false }) {
-  const u = new URL(`${BASE}/menuweb/menuextendido`);
-  if (from) u.searchParams.set('fechaInicio', from);
-  if (to) u.searchParams.set('fechaFin', to);
+  const headers = { Authorization: `Bearer ${token}` };
 
-  const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` } });
-  const j = await res.json().catch(() => ({}));
-  if (j?.resultCode !== 'SUCCESS') throw new Error('maxi_articles_fetch_failed');
+  // Intentar endpoint principal
+  let root = null;
+  let source = 'primary';
+  try {
+    const u = new URL(`${BASE}/menuweb/menuextendido`);
+    if (from) u.searchParams.set('fechaInicio', from);
+    if (to)   u.searchParams.set('fechaFin', to);
+    const res = await fetchWithRetry(u.toString(), { headers });
+    const j = await res.json().catch(() => ({}));
+    if (j?.resultCode === 'SUCCESS') {
+      root = Array.isArray(j?.content) ? j.content
+           : Array.isArray(j?.menu?.content) ? j.menu.content
+           : Array.isArray(j?.data?.content) ? j.data.content
+           : [];
+      console.log(`[fetchMaxiArticles] ✅ principal OK, ${root.length} nodos`);
+    } else {
+      console.warn(`[fetchMaxiArticles] ⚠️ principal falló: ${j?.resultDescription || j?.resultCode}`);
+    }
+  } catch (e) {
+    console.warn(`[fetchMaxiArticles] ⚠️ principal error: ${e.message}`);
+  }
 
-  const root = Array.isArray(j?.content)
-    ? j.content
-    : Array.isArray(j?.menu?.content)
-      ? j.menu.content
-      : Array.isArray(j?.data?.content)
-        ? j.data.content
-        : [];
+  // Fallback a estadisticasmaster/articulos si el principal no devolvió nada
+  if (!root || root.length === 0) {
+    source = 'fallback';
+    console.warn(`[fetchMaxiArticles] intentando fallback estadisticasmaster/articulos...`);
+    try {
+      const u2 = new URL(`${BASE}/estadisticasmaster/articulos`);
+      const res2 = await fetchWithRetry(u2.toString(), { headers });
+      const j2 = await res2.json().catch(() => ({}));
+      if (j2?.resultCode === 'SUCCESS' && Array.isArray(j2?.content)) {
+        // Convertir lista plana al formato que espera el parser
+        // cod_rua/cod_sua quedan como referencia, sin nombres de rubro
+        root = (j2.content || [])
+          .filter(a => a?.codigo && !a?.borrado)
+          .map(a => ({
+            // Simular estructura de rubro para que el parser existente lo procese
+            nombre: `Rubro ${a.cod_rua || 0}`,
+            subrubros: [{
+              nombre: `Subrubro ${a.cod_sua || 0}`,
+              articulos: [{
+                id: a.codigo,
+                nombre: a.nombre,
+                precio: a.precio1 ?? 0,
+                costo: a.costo ?? 0,
+                node_type: 'ARTICULO',
+                ...a,
+              }],
+            }],
+          }));
+        // Agrupar por cod_rua para no crear un nodo por cada artículo
+        const rubroMap = new Map();
+        for (const a of (j2.content || []).filter(x => x?.codigo && !x?.borrado)) {
+          const rKey = a.cod_rua || 0;
+          const sKey = a.cod_sua || 0;
+          if (!rubroMap.has(rKey)) rubroMap.set(rKey, { nombre: `Rubro ${rKey}`, subrubros: new Map() });
+          const rubro = rubroMap.get(rKey);
+          if (!rubro.subrubros.has(sKey)) rubro.subrubros.set(sKey, { nombre: `Subrubro ${sKey}`, articulos: [] });
+          rubro.subrubros.get(sKey).articulos.push({
+            id: a.codigo, nombre: a.nombre,
+            precio: a.precio1 ?? 0, costo: a.costo ?? 0,
+          });
+        }
+        root = Array.from(rubroMap.values()).map(r => ({
+          ...r,
+          subrubros: Array.from(r.subrubros.values()),
+        }));
+        console.log(`[fetchMaxiArticles] ✅ fallback OK, ${root.length} rubros`);
+      } else {
+        console.warn(`[fetchMaxiArticles] ❌ fallback también falló`);
+      }
+    } catch (e2) {
+      console.warn(`[fetchMaxiArticles] ❌ fallback error: ${e2.message}`);
+    }
+  }
+
+  if (!root || root.length === 0) {
+    throw new Error('maxi_articles_fetch_failed');
+  }
+
+  console.log(`[fetchMaxiArticles] source=${source}`);
 
   const items = [];
   const seen = new Set();
