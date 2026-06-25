@@ -186,21 +186,16 @@ exports.deleteList = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
-    // No se puede borrar la favorita
     const { rows: chk } = await pool.query(
-      `SELECT is_favorite FROM article_lists
+      `SELECT id FROM article_lists
         WHERE id = $1 AND business_id = $2 AND scope = 'article'`,
       [listId, bizId]
     );
     if (!chk.length) {
       return res.status(404).json({ ok: false, error: 'Lista no encontrada' });
     }
-    if (chk[0].is_favorite) {
-      return res.status(400).json({
-        ok: false,
-        error: 'No se puede borrar la lista favorita',
-      });
-    }
+
+    // ← Ya no necesitamos el check de is_favorite
 
     await pool.query(
       `DELETE FROM article_lists
@@ -235,7 +230,7 @@ exports.setFavorite = async (req, res) => {
     // Verificar que la lista exista en el negocio
     const { rows: chk } = await client.query(
       `SELECT id FROM article_lists
-        WHERE id = $1 AND business_id = $2 AND scope = 'article'`,
+        WHERE id = $1 AND business_id = $2 AND scope = 'price'`,
       [listId, bizId]
     );
     if (!chk.length) {
@@ -247,7 +242,7 @@ exports.setFavorite = async (req, res) => {
     await client.query(
       `UPDATE article_lists
           SET is_favorite = FALSE, updated_at = NOW()
-        WHERE business_id = $1 AND scope = 'article' AND is_favorite = TRUE`,
+        WHERE business_id = $1 AND scope = 'price' AND is_favorite = TRUE`,
       [bizId]
     );
 
@@ -401,7 +396,7 @@ exports.getFullState = async (req, res) => {
     const { rows: lists } = await pool.query(
       `SELECT id, name, description, color, ajuste_pct, is_favorite, orden
          FROM article_lists
-        WHERE business_id = $1 AND scope = 'article'
+        WHERE business_id = $1 AND scope = 'price'
         ORDER BY orden ASC, created_at ASC`,
       [bizId]
     );
