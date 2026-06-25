@@ -380,7 +380,9 @@ exports.syncNow = async (req, res) => {
     try { await client.query('ROLLBACK'); } catch { }
     const msg = String(e?.message || '');
     if (msg.includes('maxi_login_failed') || e.status === 401 || msg.includes('401')) {
-      return res.status(401).json({ error: 'unauthorized', detail: 'Maxi login failed/401' });
+      // Error de upstream (MaxiRest), no de auth del usuario.
+      // Usamos 502 Bad Gateway para que el frontend no interprete como sesión expirada.
+      return res.status(502).json({ error: 'maxi_upstream_unauthorized', detail: 'MaxiRest rechazó las credenciales del negocio' });
     }
     if (msg.includes('maxi_not_configured')) {
       return res.status(400).json({ error: 'maxi_not_configured' });

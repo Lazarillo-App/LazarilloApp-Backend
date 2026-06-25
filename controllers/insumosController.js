@@ -895,6 +895,43 @@ exports.syncFromMaxi = async (req, res) => {
       });
     }
 
+    // ── 2.5. Guardas defensivas contra respuestas raras de MaxiRest ──
+    // Si la API responde OK pero con array vacío o con muy pocos items
+    // comparado con lo que ya tenemos, abortamos para no romper la DB.
+    if (normItems.length === 0) {
+      console.warn(`[syncFromMaxi] MaxiRest devolvió 0 insumos. Sync abortada.`);
+      return res.json({
+        ok: true,
+        scope: 'insumos',
+        skipped: true,
+        message: 'MaxiRest devolvió 0 items — sync saltada para proteger datos',
+        inserted: 0,
+        updated: 0,
+        unchanged: 0,
+        auto_assigned: 0,
+      });
+    }
+
+    const { rows: [{ total: totalEnDb }] } = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM insumos
+       WHERE business_id = $1 AND origen = 'maxi' AND estado = 'activo'`,
+      [businessId]
+    );
+
+    if (totalEnDb > 50 && normItems.length < totalEnDb * 0.5) {
+      console.warn(`[syncFromMaxi] ⚠ MaxiRest devolvió ${normItems.length} insumos pero en DB hay ${totalEnDb}. Sync abortada.`);
+      return res.json({
+        ok: true,
+        scope: 'insumos',
+        skipped: true,
+        warning: `MaxiRest devolvió ${normItems.length} insumos (DB tiene ${totalEnDb}). Sync abortada — posible problema en MaxiRest.`,
+        inserted: 0,
+        updated: 0,
+        unchanged: totalEnDb,
+        auto_assigned: 0,
+      });
+    }
+
     // ── 3. Upsert con detección de cambios ──
     const summary = await upsertFromMaxi(businessId, normItems, { useIncomingEstado: true });
 

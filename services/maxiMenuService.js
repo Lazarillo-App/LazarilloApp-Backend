@@ -1,4 +1,6 @@
-// services/maxiMenuService.js - VERSIÓN CORREGIDA
+// services/maxiMenuService.js - VERSIÓN ADITIVA
+// La sync de artículos NO actualiza datos existentes.
+// Solo inserta nuevos. Esto protege ediciones manuales del usuario.
 const fetch = require('node-fetch');
 const { getBearer } = require('./maxiSalesService');
 const pool = require('../config/db');
@@ -44,13 +46,9 @@ async function fetchMenu({ businessId, req, listmode, list, id_tienda }) {
 
 /* ───────── Helper: aplanar árbol en artículos ───────── */
 /**
- * ✅ VERSIÓN CORREGIDA
- * 
  * Convierte el árbol devuelto por /menuweb/menuextendido
  * en una lista plana de artículos.
- * 
- * CORRECCIÓN: Solo agrega nodos con node_type === 'ARTICULO'
- * NO agrega rubros/categorías/subrubros
+ * Solo agrega nodos con node_type === 'ARTICULO'
  */
 function flattenMenuToArticles(menu) {
   const out = [];
@@ -62,57 +60,39 @@ function flattenMenuToArticles(menu) {
     const nodeType = String(node.node_type || node.type || '').toUpperCase();
     const nombre = node.nombre || node.name || node.title || null;
 
-    // Clonar contexto
     let nextCtx = { ...ctx };
 
-    // Nivel "rubro" / "categoría"
     if (nodeType === 'RUBRO' || nodeType === 'CATEGORIA') {
       if (nombre) nextCtx.categoria = nombre;
       rubrosSkipped++;
-      // ✅ NO agregar a out, solo actualizar contexto
     }
 
-    // Nivel "subrubro"
     if (nodeType === 'SUBRUBRO') {
       if (nombre) nextCtx.subrubro = nombre;
       rubrosSkipped++;
-      // ✅ NO agregar a out, solo actualizar contexto
     }
 
-    // ✅ CORRECCIÓN: Solo agregar si es ARTICULO explícitamente
     if (nodeType === 'ARTICULO') {
       const rawId = node.id ?? node.articulo_id ?? node.codigo ?? node.code;
       const articuloId = Number(rawId);
 
       if (!Number.isFinite(articuloId) || articuloId <= 0) {
         console.warn('[flattenMenuToArticles] Artículo sin ID válido:', { nombre, rawId });
-        
-        // Continuar navegando hijos por si acaso
         const hijos = node.hijos || node.children || [];
-        if (Array.isArray(hijos)) {
-          hijos.forEach((h) => walk(h, nextCtx));
-        }
+        if (Array.isArray(hijos)) hijos.forEach((h) => walk(h, nextCtx));
         return;
       }
 
       const precio = Number(node.precio ?? node.price ?? 0) || 0;
       const costo  = Number(node.costo ?? node.cost ?? 0) || 0;
 
-      // ✅ Validación adicional: No agregar si precio = 0 Y categoria = nombre
-      // (esto captura rubros que no tienen node_type correcto)
       if (precio === 0 && nombre && nextCtx.categoria === nombre) {
-        console.warn('[flattenMenuToArticles] Posible rubro detectado por heurística:', { 
-          articulo_id: articuloId, 
-          nombre, 
-          categoria: nextCtx.categoria 
+        console.warn('[flattenMenuToArticles] Posible rubro detectado por heurística:', {
+          articulo_id: articuloId, nombre, categoria: nextCtx.categoria
         });
         rubrosSkipped++;
-        
-        // Continuar navegando hijos
         const hijos = node.hijos || node.children || [];
-        if (Array.isArray(hijos)) {
-          hijos.forEach((h) => walk(h, nextCtx));
-        }
+        if (Array.isArray(hijos)) hijos.forEach((h) => walk(h, nextCtx));
         return;
       }
 
@@ -125,8 +105,7 @@ function flattenMenuToArticles(menu) {
         costo,
         raw: node,
       });
-      
-      // Los artículos normalmente NO tienen hijos, pero por si acaso
+
       const hijos = node.hijos || node.children || [];
       if (Array.isArray(hijos) && hijos.length > 0) {
         console.warn('[flattenMenuToArticles] Artículo con hijos (inusual):', articuloId);
@@ -135,26 +114,27 @@ function flattenMenuToArticles(menu) {
       return;
     }
 
-    // Para cualquier otro tipo de nodo, seguir navegando hijos
     const hijos = node.hijos || node.children || [];
-    if (Array.isArray(hijos)) {
-      hijos.forEach((h) => walk(h, nextCtx));
-    }
+    if (Array.isArray(hijos)) hijos.forEach((h) => walk(h, nextCtx));
   }
 
   (menu || []).forEach((root) => walk(root, {}));
-  
+
   console.log(`[flattenMenuToArticles] ✅ Procesados ${out.length} artículos (${rubrosSkipped} rubros/categorías omitidos)`);
-  
+
   return out;
 }
 
 /* ───────── Import completo de menú para un negocio ───────── */
 /**
- * Paso central del onboarding de ventas:
- *  - trae el menú desde Maxi,
- *  - llena/actualiza maxi_articles (SOLO artículos, NO rubros),
- *  - llena/actualiza maxi_article_map con external_code + title.
+ * SYNC ADITIVA:
+ *  - trae el menú desde Maxi
+ *  - SOLO inserta artículos nuevos (ON CONFLICT DO NOTHING)
+ *  - NO actualiza nombre, categoria, subrubro, precio, costo de artículos existentes
+ *  - Esto protege ediciones manuales y precios actualizados por el usuario
+ *
+ *  Guards defensivos:
+ *  - Si MaxiRest devuelve 0 artículos, aborta sin tocar la DB
  */
 async function importMaxiMenuForBusiness(businessId, options = {}) {
   const bizId = Number(businessId);
@@ -172,15 +152,18 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
   // 1) Traer menú crudo desde Maxi
   const menu = await fetchMenu({ businessId: bizId, req, listmode, list, id_tienda });
 
-  // 2) Aplanar en artículos (SOLO artículos, NO rubros)
+  // 2) Aplanar
   const articles = flattenMenuToArticles(menu);
 
+  // ── Guard: si MaxiRest no devolvió nada, no tocar la DB ──
   if (articles.length === 0) {
-    console.warn(`[importMaxiMenuForBusiness] Business ${bizId}: No se encontraron artículos`);
+    console.warn(`[importMaxiMenuForBusiness] Business ${bizId}: MaxiRest devolvió 0 artículos. Sync abortada.`);
     return {
       ok: true,
       business_id: bizId,
       imported_articles: 0,
+      skipped: true,
+      message: 'MaxiRest devolvió 0 artículos — sync abortada para proteger datos',
     };
   }
 
@@ -188,7 +171,7 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
   try {
     await client.query('BEGIN');
 
-    // 3) maxi_articles: espejo ordenado del menú de Maxi (SOLO artículos)
+    // 3) maxi_articles: ADITIVO — solo inserta nuevos, no toca existentes
     const values = [];
     const params = [];
     let i = 1;
@@ -198,18 +181,18 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
         `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
       );
       params.push(
-        bizId,                 // business_id
-        a.articulo_id,         // articulo_id
-        a.nombre,              // nombre
-        a.categoria || null,   // categoria
-        a.subrubro || null,    // subrubro
-        a.precio,              // precio
-        a.costo,               // costo
-        JSON.stringify(a.raw), // raw
+        bizId,
+        a.articulo_id,
+        a.nombre,
+        a.categoria || null,
+        a.subrubro || null,
+        a.precio,
+        a.costo,
+        JSON.stringify(a.raw),
       );
     }
 
-    await client.query(
+    const insertedRes = await client.query(
       `
       INSERT INTO maxi_articles (
         business_id,
@@ -223,20 +206,15 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
       )
       VALUES
         ${values.join(', ')}
-      ON CONFLICT (business_id, articulo_id)
-      DO UPDATE SET
-        nombre     = EXCLUDED.nombre,
-        categoria  = EXCLUDED.categoria,
-        subrubro   = EXCLUDED.subrubro,
-        precio     = EXCLUDED.precio,
-        costo      = EXCLUDED.costo,
-        raw        = EXCLUDED.raw,
-        updated_at = now()
+      ON CONFLICT (business_id, articulo_id) DO NOTHING
+      RETURNING articulo_id
       `,
       params
     );
 
-    // 4) maxi_article_map: base para mapping (sin tocar article_id)
+    const insertedIds = new Set(insertedRes.rows.map(r => Number(r.articulo_id)));
+
+    // 4) maxi_article_map: ADITIVO también — solo crear mappings nuevos
     const values2 = [];
     const params2 = [];
     let j = 1;
@@ -246,12 +224,12 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
         `($${j++}, $${j++}, $${j++}, $${j++}, now(), $${j++}, $${j++})`
       );
       params2.push(
-        bizId,                  // business_id
-        a.articulo_id,          // articulo_id
-        a.categoria || null,    // categoria
-        a.subrubro || null,     // subrubro
-        String(a.articulo_id),  // external_code (codigo externo de Maxi)
-        a.nombre,               // title (nombre del artículo)
+        bizId,
+        a.articulo_id,
+        a.categoria || null,
+        a.subrubro || null,
+        String(a.articulo_id),
+        a.nombre,
       );
     }
 
@@ -268,25 +246,27 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
       )
       VALUES
         ${values2.join(', ')}
-      ON CONFLICT (business_id, articulo_id)
-      DO UPDATE SET
-        categoria     = EXCLUDED.categoria,
-        subrubro      = EXCLUDED.subrubro,
-        updated_at    = now(),
-        external_code = EXCLUDED.external_code,
-        title         = EXCLUDED.title
+      ON CONFLICT (business_id, articulo_id) DO NOTHING
       `,
       params2
     );
 
     await client.query('COMMIT');
 
-    console.log(`[importMaxiMenuForBusiness] ✅ Business ${bizId}: ${articles.length} artículos importados`);
+    const insertedCount = insertedIds.size;
+    const unchangedCount = articles.length - insertedCount;
+
+    console.log(
+      `[importMaxiMenuForBusiness] ✅ Business ${bizId}: ` +
+      `${insertedCount} nuevos artículos importados, ${unchangedCount} ya existían (no tocados)`
+    );
 
     return {
       ok: true,
       business_id: bizId,
-      imported_articles: articles.length,
+      imported_articles: insertedCount,
+      unchanged: unchangedCount,
+      total_in_maxi: articles.length,
     };
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
@@ -299,6 +279,6 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
 
 module.exports = {
   fetchMenu,
-  flattenMenuToArticles, 
+  flattenMenuToArticles,
   importMaxiMenuForBusiness,
 };
