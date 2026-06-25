@@ -345,14 +345,61 @@ exports.actualizarArticulo = async (req, res, next) => {
   }
 
   const { nombre, rubro, subrubro, precio, codigoExterno } = req.body || {};
-
-  // 🆕 Si bizId es subnegocio, el artículo vive en el principal
   const storageBizId = await resolveStorageBizId(bizId);
+  const isManual = articleId < 0;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // ─── Rama A: artículo Maxi (id > 0) ────────────────────────────────────
+    if (!isManual) {
+      const { rows } = await client.query(
+        `SELECT * FROM maxi_articles WHERE business_id = $1 AND articulo_id = $2`,
+        [storageBizId, articleId]
+      );
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ ok: false, error: 'Artículo no encontrado en maxi_articles' });
+      }
+
+      const art = rows[0];
+      const sets = [];
+      const vals = [];
+      let pi = 1;
+
+      if (nombre?.trim()) { sets.push(`nombre = $${pi++}`); vals.push(nombre.trim()); }
+      if (precio != null) { sets.push(`precio = $${pi++}`); vals.push(safeNum(precio) ?? 0); }
+      // Recordatorio: en maxi_articles → subrubro DB = "Rubro" UI, categoria DB = "Subrubro" UI
+      if (rubro?.trim() != null && rubro.trim() !== art.subrubro) {
+        sets.push(`subrubro = $${pi++}`); vals.push(rubro.trim());
+      }
+      if (subrubro?.trim() != null && subrubro.trim() !== art.categoria) {
+        sets.push(`categoria = $${pi++}`); vals.push(subrubro.trim());
+      }
+
+      if (!sets.length) {
+        await client.query('ROLLBACK');
+        return res.json({ ok: true, articulo: art, message: 'Sin cambios' });
+      }
+
+      sets.push(`updated_at = NOW()`);
+      vals.push(storageBizId, articleId);
+
+      const { rows: updated } = await client.query(
+        `UPDATE maxi_articles SET ${sets.join(', ')}
+          WHERE business_id = $${pi++} AND articulo_id = $${pi}
+         RETURNING *`,
+        vals
+      );
+
+      await client.query('COMMIT');
+      invalidateCacheForBiz(bizId);
+      if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+      return res.json({ ok: true, articulo: updated[0] });
+    }
+
+    // ─── Rama B: artículo manual (id < 0) — lógica original ─────────────────
     const { rows } = await client.query(
       `SELECT * FROM app_articles WHERE id = $1 AND business_id = $2`, [articleId, storageBizId]
     );
@@ -369,7 +416,6 @@ exports.actualizarArticulo = async (req, res, next) => {
     if (nombre?.trim()) { sets.push(`name = $${pi++}`); vals.push(nombre.trim()); }
     if (precio != null) { sets.push(`price = $${pi++}`); vals.push(safeNum(precio) ?? 0); }
 
-    // Rubro/subrubro — buscar o crear categoría
     let categoriaId = art.categoria_id;
     let subrubroId = art.subrubro_id;
 
@@ -387,7 +433,7 @@ exports.actualizarArticulo = async (req, res, next) => {
       }
       sets.push(`rubro = $${pi++}`); vals.push(rubro.trim());
       sets.push(`categoria_id = $${pi++}`); vals.push(categoriaId);
-      subrubroId = 1; // reset subrubro si cambió el rubro
+      subrubroId = 1;
     }
 
     if (subrubro?.trim() && subrubro.trim() !== art.subrubro) {
@@ -408,7 +454,6 @@ exports.actualizarArticulo = async (req, res, next) => {
       sets.push(`subrubro_id = $${pi++}`); vals.push(subrubroId);
     }
 
-    // Código externo — actualiza SKU y quita sin_equivalencia
     if (codigoExterno?.trim()) {
       const props = art.props || {};
       const skuFinal = `L${codigoExterno.trim()}`;
@@ -425,7 +470,7 @@ exports.actualizarArticulo = async (req, res, next) => {
     }
 
     sets.push(`updated_at = NOW()`);
-    vals.push(articleId, storageBizId);  // 🆕
+    vals.push(articleId, storageBizId);
 
     const { rows: updated } = await client.query(
       `UPDATE app_articles SET ${sets.join(', ')}
@@ -435,8 +480,6 @@ exports.actualizarArticulo = async (req, res, next) => {
     );
 
     await client.query('COMMIT');
-
-    // Invalidar cache del subnegocio (donde mira el usuario) y del principal (donde vive el artículo)
     invalidateCacheForBiz(bizId);
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
