@@ -591,10 +591,11 @@ exports.revokeAssignment = async (req, res, next) => {
 exports.acceptInvitation = async (req, res, next) => {
     const client = await pool.connect();
     try {
-        const { token = '', email = '', password = '' } = req.body || {};
+        const { token = '', email = '', password = '', displayName = '' } = req.body || {};
         if (!token || !email || !password) {
             return res.status(400).json({ ok: false, error: 'missing_fields' });
         }
+        const displayNameClean = String(displayName || '').trim() || null;
         if (password.length < 6) {
             return res.status(400).json({ ok: false, error: 'password_too_short' });
         }
@@ -660,9 +661,10 @@ exports.acceptInvitation = async (req, res, next) => {
               invitation_token_hash  = NULL,
               invitation_expires_at  = NULL,
               invitation_accepted_at = NOW(),
-              active_business_id     = COALESCE($2, active_business_id)
+              active_business_id     = COALESCE($2, active_business_id),
+              display_name           = COALESCE($4, display_name)
         WHERE id = $3`,
-            [hash, activeBizId, user.id]
+            [hash, activeBizId, user.id, displayNameClean]
         );
 
         await client.query('COMMIT');

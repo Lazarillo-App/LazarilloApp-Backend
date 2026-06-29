@@ -174,13 +174,34 @@ exports.me = async (req, res) => {
 
 exports.updateMe = async (req, res) => {
   try {
-    const { name = null } = req.body || {};
+    const body = req.body || {};
+    const sets = [];
+    const vals = [];
+    let pi = 1;
+
+    if (body.name !== undefined) {
+      sets.push(`name = $${pi++}`);
+      vals.push(body.name || null);
+    }
+    if (body.displayName !== undefined) {
+      sets.push(`display_name = $${pi++}`);
+      vals.push(String(body.displayName || '').trim() || null);
+    }
+
+    if (!sets.length) {
+      return res.json({ ok: true, message: 'Sin cambios' });
+    }
+
+    vals.push(req.user.id);
     const { rows } = await pool.query(
-      'UPDATE app_users SET name=$1 WHERE id=$2 RETURNING id, name, email, active_business_id, role, status',
-      [name, req.user.id]
+      `UPDATE app_users SET ${sets.join(', ')}, updated_at = NOW()
+        WHERE id = $${pi}
+       RETURNING id, name, display_name, email, active_business_id, role, status`,
+      vals
     );
     res.json(rows[0] || null);
   } catch (e) {
+    console.error('[updateMe]', e.message);
     res.status(500).json({ error: 'internal' });
   }
 };
