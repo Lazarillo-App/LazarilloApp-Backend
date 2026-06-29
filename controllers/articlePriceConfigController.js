@@ -92,13 +92,13 @@ exports.getPriceConfig = async (req, res, next) => {
     for (const r of rows) {
       const entry = {
         objetivo: r.objetivo_pct != null ? Number(r.objetivo_pct) : null,
-        ajuste:   r.ajuste_pct   != null ? Number(r.ajuste_pct)   : null,
+        ajuste: r.ajuste_pct != null ? Number(r.ajuste_pct) : null,
         precioManual: r.precio_manual != null ? Number(r.precio_manual) : null,
         ultimoPct: r.ultimo_pct != null ? Number(r.ultimo_pct) : null,
         excluido: !!r.excluido,
       };
-      if (r.scope === 'articulo')   byArticle[String(r.scope_id)]   = entry;
-      else if (r.scope === 'rubro') byRubro[String(r.scope_id)]     = entry;
+      if (r.scope === 'articulo') byArticle[String(r.scope_id)] = entry;
+      else if (r.scope === 'rubro') byRubro[String(r.scope_id)] = entry;
       else if (r.scope === 'agrupacion') byAgrupacion[String(r.scope_id)] = entry;
     }
 
@@ -201,13 +201,13 @@ exports.savePriceConfig = async (req, res, next) => {
     const ajusteVal = req.body?.ajuste != null ? Number(req.body.ajuste) : null;
     const listIdVal = req.body?.listId != null ? Number(req.body.listId) : null;
     const excluidoVal = req.body?.excluido === true ? true
-                     : req.body?.excluido === false ? false
-                     : null;
+      : req.body?.excluido === false ? false
+        : null;
     const listIdKey = listIdVal != null ? Number(listIdVal) : 0; // 0 = NULL para el UNIQUE
 
     // ── Upsert del registro principal (scope + scopeId + list_id) ────────────
     if (objetivoVal !== null || precioManualVal !== null || ultimoPctVal !== null
-        || ajusteVal !== null || excluidoVal !== null) {
+      || ajusteVal !== null || excluidoVal !== null) {
       await client.query(
         `INSERT INTO article_price_config
        (business_id, scope, scope_id, list_id, objetivo_pct, ajuste_pct, precio_manual, ultimo_pct, excluido, updated_at)
@@ -290,7 +290,7 @@ exports.savePriceConfig = async (req, res, next) => {
     // nada: los artículos van a heredar el nuevo objetivo por jerarquía de lectura.
     // Los precios manuales NO se tocan — son independientes del objetivo.
     if (objetivoVal !== null && (scope === 'rubro' || scope === 'agrupacion')
-        && Array.isArray(articleIds) && articleIds.length > 0) {
+      && Array.isArray(articleIds) && articleIds.length > 0) {
       const idsNums = articleIds.map(Number).filter(id => Number.isFinite(id) && id !== 0);
       if (idsNums.length > 0) {
         await client.query(
@@ -303,7 +303,7 @@ exports.savePriceConfig = async (req, res, next) => {
           [bizId, idsNums.map(String)]
         );
         // Limpiar filas que quedaron sin ningún dato útil
-       await client.query(
+        await client.query(
           `DELETE FROM article_price_config
            WHERE business_id = $1
              AND scope = 'articulo'
@@ -317,7 +317,7 @@ exports.savePriceConfig = async (req, res, next) => {
           [bizId, idsNums.map(String)]
         );
         console.log(`[savePriceConfig] ${scope}/${scopeIdStr} → limpiados overrides individuales de ${idsNums.length} artículos`);
-         console.log(`[DEBUG] scope === 'agrupacion'?`, scope === 'agrupacion');
+        console.log(`[DEBUG] scope === 'agrupacion'?`, scope === 'agrupacion');
 
         // Si es agrupación, además limpiar todos los rubros que contienen estos artículos.
         if (scope === 'agrupacion') {
@@ -370,7 +370,8 @@ exports.savePriceConfig = async (req, res, next) => {
     // Los cambios de rubro/agrupacion son bulk y no se propagan por vinculación.
     if (scope === 'articulo') {
       const artId = Number(scopeIdStr);
-      if (Number.isFinite(artId) && artId > 0) {
+      // Propaga también desde manuales (id < 0)
+      if (Number.isFinite(artId) && artId !== 0) {
         if (precioManualVal !== null) {
           propagatePrecioManual({ bizId, articleId: artId, precioManual: precioManualVal })
             .catch(e => console.warn('[savePriceConfig] propagatePrecioManual falló:', e.message));
