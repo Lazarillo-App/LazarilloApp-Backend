@@ -620,8 +620,43 @@ exports.addMember = async (req, res) => {
       [groupId, articleId, bizId, linkType]
     );
 
+    // Si es vinculación de precio, heredar el precio_manual más reciente del grupo
+    let inheritedPrice = null;
+    if (linkType === 'precio') {
+      const { rows: priceRows } = await client.query(
+        `SELECT apc.precio_manual
+           FROM article_link_members m
+           JOIN article_price_config apc
+             ON apc.business_id = m.business_id
+            AND apc.scope = 'articulo'
+            AND apc.scope_id = m.article_id::text
+            AND apc.list_id IS NULL
+          WHERE m.link_group_id = $1
+            AND m.business_id = $2
+            AND m.article_id <> $3
+            AND apc.precio_manual IS NOT NULL
+          ORDER BY apc.updated_at DESC
+          LIMIT 1`,
+        [groupId, bizId, articleId]
+      );
+
+      if (priceRows.length) {
+        inheritedPrice = Number(priceRows[0].precio_manual);
+        await client.query(
+          `INSERT INTO article_price_config
+             (business_id, scope, scope_id, list_id, precio_manual, updated_at)
+           VALUES ($1, 'articulo', $2, NULL, $3, NOW())
+           ON CONFLICT (business_id, scope, scope_id, COALESCE(list_id, 0))
+           DO UPDATE SET
+             precio_manual = EXCLUDED.precio_manual,
+             updated_at = NOW()`,
+          [bizId, String(articleId), inheritedPrice]
+        );
+      }
+    }
+
     await client.query('COMMIT');
-    return res.json({ ok: true, groupId, articleId });
+    return res.json({ ok: true, groupId, articleId, inheritedPrice });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('[addMember]', e.message);
