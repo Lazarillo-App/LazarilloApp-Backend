@@ -1749,17 +1749,11 @@ exports.importCsvPaired = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PUT /api/insumos/rubros/rename
-// Body: { old: string, new: string }
-// Renombra el rubro de insumos en el catálogo (insumo_rubros.nombre).
-// Los insumos referencian al rubro por código (insumos.rubro = codigo),
-// así que el JOIN con el nombre nuevo se hace automático en las lecturas.
-// ─────────────────────────────────────────────────────────────────────────────
 exports.renombrarRubro = async (req, res, next) => {
   const businessId = getBusinessId(req);
   const oldName = String(req.body?.old ?? '').trim();
   const newName = String(req.body?.new ?? '').trim();
+  const codigo = req.body?.codigo != null ? Number(req.body.codigo) : null;
 
   if (!businessId || !oldName || !newName) {
     return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
@@ -1769,11 +1763,37 @@ exports.renombrarRubro = async (req, res, next) => {
   }
 
   try {
-    const { rowCount } = await pool.query(
+    // 1. Intentar UPDATE por nombre (caso normal: el rubro existe en el catálogo)
+    let { rowCount } = await pool.query(
       `UPDATE insumo_rubros SET nombre = $1, updated_at = NOW()
         WHERE business_id = $2 AND nombre = $3`,
       [newName, businessId, oldName]
     );
+
+    // 2. Si no encontró (rubro huérfano), insertar usando el código provisto
+    if (!rowCount && Number.isFinite(codigo)) {
+      // ¿Ya existe una entrada para ese código? (renombrar)
+      const existing = await pool.query(
+        `SELECT id FROM insumo_rubros WHERE business_id = $1 AND codigo = $2`,
+        [businessId, codigo]
+      );
+      if (existing.rowCount) {
+        const upd = await pool.query(
+          `UPDATE insumo_rubros SET nombre = $1, updated_at = NOW()
+            WHERE business_id = $2 AND codigo = $3`,
+          [newName, businessId, codigo]
+        );
+        rowCount = upd.rowCount;
+      } else {
+        // No existe — crear la entrada con el código y nombre nuevo
+        await pool.query(
+          `INSERT INTO insumo_rubros (business_id, codigo, codigo_maxi, nombre)
+           VALUES ($1, $2, $2, $3)`,
+          [businessId, codigo, newName]
+        );
+        rowCount = 1;
+      }
+    }
 
     if (!rowCount) {
       return res.status(404).json({ ok: false, error: 'Rubro no encontrado' });
