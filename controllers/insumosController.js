@@ -1748,3 +1748,59 @@ exports.importCsvPaired = async (req, res) => {
     client.release();
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/insumos/rubros/rename
+// Body: { old: string, new: string }
+// Renombra un rubro de insumos en:
+//   - insumo_rubros.nombre (catálogo de rubros)
+//   - insumos.rubro (texto en cada insumo)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.renombrarRubro = async (req, res, next) => {
+  const businessId = getBusinessId(req);
+  const oldName = String(req.body?.old ?? '').trim();
+  const newName = String(req.body?.new ?? '').trim();
+
+  if (!businessId || !oldName || !newName) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+  if (oldName === newName) {
+    return res.json({ ok: true, message: 'Sin cambios' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Renombrar en el catálogo
+    const r1 = await client.query(
+      `UPDATE insumo_rubros SET nombre = $1, updated_at = NOW()
+        WHERE business_id = $2 AND nombre = $3`,
+      [newName, businessId, oldName]
+    );
+
+    // 2. Renombrar la columna texto en cada insumo del negocio
+    const r2 = await client.query(
+      `UPDATE insumos SET rubro = $1, updated_at = NOW()
+        WHERE business_id = $2 AND rubro = $3`,
+      [newName, businessId, oldName]
+    );
+
+    await client.query('COMMIT');
+
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+
+    return res.json({
+      ok: true,
+      rubros_updated: r1.rowCount,
+      insumos_updated: r2.rowCount,
+    });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[renombrarRubroInsumo]', e.message);
+    next(e);
+  } finally {
+    client.release();
+  }
+};

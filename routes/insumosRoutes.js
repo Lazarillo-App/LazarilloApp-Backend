@@ -22,6 +22,7 @@ router.get('/maxi', ctrl.listarMaxi);
 router.post('/maxi/rubros/sync', ctrl.syncRubrosFromMaxi);
 router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
 router.get('/rubros', ctrl.getRubrosInsumos);
+router.put('/rubros/rename', ctrl.renombrarRubro);
 
 /* ================== AGRUPACIONES DE INSUMOS ================== */
 router.post('/groups/create-or-move', ctrl.groups_createOrMove);
