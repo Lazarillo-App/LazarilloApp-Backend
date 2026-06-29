@@ -78,7 +78,7 @@ exports.getLinkGroups = async (req, res) => {
 // ============================================================================
 exports.createLinkGroup = async (req, res) => {
   const bizId = getBusinessId(req);
-  const articleIds = (Array.isArray(req.body?.articleIds) ? req.body.articleIds : [])
+const articleIds = (Array.isArray(req.body?.articleIds) ? req.body.articleIds : [])
     .map(Number).filter(Number.isFinite);
   const name = String(req.body?.name ?? '').trim() || null;
   const syncRecipe = req.body?.syncRecipe === true;
@@ -89,59 +89,71 @@ exports.createLinkGroup = async (req, res) => {
     return res.status(400).json({ ok: false, error: 'Se necesitan al menos 2 artículos para vincular' });
   }
 
+  // Derivar el tipo a partir de los flags. Solo uno puede estar activo por grupo.
+  // Prioridad: precio > receta > objetivo (en caso de pasar varios, queda el primero).
+  const linkType = syncPrecio ? 'precio'
+                : syncRecipe ? 'receta'
+                : syncObjetivo ? 'objetivo'
+                : null;
+  if (!linkType) {
+    return res.status(400).json({ ok: false, error: 'Falta indicar el tipo de sincronización' });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Verificar que ninguno ya esté vinculado en este negocio
+    // Verificar que ninguno esté vinculado YA EN ESTE TIPO en este negocio
     const { rows: existing } = await client.query(
       `SELECT article_id FROM article_link_members
-       WHERE article_id = ANY($1::bigint[]) AND business_id = $2`,
-      [articleIds, bizId]
+       WHERE article_id = ANY($1::bigint[]) AND business_id = $2 AND link_type = $3`,
+      [articleIds, bizId, linkType]
     );
 
     if (existing.length) {
-      // Alguno ya está vinculado — buscar el grupo existente y agregar los demás
       const existingId = Number(existing[0].article_id);
       const { rows: groupData } = await client.query(
         `SELECT g.id AS group_id, g.name AS group_name, g.sync_recipe, g.sync_objetivo, g.sync_precio
            FROM article_link_members m
            JOIN article_link_groups g ON g.id = m.link_group_id
-          WHERE m.article_id = $1 AND m.business_id = $2 LIMIT 1`,
-        [existingId, bizId]
+          WHERE m.article_id = $1 AND m.business_id = $2 AND m.link_type = $3
+          LIMIT 1`,
+        [existingId, bizId, linkType]
       );
       await client.query('ROLLBACK');
       if (groupData.length) {
         return res.status(409).json({
           ok: false,
-          error: `Artículo ya vinculado`,
+          error: `Artículo ya vinculado por ${linkType}`,
           alreadyLinked: existing.map(r => Number(r.article_id)),
           existingGroup: { groupId: groupData[0].group_id, groupName: groupData[0].group_name },
         });
       }
       return res.status(409).json({
         ok: false,
-        error: `${existing.length} artículo(s) ya están vinculados`,
+        error: `${existing.length} artículo(s) ya están vinculados por ${linkType}`,
         alreadyLinked: existing.map(r => Number(r.article_id)),
       });
     }
 
-    // Crear el grupo
+    // Crear el grupo (con link_type)
     const { rows: groupRows } = await client.query(
-      `INSERT INTO article_link_groups (business_id, name, sync_recipe, sync_objetivo, sync_precio)
-   VALUES ($1, $2, $3, $4, $5)
-   RETURNING id, name, sync_recipe, sync_objetivo, sync_precio`,
-      [bizId, name, syncRecipe, syncObjetivo, syncPrecio]
+      `INSERT INTO article_link_groups (business_id, name, sync_recipe, sync_objetivo, sync_precio, link_type)
+   VALUES ($1, $2, $3, $4, $5, $6)
+   RETURNING id, name, sync_recipe, sync_objetivo, sync_precio, link_type`,
+      [bizId, name, syncRecipe, syncObjetivo, syncPrecio, linkType]
     );
     const group = groupRows[0];
     const groupId = Number(group.id);
 
-    // Insertar miembros
-    const memberValues = articleIds.map((_, i) => `($1, $${i + 2}, $${articleIds.length + 2})`).join(', ');
+    // Insertar miembros (con link_type denormalizado)
+    const memberValues = articleIds
+      .map((_, i) => `($1, $${i + 2}, $${articleIds.length + 2}, $${articleIds.length + 3})`)
+      .join(', ');
     await client.query(
-      `INSERT INTO article_link_members (link_group_id, article_id, business_id)
+      `INSERT INTO article_link_members (link_group_id, article_id, business_id, link_type)
        VALUES ${memberValues}`,
-      [groupId, ...articleIds, bizId]
+      [groupId, ...articleIds, bizId, linkType]
     );
 
     await client.query('COMMIT');
@@ -574,26 +586,38 @@ exports.addMember = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
     }
 
-    // Verificar que el artículo no esté ya en otro grupo
+    // Leer el tipo del grupo destino
+    const { rows: typeRows } = await client.query(
+      `SELECT link_type FROM article_link_groups WHERE id = $1 AND business_id = $2`,
+      [groupId, bizId]
+    );
+    if (!typeRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Grupo no encontrado' });
+    }
+    const linkType = typeRows[0].link_type;
+
+    // Verificar que el artículo no esté ya en OTRO grupo del MISMO tipo
     const { rows: existing } = await client.query(
-      `SELECT link_group_id FROM article_link_members WHERE article_id = $1 AND business_id = $2`,
-      [articleId, bizId]
+      `SELECT link_group_id FROM article_link_members
+        WHERE article_id = $1 AND business_id = $2 AND link_type = $3 AND link_group_id <> $4`,
+      [articleId, bizId, linkType, groupId]
     );
     if (existing.length) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         ok: false,
-        error: 'El artículo ya está vinculado a otro grupo',
+        error: `El artículo ya está vinculado por ${linkType} en otro grupo`,
         existingGroupId: Number(existing[0].link_group_id),
       });
     }
 
-    // Agregar el miembro
+    // Agregar el miembro (con link_type denormalizado)
     await client.query(
-      `INSERT INTO article_link_members (link_group_id, article_id, business_id)
-       VALUES ($1, $2, $3)
+      `INSERT INTO article_link_members (link_group_id, article_id, business_id, link_type)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT DO NOTHING`,
-      [groupId, articleId, bizId]
+      [groupId, articleId, bizId, linkType]
     );
 
     await client.query('COMMIT');
