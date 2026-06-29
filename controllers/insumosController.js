@@ -1752,9 +1752,9 @@ exports.importCsvPaired = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/insumos/rubros/rename
 // Body: { old: string, new: string }
-// Renombra un rubro de insumos en:
-//   - insumo_rubros.nombre (catálogo de rubros)
-//   - insumos.rubro (texto en cada insumo)
+// Renombra el rubro de insumos en el catálogo (insumo_rubros.nombre).
+// Los insumos referencian al rubro por código (insumos.rubro = codigo),
+// así que el JOIN con el nombre nuevo se hace automático en las lecturas.
 // ─────────────────────────────────────────────────────────────────────────────
 exports.renombrarRubro = async (req, res, next) => {
   const businessId = getBusinessId(req);
@@ -1768,39 +1768,23 @@ exports.renombrarRubro = async (req, res, next) => {
     return res.json({ ok: true, message: 'Sin cambios' });
   }
 
-  const client = await pool.connect();
   try {
-    await client.query('BEGIN');
-
-    // 1. Renombrar en el catálogo
-    const r1 = await client.query(
+    const { rowCount } = await pool.query(
       `UPDATE insumo_rubros SET nombre = $1, updated_at = NOW()
         WHERE business_id = $2 AND nombre = $3`,
       [newName, businessId, oldName]
     );
 
-    // 2. Renombrar la columna texto en cada insumo del negocio
-    const r2 = await client.query(
-      `UPDATE insumos SET rubro = $1, updated_at = NOW()
-        WHERE business_id = $2 AND rubro = $3`,
-      [newName, businessId, oldName]
-    );
-
-    await client.query('COMMIT');
+    if (!rowCount) {
+      return res.status(404).json({ ok: false, error: 'Rubro no encontrado' });
+    }
 
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(businessId);
 
-    return res.json({
-      ok: true,
-      rubros_updated: r1.rowCount,
-      insumos_updated: r2.rowCount,
-    });
+    return res.json({ ok: true, rubros_updated: rowCount });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { }
     console.error('[renombrarRubroInsumo]', e.message);
     next(e);
-  } finally {
-    client.release();
   }
 };
