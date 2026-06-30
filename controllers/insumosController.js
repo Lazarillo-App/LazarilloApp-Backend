@@ -40,7 +40,6 @@ if (process.env.NODE_ENV !== 'production') {
 
 // ===================== INSUMOS: LISTAR =====================
 exports.listar = async (req, res) => {
-  console.log('[INSUMOS LISTAR v2 WITH cantidad_compras]', new Date().toISOString());
   try {
     const {
       page = 1,
