@@ -167,14 +167,15 @@ exports.listar = async (req, res) => {
             (SELECT pi_ult.precio FROM purchase_items pi_ult
              WHERE pi_ult.insumo_id = i.id AND pi_ult.business_id = i.business_id AND pi_ult.precio > 0
              ORDER BY pi_ult.fecha DESC LIMIT 1) AS precio_ultima_compra,
-            MAX(pi_all.fecha) AS fecha_ultima_compra
+            MAX(pi_all.fecha) AS fecha_ultima_compra,
+            COUNT(*)::int AS cantidad_compras
           FROM purchase_items pi_all
           WHERE pi_all.insumo_id = i.id
             AND pi_all.business_id = i.business_id
             AND pi_all.precio > 0
         ) lc ON true
         ${whereSql}
-        GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra
+        GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra, lc.cantidad_compras
         ORDER BY ${orderBySql} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}
