@@ -147,6 +147,7 @@ exports.listar = async (req, res) => {
           lc.precio_promedio,
           lc.precio_ultima_compra,
           lc.fecha_ultima_compra,
+          lc.cantidad_compras,
           COALESCE(
             json_agg(
               DISTINCT jsonb_build_object(
