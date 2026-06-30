@@ -24,6 +24,8 @@ exports.getRecetasCostos = async (req, res, next) => {
          r.costo_total,
          r.porciones,
          ri.insumo_id,
+         COALESCE(i.es_elaborado, FALSE) AS es_elaborado,
+         COALESCE(i.tiene_receta, FALSE) AS tiene_receta,
          (
            SELECT MAX(pi.fecha)
            FROM purchase_items pi
@@ -32,6 +34,7 @@ exports.getRecetasCostos = async (req, res, next) => {
          ) AS fecha_ultima_compra
        FROM recetas r
        JOIN receta_items ri ON ri.receta_id = r.id
+       LEFT JOIN insumos i ON i.id = ri.insumo_id AND i.business_id = $1
        WHERE r.business_id = $1
          AND r.active = TRUE
          AND ri.tipo_costo != 'nulo'`,
@@ -52,9 +55,12 @@ exports.getRecetasCostos = async (req, res, next) => {
         };
       }
 
+      // Los insumos elaborados no se compran (tienen receta), no marcan alerta
+      const esElaborado = r.es_elaborado === true || r.tiene_receta === true;
+      if (esElaborado) continue;
+
       const fechaUltima = r.fecha_ultima_compra ? new Date(r.fecha_ultima_compra).getTime() : null;
       const esVieja = !fechaUltima || (ahora - fechaUltima) > alertaMs;
-
       if (esVieja && r.insumo_id) {
         costos[artId].tieneAlerta = true;
         costos[artId].insumosAlerta.push(Number(r.insumo_id));
