@@ -13,4 +13,7 @@ router.get('/bulk-preview', ctrl.previewBulkDelete);
 // DELETE /api/businesses/:businessId/recetas/bulk
 router.delete('/bulk', ctrl.bulkDelete);
 
+// POST /api/businesses/:businessId/recetas/bulk-add-insumo
+router.post('/bulk-add-insumo', ctrl.bulkAddInsumo);
+
 module.exports = router;
