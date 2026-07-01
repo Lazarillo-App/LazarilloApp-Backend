@@ -62,8 +62,8 @@ async function getInsumoIdsFromGroup(client, bizId, groupId) {
 exports.previewBulkDelete = async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const bizId = getBusinessId(req);
-    if (!bizId) return res.status(400).json({ ok: false, error: 'business_id_requerido' });
+    const bizId = Number(req.params.businessId) || getBusinessId(req);
+  if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
 
     const { tipo, filtroScope = 'all', agrupacionId } = req.query;
     if (!['articulo', 'elaborado'].includes(tipo)) {
@@ -197,7 +197,7 @@ exports.bulkDelete = async (req, res, next) => {
  * Recalcula costo_total de cada receta tocada.
  */
 exports.bulkAddInsumo = async (req, res, next) => {
-  const bizId = getBusinessId(req);
+  const bizId = Number(req.params.businessId) || getBusinessId(req);
   if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
 
   const { articleIds, insumoId, cantidad = 0, unidad = null } = req.body || {};
@@ -270,7 +270,7 @@ exports.bulkAddInsumo = async (req, res, next) => {
         if (existRows.length) { salteados++; continue; }
       } else {
         // Crear receta mínima
-        const { rows: newRec } = await client.query(
+        const newRec = await client.query(
           `INSERT INTO recetas
              (article_id, business_id, nombre, porciones, porcentaje_venta,
               costo_total, active, origen, created_at, updated_at)
@@ -278,6 +278,9 @@ exports.bulkAddInsumo = async (req, res, next) => {
            RETURNING id`,
           [artId, bizId]
         );
+        if (!newRec?.rows?.length) {
+          throw new Error(`INSERT receta falló para article_id=${artId}`);
+        }
         recetaId = newRec.rows[0].id;
         recetasCreadas++;
       }
