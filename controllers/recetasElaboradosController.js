@@ -60,7 +60,7 @@ exports.getRecetaElaborado = async (req, res, next) => {
     } catch { /* no crítico */ }
 
     // ← después calcular precio sugerido
-    const costoXPorcion = Number(receta.costo_total) / (Number(receta.porciones) || 1);
+    const costoXPorcion = Number(receta.costo_total) || 0;
     const pctVenta = Number(receta.porcentaje_venta) || insumosConfigObjetivo;
     const precioSugerido = pctVenta > 0 ? costoXPorcion / (pctVenta / 100) : 0;
 
@@ -145,8 +145,8 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
-    const porcionesNum = Math.max(1, Number(porciones) || 1);
-    const costoXPorcion = costoTotal / porcionesNum;
+    // El precio del insumo elaborado es el costo total de su receta (rendimiento solo informativo)
+    const costoXPorcion = costoTotal;
 
     // Si no viene porcentajeVenta, usar el global de insumos del negocio
     let porcentajeNum = Number(porcentajeVenta) || 0;

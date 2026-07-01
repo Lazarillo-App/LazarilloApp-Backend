@@ -233,7 +233,8 @@ exports.saveReceta = async (req, res, next) => {
     }
 
     // ── Actualizar costo en insumos elaborados ──
-    const costoXPorcion = Number(porciones) > 0 ? costoTotal / Number(porciones) : costoTotal;
+    // El precio del insumo elaborado es SIEMPRE el costo total de su receta.
+    // El rendimiento/porciones es solo informativo (para conversiones de unidad).
     const porcentaje = Number(porcentajeVenta) || 0;
 
     await client.query(
@@ -241,7 +242,7 @@ exports.saveReceta = async (req, res, next) => {
        SET costo_receta = $1, precio_ref = $1, tiene_receta = TRUE, updated_at = NOW()
        WHERE id = $2 AND business_id = $3
          AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
-      [Math.round(costoXPorcion * 1000) / 1000, articleId, bizId]
+      [Math.round(costoTotal * 1000) / 1000, articleId, bizId]
     );
 
     // ── Sincronizar porcentajeVenta → price_config como objetivo individual ──
