@@ -16,4 +16,7 @@ router.delete('/bulk', ctrl.bulkDelete);
 // POST /api/businesses/:businessId/recetas/bulk-add-insumo
 router.post('/bulk-add-insumo', ctrl.bulkAddInsumo);
 
+// GET /api/businesses/:businessId/recetas/promo-components
+router.get('/promo-components', ctrl.getPromoComponents);
+
 module.exports = router;

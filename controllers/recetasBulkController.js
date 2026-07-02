@@ -325,3 +325,30 @@ exports.bulkAddInsumo = async (req, res, next) => {
     client.release();
   }
 }
+
+/**
+ * GET /api/businesses/:businessId/recetas/promo-components
+ * Devuelve los article_ref_id que son componentes de alguna promo activa.
+ * Estos artículos NO deben mostrarse como filas propias (están dentro de la promo).
+ */
+exports.getPromoComponents = async (req, res, next) => {
+  const bizId = Number(req.params.businessId) || getBusinessId(req);
+  if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ri.article_ref_id
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE r.business_id = $1
+          AND r.es_promo = TRUE
+          AND r.active = TRUE
+          AND ri.article_ref_id IS NOT NULL`,
+      [bizId]
+    );
+    const ids = rows.map(r => Number(r.article_ref_id)).filter(Number.isFinite);
+    return res.json({ ok: true, ids });
+  } catch (e) {
+    console.error('[getPromoComponents]', e);
+    next(e);
+  }
+};
