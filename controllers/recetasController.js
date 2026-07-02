@@ -178,38 +178,75 @@ exports.saveReceta = async (req, res, next) => {
 
     const savedItems = [];
 
-    for (let i = 0; i < items.length; i++) {
+   for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const supplyId = Number(item.supplyId);
       const cantidad = Number(item.cantidad || 0);
       const costoUnitario = Number(item.costoUnitario || 0);
       const unidad = (item.unidad || '').trim() || null;
       const notas = (item.notas || '').trim() || null;
       const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
-
-      if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
-      if (cantidad === 0) continue;
-
-      const { rows: insumoCheck } = await client.query(
-        `SELECT id, nombre, unidad_med FROM insumos WHERE id = $1 LIMIT 1`,
-        [supplyId]
-      );
-
-      if (!insumoCheck.length) {
-        console.warn(`[saveReceta] insumo_id=${supplyId} no existe en tabla insumos, ignorando item`);
-        continue;
-      }
-
       const merma = item.merma !== false;
       const pedido = item.pedido !== false;
       const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
-
-      // fotos_urls: asegurar que sea array de strings válidos
       const fotosUrls = Array.isArray(item.fotosUrls)
         ? item.fotosUrls.filter(u => typeof u === 'string' && u.startsWith('http'))
         : [];
 
+      if (cantidad === 0) continue;
+
+      // ── Item-artículo (promo): referencia a otro artículo ──
+      const articleRefId = Number(item.articleRefId);
+      if (Number.isFinite(articleRefId) && articleRefId !== 0) {
+        // Nombre del artículo referenciado (positivo=maxi, negativo=manual)
+        let refNombre = null, refMedida = 'u';
+        if (articleRefId > 0) {
+          const { rows: aRows } = await client.query(
+            `SELECT nombre FROM maxi_articles WHERE business_id = $1 AND articulo_id = $2 LIMIT 1`,
+            [bizId, articleRefId]
+          );
+          refNombre = aRows[0]?.nombre || null;
+        } else {
+          const { rows: aRows } = await client.query(
+            `SELECT nombre FROM app_articles WHERE business_id = $1 AND id = $2 LIMIT 1`,
+            [bizId, Math.abs(articleRefId)]
+          );
+          refNombre = aRows[0]?.nombre || null;
+        }
+
+        const { rows: itemRows } = await client.query(
+          `INSERT INTO receta_items
+             (receta_id, article_ref_id, cantidad, unidad, costo_unitario, notas,
+              observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
+              nombre_insumo_maxi, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+           RETURNING *`,
+          [
+            receta.id, articleRefId, cantidad, unidad, costoUnitario, notas,
+            observaciones, fotosUrls, merma, pedido, tipoCosto, orden, refNombre,
+          ]
+        );
+        savedItems.push({
+          ...itemRows[0],
+          article_ref_id: articleRefId,
+          supply_nombre: refNombre,
+          supply_medida: refMedida,
+          costo_total_item: Math.round(cantidad * costoUnitario * 10000) / 10000,
+        });
+        continue;
+      }
+
+      // ── Item-insumo (receta normal) ──
+      const supplyId = Number(item.supplyId);
+      if (!Number.isFinite(supplyId) || supplyId <= 0) continue;
+      const { rows: insumoCheck } = await client.query(
+        `SELECT id, nombre, unidad_med FROM insumos WHERE id = $1 LIMIT 1`,
+        [supplyId]
+      );
+      if (!insumoCheck.length) {
+        console.warn(`[saveReceta] insumo_id=${supplyId} no existe en tabla insumos, ignorando item`);
+        continue;
+      }
       const { rows: itemRows } = await client.query(
         `INSERT INTO receta_items
            (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
@@ -222,7 +259,6 @@ exports.saveReceta = async (req, res, next) => {
           observaciones, fotosUrls, merma, pedido, tipoCosto, orden,
         ]
       );
-
       savedItems.push({
         ...itemRows[0],
         supply_id: supplyId,
@@ -231,6 +267,16 @@ exports.saveReceta = async (req, res, next) => {
         costo_total_item: Math.round(cantidad * costoUnitario * 10000) / 10000,
       });
     }
+
+    // ── Marcar es_promo si la receta contiene items-artículo ──
+    const esPromo = items.some(it => {
+      const ref = Number(it.articleRefId);
+      return Number.isFinite(ref) && ref !== 0;
+    });
+    await client.query(
+      `UPDATE recetas SET es_promo = $1 WHERE id = $2`,
+      [esPromo, receta.id]
+    );
 
     // ── Actualizar costo en insumos elaborados ──
     // El precio del insumo elaborado es SIEMPRE el costo total de su receta.
