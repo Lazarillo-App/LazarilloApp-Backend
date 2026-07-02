@@ -145,9 +145,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
+    // porcionesNum = rendimiento del lote (se guarda como informativo, NO divide el costo)
+    const porcionesNum = Math.max(1, Number(porciones) || 1);
     // El precio del insumo elaborado es el costo total de su receta (rendimiento solo informativo)
     const costoXPorcion = costoTotal;
-
     // Si no viene porcentajeVenta, usar el global de insumos del negocio
     let porcentajeNum = Number(porcentajeVenta) || 0;
     if (!porcentajeNum) {
