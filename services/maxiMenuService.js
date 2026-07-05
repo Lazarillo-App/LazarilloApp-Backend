@@ -275,7 +275,21 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
          precio, costo, raw, cod_rua, cod_sua
        )
        VALUES ${values.join(', ')}
-       ON CONFLICT (business_id, articulo_id) DO NOTHING
+       ON CONFLICT (business_id, articulo_id) DO UPDATE SET
+         precio     = EXCLUDED.precio,
+         costo      = EXCLUDED.costo,
+         nombre     = EXCLUDED.nombre,
+         categoria  = EXCLUDED.categoria,
+         subrubro   = COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro),
+         updated_at = NOW()
+       WHERE maxi_articles.origen = 'maxi'
+         AND NOT EXISTS (
+           SELECT 1 FROM article_price_config apc
+            WHERE apc.business_id = maxi_articles.business_id
+              AND apc.scope = 'articulo'
+              AND apc.scope_id = maxi_articles.articulo_id::text
+              AND apc.precio_manual IS NOT NULL
+         )
        RETURNING articulo_id`,
       params
     );

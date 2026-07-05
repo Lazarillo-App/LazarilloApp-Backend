@@ -42,6 +42,7 @@ exports.getReceta = async (req, res, next) => {
          ri.notas, ri.observaciones, ri.fotos_urls,
          ri.merma, ri.pedido, ri.tipo_costo, ri.orden,
          ri.codigo_maxi_insumo, ri.nombre_insumo_maxi,
+         ri.article_ref_id,
          ri.updated_at
        FROM receta_items ri
        LEFT JOIN insumos i      ON i.id  = ri.insumo_id
