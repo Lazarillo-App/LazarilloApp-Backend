@@ -8,5 +8,5 @@ router.use(authRequired);
 router.post('/', ctrl.crearPromocion);
 // PUT /api/businesses/:businessId/promociones/:promoId
 router.put('/:promoId', ctrl.actualizarPromocion);
-
+router.delete('/:promoId', ctrl.eliminarPromocion);
 module.exports = router;

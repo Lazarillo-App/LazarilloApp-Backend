@@ -433,3 +433,74 @@ exports.actualizarPromocion = async (req, res, next) => {
     client.release();
   }
 };
+
+/**
+ * DELETE /api/businesses/:businessId/promociones/:promoId
+ * Desarma la promo por completo: receta, items, artículo-promo y la saca de la agrupación.
+ */
+exports.eliminarPromocion = async (req, res, next) => {
+  const bizId = Number(req.params.businessId);
+  const promoId = Number(req.params.promoId);
+  if (!Number.isFinite(bizId) || !Number.isFinite(promoId)) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const storageBizId = await resolveStorageBizId(bizId);
+
+    // 1. Borrar items + receta de la promo
+    await client.query(
+      `DELETE FROM receta_items WHERE receta_id IN (
+         SELECT id FROM recetas WHERE article_id = $1 AND business_id = $2 AND es_promo = TRUE
+       )`,
+      [promoId, storageBizId]
+    );
+    await client.query(
+      `DELETE FROM recetas WHERE article_id = $1 AND business_id = $2 AND es_promo = TRUE`,
+      [promoId, storageBizId]
+    );
+
+    // 2. Borrar el artículo-promo
+    await client.query(`DELETE FROM maxi_articles WHERE articulo_id = $1 AND business_id = $2`, [promoId, storageBizId]);
+    await client.query(`DELETE FROM app_articles WHERE id = $1 AND business_id = $2`, [promoId, storageBizId]);
+
+    // 3. Sacar el objetivo de price_config
+    await client.query(
+      `DELETE FROM article_price_config WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2`,
+      [storageBizId, String(promoId)]
+    );
+
+    // 4. Sacar el ID de la agrupación Promociones (app_articles_ids + articulos JSONB)
+    const { rows: agRows } = await client.query(
+      `SELECT id, articulos, app_articles_ids FROM agrupaciones
+        WHERE business_id = $1 AND nombre ILIKE 'Promociones' LIMIT 1`,
+      [storageBizId]
+    );
+    if (agRows.length) {
+      const ag = agRows[0];
+      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+        : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+      const arts = Array.isArray(ag.articulos) ? ag.articulos
+        : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+      const newAppIds = appIds.filter(id => Number(id) !== promoId);
+      const newArts = arts.filter(a => Number(a?.id ?? a?.articulo_id ?? a) !== promoId);
+      await client.query(
+        `UPDATE agrupaciones SET app_articles_ids = $1, articulos = $2, updated_at = NOW() WHERE id = $3`,
+        [JSON.stringify(newAppIds), JSON.stringify(newArts), ag.id]
+      );
+    }
+
+    await client.query('COMMIT');
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+    console.log(`[eliminarPromocion] Promo ${promoId} desarmada (biz ${bizId})`);
+    return res.json({ ok: true, deleted: promoId });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[eliminarPromocion]', e);
+    next(e);
+  } finally {
+    client.release();
+  }
+};
