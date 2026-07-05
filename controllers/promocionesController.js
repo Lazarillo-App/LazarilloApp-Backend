@@ -269,3 +269,167 @@ exports.crearPromocion = async (req, res, next) => {
     client.release();
   }
 };
+
+/**
+ * PUT /api/businesses/:businessId/promociones/:promoId
+ * Actualiza una promo existente: reemplaza items, recalcula costo,
+ * actualiza nombre/objetivo. El promoId es el id negativo del artículo-promo.
+ */
+exports.actualizarPromocion = async (req, res, next) => {
+  const bizId = Number(req.params.businessId);
+  const promoId = Number(req.params.promoId);
+  if (!Number.isFinite(bizId) || !Number.isFinite(promoId)) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+
+  const {
+    nombre: nombreManual,
+    componentes = [],
+    insumos = [],
+    porcentajeVenta = 0,
+  } = req.body || {};
+
+  const comps = (Array.isArray(componentes) ? componentes : [])
+    .map(c => ({ articleId: Number(c.articleId), cantidad: Number(c.cantidad) || 1, unidad: c.unidad || 'u' }))
+    .filter(c => Number.isFinite(c.articleId) && c.articleId !== 0);
+
+  if (comps.length < 1) {
+    return res.status(400).json({ ok: false, error: 'Se requiere al menos un artículo componente' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const storageBizId = await resolveStorageBizId(bizId);
+
+    // Verificar que la promo existe y es promo
+    const { rows: recExist } = await client.query(
+      `SELECT id FROM recetas
+        WHERE article_id = $1 AND business_id = $2 AND es_promo = TRUE AND active = TRUE
+        LIMIT 1`,
+      [promoId, storageBizId]
+    );
+    if (!recExist.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Promoción no encontrada' });
+    }
+    const recetaId = recExist[0].id;
+
+    // 1. Resolver info de cada componente
+    const compInfos = [];
+    for (const c of comps) {
+      const info = await resolveArticuloInfo(client, storageBizId, c.articleId);
+      if (!info) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ ok: false, error: `Artículo ${c.articleId} no encontrado` });
+      }
+      compInfos.push({ ...c, ...info });
+    }
+
+    // 2. Nombre
+    const nombrePromo = (nombreManual && nombreManual.trim())
+      || compInfos.map(ci => ci.nombre).join(' + ');
+    const rubroCategoria = compInfos[0].categoria || 'Promociones';
+    const rubroSubrubro = compInfos[0].subrubro || 'Promociones';
+
+    // 3. Costo total (componente: costo receta si existe, sino precio DB)
+    let costoTotal = 0;
+    for (const ci of compInfos) {
+      const costoComp = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
+      costoTotal += costoComp * ci.cantidad;
+    }
+    const insumosNorm = (Array.isArray(insumos) ? insumos : [])
+      .map(i => ({ insumoId: Number(i.insumoId), cantidad: Number(i.cantidad) || 0, unidad: i.unidad || 'u' }))
+      .filter(i => Number.isFinite(i.insumoId) && i.insumoId !== 0);
+    const insumoInfos = [];
+    for (const ins of insumosNorm) {
+      const { rows } = await client.query(
+        `SELECT id, nombre, unidad_med, precio_ref, codigo_maxi
+           FROM insumos WHERE id = $1 AND business_id = $2 LIMIT 1`,
+        [ins.insumoId, storageBizId]
+      );
+      if (rows.length) {
+        costoTotal += (Number(rows[0].precio_ref) || 0) * ins.cantidad;
+        insumoInfos.push({ ...ins, ...rows[0], costoUnitario: Number(rows[0].precio_ref) || 0 });
+      }
+    }
+
+    // 4. Reemplazar items: borrar los viejos, insertar los nuevos
+    await client.query(`DELETE FROM receta_items WHERE receta_id = $1`, [recetaId]);
+    let orden = 0;
+    for (const ci of compInfos) {
+      const costoUnit = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
+      await client.query(
+        `INSERT INTO receta_items
+           (receta_id, article_ref_id, cantidad, unidad, costo_unitario,
+            nombre_insumo_maxi, tipo_costo, merma, pedido, orden, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'total', TRUE, TRUE, $7, NOW(), NOW())`,
+        [recetaId, ci.articleId, ci.cantidad, ci.unidad,
+         Math.round(costoUnit * 10000) / 10000, ci.nombre, orden++]
+      );
+    }
+    for (const ii of insumoInfos) {
+      await client.query(
+        `INSERT INTO receta_items
+           (receta_id, insumo_id, cantidad, unidad, costo_unitario,
+            codigo_maxi_insumo, nombre_insumo_maxi, tipo_costo, merma, pedido, orden, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'total', TRUE, TRUE, $8, NOW(), NOW())`,
+        [recetaId, ii.insumoId, ii.cantidad, ii.unidad,
+         Math.round(ii.costoUnitario * 10000) / 10000,
+         ii.codigo_maxi || null, ii.nombre || null, orden++]
+      );
+    }
+
+    // 5. Actualizar la receta (nombre, objetivo, costo_total)
+    await client.query(
+      `UPDATE recetas SET nombre = $1, porcentaje_venta = $2, costo_total = $3, updated_at = NOW()
+        WHERE id = $4`,
+      [nombrePromo, Number(porcentajeVenta) || 0, Math.round(costoTotal * 10000) / 10000, recetaId]
+    );
+
+    // 6. Actualizar app_articles + maxi_articles (nombre, costo, rubro)
+    await client.query(
+      `UPDATE app_articles SET name = $1, rubro = $2, subrubro = $3, updated_at = NOW() WHERE id = $4 AND business_id = $5`,
+      [nombrePromo, rubroCategoria, rubroSubrubro, promoId, storageBizId]
+    );
+    await client.query(
+      `UPDATE maxi_articles SET nombre = $1, categoria = $2, subrubro = $3, costo = $4, updated_at = NOW()
+        WHERE articulo_id = $5 AND business_id = $6`,
+      [nombrePromo, rubroCategoria, rubroSubrubro, Math.round(costoTotal * 100) / 100, promoId, storageBizId]
+    );
+
+    // 7. Objetivo % en price_config
+    const pctPromo = Number(porcentajeVenta) || 0;
+    if (pctPromo > 0) {
+      await client.query(
+        `INSERT INTO article_price_config
+           (business_id, scope, scope_id, objetivo_pct, updated_at)
+         VALUES ($1, 'articulo', $2, $3, NOW())
+         ON CONFLICT (business_id, scope, scope_id) DO UPDATE SET
+           objetivo_pct = EXCLUDED.objetivo_pct, updated_at = NOW()`,
+        [storageBizId, String(promoId), pctPromo]
+      );
+    }
+
+    await client.query('COMMIT');
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+
+    console.log(`[actualizarPromocion] Promo id=${promoId} "${nombrePromo}" biz=${bizId} costo=${costoTotal.toFixed(2)}`);
+
+    return res.json({
+      ok: true,
+      promo: {
+        id: promoId, nombre: nombrePromo,
+        costoTotal: Math.round(costoTotal * 100) / 100,
+        recetaId,
+      },
+    });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[actualizarPromocion]', e);
+    next(e);
+  } finally {
+    client.release();
+  }
+};
