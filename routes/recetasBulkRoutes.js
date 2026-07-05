@@ -19,4 +19,6 @@ router.post('/bulk-add-insumo', ctrl.bulkAddInsumo);
 // GET /api/businesses/:businessId/recetas/promo-components
 router.get('/promo-components', ctrl.getPromoComponents);
 
+router.get('/promo-ids', ctrl.getPromoIds);
+
 module.exports = router;

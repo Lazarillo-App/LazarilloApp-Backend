@@ -352,3 +352,24 @@ exports.getPromoComponents = async (req, res, next) => {
     next(e);
   }
 };
+
+// GET /api/businesses/:businessId/recetas/promo-ids
+// Devuelve los IDs de artículos que SON promos (dueños de una receta es_promo=true).
+exports.getPromoIds = async (req, res, next) => {
+  const bizId = Number(req.params.businessId) || getBusinessId(req);
+  if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT r.article_id
+         FROM recetas r
+        WHERE r.business_id = $1 AND r.es_promo = TRUE AND r.active = TRUE
+          AND r.article_id IS NOT NULL`,
+      [bizId]
+    );
+    const ids = rows.map(r => Number(r.article_id)).filter(Number.isFinite);
+    return res.json({ ok: true, ids });
+  } catch (e) {
+    console.error('[getPromoIds]', e);
+    next(e);
+  }
+};
