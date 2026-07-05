@@ -112,7 +112,9 @@ exports.crearPromocion = async (req, res, next) => {
     // 4. Costo total de la promo = suma de (costo componente × cantidad) + insumos
     let costoTotal = 0;
     for (const ci of compInfos) {
-      costoTotal += (Number(ci.costo) || 0) * ci.cantidad;
+      // Costo del componente: su costo de receta si existe, sino su precio de DB (artículo sin receta)
+      const costoComp = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
+      costoTotal += costoComp * ci.cantidad;
     }
     // Insumos propios
     const insumosNorm = (Array.isArray(insumos) ? insumos : [])
