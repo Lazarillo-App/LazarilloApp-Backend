@@ -201,6 +201,19 @@ exports.crearPromocion = async (req, res, next) => {
       );
     }
 
+    // 9b. Persistir el objetivo % como objetivo individual del artículo-promo (pisa rubro/agrupación)
+    const pctPromo = Number(porcentajeVenta) || 0;
+    if (pctPromo > 0) {
+      await client.query(
+        `INSERT INTO article_price_config
+           (business_id, scope, scope_id, objetivo_pct, updated_at)
+         VALUES ($1, 'articulo', $2, $3, NOW())
+         ON CONFLICT (business_id, scope, scope_id) DO UPDATE SET
+           objetivo_pct = EXCLUDED.objetivo_pct, updated_at = NOW()`,
+        [storageBizId, String(newId), pctPromo]
+      );
+    }
+
     // 10. Meter el artículo-promo en la agrupación "Promociones" (crearla si no existe)
     let promoAgrupId;
     const { rows: agExist } = await client.query(
