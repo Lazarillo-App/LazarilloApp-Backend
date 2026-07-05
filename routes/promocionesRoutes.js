@@ -6,4 +6,7 @@ const { authRequired } = require('../middleware/authMiddleware');
 router.use(authRequired);
 // POST /api/businesses/:businessId/promociones
 router.post('/', ctrl.crearPromocion);
+// PUT /api/businesses/:businessId/promociones/:promoId
+router.put('/:promoId', ctrl.actualizarPromocion);
+
 module.exports = router;
