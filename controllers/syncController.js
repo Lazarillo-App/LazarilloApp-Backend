@@ -506,7 +506,7 @@ exports.listArticlesFromDB = async (req, res) => {
   }
 
   const { rows } = await pool.query(
-    `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw
+    `SELECT articulo_id AS id, nombre, categoria, subrubro, precio, costo, raw, origen
        FROM public.maxi_articles
       WHERE business_id = $1
       ORDER BY categoria, subrubro, nombre`,
