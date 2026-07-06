@@ -351,6 +351,8 @@ exports.getRecetasElaboradosMapa = async (req, res, next) => {
          r.costo_total,
          r.porciones,
          r.rendimiento_unidad,
+         r.rendimiento_peso,
+         r.unidad_peso,
          -- Usar porcentaje_venta guardado, o el global del negocio como fallback
          COALESCE(NULLIF(r.porcentaje_venta, 0), $2) AS porcentaje_venta,
          CASE WHEN r.porciones > 0 AND COALESCE(NULLIF(r.porcentaje_venta, 0), $2) > 0
@@ -374,6 +376,8 @@ exports.getRecetasElaboradosMapa = async (req, res, next) => {
         costoTotal: Number(r.costo_total),
         porciones: Number(r.porciones),
         rendimientoUnidad: r.rendimiento_unidad || 'porcion',
+        rendimientoPeso: r.rendimiento_peso != null ? Number(r.rendimiento_peso) : null,
+        unidadPeso: r.unidad_peso || null,
         precioSugerido: Number(r.precio_sugerido),
         porcentajeVenta: Number(r.porcentaje_venta),
       };
