@@ -429,6 +429,28 @@ exports.crearManual = async (req, res) => {
     const skuProvisorio = (b.skuExterno && String(b.skuExterno).trim())
       || `LAZ-${businessId}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
+    // Si el usuario puso un SKU externo, verificar que no exista ya ese código.
+    // El codigo_maxi es la llave de fusión con MaxiRest: si ya existe, no se puede
+    // duplicar — el usuario debe editar el insumo existente. La fusión con Maxi
+    // ocurre automáticamente en el sync cuando llega ese código.
+    if (b.skuExterno && String(b.skuExterno).trim()) {
+      const codigo = String(b.skuExterno).trim();
+      const { rows: dupCodigo } = await pool.query(
+        `SELECT id, nombre, origen FROM insumos
+          WHERE business_id = $1 AND codigo_maxi = $2
+          LIMIT 1`,
+        [businessId, codigo]
+      );
+      if (dupCodigo.length) {
+        const ex = dupCodigo[0];
+        return res.status(409).json({
+          ok: false,
+          error: `Ya existe un insumo con el código ${codigo}: "${ex.nombre}"${ex.origen === 'maxi' ? ' (sincronizado de Maxi)' : ''}. Editá ese insumo en lugar de crear uno nuevo.`,
+          existing: { id: ex.id, codigo_maxi: codigo, origen: ex.origen },
+        });
+      }
+    }
+
     const { rows: existing } = await pool.query(
       `SELECT id, codigo_maxi, origen FROM insumos
         WHERE business_id = $1
