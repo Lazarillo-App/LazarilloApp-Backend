@@ -468,6 +468,17 @@ exports.crearManual = async (req, res) => {
       ]
     );
 
+    // Persistir agrupación heredada del padrino (o elegida manualmente)
+    const agrupacionId = Number(b.agrupacionId) || null;
+    if (agrupacionId) {
+      await pool.query(
+        `INSERT INTO insumo_group_items (group_id, insumo_id)
+         VALUES ($1, $2)
+         ON CONFLICT (group_id, insumo_id) DO NOTHING`,
+        [agrupacionId, rows[0].id]
+      );
+    }
+
     res.status(201).json({ ok: true, data: rows[0], sku: skuProvisorio });
   } catch (e) {
     console.error('crearManual error:', e);
@@ -1823,12 +1834,19 @@ exports.searchPadrinoInsumo = async (req, res) => {
     if (q.length < 2) return res.json({ ok: true, candidatos: [] });
 
     const { rows } = await pool.query(
-      `SELECT i.id, i.nombre, i.rubro, i.unidad_med, i.precio_ref
+      `SELECT DISTINCT ON (i.id)
+              i.id, i.nombre, i.rubro, i.unidad_med, i.precio_ref,
+              i.codigo_maxi AS sku,
+              g.id     AS agrupacion_id,
+              g.nombre AS agrupacion_nombre
          FROM insumos i
+         LEFT JOIN insumo_group_items gi ON gi.insumo_id = i.id
+         LEFT JOIN insumo_groups g       ON g.id = gi.group_id
         WHERE i.business_id = $1
           AND i.estado = 'activo'
           AND i.nombre ILIKE $2
         ORDER BY
+          i.id,
           CASE WHEN i.nombre ILIKE $3 THEN 0 ELSE 1 END,
           LENGTH(i.nombre), i.nombre
         LIMIT 15`,
@@ -1840,6 +1858,10 @@ exports.searchPadrinoInsumo = async (req, res) => {
       rubro: r.rubro || null,
       unidad_med: r.unidad_med || 'u',
       precio_ref: Number(r.precio_ref) || 0,
+      precio: Number(r.precio_ref) || 0,          // el front lee padrino.precio
+      sku: r.sku || null,
+      agrupacion_id: r.agrupacion_id ? Number(r.agrupacion_id) : null,
+      agrupacion_nombre: r.agrupacion_nombre || null,
     }));
     return res.json({ ok: true, candidatos });
   } catch (e) {
