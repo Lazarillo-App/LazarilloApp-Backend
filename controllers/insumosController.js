@@ -467,30 +467,24 @@ exports.crearManual = async (req, res) => {
         `manual-abm-${new Date().toISOString().slice(0, 10)}`,
       ]
     );
-    const { rows } = await pool.query(
-      `SELECT DISTINCT ON (i.id)
-              i.id, i.nombre, i.unidad_med, i.precio_ref,
-              i.codigo_maxi AS sku,
-              COALESCE(ir.nombre, i.rubro) AS rubro,
-              g.id     AS agrupacion_id,
-              g.nombre AS agrupacion_nombre
-         FROM insumos i
-         LEFT JOIN insumo_rubros ir
-                ON ir.business_id = i.business_id
-               AND ir.codigo::text = i.rubro
-         LEFT JOIN insumo_group_items gi ON gi.insumo_id = i.id
-         LEFT JOIN insumo_groups g       ON g.id = gi.group_id
-        WHERE i.business_id = $1
-          AND i.estado = 'activo'
-          AND i.nombre ILIKE $2
-        ORDER BY
-          i.id,
-          CASE WHEN i.nombre ILIKE $3 THEN 0 ELSE 1 END,
-          LENGTH(i.nombre), i.nombre
-        LIMIT 15`,
-      [bizId, `%${q}%`, `${q}%`]
-    );
+
+    // Persistir agrupación heredada del padrino (o elegida manualmente)
+    const agrupacionId = Number(b.agrupacionId) || null;
+    if (agrupacionId) {
+      await pool.query(
+        `INSERT INTO insumo_group_items (group_id, insumo_id)
+         VALUES ($1, $2)
+         ON CONFLICT (group_id, insumo_id) DO NOTHING`,
+        [agrupacionId, rows[0].id]
+      );
+    }
+
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+
+    res.status(201).json({ ok: true, data: rows[0], sku: skuProvisorio });
   } catch (e) {
+    
     console.error('crearManual error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
