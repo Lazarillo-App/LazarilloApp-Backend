@@ -75,6 +75,7 @@ router.post(
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);
+router.get('/search-padrino', ctrl.searchPadrinoInsumo);
 router.put('/:id', ctrl.actualizar);
 router.delete('/:id', ctrl.eliminar);
 

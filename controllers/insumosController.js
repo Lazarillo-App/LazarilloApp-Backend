@@ -425,7 +425,9 @@ exports.crearManual = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
     }
 
-    const skuProvisorio = `LAZ-${businessId}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    // SKU externo del PDV si viene; sino, provisorio autogenerado
+    const skuProvisorio = (b.skuExterno && String(b.skuExterno).trim())
+      || `LAZ-${businessId}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
     const { rows: existing } = await pool.query(
       `SELECT id, codigo_maxi, origen FROM insumos
@@ -1808,5 +1810,40 @@ exports.renombrarRubro = async (req, res, next) => {
   } catch (e) {
     console.error('[renombrarRubroInsumo]', e.message);
     next(e);
+  }
+};
+
+// GET /businesses/:businessId/insumos/search-padrino?q=texto
+// Busca insumos candidatos para usar como referencia (padrino) en el alta manual.
+exports.searchPadrinoInsumo = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const q = String(req.query.q || '').trim();
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (q.length < 2) return res.json({ ok: true, candidatos: [] });
+
+    const { rows } = await pool.query(
+      `SELECT i.id, i.nombre, i.rubro, i.unidad_med, i.precio_ref
+         FROM insumos i
+        WHERE i.business_id = $1
+          AND i.estado = 'activo'
+          AND i.nombre ILIKE $2
+        ORDER BY
+          CASE WHEN i.nombre ILIKE $3 THEN 0 ELSE 1 END,
+          LENGTH(i.nombre), i.nombre
+        LIMIT 15`,
+      [bizId, `%${q}%`, `${q}%`]
+    );
+    const candidatos = rows.map(r => ({
+      id: Number(r.id),
+      nombre: r.nombre,
+      rubro: r.rubro || null,
+      unidad_med: r.unidad_med || 'u',
+      precio_ref: Number(r.precio_ref) || 0,
+    }));
+    return res.json({ ok: true, candidatos });
+  } catch (e) {
+    console.error('searchPadrinoInsumo error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
