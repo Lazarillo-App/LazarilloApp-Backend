@@ -531,6 +531,30 @@ exports.eliminarArticulo = async (req, res, next) => {
       [storageBizId, articleId]
     );
 
+    // 🆕 Quitar el ID de las agrupaciones (sino queda huérfano y reaparece al refetch).
+    // articulos: jsonb array de objetos {id,...} → filtrar por elem->>'id'
+    // app_articles_ids: jsonb array de números → filtrar el valor
+    await client.query(
+      `UPDATE agrupaciones
+          SET articulos = COALESCE((
+                SELECT jsonb_agg(elem)
+                  FROM jsonb_array_elements(articulos) elem
+                 WHERE (elem->>'id')::int IS DISTINCT FROM $2
+              ), '[]'::jsonb),
+              app_articles_ids = COALESCE((
+                SELECT jsonb_agg(val)
+                  FROM jsonb_array_elements(app_articles_ids) val
+                 WHERE (val)::text::int IS DISTINCT FROM $2
+              ), '[]'::jsonb),
+              updated_at = NOW()
+        WHERE business_id = $1
+          AND (
+            articulos @> $3::jsonb
+            OR app_articles_ids @> $4::jsonb
+          )`,
+      [storageBizId, articleId, JSON.stringify([{ id: articleId }]), JSON.stringify([articleId])]
+    );
+
     await client.query('COMMIT');
 
     invalidateCacheForBiz(bizId);
