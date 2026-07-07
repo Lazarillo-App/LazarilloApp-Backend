@@ -468,6 +468,23 @@ exports.crearManual = async (req, res) => {
       });
     }
 
+    // Resolver el rubro: si viene como NOMBRE, convertirlo a CÓDIGO para
+    // que quede consistente con los insumos de Maxi (que guardan código).
+    // Así el JOIN ir.codigo::text = i.rubro los agrupa en el mismo rubro.
+    let rubroFinal = b.rubro ?? null;
+    if (rubroFinal) {
+      const { rows: rubroRows } = await pool.query(
+        `SELECT codigo FROM insumo_rubros
+          WHERE business_id = $1 AND lower(trim(nombre)) = lower(trim($2))
+          LIMIT 1`,
+        [businessId, rubroFinal]
+      );
+      if (rubroRows.length) {
+        rubroFinal = String(rubroRows[0].codigo);   // guardar el código
+      }
+      // Si no existe en insumo_rubros (rubro nuevo/manual), se guarda el nombre tal cual
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO insumos
          (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
@@ -481,7 +498,7 @@ exports.crearManual = async (req, res) => {
         b.nombre.trim(),
         b.unidadMed ?? null,
         num(b.precioRef),
-        b.rubro ?? null,
+        rubroFinal,        // ← antes era: b.rubro ?? null
         b.origen ?? 'manual',
         b.es_elaborado ?? false,
         b.es_elaborado !== undefined,
@@ -525,7 +542,6 @@ exports.crearManual = async (req, res) => {
 
     res.status(201).json({ ok: true, data: rows[0], sku: skuFinal });
   } catch (e) {
-    
     console.error('crearManual error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
