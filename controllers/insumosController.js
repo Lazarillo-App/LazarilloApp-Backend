@@ -450,27 +450,11 @@ exports.crearManual = async (req, res) => {
       }
     }
 
-    const { rows: existing } = await pool.query(
-      `SELECT id, codigo_maxi, origen FROM insumos
-        WHERE business_id = $1
-          AND lower(trim(nombre)) = lower(trim($2))
-          AND ($3::text IS NULL OR lower(trim(rubro)) = lower(trim($3)))
-        LIMIT 1`,
-      [businessId, b.nombre.trim(), b.rubro ?? null]
-    );
-
-    if (existing.length) {
-      const ex = existing[0];
-      return res.status(409).json({
-        ok: false,
-        error: `Ya existe un insumo con ese nombre${b.rubro ? ' y rubro' : ''}.`,
-        existing: { id: ex.id, codigo_maxi: ex.codigo_maxi, origen: ex.origen },
-      });
-    }
-
     // Resolver el rubro: si viene como NOMBRE, convertirlo a CÓDIGO para
     // que quede consistente con los insumos de Maxi (que guardan código).
     // Así el JOIN ir.codigo::text = i.rubro los agrupa en el mismo rubro.
+    // Se resuelve ANTES del chequeo de duplicados para que la comparación
+    // por rubro también use el código, igual que los insumos ya existentes.
     let rubroFinal = b.rubro ?? null;
     if (rubroFinal) {
       const { rows: rubroRows } = await pool.query(
@@ -483,6 +467,24 @@ exports.crearManual = async (req, res) => {
         rubroFinal = String(rubroRows[0].codigo);   // guardar el código
       }
       // Si no existe en insumo_rubros (rubro nuevo/manual), se guarda el nombre tal cual
+    }
+
+    const { rows: existing } = await pool.query(
+      `SELECT id, codigo_maxi, origen FROM insumos
+        WHERE business_id = $1
+          AND lower(trim(nombre)) = lower(trim($2))
+          AND ($3::text IS NULL OR lower(trim(rubro)) = lower(trim($3)))
+        LIMIT 1`,
+      [businessId, b.nombre.trim(), rubroFinal]
+    );
+
+    if (existing.length) {
+      const ex = existing[0];
+      return res.status(409).json({
+        ok: false,
+        error: `Ya existe un insumo con ese nombre${b.rubro ? ' y rubro' : ''}.`,
+        existing: { id: ex.id, codigo_maxi: ex.codigo_maxi, origen: ex.origen },
+      });
     }
 
     const { rows } = await pool.query(
@@ -498,7 +500,7 @@ exports.crearManual = async (req, res) => {
         b.nombre.trim(),
         b.unidadMed ?? null,
         num(b.precioRef),
-        rubroFinal,        // ← antes era: b.rubro ?? null
+        rubroFinal,
         b.origen ?? 'manual',
         b.es_elaborado ?? false,
         b.es_elaborado !== undefined,
