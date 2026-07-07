@@ -73,7 +73,7 @@ exports.getAccess = async (req, res, next) => {
 
     // Orgs donde tengo assignment directo (no contar las que llegan por owner_id de un biz)
     const { rows: orgRows } = await pool.query(
-      `SELECT o.id, o.name, o.display_name, ua.role, ua.alias
+      `SELECT o.id, o.name, o.display_name, ua.role, COALESCE(ua.self_alias, ua.alias) AS alias
          FROM user_assignments ua
          JOIN organizations o ON o.id = ua.scope_id
         WHERE ua.user_id = $1

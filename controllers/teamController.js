@@ -84,7 +84,7 @@ exports.listMembers = async (req, res, next) => {
             const { rows } = await pool.query(
                 `
         SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
-               ua.role, ua.alias, ua.granted_by_user_id,
+               ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id,
                ua.created_at, ua.updated_at,
                u.email, u.name, u.account_status,
                u.invitation_expires_at, u.invitation_accepted_at,
@@ -122,7 +122,7 @@ exports.listMembers = async (req, res, next) => {
            AND ua.role IN ('owner', 'admin')
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
-             ua.role, ua.alias, ua.granted_by_user_id,
+             ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id,
              ua.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -171,7 +171,7 @@ exports.listPendingInvitations = async (req, res, next) => {
 
         const { rows } = await pool.query(
             `
-      SELECT ua.id AS assignment_id, ua.role, ua.alias, ua.created_at,
+      SELECT ua.id AS assignment_id, ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.created_at,
              u.id AS user_id, u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
         FROM user_assignments ua
@@ -482,8 +482,12 @@ exports.updateAssignment = async (req, res, next) => {
         const sets = [];
         const params = [];
         let i = 1;
+        const esPropio = Number(a.user_id) === Number(uid);
         if (alias != null) {
-            sets.push(`alias = $${i++}`);
+            // Si el usuario edita SU PROPIO alias → self_alias (permanente, no lo pisa el owner).
+            // Si un manager edita a OTRO miembro → alias (el sugerido por el owner).
+            const col = esPropio ? 'self_alias' : 'alias';
+            sets.push(`${col} = $${i++}`);
             params.push(String(alias).trim() || null);
         }
         if (role != null) {

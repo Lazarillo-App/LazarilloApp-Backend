@@ -114,7 +114,7 @@ async function listAccessibleBusinesses(userId) {
       ua.scope_id AS business_id,
       ua.role,
       'business'::text AS source,
-      ua.alias,
+      COALESCE(ua.self_alias, ua.alias) AS alias,
       ua.id AS assignment_id
       FROM user_assignments ua
      WHERE ua.user_id = $1
@@ -128,7 +128,7 @@ async function listAccessibleBusinesses(userId) {
       b.id AS business_id,
       ua.role,
       'organization'::text AS source,
-      ua.alias,
+      COALESCE(ua.self_alias, ua.alias) AS alias,
       ua.id AS assignment_id
       FROM user_assignments ua
       JOIN app_businesses b ON b.organization_id = ua.scope_id
