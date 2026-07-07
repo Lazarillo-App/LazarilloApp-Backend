@@ -76,6 +76,7 @@ router.post(
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);
 router.get('/search-padrino', ctrl.searchPadrinoInsumo);
+router.delete('/:id/manual', ctrl.eliminarManual);
 router.put('/:id', ctrl.actualizar);
 router.delete('/:id', ctrl.eliminar);
 

@@ -1936,3 +1936,36 @@ exports.searchPadrinoInsumo = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// DELETE /insumos/:id/manual — borrado REAL, solo para insumos origen='manual'
+exports.eliminarManual = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    }
+    // Verificar que sea manual antes de borrar
+    const { rows } = await pool.query(
+      `SELECT origen FROM insumos WHERE id = $1 AND business_id = $2`,
+      [id, businessId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    if (rows[0].origen !== 'manual') {
+      return res.status(400).json({ ok: false, error: 'Solo se pueden eliminar insumos creados manualmente' });
+    }
+    // Borrado real. insumo_group_items, receta_items, etc. se limpian por FK CASCADE/SET NULL
+    await pool.query(
+      `DELETE FROM insumos WHERE id = $1 AND business_id = $2`,
+      [id, businessId]
+    );
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+    return res.json({ ok: true, deleted: Number(id) });
+  } catch (e) {
+    console.error('eliminarManual error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
