@@ -490,10 +490,18 @@ exports.crearManual = async (req, res) => {
       ]
     );
 
-    // Si no vino SKU externo, generar provisorio L{id} y setearlo
+    // Si no vino SKU externo, generar correlativo L1, L2, L3... por negocio
     let skuFinal = skuExterno;
     if (!skuExterno) {
-      skuFinal = `L${rows[0].id}`;
+      const { rows: seqRows } = await pool.query(
+        `SELECT codigo_maxi FROM insumos
+          WHERE business_id = $1 AND codigo_maxi ~ '^L[0-9]+$'
+          ORDER BY (substring(codigo_maxi from 2))::int DESC
+          LIMIT 1`,
+        [businessId]
+      );
+      const ultimo = seqRows[0]?.codigo_maxi ? parseInt(seqRows[0].codigo_maxi.slice(1), 10) : 0;
+      skuFinal = `L${ultimo + 1}`;
       await pool.query(
         `UPDATE insumos SET codigo_maxi = $1 WHERE id = $2`,
         [skuFinal, rows[0].id]
