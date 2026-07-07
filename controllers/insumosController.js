@@ -425,9 +425,8 @@ exports.crearManual = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Nombre requerido' });
     }
 
-    // SKU externo del PDV si viene; sino, provisorio autogenerado
-    const skuProvisorio = (b.skuExterno && String(b.skuExterno).trim())
-      || `LAZ-${businessId}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    // SKU externo del PDV si viene; sino queda null y se genera provisorio post-insert
+    const skuExterno = (b.skuExterno && String(b.skuExterno).trim()) || null;
 
     // Si el usuario puso un SKU externo, verificar que no exista ya ese código.
     // El codigo_maxi es la llave de fusión con MaxiRest: si ya existe, no se puede
@@ -474,11 +473,11 @@ exports.crearManual = async (req, res) => {
          (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro,
           origen, estado, es_elaborado, es_elaborado_manual,
           sin_equivalencia, upload_batch_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'activo',$8,$9,TRUE,$10)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'activo',$8,$9,$10,$11)
        RETURNING *`,
       [
         businessId,
-        skuProvisorio,
+        skuExterno,
         b.nombre.trim(),
         b.unidadMed ?? null,
         num(b.precioRef),
@@ -486,9 +485,21 @@ exports.crearManual = async (req, res) => {
         b.origen ?? 'manual',
         b.es_elaborado ?? false,
         b.es_elaborado !== undefined,
+        !skuExterno,
         `manual-abm-${new Date().toISOString().slice(0, 10)}`,
       ]
     );
+
+    // Si no vino SKU externo, generar provisorio L{id} y setearlo
+    let skuFinal = skuExterno;
+    if (!skuExterno) {
+      skuFinal = `L${rows[0].id}`;
+      await pool.query(
+        `UPDATE insumos SET codigo_maxi = $1 WHERE id = $2`,
+        [skuFinal, rows[0].id]
+      );
+      rows[0].codigo_maxi = skuFinal;
+    }
 
     // Persistir agrupación heredada del padrino (o elegida manualmente)
     const agrupacionId = Number(b.agrupacionId) || null;
@@ -504,7 +515,7 @@ exports.crearManual = async (req, res) => {
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(businessId);
 
-    res.status(201).json({ ok: true, data: rows[0], sku: skuProvisorio });
+    res.status(201).json({ ok: true, data: rows[0], sku: skuFinal });
   } catch (e) {
     
     console.error('crearManual error:', e);
