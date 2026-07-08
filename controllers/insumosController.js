@@ -1969,3 +1969,126 @@ exports.eliminarManual = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// ===================== EQUIVALENCIAS =====================
+// Verifica que el insumo pertenezca al negocio activo
+async function assertInsumoBiz(insumoId, bizId) {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM insumos WHERE id = $1 AND business_id = $2`,
+    [insumoId, bizId]
+  );
+  return rows.length > 0;
+}
+
+// GET /insumos/:id/equivalencias
+exports.equivalencias_list = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const { rows } = await pool.query(
+      `SELECT id, insumo_id, nombre, contenido, unidad, created_at, updated_at
+         FROM insumo_equivalencias
+        WHERE insumo_id = $1
+        ORDER BY nombre ASC`,
+      [insumoId]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    console.error('equivalencias_list error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// POST /insumos/:id/equivalencias
+exports.equivalencias_create = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const { nombre, contenido, unidad } = req.body || {};
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
+    if (!(Number(contenido) > 0)) return res.status(400).json({ ok: false, error: 'Contenido debe ser mayor a 0' });
+    if (!unidad?.trim()) return res.status(400).json({ ok: false, error: 'Unidad requerida' });
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO insumo_equivalencias (insumo_id, nombre, contenido, unidad)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, insumo_id, nombre, contenido, unidad, created_at, updated_at`,
+      [insumoId, nombre.trim(), Number(contenido), unidad.trim()]
+    );
+    return res.status(201).json({ ok: true, data: rows[0] });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ ok: false, error: 'Ya existe una equivalencia con ese nombre' });
+    console.error('equivalencias_create error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// PUT /insumos/:id/equivalencias/:eqId
+exports.equivalencias_update = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const eqId = Number(req.params.eqId);
+    const { nombre, contenido, unidad } = req.body || {};
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(eqId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const sets = [];
+    const vals = [];
+    if (nombre !== undefined) { vals.push(nombre.trim()); sets.push(`nombre = $${vals.length}`); }
+    if (contenido !== undefined) { vals.push(Number(contenido)); sets.push(`contenido = $${vals.length}`); }
+    if (unidad !== undefined) { vals.push(unidad.trim()); sets.push(`unidad = $${vals.length}`); }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(eqId, insumoId);
+    const { rows } = await pool.query(
+      `UPDATE insumo_equivalencias SET ${sets.join(', ')}
+        WHERE id = $${vals.length - 1} AND insumo_id = $${vals.length}
+        RETURNING id, insumo_id, nombre, contenido, unidad, created_at, updated_at`,
+      vals
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'Equivalencia no encontrada' });
+    return res.json({ ok: true, data: rows[0] });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ ok: false, error: 'Ya existe una equivalencia con ese nombre' });
+    console.error('equivalencias_update error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// DELETE /insumos/:id/equivalencias/:eqId
+exports.equivalencias_remove = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const eqId = Number(req.params.eqId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(eqId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const { rowCount } = await pool.query(
+      `DELETE FROM insumo_equivalencias WHERE id = $1 AND insumo_id = $2`,
+      [eqId, insumoId]
+    );
+    if (!rowCount) return res.status(404).json({ ok: false, error: 'Equivalencia no encontrada' });
+    return res.json({ ok: true, deleted: eqId });
+  } catch (e) {
+    console.error('equivalencias_remove error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};

@@ -72,6 +72,12 @@ router.post(
   }
 );
 
+/* ================== EQUIVALENCIAS ================== */
+router.get('/:id/equivalencias', ctrl.equivalencias_list);
+router.post('/:id/equivalencias', ctrl.equivalencias_create);
+router.put('/:id/equivalencias/:eqId', ctrl.equivalencias_update);
+router.delete('/:id/equivalencias/:eqId', ctrl.equivalencias_remove);
+
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);
