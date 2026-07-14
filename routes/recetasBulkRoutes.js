@@ -16,6 +16,9 @@ router.delete('/bulk', ctrl.bulkDelete);
 // POST /api/businesses/:businessId/recetas/bulk-add-insumo
 router.post('/bulk-add-insumo', ctrl.bulkAddInsumo);
 
+// POST /api/businesses/:businessId/recetas/insumos-usados
+router.post('/insumos-usados', ctrl.insumosUsadosEnBloque);
+
 // GET /api/businesses/:businessId/recetas/promo-components
 router.get('/promo-components', ctrl.getPromoComponents);
 

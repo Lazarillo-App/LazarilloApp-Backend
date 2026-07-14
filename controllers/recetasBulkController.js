@@ -327,6 +327,43 @@ exports.bulkAddInsumo = async (req, res, next) => {
 }
 
 /**
+ * POST /api/businesses/:businessId/recetas/insumos-usados
+ * Body: { articleIds: number[] }
+ * Devuelve los insumos ya presentes en las recetas de esos artículos,
+ * con en_cuantos (en cuántos aparece) y total (tamaño del bloque).
+ */
+exports.insumosUsadosEnBloque = async (req, res, next) => {
+  const bizId = Number(req.params.businessId) || getBusinessId(req);
+  if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
+  const articleIds = Array.isArray(req.body?.articleIds)
+    ? req.body.articleIds.map(Number).filter(Number.isFinite)
+    : [];
+  if (!articleIds.length) return res.json({ ok: true, data: [], total: 0 });
+  try {
+    const { rows } = await pool.query(
+      `SELECT ri.insumo_id,
+              i.nombre,
+              i.unidad_med,
+              i.precio_ref,
+              COUNT(DISTINCT r.article_id)::int AS en_cuantos
+         FROM recetas r
+         JOIN receta_items ri ON ri.receta_id = r.id
+         JOIN insumos i ON i.id = ri.insumo_id
+        WHERE r.business_id = $1
+          AND r.article_id = ANY($2::int[])
+          AND ri.insumo_id IS NOT NULL
+        GROUP BY ri.insumo_id, i.nombre, i.unidad_med, i.precio_ref
+        ORDER BY en_cuantos DESC, i.nombre ASC`,
+      [bizId, articleIds]
+    );
+    return res.json({ ok: true, data: rows, total: articleIds.length });
+  } catch (e) {
+    console.error('[insumosUsadosEnBloque]', e);
+    next(e);
+  }
+};
+
+/**
  * GET /api/businesses/:businessId/recetas/promo-components
  * Devuelve los article_ref_id que son componentes de alguna promo activa.
  * Estos artículos NO deben mostrarse como filas propias (están dentro de la promo).
