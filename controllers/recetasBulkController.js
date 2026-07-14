@@ -251,25 +251,33 @@ exports.bulkAddInsumo = async (req, res, next) => {
     let agregados = 0, salteados = 0, recetasCreadas = 0;
 
     for (const artId of ids) {
-      // Receta activa del artículo
+      // Buscar receta del artículo SIN filtrar por active (el unique es solo por article+business)
       const { rows: recRows } = await client.query(
-        `SELECT id FROM recetas
-          WHERE article_id = $1 AND business_id = $2 AND active = TRUE
+        `SELECT id, active FROM recetas
+          WHERE article_id = $1 AND business_id = $2
           LIMIT 1`,
         [artId, bizId]
       );
-
       let recetaId;
       if (recRows.length) {
         recetaId = recRows[0].id;
-        // ¿Ya tiene el insumo?
-        const { rows: existRows } = await client.query(
-          `SELECT 1 FROM receta_items WHERE receta_id = $1 AND insumo_id = $2 LIMIT 1`,
-          [recetaId, insId]
-        );
-        if (existRows.length) { salteados++; continue; }
+        // Si estaba inactiva, reactivarla (equivale a "recrear" sin violar el unique)
+        if (recRows[0].active !== true) {
+          await client.query(
+            `UPDATE recetas SET active = TRUE, origen = 'bulk', updated_at = NOW() WHERE id = $1`,
+            [recetaId]
+          );
+          recetasCreadas++;
+        } else {
+          // Ya activa: ¿ya tiene el insumo?
+          const { rows: existRows } = await client.query(
+            `SELECT 1 FROM receta_items WHERE receta_id = $1 AND insumo_id = $2 LIMIT 1`,
+            [recetaId, insId]
+          );
+          if (existRows.length) { salteados++; continue; }
+        }
       } else {
-        // Crear receta mínima
+        // No existe ninguna receta → crear
         const newRec = await client.query(
           `INSERT INTO recetas
              (article_id, business_id, nombre, porciones, porcentaje_venta,
