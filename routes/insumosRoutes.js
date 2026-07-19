@@ -72,6 +72,10 @@ router.post(
   }
 );
 
+/* ================== DESPERDICIO ================== */
+
+router.put('/:id/desperdicio-override', ctrl.setDesperdicioOverride);
+
 /* ================== MERMAS ================== */
 
 router.get('/:id/mermas', ctrl.mermas_list);

@@ -2227,3 +2227,30 @@ exports.mermas_remove = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// PUT /insumos/:id/desperdicio-override
+// Body: { pct: number | null }  (null = usar el global de config)
+exports.setDesperdicioOverride = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const { pct } = req.body || {};
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const val = pct == null || pct === '' ? null : Number(pct);
+    if (val != null && (!Number.isFinite(val) || val < 0)) {
+      return res.status(400).json({ ok: false, error: 'Porcentaje inválido' });
+    }
+    await pool.query(
+      `UPDATE insumos SET desperdicio_pct_override = $1, updated_at = NOW() WHERE id = $2 AND business_id = $3`,
+      [val, insumoId, bizId]
+    );
+    return res.json({ ok: true, desperdicio_pct_override: val });
+  } catch (e) {
+    console.error('setDesperdicioOverride error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
