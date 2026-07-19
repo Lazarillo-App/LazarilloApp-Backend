@@ -220,9 +220,10 @@ exports.update = async (req, res) => {
     'articulos_costo_ideal',
     'insumos_costo_ideal',
     'compras_alerta_semanas',
-    'ventas_alerta_dias',      // ← también faltaba esta
-    'redondeo_precios',        // ← agregar
-    'redondeo_mostrar_modal',  // ← agregar
+    'ventas_alerta_dias',      
+    'redondeo_precios',        
+    'redondeo_mostrar_modal',  
+    'desperdicio_global_pct',   // ← merma global (%)
   ];
   const configPatch = {};
   for (const key of CONFIG_KEYS) {
