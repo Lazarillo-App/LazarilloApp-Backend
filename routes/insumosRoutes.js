@@ -72,6 +72,13 @@ router.post(
   }
 );
 
+/* ================== MERMAS ================== */
+
+router.get('/:id/mermas', ctrl.mermas_list);
+router.post('/:id/mermas', ctrl.mermas_create);
+router.put('/:id/mermas/:mermaId', ctrl.mermas_update);
+router.delete('/:id/mermas/:mermaId', ctrl.mermas_remove);
+
 /* ================== EQUIVALENCIAS ================== */
 router.get('/:id/equivalencias', ctrl.equivalencias_list);
 router.post('/:id/equivalencias', ctrl.equivalencias_create);

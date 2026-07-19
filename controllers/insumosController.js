@@ -2092,3 +2092,138 @@ exports.equivalencias_remove = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// ===================== MERMAS =====================
+// GET /insumos/:id/mermas
+exports.mermas_list = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const { rows } = await pool.query(
+      `SELECT id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at
+         FROM insumo_mermas
+        WHERE insumo_id = $1
+        ORDER BY es_default DESC, nombre ASC`,
+      [insumoId]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    console.error('mermas_list error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// POST /insumos/:id/mermas
+exports.mermas_create = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const { nombre, peso_inicial, peso_final, es_default } = req.body || {};
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!nombre?.trim()) return res.status(400).json({ ok: false, error: 'Nombre requerido' });
+    if (!(Number(peso_inicial) > 0) || !(Number(peso_final) > 0)) {
+      return res.status(400).json({ ok: false, error: 'Pesos deben ser mayores a 0' });
+    }
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    await client.query('BEGIN');
+    // Si esta merma es default, desmarcar las otras
+    if (es_default === true) {
+      await client.query(`UPDATE insumo_mermas SET es_default = FALSE WHERE insumo_id = $1`, [insumoId]);
+    }
+    const { rows } = await client.query(
+      `INSERT INTO insumo_mermas (insumo_id, nombre, peso_inicial, peso_final, es_default)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at`,
+      [insumoId, nombre.trim(), Number(peso_inicial), Number(peso_final), es_default === true]
+    );
+    await client.query('COMMIT');
+    return res.status(201).json({ ok: true, data: rows[0] });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    if (e.code === '23505') return res.status(409).json({ ok: false, error: 'Ya existe una merma con ese nombre' });
+    console.error('mermas_create error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+// PUT /insumos/:id/mermas/:mermaId
+exports.mermas_update = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const mermaId = Number(req.params.mermaId);
+    const { nombre, peso_inicial, peso_final, es_default } = req.body || {};
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    await client.query('BEGIN');
+    if (es_default === true) {
+      await client.query(`UPDATE insumo_mermas SET es_default = FALSE WHERE insumo_id = $1`, [insumoId]);
+    }
+    const sets = [];
+    const vals = [];
+    if (nombre !== undefined) { vals.push(nombre.trim()); sets.push(`nombre = $${vals.length}`); }
+    if (peso_inicial !== undefined) { vals.push(Number(peso_inicial)); sets.push(`peso_inicial = $${vals.length}`); }
+    if (peso_final !== undefined) { vals.push(Number(peso_final)); sets.push(`peso_final = $${vals.length}`); }
+    if (es_default !== undefined) { vals.push(es_default === true); sets.push(`es_default = $${vals.length}`); }
+    if (!sets.length) { await client.query('COMMIT'); return res.json({ ok: true }); }
+    vals.push(mermaId, insumoId);
+    const { rows } = await client.query(
+      `UPDATE insumo_mermas SET ${sets.join(', ')}
+        WHERE id = $${vals.length - 1} AND insumo_id = $${vals.length}
+        RETURNING id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at`,
+      vals
+    );
+    await client.query('COMMIT');
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+    return res.json({ ok: true, data: rows[0] });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    if (e.code === '23505') return res.status(409).json({ ok: false, error: 'Ya existe una merma con ese nombre' });
+    console.error('mermas_update error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+// DELETE /insumos/:id/mermas/:mermaId
+exports.mermas_remove = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const mermaId = Number(req.params.mermaId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const { rowCount } = await pool.query(
+      `DELETE FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
+      [mermaId, insumoId]
+    );
+    if (!rowCount) return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+    return res.json({ ok: true, deleted: mermaId });
+  } catch (e) {
+    console.error('mermas_remove error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
