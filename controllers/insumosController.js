@@ -38,6 +38,25 @@ if (process.env.NODE_ENV !== 'production') {
   console.log('💡 insumosController.js cargado (es_elaborado como fuente de verdad)');
 }
 
+// Conversión de unidad para recálculo de costo (espejo básico del front)
+function factorConversion(from, to) {
+  const norm = (u) => {
+    const n = String(u || 'u').toLowerCase().trim();
+    return { k: 'kg', g: 'gr', l: 'lt', cc: 'ml' }[n] || n;
+  };
+  const PESO = { gr: 1, kg: 1000, oz: 28.35, lb: 453.59 };
+  const VOLUM = { ml: 1, lt: 1000, oz: 30 };
+  const f = norm(from), t = norm(to);
+  if (f === t) return 1;
+  if (PESO[f] !== undefined && PESO[t] !== undefined) return PESO[f] / PESO[t];
+  if (VOLUM[f] !== undefined && VOLUM[t] !== undefined) return VOLUM[f] / VOLUM[t];
+  // cruce peso↔volumen (densidad 1)
+  const baseF = PESO[f] !== undefined ? PESO[f] : VOLUM[f];
+  const baseT = PESO[t] !== undefined ? PESO[t] : VOLUM[t];
+  if (baseF !== undefined && baseT !== undefined) return baseF / baseT;
+  return 1;
+}
+
 // ===================== INSUMOS: LISTAR =====================
 exports.listar = async (req, res) => {
   try {
@@ -2309,6 +2328,8 @@ exports.reemplazarInsumo = async (req, res) => {
       `SELECT id, precio_ref, unidad_med FROM insumos WHERE id = $1`, [nuevoId]
     );
     const precioNuevo = Number(nuevoRows[0]?.precio_ref) || 0;
+    const unidadBaseNuevo = String(nuevoRows[0]?.unidad_med || 'u').toLowerCase().trim();
+    const precioNuevo = Number(nuevoRows[0]?.precio_ref) || 0;
 
     // Merma default del insumo nuevo (si tiene)
     const { rows: mermaRows } = await client.query(
@@ -2332,13 +2353,15 @@ exports.reemplazarInsumo = async (req, res) => {
 
     // Reemplazar en cada item: insumo_id nuevo, costo_unitario recalculado, merma default del nuevo
     for (const it of itemsAfectados) {
-      // costo_unitario básico: precio_ref del nuevo (el front lo afina al abrir la receta)
-      const costoUnit = precioNuevo;
+      // Convertir el precio del nuevo insumo (en su unidad base) a la unidad del item
+      const unidadItem = String(it.unidad || unidadBaseNuevo || 'u').toLowerCase().trim();
+      const factor = factorConversion(unidadBaseNuevo, unidadItem);
+      const costoUnit = factor > 0 ? precioNuevo / factor : precioNuevo;
       await client.query(
         `UPDATE receta_items
             SET insumo_id = $1, costo_unitario = $2, merma_id = $3, updated_at = NOW()
           WHERE id = $4`,
-        [nuevoId, costoUnit, mermaDefaultId, it.id]
+        [nuevoId, Number(costoUnit.toFixed(4)), mermaDefaultId, it.id]
       );
     }
 
