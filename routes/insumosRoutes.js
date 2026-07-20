@@ -72,6 +72,11 @@ router.post(
   }
 );
 
+/* ================== REEMPLAZAR INSUMO ================== */
+
+router.get('/:id/reemplazar-preview', ctrl.reemplazarPreview);
+router.post('/:id/reemplazar', ctrl.reemplazarInsumo);
+
 /* ================== DESPERDICIO ================== */
 
 router.put('/:id/desperdicio-override', ctrl.setDesperdicioOverride);

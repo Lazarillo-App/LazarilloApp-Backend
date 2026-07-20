@@ -2254,3 +2254,120 @@ exports.setDesperdicioOverride = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// GET /insumos/:id/reemplazar-preview  → cuántas recetas usan este insumo
+exports.reemplazarPreview = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const { rows } = await pool.query(
+      `SELECT COUNT(DISTINCT r.id) AS recetas, COUNT(ri.id) AS items
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE`,
+      [insumoId, bizId]
+    );
+    return res.json({ ok: true, recetas: Number(rows[0].recetas), items: Number(rows[0].items) });
+  } catch (e) {
+    console.error('reemplazarPreview error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// POST /insumos/:id/reemplazar  body { nuevoInsumoId }
+// Reemplaza el insumo viejo por el nuevo en todas las recetas del negocio activo.
+exports.reemplazarInsumo = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const viejoId = Number(req.params.id);
+    const nuevoId = Number(req.body?.nuevoInsumoId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(viejoId) || !Number.isFinite(nuevoId)) {
+      return res.status(400).json({ ok: false, error: 'IDs inválidos' });
+    }
+    if (viejoId === nuevoId) {
+      return res.status(400).json({ ok: false, error: 'El insumo nuevo debe ser distinto del viejo' });
+    }
+    // Ambos insumos deben pertenecer al negocio
+    if (!(await assertInsumoBiz(viejoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo a reemplazar no encontrado' });
+    }
+    if (!(await assertInsumoBiz(nuevoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo nuevo no encontrado' });
+    }
+
+    await client.query('BEGIN');
+
+    // Datos del insumo nuevo (precio y unidad base) para recalcular costo_unitario
+    const { rows: nuevoRows } = await client.query(
+      `SELECT id, precio_ref, unidad_med FROM insumos WHERE id = $1`, [nuevoId]
+    );
+    const precioNuevo = Number(nuevoRows[0]?.precio_ref) || 0;
+
+    // Merma default del insumo nuevo (si tiene)
+    const { rows: mermaRows } = await client.query(
+      `SELECT id FROM insumo_mermas WHERE insumo_id = $1 AND es_default = TRUE LIMIT 1`, [nuevoId]
+    );
+    const mermaDefaultId = mermaRows[0]?.id || null;
+
+    // Recetas del negocio donde aparece el insumo viejo
+    const { rows: itemsAfectados } = await client.query(
+      `SELECT ri.id, ri.receta_id, ri.cantidad, ri.unidad
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE`,
+      [viejoId, bizId]
+    );
+
+    if (itemsAfectados.length === 0) {
+      await client.query('COMMIT');
+      return res.json({ ok: true, recetasAfectadas: 0, itemsAfectados: 0 });
+    }
+
+    // Reemplazar en cada item: insumo_id nuevo, costo_unitario recalculado, merma default del nuevo
+    for (const it of itemsAfectados) {
+      // costo_unitario básico: precio_ref del nuevo (el front lo afina al abrir la receta)
+      const costoUnit = precioNuevo;
+      await client.query(
+        `UPDATE receta_items
+            SET insumo_id = $1, costo_unitario = $2, merma_id = $3, updated_at = NOW()
+          WHERE id = $4`,
+        [nuevoId, costoUnit, mermaDefaultId, it.id]
+      );
+    }
+
+    // Recalcular costo_total de las recetas afectadas (SUM de cantidad × costo_unitario)
+    const recetaIds = [...new Set(itemsAfectados.map(it => it.receta_id))];
+    for (const rId of recetaIds) {
+      await client.query(
+        `UPDATE recetas
+            SET costo_total = COALESCE((
+                  SELECT SUM(ri.cantidad * ri.costo_unitario)
+                    FROM receta_items ri WHERE ri.receta_id = $1
+                ), 0),
+                updated_at = NOW()
+          WHERE id = $1`,
+        [rId]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      recetasAfectadas: recetaIds.length,
+      itemsAfectados: itemsAfectados.length,
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('reemplazarInsumo error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
