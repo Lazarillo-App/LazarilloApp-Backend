@@ -2285,13 +2285,25 @@ exports.reemplazarPreview = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
     const { rows } = await pool.query(
-      `SELECT COUNT(DISTINCT r.id) AS recetas, COUNT(ri.id) AS items
+      `SELECT COUNT(DISTINCT r.id) AS recetas,
+              COUNT(ri.id) AS items,
+              COUNT(DISTINCT r.business_id) AS negocios
          FROM receta_items ri
          JOIN recetas r ON r.id = ri.receta_id
-        WHERE ri.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE`,
+        WHERE ri.insumo_id = $1
+          AND r.business_id = ANY(
+                SELECT id FROM app_businesses
+                 WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $2)
+              )
+          AND r.active = TRUE`,
       [insumoId, bizId]
     );
-    return res.json({ ok: true, recetas: Number(rows[0].recetas), items: Number(rows[0].items) });
+    return res.json({
+      ok: true,
+      recetas: Number(rows[0].recetas),
+      items: Number(rows[0].items),
+      negocios: Number(rows[0].negocios),
+    });
   } catch (e) {
     console.error('reemplazarPreview error:', e);
     return res.status(500).json({ ok: false, error: e.message });
@@ -2336,13 +2348,23 @@ exports.reemplazarInsumo = async (req, res) => {
     );
     const mermaDefaultId = mermaRows[0]?.id || null;
 
-    // Recetas del negocio donde aparece el insumo viejo
+    // Negocios de la organización del negocio activo (reemplazo a nivel org)
+    const { rows: orgBiz } = await client.query(
+      `SELECT id FROM app_businesses
+        WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1)`,
+      [bizId]
+    );
+    const bizIds = orgBiz.map(b => b.id);
+    // Fallback: si no hay org, al menos el negocio activo
+    const negocios = bizIds.length ? bizIds : [bizId];
+
+    // Recetas de TODOS los negocios de la org donde aparece el insumo viejo
     const { rows: itemsAfectados } = await client.query(
-      `SELECT ri.id, ri.receta_id, ri.cantidad, ri.unidad
+      `SELECT ri.id, ri.receta_id, ri.cantidad, ri.unidad, r.business_id
          FROM receta_items ri
          JOIN recetas r ON r.id = ri.receta_id
-        WHERE ri.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE`,
-      [viejoId, bizId]
+        WHERE ri.insumo_id = $1 AND r.business_id = ANY($2) AND r.active = TRUE`,
+      [viejoId, negocios]
     );
 
     if (itemsAfectados.length === 0) {
