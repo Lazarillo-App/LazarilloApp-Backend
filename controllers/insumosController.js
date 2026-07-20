@@ -2329,7 +2329,6 @@ exports.reemplazarInsumo = async (req, res) => {
     );
     const precioNuevo = Number(nuevoRows[0]?.precio_ref) || 0;
     const unidadBaseNuevo = String(nuevoRows[0]?.unidad_med || 'u').toLowerCase().trim();
-    const precioNuevo = Number(nuevoRows[0]?.precio_ref) || 0;
 
     // Merma default del insumo nuevo (si tiene)
     const { rows: mermaRows } = await client.query(
