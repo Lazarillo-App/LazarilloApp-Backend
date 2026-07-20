@@ -31,6 +31,7 @@ exports.getMyOrganization = async (req, res, next) => {
 
     // Negocio activo (del header X-Business-Id o del helper). Puede no venir.
     const activeBizId = Number(getBusinessId(req)) || null;
+    console.log('[getMyOrganization] uid:', uid, 'activeBizId:', activeBizId, 'header:', req.headers['x-business-id']);
 
     const { rows } = await pool.query(
       `SELECT
