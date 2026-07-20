@@ -1992,8 +1992,15 @@ exports.eliminarManual = async (req, res) => {
 // ===================== EQUIVALENCIAS =====================
 // Verifica que el insumo pertenezca al negocio activo
 async function assertInsumoBiz(insumoId, bizId) {
+  // El insumo es global por organización: validar que pertenezca a cualquier
+  // negocio de la misma org que el negocio activo (no solo al negocio exacto).
   const { rows } = await pool.query(
-    `SELECT 1 FROM insumos WHERE id = $1 AND business_id = $2`,
+    `SELECT 1 FROM insumos i
+       WHERE i.id = $1
+         AND i.business_id = ANY(
+           SELECT id FROM app_businesses
+            WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $2)
+         )`,
     [insumoId, bizId]
   );
   return rows.length > 0;
@@ -2264,8 +2271,8 @@ exports.setDesperdicioOverride = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Porcentaje inválido' });
     }
     await pool.query(
-      `UPDATE insumos SET desperdicio_pct_override = $1, updated_at = NOW() WHERE id = $2 AND business_id = $3`,
-      [val, insumoId, bizId]
+      `UPDATE insumos SET desperdicio_pct_override = $1, updated_at = NOW() WHERE id = $2`,
+      [val, insumoId]
     );
     return res.json({ ok: true, desperdicio_pct_override: val });
   } catch (e) {

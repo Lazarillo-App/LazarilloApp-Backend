@@ -29,8 +29,9 @@ exports.getMyOrganization = async (req, res, next) => {
     const uid = req.user?.id;
     if (!uid) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
-    // Buscar la org a partir de CUALQUIER negocio del usuario que tenga organization_id
-    // (no solo el activo, para evitar que falle si el activo es un negocio sin org aún)
+    // Negocio activo (del header X-Business-Id o del helper). Puede no venir.
+    const activeBizId = Number(getBusinessId(req)) || null;
+
     const { rows } = await pool.query(
       `SELECT
          o.id,
@@ -53,19 +54,19 @@ exports.getMyOrganization = async (req, res, next) => {
              'source_group_id',      b.source_group_id,
              'created_at',           b.created_at
            ) ORDER BY b.created_at ASC
-         ) AS businesses
+         ) AS businesses,
+         -- Marca 1 si esta org es la del negocio activo (para priorizarla)
+         MAX(CASE WHEN b.id = $2 THEN 1 ELSE 0 END) AS es_org_activa
        FROM organizations o
-       -- Todos los negocios de la org que le pertenecen al usuario
        JOIN app_businesses b ON b.organization_id = o.id
        LEFT JOIN user_businesses ub ON ub.business_id = b.id AND ub.user_id = $1
        WHERE (b.owner_id = $1 OR ub.user_id IS NOT NULL)
        GROUP BY o.id
-       -- Si tiene múltiples orgs, tomar la más reciente
-       ORDER BY o.created_at DESC
+       -- 1º la org que contiene el negocio activo; luego la más reciente como fallback
+       ORDER BY es_org_activa DESC, o.created_at DESC
        LIMIT 5`,
-      [uid]
+      [uid, activeBizId]
     );
-
     return res.json({ ok: true, organization: rows[0] || null });
   } catch (e) {
     console.error('[getMyOrganization]', e);
