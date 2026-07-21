@@ -643,6 +643,43 @@ exports.actualizar = async (req, res) => {
   }
 };
 
+// GET /insumos/:id/compras — historial de compras de un insumo
+// GET /insumos/:id/compras — historial de compras de un insumo
+exports.getCompras = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    }
+    const { rows } = await pool.query(
+      `SELECT
+         pi.id,
+         pi.fecha,
+         pi.cantidad,
+         pi.precio,
+         pi.precio_total,
+         pi.referencia,
+         pi.source,
+         pi.branch_id,
+         p.factura_key,
+         p.proveedor_id
+       FROM purchase_items pi
+       LEFT JOIN purchases p ON p.id = pi.purchase_id AND p.business_id = pi.business_id
+       WHERE pi.insumo_id = $1
+         AND pi.business_id = $2
+         AND pi.precio > 0
+       ORDER BY pi.fecha DESC, pi.id DESC
+       LIMIT 100`,
+      [id, businessId]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    console.error('getCompras error:', e);
+    return res.status(500).json({ ok: false, error: 'Error al obtener compras del insumo' });
+  }
+};
+
 exports.eliminar = async (req, res) => {
   try {
     const { id } = req.params;

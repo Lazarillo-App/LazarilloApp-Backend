@@ -97,6 +97,7 @@ router.delete('/:id/equivalencias/:eqId', ctrl.equivalencias_remove);
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);
+router.get('/:id/compras', ctrl.getCompras);
 router.get('/search-padrino', ctrl.searchPadrinoInsumo);
 router.delete('/:id/manual', ctrl.eliminarManual);
 router.put('/:id', ctrl.actualizar);
