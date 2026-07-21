@@ -15,7 +15,7 @@ exports.getReceta = async (req, res, next) => {
       `SELECT
          r.id, r.article_id, r.business_id, r.nombre, r.descripcion,
          r.porciones, r.porcentaje_venta, r.costo_total, r.active,
-         r.notas, r.foto, r.notas_updated_at,
+         r.notas, r.foto, r.fotos, r.notas_updated_at,
          r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
          r.created_at, r.updated_at
        FROM recetas r
@@ -81,8 +81,15 @@ exports.saveReceta = async (req, res, next) => {
       items = [],
       notas,
       foto,
+      fotos,
       notasUpdatedAt,
     } = req.body || {};
+
+    // Normalizar fotos: array de hasta 6. Compatibilidad con `foto` single.
+    let fotosArr = Array.isArray(fotos) ? fotos.filter(Boolean).slice(0, 6) : [];
+    if (fotosArr.length === 0 && foto) fotosArr = [foto]; // migración desde single
+    const fotosJson = JSON.stringify(fotosArr);
+    const fotoPrincipal = fotosArr[0] || null; // mantener `foto` sincronizada con la primera
 
     // Normalizar y validar campos del rendimiento del lote
     const VALID_RU = ['porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
@@ -125,14 +132,15 @@ exports.saveReceta = async (req, res, next) => {
        costo_total        = $5,
        notas              = $6,
        foto               = $7,
-       notas_updated_at   = $8,
-       rendimiento_unidad = $9,
-       rendimiento_peso   = $10,
-       unidad_peso        = $11,
+       fotos              = $8::jsonb,
+       notas_updated_at   = $9,
+       rendimiento_unidad = $10,
+       rendimiento_peso   = $11,
+       unidad_peso        = $12,
        active             = TRUE,
        origen             = 'manual',
        updated_at         = NOW()
-     WHERE id = $12
+     WHERE id = $13
      RETURNING *`,
         [
           nombre?.trim() || null,
@@ -141,7 +149,8 @@ exports.saveReceta = async (req, res, next) => {
           Number(porcentajeVenta) || 0,
           Math.round(costoTotal * 10000) / 10000,
           notas?.trim() || null,
-          foto || null,
+          fotoPrincipal,      // foto (sincronizada con la primera del array)
+          fotosJson,          // fotos jsonb
           notasUpdatedAt || null,
           ruFinal, rpFinal, upFinal,
           existing[0].id,
@@ -152,10 +161,10 @@ exports.saveReceta = async (req, res, next) => {
       const { rows } = await client.query(
         `INSERT INTO recetas
        (article_id, business_id, nombre, descripcion, porciones,
-        porcentaje_venta, costo_total, notas, foto, notas_updated_at,
+        porcentaje_venta, costo_total, notas, foto, fotos, notas_updated_at,
         rendimiento_unidad, rendimiento_peso, unidad_peso,
         active, origen, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE, 'manual', NOW(), NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, TRUE, 'manual', NOW(), NOW())
      RETURNING *`,
         [
           articleId, bizId,
@@ -165,7 +174,8 @@ exports.saveReceta = async (req, res, next) => {
           Number(porcentajeVenta) || 0,
           Math.round(costoTotal * 10000) / 10000,
           notas?.trim() || null,
-          foto || null,
+          fotoPrincipal,      // foto (sincronizada con la primera del array)
+          fotosJson,          // fotos jsonb
           notasUpdatedAt || null,
           ruFinal, rpFinal, upFinal,
         ]
