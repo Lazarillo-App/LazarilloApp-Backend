@@ -588,6 +588,8 @@ exports.actualizar = async (req, res) => {
     if (b.nombre !== undefined) push('nombre', b.nombre);
     if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
+    if (b.contenidoEnvase !== undefined) push('contenido_envase', b.contenidoEnvase === null || b.contenidoEnvase === '' ? null : num(b.contenidoEnvase));
+    if (b.unidadEnvase !== undefined) push('unidad_envase', b.unidadEnvase || null);
     if (b.rubro !== undefined) push('rubro', b.rubro);
     if (b.estado !== undefined) push('estado', b.estado);
     if (b.nota !== undefined) push('nota', b.nota);
