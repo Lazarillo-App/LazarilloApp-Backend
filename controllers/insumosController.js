@@ -166,6 +166,14 @@ exports.listar = async (req, res) => {
           lc.precio_ultima_compra,
           lc.fecha_ultima_compra,
           lc.cantidad_compras,
+          rc.receta_updated_at,
+          CASE
+            WHEN i.costo_preferido IS NOT NULL THEN i.costo_preferido
+            WHEN rc.receta_updated_at IS NULL THEN 'compra'
+            WHEN lc.fecha_ultima_compra IS NULL THEN 'elaboracion'
+            WHEN lc.fecha_ultima_compra > rc.receta_updated_at THEN 'compra'
+            ELSE 'elaboracion'
+          END AS costo_efectivo_origen,
           COALESCE(
             json_agg(
               DISTINCT jsonb_build_object(
@@ -194,8 +202,17 @@ exports.listar = async (req, res) => {
             AND pi_all.business_id = i.business_id
             AND pi_all.precio > 0
         ) lc ON true
+        LEFT JOIN LATERAL (
+          SELECT r.updated_at AS receta_updated_at
+          FROM recetas r
+          WHERE r.insumo_id = i.id
+            AND r.business_id = i.business_id
+            AND r.active = TRUE
+          ORDER BY r.updated_at DESC
+          LIMIT 1
+        ) rc ON true
         ${whereSql}
-        GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra, lc.cantidad_compras
+        GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra, lc.cantidad_compras, rc.receta_updated_at
         ORDER BY ${orderBySql} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}
