@@ -182,13 +182,15 @@ exports.crearPromocion = async (req, res, next) => {
     // 9. Insertar items: primero los artículos componentes, luego los insumos
     let orden = 0;
     for (const ci of compInfos) {
+      // Costo del componente: costo de receta si existe, sino precio (misma jerarquía que el total)
+      const costoComp = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
       await client.query(
         `INSERT INTO receta_items
            (receta_id, article_ref_id, cantidad, unidad, costo_unitario,
             nombre_insumo_maxi, tipo_costo, merma, pedido, orden, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'total', TRUE, TRUE, $7, NOW(), NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6, 'total', FALSE, TRUE, $7, NOW(), NOW())`,
         [recetaId, ci.articleId, ci.cantidad, ci.unidad,
-         Math.round((Number(ci.costo) || 0) * 10000) / 10000, ci.nombre, orden++]
+         Math.round(costoComp * 10000) / 10000, ci.nombre, orden++]
       );
     }
     for (const ii of insumoInfos) {
