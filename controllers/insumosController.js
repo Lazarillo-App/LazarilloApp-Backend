@@ -610,6 +610,7 @@ exports.actualizar = async (req, res) => {
     if (b.rubro !== undefined) push('rubro', b.rubro);
     if (b.estado !== undefined) push('estado', b.estado);
     if (b.nota !== undefined) push('nota', b.nota);
+    if (b.costoPreferido !== undefined) push('costo_preferido', b.costoPreferido || null);
 
     if (b.es_elaborado !== undefined) {
       push('es_elaborado', b.es_elaborado);
