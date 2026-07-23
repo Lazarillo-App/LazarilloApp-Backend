@@ -139,13 +139,16 @@ exports.listar = async (req, res) => {
       `);
     }
 
-    if (elaborados === 'true') {
-      where.push(`i.es_elaborado = true`);
-    }
+    // Elaborado = tiene receta activa. Única fuente de verdad.
+    const tieneRecetaSQL = `EXISTS (
+      SELECT 1 FROM recetas r_el
+      WHERE r_el.insumo_id = i.id
+        AND r_el.business_id = i.business_id
+        AND r_el.active = TRUE
+    )`;
 
-    if (elaborados === 'false') {
-      where.push(`(i.es_elaborado = false OR i.es_elaborado IS NULL)`);
-    }
+    if (elaborados === 'true')  where.push(tieneRecetaSQL);
+    if (elaborados === 'false') where.push(`NOT ${tieneRecetaSQL}`);
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const hardLimit = Math.min(Math.max(Number(limit), 1), 500000);
