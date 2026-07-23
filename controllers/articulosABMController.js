@@ -471,13 +471,31 @@ exports.actualizarArticulo = async (req, res, next) => {
 
     sets.push(`updated_at = NOW()`);
     vals.push(articleId, storageBizId);
-
     const { rows: updated } = await client.query(
       `UPDATE app_articles SET ${sets.join(', ')}
         WHERE id = $${pi++} AND business_id = $${pi}
        RETURNING *`,
       vals
     );
+
+    // ── Espejo en maxi_articles: los manuales/promos también viven ahí (para el árbol) ──
+    const mSets = [];
+    const mVals = [];
+    let mi = 1;
+    if (nombre?.trim()) { mSets.push(`nombre = $${mi++}`); mVals.push(nombre.trim()); }
+    if (precio != null) { mSets.push(`precio = $${mi++}`); mVals.push(safeNum(precio) ?? 0); }
+    // Recordatorio: en maxi_articles → subrubro DB = "Rubro" UI, categoria DB = "Subrubro" UI
+    if (rubro?.trim()) { mSets.push(`subrubro = $${mi++}`); mVals.push(rubro.trim()); }
+    if (subrubro?.trim()) { mSets.push(`categoria = $${mi++}`); mVals.push(subrubro.trim()); }
+    if (mSets.length) {
+      mSets.push(`updated_at = NOW()`);
+      mVals.push(storageBizId, articleId);
+      await client.query(
+        `UPDATE maxi_articles SET ${mSets.join(', ')}
+          WHERE business_id = $${mi++} AND articulo_id = $${mi}`,
+        mVals
+      );
+    }
 
     await client.query('COMMIT');
     invalidateCacheForBiz(bizId);
