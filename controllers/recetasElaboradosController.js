@@ -269,7 +269,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       [Math.round(costoXPorcion * 1000) / 1000, insumoId, bizId]
     );
 
-    await client.query('COMMIT');
+   await client.query('COMMIT');
+
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(bizId);
 
     console.log(`✅ [saveRecetaElaborado] Insumo=${insumoId} | Biz=${bizId} | Costo/u=$${costoXPorcion.toFixed(4)} | PrecioSug=$${precioSugerido.toFixed(4)}`);
 
@@ -325,6 +328,9 @@ exports.deleteRecetaElaborado = async (req, res, next) => {
         WHERE id = $1 AND business_id = $2`,
       [insumoId, bizId]
     );
+
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(bizId);
 
     console.log(`🗑️ [deleteRecetaElaborado] Receta ID=${rows[0].id} | Insumo=${insumoId} desactivada`);
 
