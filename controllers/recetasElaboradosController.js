@@ -204,6 +204,13 @@ exports.saveRecetaElaborado = async (req, res, next) => {
 
     const receta = recetaRows[0];
 
+    // El insumo pasa a ser elaborado por tener receta activa.
+    await client.query(
+      `UPDATE insumos SET es_elaborado = TRUE, updated_at = NOW()
+        WHERE id = $1 AND business_id = $2 AND es_elaborado IS NOT TRUE`,
+      [insumoId, bizId]
+    );
+
     // Reemplazar items
     await client.query(`DELETE FROM receta_items WHERE receta_id = $1`, [receta.id]);
 
@@ -313,6 +320,7 @@ exports.deleteRecetaElaborado = async (req, res, next) => {
       `UPDATE insumos
           SET costo_receta = 0,
               tiene_receta = FALSE,
+              es_elaborado = FALSE,
               updated_at   = NOW()
         WHERE id = $1 AND business_id = $2`,
       [insumoId, bizId]
