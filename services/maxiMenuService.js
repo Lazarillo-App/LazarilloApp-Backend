@@ -1,6 +1,8 @@
-// services/maxiMenuService.js - VERSIÓN ADITIVA CON FALLBACK
-// La sync de artículos NO actualiza datos existentes.
-// Solo inserta nuevos. Esto protege ediciones manuales del usuario.
+// services/maxiMenuService.js - SYNC CON FALLBACK
+// Inserta artículos nuevos y actualiza precio/costo de los existentes (origen='maxi').
+// Protecciones: nombre editado en Lazarillo no se pisa (comparación contra nombre_maxi),
+// precio manual en article_price_config bloquea el update entero,
+// categoria/subrubro solo se actualizan si Maxi manda valor (el fallback los manda null).
 const fetch = require('node-fetch');
 const { getBearer } = require('./maxiSalesService');
 const pool = require('../config/db');
@@ -252,8 +254,8 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
     let i = 1;
 
     for (const a of articles) {
-      values.push(
-        `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
+     values.push(
+        `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
       );
       params.push(
         bizId,
@@ -266,20 +268,26 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
         JSON.stringify(a.raw),
         a.cod_rua || null,
         a.cod_sua || null,
+        a.nombre,              // nombre_maxi: espejo de lo que vino de Maxi
       );
     }
 
     const insertedRes = await client.query(
       `INSERT INTO maxi_articles (
          business_id, articulo_id, nombre, categoria, subrubro,
-         precio, costo, raw, cod_rua, cod_sua
+         precio, costo, raw, cod_rua, cod_sua, nombre_maxi
        )
        VALUES ${values.join(', ')}
        ON CONFLICT (business_id, articulo_id) DO UPDATE SET
          precio     = EXCLUDED.precio,
          costo      = EXCLUDED.costo,
-         nombre     = EXCLUDED.nombre,
-         categoria  = EXCLUDED.categoria,
+         nombre      = CASE
+                         WHEN maxi_articles.nombre IS DISTINCT FROM maxi_articles.nombre_maxi
+                           THEN maxi_articles.nombre
+                         ELSE EXCLUDED.nombre
+                       END,
+         nombre_maxi = EXCLUDED.nombre,
+         categoria  = COALESCE(EXCLUDED.categoria, maxi_articles.categoria),
          subrubro   = COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro),
          updated_at = NOW()
        WHERE maxi_articles.origen = 'maxi'

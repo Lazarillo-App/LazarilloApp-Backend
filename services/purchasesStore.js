@@ -135,7 +135,7 @@ async function upsertSuppliers(businessId, proveedores) {
       await client.query(
         `INSERT INTO suppliers (id, business_id, nombre, razon_social, cuit, updated_at)
          VALUES ($1,$2,$3,$4,$5,NOW())
-         ON CONFLICT (id) DO UPDATE SET
+         ON CONFLICT (business_id, id) DO UPDATE SET
            nombre       = EXCLUDED.nombre,
            razon_social = EXCLUDED.razon_social,
            cuit         = EXCLUDED.cuit,
