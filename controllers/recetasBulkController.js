@@ -380,14 +380,29 @@ exports.getPromoComponents = async (req, res, next) => {
   const bizId = Number(req.params.businessId) || getBusinessId(req);
   if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
   try {
+    // Solo se ocultan los componentes que TAMBIÉN viven en la agrupación "Promociones".
+    // Un componente que vive en otra agrupación (ej. Cafetería) NO se oculta: se sigue
+    // viendo en su origen y además aparece dentro de la promo (modelo "como insumo").
     const { rows } = await pool.query(
-      `SELECT DISTINCT ri.article_ref_id
-         FROM receta_items ri
-         JOIN recetas r ON r.id = ri.receta_id
-        WHERE r.business_id = $1
-          AND r.es_promo = TRUE
-          AND r.active = TRUE
-          AND ri.article_ref_id IS NOT NULL`,
+      `WITH comps AS (
+         SELECT DISTINCT ri.article_ref_id AS id
+           FROM receta_items ri
+           JOIN recetas r ON r.id = ri.receta_id
+          WHERE r.business_id = $1
+            AND r.es_promo = TRUE
+            AND r.active = TRUE
+            AND ri.article_ref_id IS NOT NULL
+       ),
+       promo_group_ids AS (
+         SELECT (art->>'id')::int AS id
+           FROM agrupaciones a,
+                jsonb_array_elements(COALESCE(a.articulos, '[]'::jsonb)) AS art
+          WHERE a.business_id = $1
+            AND a.nombre ILIKE 'Promociones'
+       )
+       SELECT c.id AS article_ref_id
+         FROM comps c
+        WHERE c.id IN (SELECT id FROM promo_group_ids)`,
       [bizId]
     );
     const ids = rows.map(r => Number(r.article_ref_id)).filter(Number.isFinite);
