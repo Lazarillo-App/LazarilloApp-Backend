@@ -33,16 +33,6 @@ async function resolveStorageBizId(bizId) {
  * Positivo → maxi_articles.articulo_id ; Negativo → app_articles.id
  */
 async function resolveArticuloInfo(client, storageBizId, artId) {
-  // El costo del componente debe ser el costo_total de su receta (incluye merma).
-  // Solo si no tiene receta se cae al costo/precio de la tabla de artículos.
-  const { rows: recRows } = await client.query(
-    `SELECT costo_total FROM recetas
-      WHERE article_id = $1 AND business_id = $2 AND active = TRUE
-      ORDER BY updated_at DESC LIMIT 1`,
-    [artId, storageBizId]
-  );
-  const costoReceta = recRows.length ? Number(recRows[0].costo_total) || 0 : 0;
-
   if (artId > 0) {
     const { rows } = await client.query(
       `SELECT nombre, categoria, subrubro, precio, costo
@@ -50,10 +40,7 @@ async function resolveArticuloInfo(client, storageBizId, artId) {
         WHERE business_id = $1 AND articulo_id = $2 LIMIT 1`,
       [storageBizId, artId]
     );
-    if (rows.length) {
-      // costo con merma (receta) tiene prioridad sobre el costo plano de maxi_articles
-      return { ...rows[0], costo: costoReceta || Number(rows[0].costo) || 0 };
-    }
+    if (rows.length) return rows[0];
   } else {
     const { rows } = await client.query(
       `SELECT name AS nombre, rubro AS categoria, subrubro, price AS precio, 0 AS costo
@@ -61,9 +48,7 @@ async function resolveArticuloInfo(client, storageBizId, artId) {
         WHERE business_id = $1 AND id = $2 LIMIT 1`,
       [storageBizId, Math.abs(artId)]
     );
-    if (rows.length) {
-      return { ...rows[0], costo: costoReceta || 0 };
-    }
+    if (rows.length) return rows[0];
   }
   return null;
 }
