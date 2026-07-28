@@ -24,4 +24,7 @@ router.get('/promo-components', ctrl.getPromoComponents);
 
 router.get('/promo-ids', ctrl.getPromoIds);
 
+// GET /api/businesses/:businessId/recetas/venta-sin-promo
+router.get('/venta-sin-promo', ctrl.getVentaSinPromo);
+
 module.exports = router;

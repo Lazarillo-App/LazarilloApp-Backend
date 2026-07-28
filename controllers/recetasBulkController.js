@@ -433,3 +433,51 @@ exports.getPromoIds = async (req, res, next) => {
     next(e);
   }
 };
+
+// GET /api/businesses/:businessId/recetas/venta-sin-promo
+// Por cada promo (receta es_promo=true), suma (precio_sin_promo × cantidad) de sus componentes.
+// precio_sin_promo = precio_manual de la lista principal (list_id NULL) si existe, sino el precio del artículo.
+exports.getVentaSinPromo = async (req, res, next) => {
+  const bizId = Number(req.params.businessId) || getBusinessId(req);
+  if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT r.article_id AS promo_id,
+              COALESCE(SUM(
+                COALESCE(
+                  NULLIF(cfg.precio_manual, 0),      -- nuevo precio de lista principal
+                  ma.precio,                          -- precio del artículo maxi
+                  aa.price,                           -- precio del artículo app (manual)
+                  0
+                ) * ri.cantidad
+              ), 0) AS venta_sin_promo
+         FROM recetas r
+         JOIN receta_items ri ON ri.receta_id = r.id
+         LEFT JOIN article_price_config cfg
+                ON cfg.business_id = r.business_id
+               AND cfg.scope = 'articulo'
+               AND cfg.scope_id = ri.article_ref_id::text
+               AND cfg.list_id IS NULL
+         LEFT JOIN maxi_articles ma
+                ON ma.business_id = r.business_id
+               AND ma.articulo_id = ri.article_ref_id
+         LEFT JOIN app_articles aa
+                ON aa.business_id = r.business_id
+               AND aa.id = ABS(ri.article_ref_id)
+        WHERE r.business_id = $1
+          AND r.es_promo = TRUE
+          AND r.active = TRUE
+          AND ri.article_ref_id IS NOT NULL
+        GROUP BY r.article_id`,
+      [bizId]
+    );
+    const map = {};
+    for (const row of rows) {
+      map[Number(row.promo_id)] = Number(row.venta_sin_promo) || 0;
+    }
+    return res.json({ ok: true, ventaSinPromo: map });
+  } catch (e) {
+    console.error('[getVentaSinPromo]', e);
+    next(e);
+  }
+};
