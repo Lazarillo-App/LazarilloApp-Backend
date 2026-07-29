@@ -136,10 +136,11 @@ exports.saveRecetaElaborado = async (req, res, next) => {
     // El peso/volumen equivalente aplica cuando el rinde NO es directamente medible:
     // porcion o u. Si ya rinde en gr/kg/ml/lt, el lote es medible y no necesita equivalente.
     const aplicaPeso = ['porcion', 'u'].includes(ruFinal);
-    const rpFinal = aplicaPeso && rendimientoPeso != null && Number(rendimientoPeso) > 0
-      ? Number(rendimientoPeso)
-      : null;
-    const upFinal = aplicaPeso && VALID_UP.includes(unidadPeso) ? unidadPeso : null;
+    // Peso y unidad van juntos: si falta cualquiera de los dos, no se guarda ninguno.
+    const rpRaw = aplicaPeso && rendimientoPeso != null && Number(rendimientoPeso) > 0 ? Number(rendimientoPeso) : null;
+    const upRaw = aplicaPeso && VALID_UP.includes(unidadPeso) ? unidadPeso : null;
+    const rpFinal = (rpRaw != null && upRaw != null) ? rpRaw : null;
+    const upFinal = (rpRaw != null && upRaw != null) ? upRaw : null;
 
     // Calcular costo total
     const costoTotal = items.reduce((acc, item) => {
@@ -272,7 +273,7 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       [Math.round(costoXPorcion * 1000) / 1000, insumoId, bizId]
     );
 
-   await client.query('COMMIT');
+    await client.query('COMMIT');
 
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(bizId);
