@@ -149,10 +149,11 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
-    // porcionesNum = rendimiento del lote (se guarda como informativo, NO divide el costo)
+    // porcionesNum = rendimiento del lote. El costo por unidad del elaborado SÍ divide por porciones:
+    // si rinde 20 y cuesta $261.104, 1 unidad/porción cuesta $13.055. Regla: elaborado con rendimiento > 1
+    // siempre se costea por porción, nunca por el total del lote.
     const porcionesNum = Math.max(1, Number(porciones) || 1);
-    // El precio del insumo elaborado es el costo total de su receta (rendimiento solo informativo)
-    const costoXPorcion = costoTotal;
+    const costoXPorcion = costoTotal / porcionesNum;   // costo de 1 unidad base del elaborado
     // Si no viene porcentajeVenta, usar el global de insumos del negocio
     let porcentajeNum = Number(porcentajeVenta) || 0;
     if (!porcentajeNum) {
