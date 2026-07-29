@@ -93,10 +93,12 @@ exports.saveReceta = async (req, res, next) => {
 
     // Normalizar y validar campos del rendimiento del lote
     const VALID_RU = ['porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
-    const VALID_UP = ['gr', 'kg'];
+    // Familia peso + volumen: el equivalente puede ser peso (gr/kg) o volumen (ml/lt)
+    const VALID_UP = ['gr', 'kg', 'ml', 'lt'];
     const ruFinal = VALID_RU.includes(rendimientoUnidad) ? rendimientoUnidad : 'porcion';
-    // Peso solo aplica cuando la unidad es lt/ml/u (las demás no lo necesitan)
-    const aplicaPeso = ['lt', 'ml', 'u'].includes(ruFinal);
+    // El peso/volumen equivalente aplica cuando el rinde NO es directamente medible:
+    // porcion o u. Si ya rinde en gr/kg/ml/lt, el lote es medible y no necesita equivalente.
+    const aplicaPeso = ['porcion', 'u'].includes(ruFinal);
     const rpFinal = aplicaPeso && rendimientoPeso != null && Number(rendimientoPeso) > 0
       ? Number(rendimientoPeso)
       : null;
