@@ -42,6 +42,7 @@ const articlePriceConfigRoutes   = require('./routes/articlePriceConfigRoutes');
 const salesImportRoutes = require('./routes/salesImportRoutes');
 const insumosImportRoutes   = require('./routes/insumosImportRoutes');
 const insumosElaboradosRoutes = require('./routes/insumosElaboradosRoutes');
+const onboardingRoutes = require('./routes/onboardingRoutes');
 const recetaFotosRoutes = require('./routes/recetaFotosRoutes');
 const recetaUploadRoutes = require('./routes/recetaUploadRoutes');
 const articulosImportRoutes = require('./routes/articulosImportRoutes');
@@ -175,6 +176,7 @@ app.use('/api/businesses', purchasesImportRoutes);
 app.use('/api/businesses', insumosImportRoutes);
 app.use('/api/businesses', articulosImportRoutes);
 app.use('/api/businesses', recetasImportRoutes);
+app.use('/api/businesses', onboardingRoutes);
 app.use('/api/businesses', articlePriceConfigRoutes);
 
 // 2) rutas específicas por businessId
