@@ -214,6 +214,7 @@ exports.update = async (req, res) => {
   const address = incoming.address || null;
   const social = incoming.social || null;
   const description = (incoming.description ?? null);
+  const carta = incoming.carta || null;   // diseño de la carta/menú (jsonb libre)
 
   // Keys de configuración que se pueden guardar directamente en props
   const CONFIG_KEYS = [
@@ -241,6 +242,7 @@ exports.update = async (req, res) => {
   if (address) patchParts.push({ address });
   if (social) patchParts.push({ social });
   if (description !== null) patchParts.push({ description });
+  if (carta) patchParts.push({ carta });
   if (hasConfigPatch) patchParts.push(configPatch);
   const patchIsEmpty = patchParts.length === 0;
 
