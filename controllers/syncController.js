@@ -300,12 +300,27 @@ async function upsertArticles({ client, businessId, items }) {
       VALUES ${values.join(',')}
       ON CONFLICT (business_id, articulo_id)
       DO UPDATE SET
-        nombre   = EXCLUDED.nombre,
-        categoria= EXCLUDED.categoria,
-        subrubro = EXCLUDED.subrubro,
         precio   = EXCLUDED.precio,
         costo    = EXCLUDED.costo,
         raw      = EXCLUDED.raw,
+        nombre   = CASE
+                     WHEN maxi_articles.nombre IS DISTINCT FROM maxi_articles.nombre_maxi
+                       THEN maxi_articles.nombre
+                     ELSE EXCLUDED.nombre
+                   END,
+        nombre_maxi = EXCLUDED.nombre,
+        categoria = CASE
+                      WHEN maxi_articles.categoria IS DISTINCT FROM maxi_articles.categoria_maxi
+                        THEN maxi_articles.categoria
+                      ELSE COALESCE(EXCLUDED.categoria, maxi_articles.categoria)
+                    END,
+        subrubro  = CASE
+                      WHEN maxi_articles.subrubro IS DISTINCT FROM maxi_articles.subrubro_maxi
+                        THEN maxi_articles.subrubro
+                      ELSE COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro)
+                    END,
+        categoria_maxi = COALESCE(EXCLUDED.categoria, maxi_articles.categoria_maxi),
+        subrubro_maxi  = COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro_maxi),
         updated_at = NOW()
     `;
     await client.query(sql, params);
