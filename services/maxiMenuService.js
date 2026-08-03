@@ -197,9 +197,14 @@ function flattenFallbackToArticles(content) {
 /**
  * SYNC ADITIVA:
  *  - trae el menú desde Maxi (con fallback automático)
- *  - SOLO inserta artículos nuevos (ON CONFLICT DO NOTHING)
- *  - NO actualiza nombre, categoria, subrubro, precio, costo de artículos existentes
- *  - Esto protege ediciones manuales y precios actualizados por el usuario
+*  - Inserta artículos nuevos y actualiza los existentes (ON CONFLICT DO UPDATE)
+ *  - Precio y costo: siempre se actualizan con el valor de Maxi
+ *  - Nombre, categoria y subrubro: se conservan si fueron editados en Lazarillo
+ *    (se detecta comparando contra las columnas espejo nombre_maxi / categoria_maxi /
+ *    subrubro_maxi; si el valor actual difiere de su espejo, gana Lazarillo)
+ *  - Las columnas espejo *_maxi se refrescan siempre con lo que manda Maxi, para que
+ *    el botón "Restaurar desde MaxiRest" pueda revertir a los valores originales
+ *  - Precio manual (article_price_config.precio_manual) bloquea la actualización de la fila
  *
  *  Guards defensivos:
  *  - Si MaxiRest devuelve 0 artículos, aborta sin tocar la DB
@@ -287,8 +292,18 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
                          ELSE EXCLUDED.nombre
                        END,
          nombre_maxi = EXCLUDED.nombre,
-         categoria  = COALESCE(EXCLUDED.categoria, maxi_articles.categoria),
-         subrubro   = COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro),
+         categoria  = CASE
+                        WHEN maxi_articles.categoria IS DISTINCT FROM maxi_articles.categoria_maxi
+                          THEN maxi_articles.categoria
+                        ELSE COALESCE(EXCLUDED.categoria, maxi_articles.categoria)
+                      END,
+         subrubro   = CASE
+                        WHEN maxi_articles.subrubro IS DISTINCT FROM maxi_articles.subrubro_maxi
+                          THEN maxi_articles.subrubro
+                        ELSE COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro)
+                      END,
+         categoria_maxi = COALESCE(EXCLUDED.categoria, maxi_articles.categoria_maxi),
+         subrubro_maxi  = COALESCE(EXCLUDED.subrubro, maxi_articles.subrubro_maxi),
          updated_at = NOW()
        WHERE maxi_articles.origen = 'maxi'
          AND NOT EXISTS (
