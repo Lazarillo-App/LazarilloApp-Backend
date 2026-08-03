@@ -282,6 +282,30 @@ router.post('/:id/reconcile-manuals', async (req, res) => {
   }
 });
 
+/* ───────── Restaurar valores originales de MaxiRest (formateo de nombre/rubro/subrubro) ───────── */
+router.post('/:id/restore-maxi', async (req, res) => {
+  const bizId = Number(req.params.id);
+  if (!Number.isFinite(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
+  try {
+    const pool = require('../config/db');
+    const { rowCount } = await pool.query(
+      `UPDATE maxi_articles
+          SET nombre    = nombre_maxi,
+              categoria = categoria_maxi,
+              subrubro  = subrubro_maxi,
+              updated_at = NOW()
+        WHERE business_id = $1
+          AND origen = 'maxi'
+          AND nombre_maxi IS NOT NULL`,
+      [bizId]
+    );
+    return res.json({ ok: true, restored: rowCount });
+  } catch (e) {
+    console.error('[restore-maxi] error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* Default group helpers */
 router.get('/:id/default-group', (req, res) => {
   const biz = req.business;

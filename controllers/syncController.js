@@ -279,7 +279,7 @@ async function upsertArticles({ client, businessId, items }) {
       const precio = num(it.precio ?? it.precioVenta ?? it.importe, 0);
       const costo = num(it.costo ?? it.costoPromedio, 0);
 
-      values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},$${p + 6},$${p + 7}::jsonb,NOW())`);
+      values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},$${p + 6},$${p + 7}::jsonb,NOW(),$${p + 8},$${p + 9},$${p + 10})`);
       params.push(
         businessId,
         id,
@@ -288,15 +288,18 @@ async function upsertArticles({ client, businessId, items }) {
         subrubro,
         precio,
         costo,
-        JSON.stringify(it.raw ?? it._raw ?? it)
+        JSON.stringify(it.raw ?? it._raw ?? it),
+        nombre,      // nombre_maxi: nace igual al de Maxi
+        categoria,   // categoria_maxi
+        subrubro     // subrubro_maxi
       );
-      p += 8;
+      p += 11;
     }
     if (!values.length) continue;
 
     const sql = `
       INSERT INTO public.maxi_articles
-        (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at)
+        (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at, nombre_maxi, categoria_maxi, subrubro_maxi)
       VALUES ${values.join(',')}
       ON CONFLICT (business_id, articulo_id)
       DO UPDATE SET
