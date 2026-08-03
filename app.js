@@ -52,6 +52,7 @@ const notificationsRoutes = require('./routes/notificationsRoutes');
 const accessRoutes         = require('./routes/accessRoutes');
 const requireActiveAccount = require('./middleware/requireActiveAccount');
 const syncRoutes = require('./routes/syncRoutes');
+const dashboardStoreRoutes = require('./routes/dashboardStore');
 const branchesRouter = require("./routes/branchesRoutes");
 const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
@@ -182,6 +183,7 @@ app.use('/api/businesses', articlePriceConfigRoutes);
 // 2) rutas específicas por businessId
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
 app.use('/api/businesses/:businessId/sync', syncRoutes);
+app.use('/api/businesses/:businessId/dashboard-store', dashboardStoreRoutes);
 
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
