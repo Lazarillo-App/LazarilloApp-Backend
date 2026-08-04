@@ -63,7 +63,7 @@ exports.previewBulkDelete = async (req, res, next) => {
   const client = await pool.connect();
   try {
     const bizId = Number(req.params.businessId) || getBusinessId(req);
-  if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Business ID requerido' });
 
     const { tipo, filtroScope = 'all', agrupacionId } = req.query;
     if (!['articulo', 'elaborado'].includes(tipo)) {
@@ -301,8 +301,8 @@ exports.bulkAddInsumo = async (req, res, next) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'total', TRUE, TRUE,
            COALESCE((SELECT MAX(orden) + 1 FROM receta_items WHERE receta_id = $1), 0))`,
         [recetaId, insId, cant, unidadItem,
-         Math.round(costoUnitario * 10000) / 10000,
-         insumo.codigo_maxi || null, insumo.nombre || null]
+          Math.round(costoUnitario * 10000) / 10000,
+          insumo.codigo_maxi || null, insumo.nombre || null]
       );
 
       // Recalcular costo_total de la receta
@@ -353,10 +353,12 @@ exports.insumosUsadosEnBloque = async (req, res, next) => {
               i.nombre,
               i.unidad_med,
               i.precio_ref,
-              COUNT(DISTINCT r.article_id)::int AS en_cuantos
+              COUNT(DISTINCT r.article_id)::int AS en_cuantos,
+              jsonb_agg(DISTINCT jsonb_build_object('id', r.article_id, 'nombre', ma.nombre)) AS articulos
          FROM recetas r
          JOIN receta_items ri ON ri.receta_id = r.id
          JOIN insumos i ON i.id = ri.insumo_id
+         LEFT JOIN maxi_articles ma ON ma.business_id = r.business_id AND ma.articulo_id = r.article_id
         WHERE r.business_id = $1
           AND r.article_id = ANY($2::int[])
           AND ri.insumo_id IS NOT NULL
