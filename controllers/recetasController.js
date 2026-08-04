@@ -40,7 +40,7 @@ exports.getReceta = async (req, res, next) => {
          ri.cantidad, ri.unidad, ri.costo_unitario,
          ROUND(ri.cantidad * ri.costo_unitario, 4)               AS costo_total_item,
          ri.notas, ri.observaciones, ri.fotos_urls,
-         ri.merma, ri.pedido, ri.tipo_costo, ri.orden, ri.merma_id,
+         ri.merma, ri.pedido, ri.tipo_costo, ri.orden, ri.merma_id, ri.secreto,
          ri.codigo_maxi_insumo, ri.nombre_insumo_maxi,
          ri.article_ref_id,
          ri.updated_at
@@ -201,6 +201,7 @@ exports.saveReceta = async (req, res, next) => {
       const merma = item.merma !== false;
       const mermaId = item.mermaId != null ? Number(item.mermaId) : null;
       const pedido = item.pedido !== false;
+      const secreto = item.secreto === true;
       const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
       const fotosUrls = Array.isArray(item.fotosUrls)
@@ -232,12 +233,12 @@ exports.saveReceta = async (req, res, next) => {
           `INSERT INTO receta_items
              (receta_id, article_ref_id, cantidad, unidad, costo_unitario, notas,
               observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
-              nombre_insumo_maxi, merma_id, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+              nombre_insumo_maxi, merma_id, secreto, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
            RETURNING *`,
           [
             receta.id, articleRefId, cantidad, unidad, costoUnitario, notas,
-            observaciones, fotosUrls, merma, pedido, tipoCosto, orden, refNombre, mermaId,
+            observaciones, fotosUrls, merma, pedido, tipoCosto, orden, refNombre, mermaId, secreto,
           ]
         );
         savedItems.push({
@@ -265,12 +266,12 @@ exports.saveReceta = async (req, res, next) => {
         `INSERT INTO receta_items
            (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
             observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
-            merma_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+            merma_id, secreto, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
          RETURNING *`,
         [
           receta.id, supplyId, cantidad, unidad, costoUnitario, notas,
-          observaciones, fotosUrls, merma, pedido, tipoCosto, orden, mermaId,
+          observaciones, fotosUrls, merma, pedido, tipoCosto, orden, mermaId, secreto,
         ]
       );
       savedItems.push({
