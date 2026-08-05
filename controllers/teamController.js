@@ -81,24 +81,55 @@ exports.listMembers = async (req, res, next) => {
                 whereCallerScope = ` AND (ua.granted_by_user_id = $3 OR ua.user_id = $3)`;
             }
 
-            const { rows } = await pool.query(
-                `
-        SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
-               ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id,
-               ua.created_at, ua.updated_at,
+            // El owner del negocio (app_businesses.owner_id) puede no tener fila en
+            // user_assignments. Lo sumamos vía UNION para que SIEMPRE aparezca en el equipo,
+            // salvo que ya venga como assignment (evitamos duplicado con el NOT EXISTS).
+            // Solo aplica a scope 'business'; el admin no ve este owner sintético igual que
+            // hoy no ve assignments ajenos.
+            const ownerUnion = (scopeType === 'business' && callerRole !== 'admin')
+                ? `
+        UNION ALL
+        SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
+               b.id AS scope_id, 'owner'::text AS role,
+               u.name AS alias, NULL::bigint AS granted_by_user_id,
+               u.created_at, u.updated_at,
                u.email, u.name, u.account_status,
                u.invitation_expires_at, u.invitation_accepted_at,
-               gb.name AS granted_by_name, gb.email AS granted_by_email
-          FROM user_assignments ua
-          JOIN app_users u ON u.id = ua.user_id
-          LEFT JOIN app_users gb ON gb.id = ua.granted_by_user_id
-         WHERE ua.scope_type = $1
-           AND ua.scope_id = $2
-           AND ua.revoked_at IS NULL
-           ${whereCallerScope}
+               NULL::text AS granted_by_name, NULL::text AS granted_by_email
+          FROM app_businesses b
+          JOIN app_users u ON u.id = b.owner_id
+         WHERE b.id = $2
+           AND b.owner_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM user_assignments ua2
+              WHERE ua2.scope_type = 'business'
+                AND ua2.scope_id = b.id
+                AND ua2.user_id = b.owner_id
+                AND ua2.revoked_at IS NULL
+           )`
+                : '';
+
+            const { rows } = await pool.query(
+                `
+        SELECT * FROM (
+          SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
+                 ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id,
+                 ua.created_at, ua.updated_at,
+                 u.email, u.name, u.account_status,
+                 u.invitation_expires_at, u.invitation_accepted_at,
+                 gb.name AS granted_by_name, gb.email AS granted_by_email
+            FROM user_assignments ua
+            JOIN app_users u ON u.id = ua.user_id
+            LEFT JOIN app_users gb ON gb.id = ua.granted_by_user_id
+           WHERE ua.scope_type = $1
+             AND ua.scope_id = $2
+             AND ua.revoked_at IS NULL
+             ${whereCallerScope}
+          ${ownerUnion}
+        ) t
          ORDER BY
-           CASE ua.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
-           ua.created_at ASC
+           CASE t.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+           t.created_at ASC
         `,
                 params
             );
