@@ -162,7 +162,28 @@ exports.listMembers = async (req, res, next) => {
         JOIN visible_scopes vs
           ON vs.scope_type = ua.scope_type AND vs.scope_id = ua.scope_id
        WHERE ua.revoked_at IS NULL
-       ORDER BY ua.scope_type, ua.scope_id, ua.created_at ASC
+
+      UNION ALL
+
+      -- Owner sintético: negocios que POSEO por owner_id pero sin assignment propio.
+      -- Sin esto, mis negocios sin fila en user_assignments no aparecen en la vista.
+      SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
+             b.id AS scope_id, 'owner'::text AS role,
+             u.name AS alias, NULL::bigint AS granted_by_user_id,
+             u.created_at,
+             u.email, u.name, u.account_status,
+             u.invitation_expires_at, u.invitation_accepted_at
+        FROM app_businesses b
+        JOIN app_users u ON u.id = b.owner_id
+       WHERE b.owner_id = $1
+         AND NOT EXISTS (
+           SELECT 1 FROM user_assignments ua2
+            WHERE ua2.scope_type = 'business'
+              AND ua2.scope_id = b.id
+              AND ua2.user_id = b.owner_id
+              AND ua2.revoked_at IS NULL
+         )
+       ORDER BY scope_type, scope_id, created_at ASC
       `,
             [uid]
         );
