@@ -6,6 +6,7 @@ const team = require('../controllers/teamController');
 // Listado
 router.get('/members', authRequired, team.listMembers);
 router.get('/invitations', authRequired, team.listPendingInvitations);
+router.get('/known-people', authRequired, team.listKnownPeople);
 
 // Invitaciones
 router.post('/invitations', authRequired, team.createInvitation);

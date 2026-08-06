@@ -228,6 +228,34 @@ exports.listPendingInvitations = async (req, res, next) => {
    POST /api/team/invitations
    body: { email, scopeType, scopeId, role, alias }
 ═════════════════════════════════════════════════════════════════════ */
+/* ───────────────────────────────────────────────────────────
+   GET /api/team/known-people
+   Personas que el caller ya asignó alguna vez (para sugerir al invitar).
+   Agrupadas por email, con su alias efectivo. Evita duplicar identidad.
+─────────────────────────────────────────────────────────── */
+exports.listKnownPeople = async (req, res, next) => {
+    try {
+        const uid = req.user?.id;
+        const { rows } = await pool.query(
+            `SELECT DISTINCT ON (u.email)
+                    u.id AS user_id, u.email,
+                    COALESCE(ua.self_alias, ua.alias) AS alias,
+                    u.account_status
+               FROM user_assignments ua
+               JOIN app_users u ON u.id = ua.user_id
+              WHERE ua.granted_by_user_id = $1
+                AND ua.revoked_at IS NULL
+                AND u.id <> $1
+              ORDER BY u.email, ua.updated_at DESC NULLS LAST, ua.created_at DESC`,
+            [uid]
+        );
+        return res.json({ ok: true, people: rows });
+    } catch (e) {
+        console.error('[listKnownPeople]', e);
+        next(e);
+    }
+};
+
 exports.createInvitation = async (req, res, next) => {
     const client = await pool.connect();
     try {
@@ -268,9 +296,27 @@ exports.createInvitation = async (req, res, next) => {
 
         let userId;
         let isNewUser = false;
+        // Alias efectivo: por defecto el que mandó el front, pero si la persona ya existe
+        // y tiene alias en otro assignment activo (mismo owner), se hereda para no divergir.
+        // El alias es identidad de la persona, no del assignment.
+        let aliasEfectivo = alias.trim();
 
         if (existing.length) {
             userId = existing[0].id;
+            const { rows: aliasPrevio } = await client.query(
+                `SELECT COALESCE(self_alias, alias) AS alias
+                   FROM user_assignments
+                  WHERE user_id = $1
+                    AND granted_by_user_id = $2
+                    AND revoked_at IS NULL
+                    AND COALESCE(self_alias, alias) IS NOT NULL
+                  ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                  LIMIT 1`,
+                [userId, uid]
+            );
+            if (aliasPrevio.length && aliasPrevio[0].alias) {
+                aliasEfectivo = aliasPrevio[0].alias;
+            }
             // Si está 'invited' aún, reseteamos su token para reenvío implícito.
             // Si está activo, no le tocamos el password — solo agregamos assignment.
             if (existing[0].account_status === 'invited') {
@@ -316,7 +362,7 @@ exports.createInvitation = async (req, res, next) => {
                   granted_by_user_id = $2,
                   updated_at = NOW()
             WHERE id = $3`,
-                    [alias.trim(), uid, assignmentId]
+                    [aliasEfectivo, uid, assignmentId]
                 );
             } else {
                 // Ya estaba activo: actualizar alias por las dudas
@@ -324,7 +370,7 @@ exports.createInvitation = async (req, res, next) => {
                     `UPDATE user_assignments
               SET alias = $1, updated_at = NOW()
             WHERE id = $2`,
-                    [alias.trim(), assignmentId]
+                    [aliasEfectivo, assignmentId]
                 );
             }
         } else {
@@ -333,7 +379,7 @@ exports.createInvitation = async (req, res, next) => {
            (user_id, scope_type, scope_id, role, alias, granted_by_user_id)
          VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id`,
-                [userId, scopeType, Number(scopeId), role, alias.trim(), uid]
+                [userId, scopeType, Number(scopeId), role, aliasEfectivo, uid]
             );
             assignmentId = newAssign[0].id;
         }
