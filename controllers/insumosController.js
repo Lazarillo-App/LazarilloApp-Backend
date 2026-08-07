@@ -185,7 +185,13 @@ exports.listar = async (req, res) => {
               )
             ) FILTER (WHERE g.id IS NOT NULL),
             '[]'::json
-          ) as grupos
+          ) as grupos,
+          (SELECT COUNT(DISTINCT ri.receta_id)::int
+             FROM receta_items ri
+             JOIN recetas r2 ON r2.id = ri.receta_id
+            WHERE ri.insumo_id = i.id
+              AND r2.business_id = i.business_id
+              AND r2.active = TRUE) AS en_recetas
         FROM insumos i
         LEFT JOIN insumo_rubros ir 
           ON ir.business_id = i.business_id 
