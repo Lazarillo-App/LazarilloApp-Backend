@@ -472,8 +472,8 @@ exports.getRecetasAlertas = async (req, res, next) => {
        WHERE ri.tipo_costo != 'nulo'
        GROUP BY i.id, i.nombre, i.unidad_med
        HAVING
-         MAX(pi.fecha) IS NULL
-         OR MAX(pi.fecha) < CURRENT_DATE - ($2 || ' weeks')::interval
+         MAX(pi.fecha) IS NOT NULL
+         AND MAX(pi.fecha) < CURRENT_DATE - ($2 || ' weeks')::interval
        ORDER BY fecha_ultima_compra ASC NULLS FIRST, i.nombre ASC`,
       [bizId, alertaSemanas]
     );
