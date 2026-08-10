@@ -263,19 +263,36 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       });
     }
 
+    // ── Materializar costos desde receta_items ya persistidos ──
+    // Pisa costo_total con la suma real de DB y calcula costo_unitario
+    // (÷porciones para porcion/u, ÷peso para gr/kg/ml/lt) y costo_total_con_merma.
+    const recetaCostos = await recalcularCostoReceta(receta.id, client);
+    const costoTotalDB    = Number(recetaCostos?.costo_total)    || costoTotal;
+    const costoUnitarioDB = Number(recetaCostos?.costo_unitario) || costoXPorcion;
+
     // ── Actualizar precio_ref y costo_receta en el insumo elaborado ──
+    // precio_ref = costo UNITARIO correcto (contempla rendimiento por peso,
+    // que el cálculo viejo por porciones ignoraba → arreglo del $/porcion mal
+    // etiquetado cuando el elaborado rinde en gr/kg/ml/lt).
+    // costo_receta = costo TOTAL del lote (informativo).
     await client.query(
       `UPDATE insumos
           SET precio_ref   = $1,
-              costo_receta = $1,
+              costo_receta = $2,
               tiene_receta = TRUE,
               updated_at   = NOW()
-        WHERE id = $2 AND business_id = $3`,
-      [Math.round(costoXPorcion * 1000) / 1000, insumoId, bizId]
+        WHERE id = $3 AND business_id = $4`,
+      [
+        Math.round(costoUnitarioDB * 1000000) / 1000000, // precio_ref = unitario
+        Math.round(costoTotalDB    * 1000)    / 1000,    // costo_receta = total
+        insumoId, bizId,
+      ]
     );
 
-    await client.query('COMMIT');
+// Recalcular sugerido con el unitario materializado (correcto para peso)
+    const precioSugeridoDB = porcentajeNum > 0 ? costoUnitarioDB / (porcentajeNum / 100) : 0;
 
+    await client.query('COMMIT');
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(bizId);
 
@@ -283,9 +300,9 @@ exports.saveRecetaElaborado = async (req, res, next) => {
 
     return res.json({
       ok: true,
-      receta: { ...receta, items: savedItems },
-      costo_por_porcion: costoXPorcion,
-      precio_sugerido: precioSugerido,
+      receta: { ...receta, ...recetaCostos, items: savedItems },
+      costo_por_porcion: costoUnitarioDB,
+      precio_sugerido: precioSugeridoDB,
       porciones: porcionesNum,
     });
   } catch (e) {

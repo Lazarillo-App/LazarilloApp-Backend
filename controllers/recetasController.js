@@ -2,6 +2,7 @@
 const pool = require('../config/db');
 const { propagateRecipe } = require('../services/linkPropagation');
 const { recalcularCostoReceta } = require('../services/costoRecetaService');
+
 exports.getReceta = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
