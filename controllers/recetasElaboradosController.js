@@ -1,5 +1,6 @@
 // controllers/recetasElaboradosController.js
 const pool = require('../config/db');
+const { recalcularCostoReceta } = require('../services/costoRecetaService');
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/insumos/:insumoId/receta
