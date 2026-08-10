@@ -8,7 +8,7 @@ const {
   fetchMaxiInsumosRubros,
   normalizarInsumosRubros,
 } = require('../services/maxiSuppliesService');
-
+const { recalcularCostoRecetas } = require('../services/costoRecetaService');
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 const { autoAssignNewInsumos } = require('../services/autoAssignNewInsumos');
@@ -2461,18 +2461,7 @@ exports.reemplazarInsumo = async (req, res) => {
 
     // Recalcular costo_total de las recetas afectadas (SUM de cantidad × costo_unitario)
     const recetaIds = [...new Set(itemsAfectados.map(it => it.receta_id))];
-    for (const rId of recetaIds) {
-      await client.query(
-        `UPDATE recetas
-            SET costo_total = COALESCE((
-                  SELECT SUM(ri.cantidad * ri.costo_unitario)
-                    FROM receta_items ri WHERE ri.receta_id = $1
-                ), 0),
-                updated_at = NOW()
-          WHERE id = $1`,
-        [rId]
-      );
-    }
+    await recalcularCostoRecetas(recetaIds, client);
 
     await client.query('COMMIT');
     return res.json({

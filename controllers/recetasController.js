@@ -1,7 +1,7 @@
 // controllers/recetasController.js
 const pool = require('../config/db');
 const { propagateRecipe } = require('../services/linkPropagation');
-
+const { recalcularCostoReceta } = require('../services/costoRecetaService');
 exports.getReceta = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
@@ -293,17 +293,25 @@ exports.saveReceta = async (req, res, next) => {
       [esPromo, receta.id]
     );
 
-    // ── Actualizar costo en insumos elaborados ──
-    // El precio del insumo elaborado es SIEMPRE el costo total de su receta.
-    // El rendimiento/porciones es solo informativo (para conversiones de unidad).
-    const porcentaje = Number(porcentajeVenta) || 0;
+    // ── Materializar costos desde receta_items ya persistidos ──
+    // Pisa costo_total con la suma real de DB (no la del front) y calcula
+    // costo_unitario (por gr/ml/u/porcion) y costo_total_con_merma.
+    const recetaCostos = await recalcularCostoReceta(receta.id, client);
+    const costoTotalDB   = Number(recetaCostos?.costo_total)    || costoTotal;
+    const costoUnitarioDB = Number(recetaCostos?.costo_unitario) || 0;
 
+    // ── Actualizar costo en insumos elaborados ──
+    // costo_receta = costo TOTAL del lote (informativo, para el footer).
+    // precio_ref  = costo UNITARIO (por gr/ml/u/porcion): es lo que se usa
+    // cuando el elaborado se agrega como ingrediente de otra receta.
+    // Esto arregla que al agregarlo tome el costo total en vez del unitario.
+  const porcentaje = Number(porcentajeVenta) || 0;
     await client.query(
       `UPDATE insumos
        SET costo_receta = $1, precio_ref = $1, tiene_receta = TRUE, updated_at = NOW()
        WHERE id = $2 AND business_id = $3
          AND (es_elaborado = TRUE OR es_elaborado_manual = TRUE)`,
-      [Math.round(costoTotal * 1000) / 1000, articleId, bizId]
+      [Math.round(costoTotalDB * 1000) / 1000, articleId, bizId]
     );
 
     // ── Sincronizar porcentajeVenta → price_config como objetivo individual ──
@@ -330,7 +338,7 @@ exports.saveReceta = async (req, res, next) => {
 
     return res.json({
       ok: true,
-      receta: { ...receta, items: savedItems },
+      receta: { ...receta, ...recetaCostos, items: savedItems },
     });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
