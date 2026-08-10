@@ -30,7 +30,9 @@ async function recalcularCostoReceta(recetaId, db = pool) {
 
   const { rows: sumRows } = await db.query(
     `SELECT COALESCE(SUM(ri.cantidad * ri.costo_unitario), 0) AS total
-       FROM receta_items ri WHERE ri.receta_id = $1`,
+       FROM receta_items ri
+      WHERE ri.receta_id = $1
+        AND ri.tipo_costo IS DISTINCT FROM 'nulo'`,
     [recetaId]
   );
   const costoTotal = Number(sumRows[0].total) || 0;

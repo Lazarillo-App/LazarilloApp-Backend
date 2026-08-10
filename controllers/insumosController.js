@@ -212,7 +212,13 @@ exports.listar = async (req, res) => {
             AND pi_all.precio > 0
         ) lc ON true
         LEFT JOIN LATERAL (
-          SELECT r.updated_at AS receta_updated_at
+          SELECT
+            r.updated_at         AS receta_updated_at,
+            r.rendimiento_unidad AS receta_rend_unidad,
+            r.rendimiento_peso   AS receta_rend_peso,
+            r.unidad_peso        AS receta_unidad_peso,
+            r.porciones          AS receta_porciones,
+            r.costo_unitario     AS receta_costo_unitario
           FROM recetas r
           WHERE r.insumo_id = i.id
             AND r.business_id = i.business_id
@@ -221,7 +227,7 @@ exports.listar = async (req, res) => {
           LIMIT 1
         ) rc ON true
         ${whereSql}
-        GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra, lc.cantidad_compras, rc.receta_updated_at
+        GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra, lc.cantidad_compras, rc.receta_updated_at, rc.receta_rend_unidad, rc.receta_rend_peso, rc.receta_unidad_peso, rc.receta_porciones, rc.receta_costo_unitario
         ORDER BY ${orderBySql} ${safeOrder}
         LIMIT $${params.length + 1}
         OFFSET $${params.length + 2}

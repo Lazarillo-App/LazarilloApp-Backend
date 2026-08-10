@@ -3,6 +3,7 @@
 
 const pool = require('../config/db');
 const getBusinessId = require('../utils/getBusinessId');
+const { recalcularCostoRecetas } = require('../services/costoRecetaService');
 
 /**
  * Resuelve los article_id de una agrupación leyendo tanto
@@ -249,6 +250,7 @@ exports.bulkAddInsumo = async (req, res, next) => {
     const cant = Number(cantidad) || 0;
 
     let agregados = 0, salteados = 0, recetasCreadas = 0;
+    const recetasTocadas = [];
 
     for (const artId of ids) {
       // Buscar receta del artículo SIN filtrar por active (el unique es solo por article+business)
@@ -305,23 +307,13 @@ exports.bulkAddInsumo = async (req, res, next) => {
           insumo.codigo_maxi || null, insumo.nombre || null]
       );
 
-      // Recalcular costo_total de la receta
-      await client.query(
-        `UPDATE recetas r
-            SET costo_total = COALESCE((
-                  SELECT SUM(ri.cantidad * ri.costo_unitario)
-                    FROM receta_items ri
-                   WHERE ri.receta_id = r.id
-                     AND ri.tipo_costo != 'nulo'
-                     AND ri.cantidad > 0
-                ), 0),
-                updated_at = NOW()
-          WHERE r.id = $1`,
-        [recetaId]
-      );
-
+      // El costo se materializa después del loop, con el service único
+      recetasTocadas.push(recetaId);
       agregados++;
     }
+
+    // ── Materializar costos de todas las recetas tocadas ──
+    await recalcularCostoRecetas(recetasTocadas, client);
 
     await client.query('COMMIT');
     return res.json({ ok: true, agregados, salteados, recetasCreadas, insumo: insumo.nombre });
