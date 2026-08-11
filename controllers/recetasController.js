@@ -2,6 +2,7 @@
 const pool = require('../config/db');
 const { propagateRecipe } = require('../services/linkPropagation');
 const { recalcularCostoReceta } = require('../services/costoRecetaService');
+const { normalizarCantidadUnidad } = require('../services/unidades');
 
 exports.getReceta = async (req, res, next) => {
   try {
@@ -194,9 +195,16 @@ exports.saveReceta = async (req, res, next) => {
 
    for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const cantidad = Number(item.cantidad || 0);
-      const costoUnitario = Number(item.costoUnitario || 0);
-      const unidad = (item.unidad || '').trim() || null;
+      // Normalizar cantidad+unidad a rango legible (0.05kg→50gr, 2500gr→2.5kg).
+      // El costo unitario se reajusta inverso para que el total no cambie.
+      const _norm = normalizarCantidadUnidad(
+        Number(item.cantidad || 0),
+        item.unidad || '',
+        Number(item.costoUnitario || 0)
+      );
+      const cantidad = _norm.cantidad;
+      const costoUnitario = _norm.costoUnitario;
+      const unidad = _norm.unidad || null;
       const notas = (item.notas || '').trim() || null;
       const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
       const merma = item.merma !== false;
