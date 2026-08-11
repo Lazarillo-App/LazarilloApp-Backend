@@ -163,7 +163,6 @@ exports.listar = async (req, res) => {
         `
         SELECT 
           i.*,
-          'v2_lateral' AS _debug_version,
           ir.nombre as rubro_nombre,
           ir.es_elaborador,
           lc.precio_promedio,
@@ -171,6 +170,11 @@ exports.listar = async (req, res) => {
           lc.fecha_ultima_compra,
           lc.cantidad_compras,
           rc.receta_updated_at,
+          rc.receta_rend_unidad,
+          rc.receta_rend_peso,
+          rc.receta_unidad_peso,
+          rc.receta_porciones,
+          rc.receta_costo_unitario,
           CASE
             WHEN i.costo_preferido IS NOT NULL THEN i.costo_preferido
             WHEN rc.receta_updated_at IS NULL THEN 'compra'
