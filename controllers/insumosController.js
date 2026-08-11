@@ -163,6 +163,7 @@ exports.listar = async (req, res) => {
         `
         SELECT 
           i.*,
+          'v2_lateral' AS _debug_version,
           ir.nombre as rubro_nombre,
           ir.es_elaborador,
           lc.precio_promedio,
