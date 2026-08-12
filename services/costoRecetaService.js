@@ -135,13 +135,26 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   //  - si rinde en porcion/u → 'u' (no se convierte por peso)
   //  - si no es elaborado → su unidad_med
   const rendU = String(ins.rendimiento_unidad || '').toLowerCase().trim();
+  const pesoEquiv = Number(ins.rendimiento_peso) || 0;   // peso de 1 porción (equivalente)
+  const unidadPesoEquiv = String(ins.unidad_peso || 'gr').toLowerCase().trim();
   let unidadBase;
+  let costoPorGrBase = 0;   // costo por unidad base de peso, si aplica equivalente
   if (['gr','kg','ml','lt'].includes(rendU)) {
+    // Rinde directamente en peso/volumen: precio_ref ya es por esa unidad
     unidadBase = rendU;
-  } else if (rendU === 'porcion' || rendU === 'u') {
-    unidadBase = 'u';
+  } else if ((rendU === 'porcion' || rendU === 'u') && pesoEquiv > 0) {
+    // Rinde en porción CON equivalente: precio_ref es por porción, pero se puede
+    // usar en peso. costo por gr = precio_ref / peso_equivalente (en gr).
+    const pesoEnGr = unidadPesoEquiv === 'kg' ? pesoEquiv * 1000
+      : unidadPesoEquiv === 'lt' ? pesoEquiv * 1000
+      : pesoEquiv;  // gr o ml
+    costoPorGrBase = pesoEnGr > 0 ? precioRef / pesoEnGr : 0;
+    // unidad base física según el equivalente (gr para peso, ml para volumen)
+    unidadBase = (unidadPesoEquiv === 'kg' || unidadPesoEquiv === 'gr') ? 'gr' : 'ml';
   } else {
-    unidadBase = String(ins.unidad_med || 'u').toLowerCase().trim();
+    // Rinde en porción/u SIN equivalente, o no es elaborado
+    unidadBase = (rendU === 'porcion' || rendU === 'u') ? 'u'
+      : String(ins.unidad_med || 'u').toLowerCase().trim();
   }
 
   // 1. Items que usan este insumo (en cualquier receta del biz)
@@ -158,8 +171,17 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   for (const it of items) {
     const unidadItem = String(it.unidad || unidadBase || 'u').toLowerCase().trim();
     let nuevoCosto;
-    if (unidadBase === 'u') {
-      nuevoCosto = precioRef;   // por porción/unidad, sin conversión de peso
+    if (costoPorGrBase > 0) {
+      // Elaborado en porción con equivalente: costo por gr base, convertido a la unidad del item.
+      // Si el item lo usa en porción/u, usar el costo por porción directo.
+      if (unidadItem === 'u' || unidadItem === 'porcion') {
+        nuevoCosto = precioRef;   // por porción
+      } else {
+        const factor = factorConversion(unidadBase, unidadItem);  // gr→kg = 1000, gr→gr = 1
+        nuevoCosto = factor > 0 ? costoPorGrBase / factor : costoPorGrBase;
+      }
+    } else if (unidadBase === 'u') {
+      nuevoCosto = precioRef;   // por porción/unidad sin equivalente, sin conversión
     } else {
       const factor = factorConversion(unidadBase, unidadItem);
       nuevoCosto = factor > 0 ? precioRef / factor : precioRef;
