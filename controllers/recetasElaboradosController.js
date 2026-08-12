@@ -1,6 +1,6 @@
 // controllers/recetasElaboradosController.js
 const pool = require('../config/db');
-const { recalcularCostoReceta } = require('../services/costoRecetaService');
+const { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo } = require('../services/costoRecetaService');
 const { normalizarCantidadUnidad } = require('../services/unidades');
 
 /* ══════════════════════════════════════════════════════════════
@@ -296,10 +296,52 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       ]
     );
 
-// Recalcular sugerido con el unitario materializado (correcto para peso)
-    const precioSugeridoDB = porcentajeNum > 0 ? costoUnitarioDB / (porcentajeNum / 100) : 0;
+// ── Propagación: recalcular recetas que usan este elaborado como ingrediente ──
+    // El rendimiento cambió → su costo_unitario cambió → actualizar los items que
+    // lo referencian (convertido a la unidad de cada item) y recalcular esas recetas.
+    const rendUnidElab = String(recetaCostos?.rendimiento_unidad || ruFinal || 'porcion').toLowerCase();
+    // Unidad base en la que está expresado costoUnitarioDB:
+    //  - porcion/u → 'u' (no se convierte por peso)
+    //  - gr/kg/ml/lt → esa unidad medible
+    const unidadBaseElab = ['gr','kg','ml','lt'].includes(rendUnidElab) ? rendUnidElab : 'u';
+    const { rows: itemsAfectados } = await client.query(
+      `SELECT ri.id, ri.receta_id, ri.unidad
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.insumo_id = $1
+          AND r.business_id = $2
+          AND ri.receta_id <> $3`,
+      [insumoId, bizId, receta.id]
+    );
+    for (const it of itemsAfectados) {
+      const unidadItem = String(it.unidad || unidadBaseElab || 'u').toLowerCase().trim();
+      let nuevoCosto;
+      if (unidadBaseElab === 'u') {
+        // Elaborado por porción/unidad: el costo_unitario es por porción, sin conversión de peso
+        nuevoCosto = costoUnitarioDB;
+      } else {
+        // Elaborado medible: convertir de la unidad base a la unidad del item
+        const factor = factorConversion(unidadBaseElab, unidadItem);
+        nuevoCosto = factor > 0 ? costoUnitarioDB / factor : costoUnitarioDB;
+      }
+      await client.query(
+        `UPDATE receta_items SET costo_unitario = $1, updated_at = NOW() WHERE id = $2`,
+        [Number(nuevoCosto.toFixed(6)), it.id]
+      );
+    }
+    const recetasAfectadas = [...new Set(itemsAfectados.map(it => it.receta_id))];
+    if (recetasAfectadas.length) {
+      await recalcularCostoRecetas(recetasAfectadas, client);
+    }
 
+    // ── Propagación en cascada: este elaborado cambió su costo/rendimiento →
+    // recalcular todas las recetas que lo usan (y elaborados anidados hacia arriba).
+    await propagarCostoInsumo(insumoId, bizId, client);
+
+    // Recalcular sugerido con el unitario materializado (correcto para peso)
+    const precioSugeridoDB = porcentajeNum > 0 ? costoUnitarioDB / (porcentajeNum / 100) : 0;
     await client.query('COMMIT');
+
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(bizId);
 
