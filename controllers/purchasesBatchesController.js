@@ -113,7 +113,7 @@ exports.previewBatch = async (req, res, next) => {
    LEFT JOIN purchase_items pi  ON pi.purchase_id = p.id
    LEFT JOIN app_branches ab    ON ab.id = p.branch_id
    LEFT JOIN app_businesses biz ON biz.id = p.business_id   -- ← este faltaba
-   LEFT JOIN suppliers s        ON s.id = p.proveedor_id
+   LEFT JOIN suppliers s        ON s.id = p.proveedor_id AND s.business_id = p.business_id
    WHERE p.batch_id = $1 AND p.business_id = $2
    ORDER BY p.fecha DESC, p.id, pi.id
    LIMIT $3`,

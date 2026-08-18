@@ -217,8 +217,7 @@ exports.list = async (req, res, next) => {
            pi.orden_compra, pi.referencia
          FROM purchase_items pi
          JOIN purchases p        ON p.id = pi.purchase_id
-         LEFT JOIN app_branches ab ON ab.id = p.branch_id
-         LEFT JOIN suppliers s   ON s.id = p.proveedor_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = p.business_id
          LEFT JOIN insumos   i   ON i.id = pi.insumo_id
          ${whereSql}
          ORDER BY pi.fecha DESC, p.factura_key, pi.id
@@ -284,7 +283,7 @@ exports.summary = async (req, res, next) => {
          FROM purchase_items pi
          JOIN purchases p        ON p.id = pi.purchase_id
          LEFT JOIN app_branches ab ON ab.id = p.branch_id
-         LEFT JOIN suppliers s   ON s.id = p.proveedor_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = p.business_id
          WHERE pi.business_id = $1 ${extraFilterSql}
          GROUP BY s.id, s.nombre, s.cuit${branchGroup}
          ORDER BY total DESC NULLS LAST`,
@@ -322,7 +321,7 @@ exports.exportCsv = async (req, res, next) => {
          FROM purchase_items pi
          JOIN purchases p        ON p.id = pi.purchase_id
          LEFT JOIN app_branches ab ON ab.id = p.branch_id
-         LEFT JOIN suppliers s   ON s.id = p.proveedor_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = p.business_id
          LEFT JOIN insumos   i   ON i.id = pi.insumo_id
          WHERE ${allWhere.join(' AND ')}
          GROUP BY pi.insumo_id, i.codigo_maxi
