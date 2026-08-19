@@ -1226,7 +1226,13 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
   }
 
-  if (fromId === toId) return res.json({ ok: true, moved: 0 });
+    // subrubro destino opcional: si viene, ademÃ¡s de mover reescribe el rubro (UI) en las 3 capas
+  const nuevoSubrubro =
+    typeof req.body?.subrubro === 'string' && req.body.subrubro.trim()
+      ? req.body.subrubro.trim()
+      : null;
+  // fromId === toId sigue siendo vÃ¡lido si solo se cambia el rubro dentro de la misma agrupaciÃ³n
+  if (fromId === toId && !nuevoSubrubro) return res.json({ ok: true, moved: 0 });
 
   const client = await pool.connect();
   try {
@@ -1313,10 +1319,11 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     const seen = new Set(toList.map((x) => Number(x.id)));
     const toMerged = [...toList];
 
-    for (const it of moving) {
+        for (const it of moving) {
       const id = Number(it.id);
       if (!seen.has(id)) {
-        toMerged.push({ ...it, id });
+        // si viene subrubro nuevo, se escribe en la copia del jsonb destino
+        toMerged.push(nuevoSubrubro ? { ...it, id, subrubro: nuevoSubrubro } : { ...it, id });
         seen.add(id);
       }
     }
@@ -1341,11 +1348,25 @@ exports.moveItemsBetweenGroups = async (req, res) => {
       [ids, fromId, fromBizId]
     );
 
-    await client.query(
+        await client.query(
       `UPDATE agrupaciones SET articulos = $1::jsonb WHERE id = $2 AND business_id = $3`,
       [JSON.stringify(toMerged), toId, toBizId]
     );
-
+    // Si viene subrubro nuevo: reescribir fuente de verdad + copia desnormalizada
+    if (nuevoSubrubro) {
+      // maxi_articles.subrubro = "Rubro" UI (fuente de verdad, respetada por el sync)
+      await client.query(
+        `UPDATE maxi_articles SET subrubro = $1 WHERE id = ANY($2::int[])`,
+        [nuevoSubrubro, ids]
+      );
+      // agrupacion_articulos.subrubro (copia desnormalizada) para el destino
+      await client.query(
+        `UPDATE agrupacion_articulos
+            SET subrubro = $1
+          WHERE agrupacion_id = $2 AND articulo_id = ANY($3::int[])`,
+        [nuevoSubrubro, toId, ids]
+      );
+    }
     await client.query('COMMIT');
 
     // Invalidar caché de artículos para ambos negocios involucrados
