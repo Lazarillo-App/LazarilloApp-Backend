@@ -46,7 +46,7 @@ async function resolveArticuloInfo(client, storageBizId, artId) {
       `SELECT name AS nombre, rubro AS categoria, subrubro, price AS precio, 0 AS costo
          FROM app_articles
         WHERE business_id = $1 AND id = $2 LIMIT 1`,
-      [storageBizId, Math.abs(artId)]
+            [storageBizId, artId]
     );
     if (rows.length) return rows[0];
   }
