@@ -1356,7 +1356,7 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     if (nuevoSubrubro) {
       // maxi_articles.subrubro = "Rubro" UI (fuente de verdad, respetada por el sync)
       await client.query(
-        `UPDATE maxi_articles SET subrubro = $1 WHERE id = ANY($2::int[])`,
+        `UPDATE maxi_articles SET subrubro = $1 WHERE articulo_id = ANY($2::int[])`,
         [nuevoSubrubro, ids]
       );
       // agrupacion_articulos.subrubro (copia desnormalizada) para el destino
