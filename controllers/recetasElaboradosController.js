@@ -1,7 +1,7 @@
 // controllers/recetasElaboradosController.js
 const pool = require('../config/db');
 const { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo } = require('../services/costoRecetaService');
-const { normalizarCantidadUnidad } = require('../services/unidades');
+const { factorConversion, normalizarCantidadUnidad } = require('../services/unidades');
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/insumos/:insumoId/receta
