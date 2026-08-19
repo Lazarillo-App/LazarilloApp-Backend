@@ -6,12 +6,11 @@ const getBusinessId = require('../utils/getBusinessId');
 const { fetchMaxiSuppliers, fetchMaxiPurchases } = require('../services/maxiPurchasesService');
 const { upsertPurchasesBatch, upsertSuppliers } = require('../services/purchasesStore');
 
-// ── Cada negocio es dueño de sus propias compras ──
-async function resolvePurchaseBusiness(bizId) {
-  return bizId;
-}
-
-// ── Credenciales siempre del principal ──
+// ── Credenciales / proveedores siempre del principal de la org ──
+// Modelo de alcances Lazarillo:
+//   - COMPRAS (purchases/purchase_items): por-negocio → se usa el bizId crudo.
+//   - PROVEEDORES (suppliers): org-wide → viven en el principal, se resuelven con esta función.
+//   - INSUMOS: org-wide → también en el principal.
 async function resolveCredsBizId(bizId) {
   const { rows } = await pool.query(
     'SELECT created_from, organization_id FROM app_businesses WHERE id = $1',
@@ -27,6 +26,11 @@ async function resolveCredsBizId(bizId) {
     [biz.organization_id]
   );
   return rootRows[0]?.id ?? bizId;
+}
+
+// Proveedores viven en el principal (org-wide). Alias semántico de resolveCredsBizId.
+async function resolveSupplierBizId(bizId) {
+  return resolveCredsBizId(bizId);
 }
 
 // ── Mapa codigo_maxi → insumo_id ──
@@ -117,22 +121,22 @@ exports.sync = async (req, res, next) => {
       }
     }
 
-    // 1) Proveedores
+    // 1) Proveedores → se upsertean en el PRINCIPAL (org-wide)
     let suppliersCount = 0;
     try {
       const proveedores = await fetchMaxiSuppliers({ businessId: credsBizId, req });
-      suppliersCount = await upsertSuppliers(businessId, proveedores);
+      suppliersCount = await upsertSuppliers(credsBizId, proveedores);
     } catch (e) {
       console.warn('[purchases.sync] Proveedores falló (no crítico):', e.message);
     }
 
-    // 2) Compras
+    // 2) Compras → se guardan en el negocio activo (por-negocio)
     const facturas = await fetchMaxiPurchases({ businessId: credsBizId, req, from, to, provdr, num });
     if (!facturas.length) {
       return res.json({ ok: true, inserted: 0, updated: 0, items: 0, suppliers: suppliersCount, message: 'Sin compras en el rango' });
     }
 
-    // 3) Cruzar con insumos
+    // 3) Cruzar con insumos (del principal)
     const insumoMap = await buildInsumoMap(credsBizId);
 
     // 4) Upsert — pasa branch_id para que se guarde en purchases
@@ -145,24 +149,26 @@ exports.sync = async (req, res, next) => {
 };
 
 // POST /api/purchases/sync-suppliers
+// Proveedores org-wide → se upsertean SIEMPRE en el principal de la org.
 exports.syncSuppliers = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     const credsBizId = await resolveCredsBizId(rawBizId);
     const proveedores = await fetchMaxiSuppliers({ businessId: credsBizId, req });
-    const count = await upsertSuppliers(rawBizId, proveedores);
+    const count = await upsertSuppliers(credsBizId, proveedores);
     res.json({ ok: true, suppliers: count });
   } catch (e) { next(e); }
 };
 
 // GET /api/purchases/suppliers
+// Proveedores org-wide → se listan desde el principal de la org.
 exports.listSuppliers = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
-    const businessId = await resolvePurchaseBusiness(rawBizId);
+    const supplierBizId = await resolveSupplierBizId(rawBizId);
     const { rows } = await pool.query(
       'SELECT id, nombre, razon_social, cuit FROM suppliers WHERE business_id = $1 ORDER BY nombre ASC',
-      [businessId]
+      [supplierBizId]
     );
     res.json({ ok: true, data: rows });
   } catch (e) { next(e); }
@@ -177,12 +183,17 @@ exports.listSuppliers = async (req, res, next) => {
 //
 // Nuevas columnas en la respuesta:
 //   branch_id, branch_name, branch_color  (null si no tiene sucursal)
+//
+// Alcances: las COMPRAS se filtran por el negocio activo (crudo); los PROVEEDORES
+// se resuelven contra el principal de la org (org-wide).
 // ─────────────────────────────────────────────────────────────────────────────
 exports.list = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     if (!rawBizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
-    const businessId = await resolvePurchaseBusiness(rawBizId);
+
+    const businessId = rawBizId;                              // compras: por-negocio
+    const supplierBizId = await resolveSupplierBizId(rawBizId); // proveedores: principal
 
     const { page = 1, limit = 500 } = req.query;
     const hardLimit = Math.min(Math.max(Number(limit), 1), 10000);
@@ -195,6 +206,10 @@ exports.list = async (req, res, next) => {
     const allWhere = [...baseWhere, ...extraWhere];
     const allParams = [...baseParams, ...extraParams];
     const whereSql = 'WHERE ' + allWhere.join(' AND ');
+
+    // El JOIN de suppliers resuelve contra el principal (org-wide), no contra p.business_id.
+    // supplierBizId va como parámetro posicional después de los del WHERE.
+    const supplierParamIdx = allParams.length + 1;
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -218,13 +233,13 @@ exports.list = async (req, res, next) => {
          FROM purchase_items pi
          JOIN purchases p        ON p.id = pi.purchase_id
          LEFT JOIN app_branches ab ON ab.id = p.branch_id
-         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = p.business_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = $${supplierParamIdx}
          LEFT JOIN insumos   i   ON i.id = pi.insumo_id
          ${whereSql}
          ORDER BY pi.fecha DESC, p.factura_key, pi.id
-         LIMIT $${allParams.length + 1}
-         OFFSET $${allParams.length + 2}`,
-        [...allParams, hardLimit, offset]
+         LIMIT $${allParams.length + 2}
+         OFFSET $${allParams.length + 3}`,
+        [...allParams, supplierBizId, hardLimit, offset]
       ),
       pool.query(
         `SELECT COUNT(DISTINCT pi.id)::int AS total
@@ -253,7 +268,8 @@ exports.list = async (req, res, next) => {
 exports.summary = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
-    const businessId = await resolvePurchaseBusiness(rawBizId);
+    const businessId = rawBizId;                              // compras: por-negocio
+    const supplierBizId = await resolveSupplierBizId(rawBizId); // proveedores: principal
 
     const baseParams = [businessId];
     const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
@@ -270,6 +286,9 @@ exports.summary = async (req, res, next) => {
 
     const extraFilterSql = extraWhere.length ? 'AND ' + extraWhere.join(' AND ') : '';
 
+    // supplierBizId como parámetro posicional después de los del WHERE.
+    const supplierParamIdx = allParams.length + 1;
+
     const { rows } = await pool.query(
       `SELECT
            s.id             AS proveedor_id,
@@ -284,11 +303,11 @@ exports.summary = async (req, res, next) => {
          FROM purchase_items pi
          JOIN purchases p        ON p.id = pi.purchase_id
          LEFT JOIN app_branches ab ON ab.id = p.branch_id
-         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = p.business_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = $${supplierParamIdx}
          WHERE pi.business_id = $1 ${extraFilterSql}
          GROUP BY s.id, s.nombre, s.cuit${branchGroup}
          ORDER BY total DESC NULLS LAST`,
-      allParams
+      [...allParams, supplierBizId]
     );
     res.json({ ok: true, data: rows });
   } catch (e) { next(e); }
@@ -300,7 +319,8 @@ exports.summary = async (req, res, next) => {
 exports.exportCsv = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
-    const businessId = await resolvePurchaseBusiness(rawBizId);
+    const businessId = rawBizId;                              // compras: por-negocio
+    const supplierBizId = await resolveSupplierBizId(rawBizId); // proveedores: principal
 
     const baseParams = [businessId];
     const baseWhere = ['pi.business_id = $1'];
@@ -308,6 +328,9 @@ exports.exportCsv = async (req, res, next) => {
 
     const allWhere = [...baseWhere, ...extraWhere];
     const allParams = [...baseParams, ...extraParams];
+
+    // supplierBizId como parámetro posicional después de los del WHERE.
+    const supplierParamIdx = allParams.length + 1;
 
     // Agregado por insumo
     const { rows } = await pool.query(
@@ -322,12 +345,12 @@ exports.exportCsv = async (req, res, next) => {
          FROM purchase_items pi
          JOIN purchases p        ON p.id = pi.purchase_id
          LEFT JOIN app_branches ab ON ab.id = p.branch_id
-         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = p.business_id
+         LEFT JOIN suppliers s   ON s.id = p.proveedor_id AND s.business_id = $${supplierParamIdx}
          LEFT JOIN insumos   i   ON i.id = pi.insumo_id
          WHERE ${allWhere.join(' AND ')}
          GROUP BY pi.insumo_id, i.codigo_maxi
          ORDER BY SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0)) DESC NULLS LAST`,
-      allParams
+      [...allParams, supplierBizId]
     );
 
     const headers = ['Código', 'Nombre', 'Unidad', 'Cantidad', 'Precio unitario', 'Total'];
@@ -372,7 +395,7 @@ exports.firstDate = async (req, res, next) => {
   try {
     const rawBizId = getBusinessId(req);
     if (!rawBizId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
-    const businessId = await resolvePurchaseBusiness(rawBizId);
+    const businessId = rawBizId; // compras: por-negocio
 
     const { branch_id } = req.query;
     const params = [businessId];

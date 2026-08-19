@@ -308,6 +308,30 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       );
     }
 
+   // ── Proveedores: upsert en el PRINCIPAL de la org (credsBizId) ──
+    // Modelo org-wide: los proveedores viven en el principal, igual que los insumos.
+    // Se pueblan desde el CSV (cod_pro + proveedor) para no dejar compras huérfanas.
+    const provMap = new Map(); // cod_pro → nombre (dedup por lote)
+    for (const item of items) {
+      if (Number.isFinite(item.cod_pro) && item.cod_pro > 0) {
+        const nom = (item.proveedor || '').trim();
+        // Preferimos un nombre no vacío si el mismo cod_pro aparece con y sin nombre
+        if (!provMap.has(item.cod_pro) || (nom && !provMap.get(item.cod_pro))) {
+          provMap.set(item.cod_pro, nom || null);
+        }
+      }
+    }
+    for (const [codPro, nom] of provMap) {
+      await client.query(
+        `INSERT INTO suppliers (id, business_id, nombre, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (business_id, id) DO UPDATE SET
+           nombre     = COALESCE(NULLIF(EXCLUDED.nombre, ''), suppliers.nombre),
+           updated_at = NOW()`,
+        [codPro, credsBizId, nom]
+      );
+    }
+
     // ── INSERT — todos los registros con business_id = dataBizId ──
     const purchaseMap = new Map();
     const CHUNK = 500;
