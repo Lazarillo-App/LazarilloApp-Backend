@@ -162,7 +162,7 @@ exports.listar = async (req, res) => {
         AND r_el.active = TRUE
     )`;
 
-    if (elaborados === 'true')  where.push(tieneRecetaSQL);
+    if (elaborados === 'true') where.push(tieneRecetaSQL);
     if (elaborados === 'false') where.push(`NOT ${tieneRecetaSQL}`);
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -2525,7 +2525,7 @@ exports.estadoBonificacion = async (req, res) => {
     if (!insRows.length) return res.status(404).json({ ok: false, error: 'insumo no encontrado' });
     const ins = insRows[0];
 
-        // Compras org-wide: el costo de reposición mira el último comprobante de
+    // Compras org-wide: el costo de reposición mira el último comprobante de
     // CUALQUIER negocio de la org (las compras son per-business, el costo es único).
     const orgBizIds = await getOrgBizIds(businessId);
     // Último comprobante del insumo (agrupado por factura_key + proveedor)
@@ -2598,6 +2598,7 @@ exports.estadoBonificacion = async (req, res) => {
         facturadas,
         bonificadas,
         recibidas,
+        importe_ultimo: importe,
         ahorro_pct: null,                     // ya aplicado, no hay delta que mostrar
         sugerencia: null,
       });
@@ -2620,6 +2621,7 @@ exports.estadoBonificacion = async (req, res) => {
       facturadas,
       bonificadas,
       recibidas,
+      importe_ultimo: importe,
       irregular,
       descartado,
       sugerencia: haySugerencia ? {
