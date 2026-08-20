@@ -57,6 +57,21 @@ function factorConversion(from, to) {
   return 1;
 }
 
+// Resuelve todos los business_id de la organización a la que pertenece un negocio.
+// Las compras son per-business pero el costo de reposición es org-wide:
+// el "último comprobante" se busca entre todos los negocios de la org.
+async function getOrgBizIds(bizId, db = pool) {
+  const { rows } = await db.query(
+    `SELECT id FROM app_businesses
+      WHERE organization_id = (
+        SELECT organization_id FROM app_businesses WHERE id = $1
+      )`,
+    [bizId]
+  );
+  const ids = rows.map((r) => Number(r.id)).filter(Boolean);
+  return ids.length ? ids : [Number(bizId)];  // fallback: el propio negocio (independiente sin org)
+}
+
 // ===================== INSUMOS: LISTAR =====================
 exports.listar = async (req, res) => {
   try {
@@ -2510,6 +2525,9 @@ exports.estadoBonificacion = async (req, res) => {
     if (!insRows.length) return res.status(404).json({ ok: false, error: 'insumo no encontrado' });
     const ins = insRows[0];
 
+        // Compras org-wide: el costo de reposición mira el último comprobante de
+    // CUALQUIER negocio de la org (las compras son per-business, el costo es único).
+    const orgBizIds = await getOrgBizIds(businessId);
     // Último comprobante del insumo (agrupado por factura_key + proveedor)
     const { rows: compRows } = await pool.query(
       `SELECT
@@ -2521,11 +2539,11 @@ exports.estadoBonificacion = async (req, res) => {
          SUM(pi.precio_total)                                           AS importe_total
        FROM purchases p
        JOIN purchase_items pi ON pi.purchase_id = p.id
-      WHERE pi.insumo_id = $1 AND pi.business_id = $2
+      WHERE pi.insumo_id = $1 AND pi.business_id = ANY($2::int[])
       GROUP BY p.factura_key, p.proveedor_id
       ORDER BY MAX(p.fecha) DESC, MAX(p.id) DESC
       LIMIT 1`,
-      [insumoId, businessId]
+      [insumoId, orgBizIds]
     );
     const comp = compRows[0] || null;
 
