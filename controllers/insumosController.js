@@ -2488,3 +2488,279 @@ exports.reemplazarInsumo = async (req, res) => {
     client.release();
   }
 };
+
+// ============================================================================
+// GET /businesses/:businessId/insumos/:id/bonificacion/estado
+// Estado de bonificación del insumo para el chip + popover.
+// No escribe nada. Solo detecta y reporta.
+// ============================================================================
+exports.estadoBonificacion = async (req, res) => {
+  const businessId = getBusinessId(req);
+  const insumoId = Number(req.params.id);
+  if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
+    return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+  }
+  try {
+    // Estado persistido del insumo
+    const { rows: insRows } = await pool.query(
+      `SELECT precio_ref, unidad_med, bonif_aceptada, bonif_descartada_factura
+         FROM insumos WHERE id = $1 AND business_id = $2`,
+      [insumoId, businessId]
+    );
+    if (!insRows.length) return res.status(404).json({ ok: false, error: 'insumo no encontrado' });
+    const ins = insRows[0];
+
+    // Último comprobante del insumo (agrupado por factura_key + proveedor)
+    const { rows: compRows } = await pool.query(
+      `SELECT
+         p.factura_key,
+         p.proveedor_id,
+         MAX(p.fecha)                                                   AS fecha,
+         SUM(CASE WHEN pi.precio_total > 0 THEN pi.cantidad ELSE 0 END) AS facturadas,
+         SUM(CASE WHEN pi.precio_total = 0 THEN pi.cantidad ELSE 0 END) AS bonificadas,
+         SUM(pi.precio_total)                                           AS importe_total
+       FROM purchases p
+       JOIN purchase_items pi ON pi.purchase_id = p.id
+      WHERE pi.insumo_id = $1 AND pi.business_id = $2
+      GROUP BY p.factura_key, p.proveedor_id
+      ORDER BY MAX(p.fecha) DESC, MAX(p.id) DESC
+      LIMIT 1`,
+      [insumoId, businessId]
+    );
+    const comp = compRows[0] || null;
+
+    const costoVigente = Number(ins.precio_ref) || 0;
+    const unidad = ins.unidad_med || null;
+
+    // Sin compras → sin bonificación posible
+    if (!comp) {
+      return res.json({
+        ok: true,
+        estado: 'sin_promocion',
+        costo_vigente: costoVigente,
+        unidad,
+        bonif_aceptada: !!ins.bonif_aceptada,
+        sugerencia: null,
+      });
+    }
+
+    const facturadas = Number(comp.facturadas) || 0;
+    const bonificadas = Number(comp.bonificadas) || 0;
+    const importe = Number(comp.importe_total) || 0;
+    const recibidas = facturadas + bonificadas;
+    const costoSiAplica = recibidas > 0
+      ? Math.round((importe / recibidas) * 10000) / 10000
+      : 0;
+
+    // Ratio y etiqueta (spec §3.3)
+    let promo = 'sin_promocion';
+    let ratioN = null;
+    let irregular = false;
+    if (bonificadas > 0 && facturadas > 0) {
+      ratioN = facturadas / bonificadas;
+      if (Math.abs(ratioN - Math.round(ratioN)) < 0.01) {
+        promo = `${Math.round(ratioN)}+1`;
+      } else {
+        promo = 'irregular';
+        irregular = true;
+      }
+    }
+
+    // ¿Ya está aceptada?
+    if (ins.bonif_aceptada) {
+      return res.json({
+        ok: true,
+        estado: 'aplicada',
+        costo_vigente: costoVigente,          // ya es el costo real (precio_ref actualizado)
+        unidad,
+        bonif_aceptada: true,
+        promo,
+        factura_key: comp.factura_key,
+        fecha: comp.fecha,
+        facturadas,
+        bonificadas,
+        recibidas,
+        ahorro_pct: null,                     // ya aplicado, no hay delta que mostrar
+        sugerencia: null,
+      });
+    }
+
+    // ¿El último comprobante fue descartado? → sin sugerencia
+    const descartado = comp.factura_key && comp.factura_key === ins.bonif_descartada_factura;
+
+    // ¿Hay bonificación no aplicada ni descartada, con ratio regular? → sugerencia pendiente
+    const haySugerencia = bonificadas > 0 && !irregular && !descartado;
+
+    return res.json({
+      ok: true,
+      estado: haySugerencia ? 'sugerencia_pendiente' : 'sin_promocion',
+      costo_vigente: costoVigente,            // precio de lista (no aplicada)
+      unidad,
+      bonif_aceptada: false,
+      factura_key: comp.factura_key,
+      fecha: comp.fecha,
+      facturadas,
+      bonificadas,
+      recibidas,
+      irregular,
+      descartado,
+      sugerencia: haySugerencia ? {
+        promo,
+        ratio_n: Math.round(ratioN),
+        costo_si_aplica: costoSiAplica,
+        ahorro_pct: costoVigente > 0
+          ? Math.round((1 - costoSiAplica / costoVigente) * 1000) / 10
+          : null,
+      } : null,
+    });
+  } catch (e) {
+    console.error('estadoBonificacion error:', { code: e.code, msg: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ============================================================================
+// POST /businesses/:businessId/insumos/:id/bonificacion/aplicar
+// Body opcional: { n }  (ratio manual "n+1"; si no viene, usa la bonificación
+// real detectada en el último comprobante del insumo)
+//
+// Escribe el costo real en precio_ref, prende el flag, y propaga en cascada.
+// Principio sagrado: solo se ejecuta por acción explícita del usuario.
+// ============================================================================
+exports.aplicarBonificacion = async (req, res) => {
+  const businessId = getBusinessId(req);
+  const insumoId = Number(req.params.id);
+  const nManual = req.body?.n != null ? Number(req.body.n) : null;
+  if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
+    return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+  }
+  if (nManual != null && (!Number.isFinite(nManual) || nManual <= 0)) {
+    return res.status(400).json({ ok: false, error: 'ratio n inválido' });
+  }
+  const { propagarCostoInsumo } = require('../services/costoRecetaService');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Traer el último comprobante (factura_key) del insumo, con sus totales.
+    // Agrupamos por factura_key + proveedor_id (spec §3.1), no por purchase_id,
+    // para tolerar comprobantes cargados partidos por sucursal.
+    const { rows: compRows } = await client.query(
+      `SELECT
+         p.factura_key,
+         p.proveedor_id,
+         MAX(p.fecha)                                                   AS fecha,
+         SUM(CASE WHEN pi.precio_total > 0 THEN pi.cantidad ELSE 0 END) AS facturadas,
+         SUM(CASE WHEN pi.precio_total = 0 THEN pi.cantidad ELSE 0 END) AS bonificadas,
+         SUM(pi.precio_total)                                           AS importe_total
+       FROM purchases p
+       JOIN purchase_items pi ON pi.purchase_id = p.id
+      WHERE pi.insumo_id = $1 AND pi.business_id = $2
+      GROUP BY p.factura_key, p.proveedor_id
+      ORDER BY MAX(p.fecha) DESC, MAX(p.id) DESC
+      LIMIT 1`,
+      [insumoId, businessId]
+    );
+    const comp = compRows[0];
+    if (!comp) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'el insumo no tiene compras' });
+    }
+    const facturadas = Number(comp.facturadas) || 0;
+    const importe = Number(comp.importe_total) || 0;
+    if (!facturadas || !importe) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'comprobante sin unidades facturadas' });
+    }
+    // Bonificadas: manual (facturadas / n) o las reales del comprobante
+    const bonificadas = nManual != null
+      ? facturadas / nManual
+      : (Number(comp.bonificadas) || 0);
+    const recibidas = facturadas + bonificadas;
+    const costoReal = recibidas > 0
+      ? Math.round((importe / recibidas) * 10000) / 10000
+      : 0;
+    if (!costoReal) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'no se pudo calcular el costo real' });
+    }
+    await client.query(
+      `UPDATE insumos SET precio_ref = $1, bonif_aceptada = true WHERE id = $2 AND business_id = $3`,
+      [costoReal, insumoId, businessId]
+    );
+    await propagarCostoInsumo(insumoId, businessId, client);
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      insumoId,
+      costo_real: costoReal,
+      facturadas,
+      bonificadas,
+      recibidas,
+      manual: nManual != null,
+      factura_key: comp.factura_key,
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('aplicarBonificacion error:', { code: e.code, detail: e.detail, msg: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+// ============================================================================
+// POST /businesses/:businessId/insumos/:id/bonificacion/descartar
+// Revierte al precio de lista, apaga el flag, y recuerda el factura_key
+// descartado para no re-proponer la misma sugerencia (spec §4.0).
+// Una compra posterior con otro comprobante genera una sugerencia nueva.
+// ============================================================================
+exports.descartarBonificacion = async (req, res) => {
+  const businessId = getBusinessId(req);
+  const insumoId = Number(req.params.id);
+  if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
+    return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+  }
+  const { propagarCostoInsumo } = require('../services/costoRecetaService');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // factura_key del último comprobante del insumo (el que se está descartando)
+    const { rows: compRows } = await client.query(
+      `SELECT p.factura_key
+         FROM purchases p
+         JOIN purchase_items pi ON pi.purchase_id = p.id
+        WHERE pi.insumo_id = $1 AND pi.business_id = $2
+        GROUP BY p.factura_key, p.proveedor_id
+        ORDER BY MAX(p.fecha) DESC, MAX(p.id) DESC
+        LIMIT 1`,
+      [insumoId, businessId]
+    );
+    const facturaKey = compRows[0]?.factura_key || null;
+    // Precio de lista: última línea con precio > 0
+    const { rows: listaRows } = await client.query(
+      `SELECT pi_ult.precio AS precio_lista
+         FROM purchase_items pi_ult
+        WHERE pi_ult.insumo_id = $1 AND pi_ult.business_id = $2 AND pi_ult.precio > 0
+        ORDER BY pi_ult.fecha DESC, pi_ult.id DESC LIMIT 1`,
+      [insumoId, businessId]
+    );
+    const precioLista = Number(listaRows[0]?.precio_lista) || 0;
+    await client.query(
+      `UPDATE insumos
+          SET precio_ref = $1,
+              bonif_aceptada = false,
+              bonif_descartada_factura = $2
+        WHERE id = $3 AND business_id = $4`,
+      [precioLista, facturaKey, insumoId, businessId]
+    );
+    await propagarCostoInsumo(insumoId, businessId, client);
+    await client.query('COMMIT');
+    return res.json({ ok: true, insumoId, precio_lista: precioLista, factura_descartada: facturaKey });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('descartarBonificacion error:', { code: e.code, detail: e.detail, msg: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};

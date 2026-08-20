@@ -94,6 +94,11 @@ router.post('/:id/equivalencias', ctrl.equivalencias_create);
 router.put('/:id/equivalencias/:eqId', ctrl.equivalencias_update);
 router.delete('/:id/equivalencias/:eqId', ctrl.equivalencias_remove);
 
+/* ================== BONIFICACIONES ================== */
+router.get('/:id/bonificacion/estado', ctrl.estadoBonificacion);
+router.post('/:id/bonificacion/aplicar', ctrl.aplicarBonificacion);
+router.post('/:id/bonificacion/descartar', ctrl.descartarBonificacion);
+
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);
