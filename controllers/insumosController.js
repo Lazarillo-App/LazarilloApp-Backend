@@ -2510,7 +2510,10 @@ exports.reemplazarInsumo = async (req, res) => {
 // No escribe nada. Solo detecta y reporta.
 // ============================================================================
 exports.estadoBonificacion = async (req, res) => {
-  const businessId = getBusinessId(req);
+  // El middleware resolveInsumoBusiness ya redirigió req.business al principal
+  // (147) donde viven los insumos org-wide. NO usar getBusinessId: lee el header
+  // crudo (204) e ignora esa redirección.
+  const businessId = Number(req.business?.id) || getBusinessId(req);
   const insumoId = Number(req.params.id);
   if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
@@ -2648,7 +2651,10 @@ exports.estadoBonificacion = async (req, res) => {
 // Principio sagrado: solo se ejecuta por acción explícita del usuario.
 // ============================================================================
 exports.aplicarBonificacion = async (req, res) => {
-  const businessId = getBusinessId(req);
+  // El middleware resolveInsumoBusiness ya redirigió req.business al principal
+  // (147) donde viven los insumos org-wide. NO usar getBusinessId: lee el header
+  // crudo (204) e ignora esa redirección.
+  const businessId = Number(req.business?.id) || getBusinessId(req);
   const insumoId = Number(req.params.id);
   const nManual = req.body?.n != null ? Number(req.body.n) : null;
   if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
@@ -2735,7 +2741,10 @@ exports.aplicarBonificacion = async (req, res) => {
 // Una compra posterior con otro comprobante genera una sugerencia nueva.
 // ============================================================================
 exports.descartarBonificacion = async (req, res) => {
-  const businessId = getBusinessId(req);
+  // El middleware resolveInsumoBusiness ya redirigió req.business al principal
+  // (147) donde viven los insumos org-wide. NO usar getBusinessId: lee el header
+  // crudo (204) e ignora esa redirección.
+  const businessId = Number(req.business?.id) || getBusinessId(req);
   const insumoId = Number(req.params.id);
   if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
     return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
