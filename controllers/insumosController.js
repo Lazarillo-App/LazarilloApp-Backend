@@ -2587,12 +2587,24 @@ exports.estadoBonificacion = async (req, res) => {
       }
     }
 
-    // ¿Ya está aceptada?
+        // ¿Ya está aceptada?
     if (ins.bonif_aceptada) {
+      // Precio de lista org-wide: última línea con precio > 0 en cualquier negocio
+      // de la org. Sirve para que el popover muestre "Sin promoción" = precio real
+      // de lista, no el costo con promo ya aplicado.
+      const { rows: listaRows } = await pool.query(
+        `SELECT pi_ult.precio AS precio_lista
+           FROM purchase_items pi_ult
+          WHERE pi_ult.insumo_id = $1 AND pi_ult.business_id = ANY($2::int[]) AND pi_ult.precio > 0
+          ORDER BY pi_ult.fecha DESC, pi_ult.id DESC LIMIT 1`,
+        [insumoId, orgBizIds]
+      );
+      const precioLista = Number(listaRows[0]?.precio_lista) || 0;
       return res.json({
         ok: true,
         estado: 'aplicada',
         costo_vigente: costoVigente,          // ya es el costo real (precio_ref actualizado)
+        precio_lista: precioLista,            // precio de lista para la fila "Sin promoción"
         unidad,
         bonif_aceptada: true,
         promo,
