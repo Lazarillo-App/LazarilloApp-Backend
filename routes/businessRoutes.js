@@ -367,7 +367,7 @@ router.get('/:id/config', async (req, res, next) => {
     const props = rows[0]?.props || {};
     res.json({
       ok: true,
-      config: {
+            config: {
         articulos_costo_ideal: Number(props.articulos_costo_ideal ?? 30),
         insumos_costo_ideal: Number(props.insumos_costo_ideal ?? 30),
         compras_alerta_semanas: Number(props.compras_alerta_semanas ?? 4),
@@ -375,6 +375,7 @@ router.get('/:id/config', async (req, res, next) => {
         precio_costeo_insumos: props.precio_costeo_insumos || 'ultima_compra',
         redondeo_precios: props.redondeo_precios ?? null,
         redondeo_mostrar_modal: props.redondeo_mostrar_modal ?? true,
+        desperdicio_global_pct: Number(props.desperdicio_global_pct ?? 5),
         divisa: props.divisa || 'ARS',
       },
     });
