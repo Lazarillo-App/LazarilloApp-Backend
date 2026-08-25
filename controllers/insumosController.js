@@ -2587,7 +2587,7 @@ exports.estadoBonificacion = async (req, res) => {
       }
     }
 
-        // ¿Ya está aceptada?
+    // ¿Ya está aceptada?
     if (ins.bonif_aceptada) {
       // Precio de lista org-wide: última línea con precio > 0 en cualquier negocio
       // de la org. Sirve para que el popover muestre "Sin promoción" = precio real
@@ -2677,7 +2677,7 @@ exports.aplicarBonificacion = async (req, res) => {
   }
   const { propagarCostoInsumo } = require('../services/costoRecetaService');
   const client = await pool.connect();
-    try {
+  try {
     await client.query('BEGIN');
     // Compras org-wide: mismo criterio que estadoBonificacion. Las compras son
     // per-business (viven en el subnegocio, ej. 204) pero el costo del insumo es
@@ -2769,25 +2769,28 @@ exports.descartarBonificacion = async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Compras org-wide: las compras viven en el subnegocio (ej. 204), no en el
+    // principal (147). Buscar solo en 147 da 0 filas → precioLista 0 → insumo en $0.
+    const orgBizIds = await getOrgBizIds(businessId);
     // factura_key del último comprobante del insumo (el que se está descartando)
     const { rows: compRows } = await client.query(
       `SELECT p.factura_key
          FROM purchases p
          JOIN purchase_items pi ON pi.purchase_id = p.id
-        WHERE pi.insumo_id = $1 AND pi.business_id = $2
+        WHERE pi.insumo_id = $1 AND pi.business_id = ANY($2::int[])
         GROUP BY p.factura_key, p.proveedor_id
         ORDER BY MAX(p.fecha) DESC, MAX(p.id) DESC
         LIMIT 1`,
-      [insumoId, businessId]
+      [insumoId, orgBizIds]
     );
     const facturaKey = compRows[0]?.factura_key || null;
     // Precio de lista: última línea con precio > 0
     const { rows: listaRows } = await client.query(
       `SELECT pi_ult.precio AS precio_lista
          FROM purchase_items pi_ult
-        WHERE pi_ult.insumo_id = $1 AND pi_ult.business_id = $2 AND pi_ult.precio > 0
+        WHERE pi_ult.insumo_id = $1 AND pi_ult.business_id = ANY($2::int[]) AND pi_ult.precio > 0
         ORDER BY pi_ult.fecha DESC, pi_ult.id DESC LIMIT 1`,
-      [insumoId, businessId]
+      [insumoId, orgBizIds]
     );
     const precioLista = Number(listaRows[0]?.precio_lista) || 0;
     await client.query(
