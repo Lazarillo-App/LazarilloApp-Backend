@@ -2665,8 +2665,12 @@ exports.aplicarBonificacion = async (req, res) => {
   }
   const { propagarCostoInsumo } = require('../services/costoRecetaService');
   const client = await pool.connect();
-  try {
+    try {
     await client.query('BEGIN');
+    // Compras org-wide: mismo criterio que estadoBonificacion. Las compras son
+    // per-business (viven en el subnegocio, ej. 204) pero el costo del insumo es
+    // único por org. Buscar solo en el principal (147) da 0 filas → "no tiene compras".
+    const orgBizIds = await getOrgBizIds(businessId);
     // Traer el último comprobante (factura_key) del insumo, con sus totales.
     // Agrupamos por factura_key + proveedor_id (spec §3.1), no por purchase_id,
     // para tolerar comprobantes cargados partidos por sucursal.
@@ -2680,11 +2684,11 @@ exports.aplicarBonificacion = async (req, res) => {
          SUM(pi.precio_total)                                           AS importe_total
        FROM purchases p
        JOIN purchase_items pi ON pi.purchase_id = p.id
-      WHERE pi.insumo_id = $1 AND pi.business_id = $2
+      WHERE pi.insumo_id = $1 AND pi.business_id = ANY($2::int[])
       GROUP BY p.factura_key, p.proveedor_id
       ORDER BY MAX(p.fecha) DESC, MAX(p.id) DESC
       LIMIT 1`,
-      [insumoId, businessId]
+      [insumoId, orgBizIds]
     );
     const comp = compRows[0];
     if (!comp) {
