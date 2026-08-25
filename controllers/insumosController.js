@@ -2521,7 +2521,7 @@ exports.estadoBonificacion = async (req, res) => {
   try {
     // Estado persistido del insumo
     const { rows: insRows } = await pool.query(
-      `SELECT precio_ref, unidad_med, bonif_aceptada, bonif_descartada_factura
+            `SELECT precio_ref, unidad_med, bonif_aceptada, bonif_descartada_factura, bonif_ratio
          FROM insumos WHERE id = $1 AND business_id = $2`,
       [insumoId, businessId]
     );
@@ -2587,7 +2587,7 @@ exports.estadoBonificacion = async (req, res) => {
       }
     }
 
-    // ¿Ya está aceptada?
+       // ¿Ya está aceptada?
     if (ins.bonif_aceptada) {
       // Precio de lista org-wide: última línea con precio > 0 en cualquier negocio
       // de la org. Sirve para que el popover muestre "Sin promoción" = precio real
@@ -2600,6 +2600,9 @@ exports.estadoBonificacion = async (req, res) => {
         [insumoId, orgBizIds]
       );
       const precioLista = Number(listaRows[0]?.precio_lista) || 0;
+      // La etiqueta muestra el ratio que el usuario aplicó (guardado en bonif_ratio),
+      // no el detectado del comprobante. Fallback al detectado si no hay ratio guardado.
+      const promoAplicada = ins.bonif_ratio != null ? `${ins.bonif_ratio}+1` : promo;
       return res.json({
         ok: true,
         estado: 'aplicada',
@@ -2607,7 +2610,7 @@ exports.estadoBonificacion = async (req, res) => {
         precio_lista: precioLista,            // precio de lista para la fila "Sin promoción"
         unidad,
         bonif_aceptada: true,
-        promo,
+        promo: promoAplicada,
         factura_key: comp.factura_key,
         fecha: comp.fecha,
         facturadas,
@@ -2713,10 +2716,11 @@ exports.aplicarBonificacion = async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'comprobante sin unidades facturadas' });
     }
-    // Bonificadas: manual (facturadas / n) o las reales del comprobante
+        // Bonificadas: manual (facturadas / n) o las reales del comprobante
+    const bonificadasReales = Number(comp.bonificadas) || 0;
     const bonificadas = nManual != null
       ? facturadas / nManual
-      : (Number(comp.bonificadas) || 0);
+      : bonificadasReales;
     const recibidas = facturadas + bonificadas;
     const costoReal = recibidas > 0
       ? Math.round((importe / recibidas) * 10000) / 10000
@@ -2725,9 +2729,18 @@ exports.aplicarBonificacion = async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'no se pudo calcular el costo real' });
     }
+    // Ratio a persistir para la etiqueta del chip. Si vino manual, ese;
+    // si no, el detectado (facturadas/bonificadas) redondeado, o null si irregular.
+    let ratioGuardado = null;
+    if (nManual != null) {
+      ratioGuardado = Math.round(nManual);
+    } else if (bonificadasReales > 0) {
+      const r = facturadas / bonificadasReales;
+      ratioGuardado = Math.abs(r - Math.round(r)) < 0.01 ? Math.round(r) : null;
+    }
     await client.query(
-      `UPDATE insumos SET precio_ref = $1, bonif_aceptada = true WHERE id = $2 AND business_id = $3`,
-      [costoReal, insumoId, businessId]
+      `UPDATE insumos SET precio_ref = $1, bonif_aceptada = true, bonif_ratio = $2 WHERE id = $3 AND business_id = $4`,
+      [costoReal, ratioGuardado, insumoId, businessId]
     );
     await propagarCostoInsumo(insumoId, businessId, client);
     await client.query('COMMIT');
@@ -2793,11 +2806,12 @@ exports.descartarBonificacion = async (req, res) => {
       [insumoId, orgBizIds]
     );
     const precioLista = Number(listaRows[0]?.precio_lista) || 0;
-    await client.query(
+        await client.query(
       `UPDATE insumos
           SET precio_ref = $1,
               bonif_aceptada = false,
-              bonif_descartada_factura = $2
+              bonif_descartada_factura = $2,
+              bonif_ratio = NULL
         WHERE id = $3 AND business_id = $4`,
       [precioLista, facturaKey, insumoId, businessId]
     );
