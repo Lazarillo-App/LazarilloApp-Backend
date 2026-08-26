@@ -99,6 +99,9 @@ router.get('/:id/bonificacion/estado', ctrl.estadoBonificacion);
 router.post('/:id/bonificacion/aplicar', ctrl.aplicarBonificacion);
 router.post('/:id/bonificacion/descartar', ctrl.descartarBonificacion);
 
+/* ================== USO (recetas donde se usa el insumo) ================== */
+router.get('/:id/uso', ctrl.usoInsumo);
+
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);

@@ -2409,6 +2409,58 @@ exports.reemplazarPreview = async (req, res) => {
   }
 };
 
+// GET /insumos/:id/uso → recetas (artículos y elaborados) donde se usa el insumo
+exports.usoInsumo = async (req, res) => {
+  try {
+    const businessId = Number(req.business?.id) || getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+    const orgBizIds = await getOrgBizIds(businessId);
+    const { rows } = await pool.query(
+      `SELECT
+         ri.id                AS item_id,
+         ri.receta_id,
+         ri.cantidad,
+         ri.unidad,
+         ri.merma            AS aplica_merma,
+         im.nombre           AS merma_nombre,
+         r.article_id,
+         r.insumo_id         AS receta_insumo_id,
+         r.nombre            AS receta_nombre,
+         r.business_id,
+         ma.articulo_id      AS art_codigo,
+         ma.nombre           AS art_nombre,
+         ie.codigo_maxi      AS elab_codigo,
+         ie.nombre           AS elab_nombre
+       FROM receta_items ri
+       JOIN recetas r        ON r.id = ri.receta_id
+       LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
+       LEFT JOIN insumos ie  ON ie.id = r.insumo_id
+       LEFT JOIN insumo_mermas im ON im.id = ri.merma_id
+      WHERE ri.insumo_id = $1 AND r.business_id = ANY($2::int[]) AND r.active = TRUE
+      ORDER BY COALESCE(ma.nombre, ie.nombre, r.nombre)`,
+      [insumoId, orgBizIds]
+    );
+    const uso = rows.map(x => ({
+      item_id: x.item_id,
+      receta_id: x.receta_id,
+      es_elaborado: x.receta_insumo_id != null,
+      codigo: x.receta_insumo_id != null ? (x.elab_codigo || null) : (x.art_codigo != null ? String(x.art_codigo) : null),
+      nombre: x.receta_insumo_id != null ? (x.elab_nombre || x.receta_nombre) : (x.art_nombre || x.receta_nombre),
+      cantidad: Number(x.cantidad) || 0,
+      unidad: x.unidad || 'u',
+      aplica_merma: !!x.aplica_merma,
+      merma_nombre: x.merma_nombre || null,
+    }));
+    return res.json({ ok: true, uso, total: uso.length });
+  } catch (e) {
+    console.error('usoInsumo error:', { code: e.code, msg: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
 // POST /insumos/:id/reemplazar  body { nuevoInsumoId }
 // Reemplaza el insumo viejo por el nuevo en todas las recetas del negocio activo.
 exports.reemplazarInsumo = async (req, res) => {
