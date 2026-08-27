@@ -105,12 +105,12 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
 
     let preciosActualizados = 0;
     for (const [insumoId, { precio }] of ultimoPrecioMap.entries()) {
-      await client.query(
+      const upd = await client.query(
         `UPDATE insumos SET precio_ref = $1, updated_at = NOW()
-         WHERE id = $2 AND business_id = $3`,
+         WHERE id = $2 AND business_id = $3 AND bonif_aceptada IS NOT TRUE`,
         [precio.toFixed(4), insumoId, businessId]
       );
-      preciosActualizados++;
+      if (upd.rowCount > 0) preciosActualizados++;
     }
 
     await client.query('COMMIT');

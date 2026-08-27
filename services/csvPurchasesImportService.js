@@ -6,6 +6,7 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
 const { generateBatchId } = require('./purchasesStore');
+const { recalcularBonificaciones } = require('./bonificacionesService');
 
 /**
  * Columnas esperadas del informe de MaxiRest:
@@ -308,7 +309,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       );
     }
 
-   // ── Proveedores: upsert en el PRINCIPAL de la org (credsBizId) ──
+    // ── Proveedores: upsert en el PRINCIPAL de la org (credsBizId) ──
     // Modelo org-wide: los proveedores viven en el principal, igual que los insumos.
     // Se pueblan desde el CSV (cod_pro + proveedor) para no dejar compras huérfanas.
     const provMap = new Map(); // cod_pro → nombre (dedup por lote)
@@ -413,11 +414,35 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
            ORDER BY pi.insumo_id, pi.fecha DESC, pi.id DESC
          ) sub
         WHERE i.id = sub.insumo_id
-          AND i.business_id = $4`,
+          AND i.business_id = $4
+          AND i.bonif_aceptada IS NOT TRUE`,
       [dataBizId, minDate, maxDate, credsBizId]
     );
     if (preciosActualizados > 0) {
-      console.log(`[CSV Purchases Import] precio_ref actualizado en \${preciosActualizados} insumos`);
+      console.log(`[CSV Purchases Import] precio_ref actualizado en ${preciosActualizados} insumos`);
+    }
+
+    // ── Recalcular bonificaciones de insumos con bonif_aceptada tocados por este import ──
+    // Los insumos con bonificación NO fueron pisados por el UPDATE de arriba (blindados).
+    // Acá su costo se actualiza por la lógica de bonificación: si la nueva compra trae
+    // otra bonificación, la aplica; si dejó de traerla, vuelve a lista y apaga el flag.
+    let bonificacionesCambiadas = [];
+    try {
+      const { rows: tocados } = await client.query(
+        `SELECT DISTINCT pi.insumo_id
+           FROM purchase_items pi
+          WHERE pi.business_id = $1
+            AND pi.insumo_id IS NOT NULL
+            AND pi.fecha BETWEEN $2::date AND $3::date`,
+        [dataBizId, minDate, maxDate]
+      );
+      const insumoIdsTocados = tocados.map(r => r.insumo_id).filter(Boolean);
+      if (insumoIdsTocados.length) {
+        bonificacionesCambiadas = await recalcularBonificaciones(dataBizId, insumoIdsTocados, client);
+      }
+    } catch (e) {
+      console.error('[CSV Purchases Import] recalcularBonificaciones error:', e.message);
+      // No abortar el import por esto: las compras ya están insertadas.
     }
 
     await client.query('COMMIT');
@@ -440,8 +465,8 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
         date_range: { from: minDate, to: maxDate },
       },
       errors: errors.slice(0, 20),
+      bonificaciones_cambiadas: bonificacionesCambiadas,
     };
-
   } catch (error) {
     if (txOpen) { try { await client.query('ROLLBACK'); } catch { } }
     console.error('[CSV Purchases Import] Error fatal:', error);
