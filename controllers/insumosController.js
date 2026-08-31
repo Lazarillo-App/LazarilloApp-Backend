@@ -2878,3 +2878,22 @@ exports.descartarBonificacion = async (req, res) => {
     client.release();
   }
 };
+
+exports.getOne = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    const id = Number(req.params.id);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    const orgBizIds = await getOrgBizIds(businessId);
+    const { rows } = await pool.query(
+      `SELECT i.* FROM insumos i WHERE i.id = $1 AND i.business_id = ANY($2::int[]) LIMIT 1`,
+      [id, orgBizIds]
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    return res.json({ ok: true, data: rows[0] });
+  } catch (e) {
+    console.error('getOne insumo error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};

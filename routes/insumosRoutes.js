@@ -120,6 +120,9 @@ router.get('/batches', ctrl.listBatchesInsumos);
 router.get('/batches/:batchId/preview', ctrl.previewBatchInsumos);
 router.delete('/batches/:batchId', ctrl.deleteBatchInsumos);
 
+// GET individual — al final, después de todas las estáticas, para no capturarlas
+router.get('/:id', ctrl.getOne);
+
 /* ================== MANTENIMIENTO / UTILIDADES ================== */
 router.post('/admin/cleanup-null', ctrl.__cleanupNullInsumos);
 router.post('/sync-compras', ctrl.syncDesdeCompras);
