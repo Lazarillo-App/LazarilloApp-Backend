@@ -652,21 +652,21 @@ exports.actualizar = async (req, res) => {
       push('es_elaborado_manual', true);
     }
 
-    if (!sets.length) return res.json({ ok: true });
-
-    vals.push(id, businessId);
-
+        if (!sets.length) return res.json({ ok: true });
+    // Los insumos son org-wide (viven en el principal). Desde un subnegocio hay que
+    // resolver el scope a toda la org, si no el update no encuentra el insumo → 404.
+    const orgBizIds = await getOrgBizIds(businessId);
+    vals.push(id, orgBizIds);
     const { rows } = await pool.query(
       `
       UPDATE insumos
       SET ${sets.join(', ')}, updated_at = NOW()
       WHERE id = $${vals.length - 1}
-        AND business_id = $${vals.length}
+        AND business_id = ANY($${vals.length}::int[])
       RETURNING *
       `,
       vals
     );
-
     if (!rows.length) {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
