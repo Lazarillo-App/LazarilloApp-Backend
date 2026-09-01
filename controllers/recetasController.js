@@ -42,7 +42,7 @@ exports.getReceta = async (req, res, next) => {
          ri.cantidad, ri.unidad, ri.costo_unitario,
          ROUND(ri.cantidad * ri.costo_unitario, 4)               AS costo_total_item,
          ri.notas, ri.observaciones, ri.fotos_urls,
-         ri.merma, ri.pedido, ri.tipo_costo, ri.orden, ri.merma_id, ri.secreto,
+         ri.merma, ri.pedido, ri.tipo_costo, ri.orden, ri.merma_id, ri.merma_ids, ri.secreto,
          ri.codigo_maxi_insumo, ri.nombre_insumo_maxi,
          ri.article_ref_id,
          ri.updated_at
