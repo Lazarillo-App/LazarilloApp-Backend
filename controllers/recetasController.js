@@ -193,7 +193,7 @@ exports.saveReceta = async (req, res, next) => {
 
     const savedItems = [];
 
-   for (let i = 0; i < items.length; i++) {
+    for (let i = 0; i < items.length; i++) {
       const item = items[i];
       // Normalizar cantidad+unidad a rango legible (0.05kg→50gr, 2500gr→2.5kg).
       // El costo unitario se reajusta inverso para que el total no cambie.
@@ -208,7 +208,11 @@ exports.saveReceta = async (req, res, next) => {
       const notas = (item.notas || '').trim() || null;
       const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
       const merma = item.merma !== false;
-      const mermaId = item.mermaId != null ? Number(item.mermaId) : null;
+      // Varias mermas por ítem. Compat hacia atrás: si llega el viejo `mermaId`, se envuelve.
+      const mermaIds = Array.isArray(item.mermaIds)
+        ? item.mermaIds.map(Number).filter(Number.isFinite)
+        : (item.mermaId != null ? [Number(item.mermaId)] : []);
+      const mermaId = mermaIds.length ? mermaIds[0] : null;   // legacy: la primera
       const pedido = item.pedido !== false;
       const secreto = item.secreto === true;
       const tipoCosto = (item.tipoCosto || 'total').trim();
@@ -275,12 +279,13 @@ exports.saveReceta = async (req, res, next) => {
         `INSERT INTO receta_items
            (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
             observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
-            merma_id, secreto, created_at, updated_at)
+            merma_id, merma_ids, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
          RETURNING *`,
         [
           receta.id, supplyId, cantidad, unidad, costoUnitario, notas,
-          observaciones, fotosUrls, merma, pedido, tipoCosto, orden, mermaId, secreto,
+          observaciones, fotosUrls, merma, pedido, tipoCosto, orden,
+          mermaId, mermaIds.length ? mermaIds : null,
         ]
       );
       savedItems.push({
@@ -306,7 +311,7 @@ exports.saveReceta = async (req, res, next) => {
     // Pisa costo_total con la suma real de DB (no la del front) y calcula
     // costo_unitario (por gr/ml/u/porcion) y costo_total_con_merma.
     const recetaCostos = await recalcularCostoReceta(receta.id, client);
-    const costoTotalDB   = Number(recetaCostos?.costo_total)    || costoTotal;
+    const costoTotalDB = Number(recetaCostos?.costo_total) || costoTotal;
     const costoUnitarioDB = Number(recetaCostos?.costo_unitario) || 0;
 
     // ── Actualizar costo en insumos elaborados ──
@@ -314,7 +319,7 @@ exports.saveReceta = async (req, res, next) => {
     // precio_ref  = costo UNITARIO (por gr/ml/u/porcion): es lo que se usa
     // cuando el elaborado se agrega como ingrediente de otra receta.
     // Esto arregla que al agregarlo tome el costo total en vez del unitario.
-  const porcentaje = Number(porcentajeVenta) || 0;
+    const porcentaje = Number(porcentajeVenta) || 0;
     await client.query(
       `UPDATE insumos
        SET costo_receta = $1, precio_ref = $1, tiene_receta = TRUE, updated_at = NOW()

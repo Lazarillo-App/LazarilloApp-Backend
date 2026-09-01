@@ -2570,7 +2570,9 @@ exports.reemplazarInsumo = async (req, res) => {
       const costoUnit = factor > 0 ? precioNuevo / factor : precioNuevo;
       await client.query(
         `UPDATE receta_items
-            SET insumo_id = $1, costo_unitario = $2, merma_id = $3, updated_at = NOW()
+            SET insumo_id = $1, costo_unitario = $2, merma_id = $3,
+                merma_ids = CASE WHEN $3::int IS NULL THEN NULL ELSE ARRAY[$3::int] END,
+                updated_at = NOW()
           WHERE id = $4`,
         [nuevoId, Number(costoUnit.toFixed(4)), mermaDefaultId, it.id]
       );
