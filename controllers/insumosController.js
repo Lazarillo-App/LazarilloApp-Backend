@@ -2383,25 +2383,59 @@ exports.reemplazarPreview = async (req, res) => {
     if (!(await assertInsumoBiz(insumoId, bizId))) {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
+    // Ahora devuelve el detalle (para poder destildar recetas), no solo los conteos.
     const { rows } = await pool.query(
-      `SELECT COUNT(DISTINCT r.id) AS recetas,
-              COUNT(ri.id) AS items,
-              COUNT(DISTINCT r.business_id) AS negocios
+      `SELECT ri.id AS item_id,
+              ri.receta_id,
+              ri.cantidad,
+              ri.unidad,
+              r.business_id,
+              r.article_id,
+              r.insumo_id AS receta_insumo_id,
+              COALESCE(NULLIF(r.nombre, ''), ma.nombre, ie.nombre, '(sin nombre)') AS titulo
          FROM receta_items ri
          JOIN recetas r ON r.id = ri.receta_id
+         LEFT JOIN maxi_articles ma
+                ON ma.articulo_id = r.article_id
+               AND ma.business_id = r.business_id
+         LEFT JOIN insumos ie ON ie.id = r.insumo_id
         WHERE ri.insumo_id = $1
           AND r.business_id = ANY(
                 SELECT id FROM app_businesses
                  WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $2)
               )
-          AND r.active = TRUE`,
+          AND r.active = TRUE
+        ORDER BY titulo`,
       [insumoId, bizId]
     );
+
+    // Un insumo puede aparecer en más de un item de la misma receta: agrupamos por receta.
+    const porReceta = new Map();
+    for (const row of rows) {
+      const rid = Number(row.receta_id);
+      if (!porReceta.has(rid)) {
+        porReceta.set(rid, {
+          recetaId: rid,
+          titulo: row.titulo,
+          businessId: Number(row.business_id),
+          esElaborado: row.receta_insumo_id != null,
+          items: [],
+        });
+      }
+      porReceta.get(rid).items.push({
+        itemId: Number(row.item_id),
+        cantidad: Number(row.cantidad),
+        unidad: row.unidad,
+      });
+    }
+    const detalle = Array.from(porReceta.values());
+
     return res.json({
       ok: true,
-      recetas: Number(rows[0].recetas),
-      items: Number(rows[0].items),
-      negocios: Number(rows[0].negocios),
+      recetas: detalle.length,
+      items: rows.length,
+      negocios: new Set(rows.map(r => Number(r.business_id))).size,
+      detalle,
     });
   } catch (e) {
     console.error('reemplazarPreview error:', e);
@@ -2469,6 +2503,10 @@ exports.reemplazarInsumo = async (req, res) => {
     const bizId = getBusinessId(req);
     const viejoId = Number(req.params.id);
     const nuevoId = Number(req.body?.nuevoInsumoId);
+        // Opcional: si viene, el reemplazo se limita a estas recetas (las tildadas en el modal).
+    const recetaIdsFiltro = Array.isArray(req.body?.recetaIds)
+      ? req.body.recetaIds.map(Number).filter(Number.isFinite)
+      : null;
     if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
     if (!Number.isFinite(viejoId) || !Number.isFinite(nuevoId)) {
       return res.status(400).json({ ok: false, error: 'IDs inválidos' });
@@ -2514,8 +2552,9 @@ exports.reemplazarInsumo = async (req, res) => {
       `SELECT ri.id, ri.receta_id, ri.cantidad, ri.unidad, r.business_id
          FROM receta_items ri
          JOIN recetas r ON r.id = ri.receta_id
-        WHERE ri.insumo_id = $1 AND r.business_id = ANY($2) AND r.active = TRUE`,
-      [viejoId, negocios]
+        WHERE ri.insumo_id = $1 AND r.business_id = ANY($2) AND r.active = TRUE
+          AND ($3::int[] IS NULL OR r.id = ANY($3))`,
+      [viejoId, negocios, recetaIdsFiltro]
     );
 
     if (itemsAfectados.length === 0) {
