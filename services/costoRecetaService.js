@@ -37,19 +37,34 @@ async function recalcularCostoReceta(recetaId, db = pool) {
   );
   const costoTotal = Number(sumRows[0].total) || 0;
 
-  // 2. Resolver divisor de rendimiento
+  // 2. Resolver divisor de rendimiento y la unidad en que queda el costo unitario.
+  //    - porcion/u SIN equivalente  → divisor = porciones; costo por porción.
+  //    - porcion/u CON rendimiento_peso → divisor = peso total (gr); costo por gr.
+  //    - medible directo (gr/kg/ml/lt) → divisor = porciones (que YA está en esa
+  //      unidad); costo por 1 unidad de rendimiento. (Antes caía al fallback ÷1
+  //      porque buscaba rendimiento_peso, que es NULL en este caso → bug del
+  //      precio_ref = costo del lote entero.)
   const unidad = String(rec.rendimiento_unidad || 'porcion').toLowerCase().trim();
+  const MEDIBLES = ['gr', 'kg', 'ml', 'lt'];
   let divisor;
+  let unidadCostoUnitario;   // en qué unidad queda costoUnitario
   if (unidad === 'porcion' || unidad === 'u') {
-    divisor = Number(rec.porciones) || 1;
-  } else {
-    // rinde por peso/volumen. rendimiento_peso viene en unidad_peso (gr o kg).
-    // Normalizamos a base gr (o ml para volumen — mismo número, densidad 1).
     const peso = Number(rec.rendimiento_peso) || 0;
-    const up   = String(rec.unidad_peso || 'gr').toLowerCase().trim();
-    // rendimiento_peso puede estar en kg → pasar a gr (base)
-    const pesoBase = up === 'kg' ? peso * 1000 : peso;
-    divisor = pesoBase > 0 ? pesoBase : 1;
+    if (peso > 0) {
+      const up = String(rec.unidad_peso || 'gr').toLowerCase().trim();
+      divisor = up === 'kg' ? peso * 1000 : peso;   // base gr/ml
+      unidadCostoUnitario = up === 'kg' ? 'gr' : (up || 'gr');
+    } else {
+      divisor = Number(rec.porciones) || 1;
+      unidadCostoUnitario = 'u';
+    }
+  } else if (MEDIBLES.includes(unidad)) {
+    // porciones está expresado EN la unidad de rendimiento (ej: 300 gr, 8.35 kg)
+    divisor = Number(rec.porciones) || 1;
+    unidadCostoUnitario = unidad;
+  } else {
+    divisor = Number(rec.porciones) || 1;
+    unidadCostoUnitario = 'u';
   }
   const costoUnitario = divisor > 0 ? costoTotal / divisor : 0;
 
@@ -73,7 +88,7 @@ async function recalcularCostoReceta(recetaId, db = pool) {
       Number(costoTotalConMerma.toFixed(4)),
     ]
   );
-  return upd[0] || null;
+  return upd[0] ? { ...upd[0], _unidad_costo_unitario: unidadCostoUnitario } : null;
 }
 
 /**
