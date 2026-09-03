@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { generateBatchId } = require('./purchasesStore');
 const { recalcularBonificaciones } = require('./bonificacionesService');
+const { propagarCostoInsumo } = require('./costoRecetaService');
 
 /**
  * Columnas esperadas del informe de MaxiRest:
@@ -398,7 +399,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
 
     // ── Actualizar precio_ref en insumos con el último precio pagado ──
     // Solo actualiza insumos que tienen compras en este archivo (credsBizId = lista compartida)
-    const { rowCount: preciosActualizados } = await client.query(
+    const { rows: insumosActualizadosRows } = await client.query(
       `UPDATE insumos i
           SET precio_ref = sub.ultimo_precio,
               updated_at = NOW()
@@ -415,11 +416,24 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
          ) sub
         WHERE i.id = sub.insumo_id
           AND i.business_id = $4
-          AND i.bonif_aceptada IS NOT TRUE`,
+          AND i.bonif_aceptada IS NOT TRUE
+        RETURNING i.id`,
       [dataBizId, minDate, maxDate, credsBizId]
     );
+    const preciosActualizados = insumosActualizadosRows.length;
     if (preciosActualizados > 0) {
       console.log(`[CSV Purchases Import] precio_ref actualizado en ${preciosActualizados} insumos`);
+      // El precio de estos insumos cambió: propagar en cascada a las recetas que los usan
+      // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total de las recetas
+      // quedaba congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
+      for (const row of insumosActualizadosRows) {
+        try {
+          await propagarCostoInsumo(row.id, dataBizId, client);
+        } catch (e) {
+          console.error(`[CSV Purchases Import] propagarCostoInsumo error insumo ${row.id}:`, e.message);
+          // No abortar el import por esto: el precio_ref ya quedó actualizado.
+        }
+      }
     }
 
     // ── Recalcular bonificaciones de insumos con bonif_aceptada tocados por este import ──

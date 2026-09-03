@@ -2,6 +2,7 @@
 'use strict';
 
 const pool = require('../config/db');
+const { propagarCostoInsumo } = require('./costoRecetaService');
 
 /* ─── helper: genera batch_id único ─── */
 function generateBatchId() {
@@ -110,7 +111,13 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
          WHERE id = $2 AND business_id = $3 AND bonif_aceptada IS NOT TRUE`,
         [precio.toFixed(4), insumoId, businessId]
       );
-      if (upd.rowCount > 0) preciosActualizados++;
+      if (upd.rowCount > 0) {
+        preciosActualizados++;
+        // El precio del insumo cambió: propagar en cascada a las recetas que lo usan
+        // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total quedaba
+        // congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
+        await propagarCostoInsumo(insumoId, businessId, client);
+      }
     }
 
     await client.query('COMMIT');
