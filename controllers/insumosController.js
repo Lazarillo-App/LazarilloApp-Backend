@@ -2467,11 +2467,11 @@ exports.mermasAplicar = async (req, res) => {
     const itemIds = itemsAfectados.map(it => it.id);
     await client.query(
       `UPDATE receta_items
-          SET merma_id = $1,
-              merma_ids = ARRAY[$1]::int[],
-              costo_unitario = costo_unitario * $2,
+          SET merma_id = $1::int,
+              merma_ids = ARRAY[$1::int],
+              costo_unitario = costo_unitario * $2::numeric,
               updated_at = NOW()
-        WHERE id = ANY($3)`,
+        WHERE id = ANY($3::int[])`,
       [mermaId, factor, itemIds]
     );
 
