@@ -52,12 +52,6 @@ exports.getRubros = async (req, res, next) => {
     const storageBizId = await resolveStorageBizId(bizId);
     const isSubnegocio = storageBizId !== bizId;
 
-    // Leer flag de jerarquía del principal (el catálogo vive ahí)
-    const { rows: bizRows } = await pool.query(
-      `SELECT props FROM app_businesses WHERE id = $1`, [storageBizId]
-    );
-    const invertir = bizRows[0]?.props?.invertir_jerarquia_articulos === true;
-
     // 🆕 Si bizId es subnegocio, restringir a rubros de artículos asignados a sus agrupaciones reales
     let articleIdFilter = null; // null = sin filtro (todos del principal)
     if (isSubnegocio) {
@@ -112,12 +106,16 @@ exports.getRubros = async (req, res, next) => {
       params
     );
 
-    // Sin invertir: rubro=categoria, subrubro=subrubro
-    // Con invertir: rubro=subrubro (col_rubro), subrubro=categoria (col_subrubro)
+    // Convención fija del sistema (misma que crearArticulo/actualizarArticulo/
+    // ArticuloAccionesMenu/listArticlesTreeFromDB): "Rubro" UI = columna subrubro en
+    // maxi_articles, "Subrubro" UI = columna categoria. El flag invertir_jerarquia_articulos
+    // nunca se setea desde ninguna pantalla (no hay UI para eso), así que antes esta
+    // función SIEMPRE corría con el mapeo al revés de esa convención — el desplegable
+    // de Subrubro al editar un artículo no matcheaba ningún grupo real.
     const byCategoria = {};
     for (const row of rows) {
-      const cat = (invertir ? row.col_rubro : row.col_subrubro) || 'Sin rubro';
-      const sub = invertir ? row.col_subrubro : row.col_rubro;
+      const cat = row.col_rubro || 'Sin rubro';
+      const sub = row.col_subrubro;
       if (!byCategoria[cat]) byCategoria[cat] = [];
       if (sub && !sub.includes('[PENDIENTE]') && sub !== '') {
         byCategoria[cat].push(sub);
