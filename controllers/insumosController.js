@@ -2347,14 +2347,19 @@ exports.mermas_remove = async (req, res) => {
 };
 
 // GET /insumos/:id/mermas/:mermaId/aplicar-preview
-// Recetas que usan este insumo y aún NO tienen ninguna merma asignada en la línea
-// (candidatas a recibir la merma que se acaba de marcar como default).
+// Recetas que usan este insumo (org-wide, activas) — candidatas a recibir la merma que
+// se acaba de marcar como default. Incluye las que ya tenían OTRA merma asignada (se
+// muestra cuál, para que el usuario decida caso por caso); excluye solo las que ya
+// tienen exactamente esta misma merma (no hay nada que cambiarles).
 exports.mermasAplicarPreview = async (req, res) => {
   try {
     const bizId = getBusinessId(req);
     const insumoId = Number(req.params.id);
+    const mermaId = Number(req.params.mermaId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
-    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
     if (!(await assertInsumoBiz(insumoId, bizId))) {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
@@ -2364,6 +2369,7 @@ exports.mermasAplicarPreview = async (req, res) => {
               ri.receta_id,
               ri.cantidad,
               ri.unidad,
+              imv.nombre AS merma_actual_nombre,
               r.business_id,
               r.article_id,
               r.insumo_id AS receta_insumo_id,
@@ -2374,13 +2380,13 @@ exports.mermasAplicarPreview = async (req, res) => {
                 ON ma.articulo_id = r.article_id
                AND ma.business_id = r.business_id
          LEFT JOIN insumos ie ON ie.id = r.insumo_id
+         LEFT JOIN insumo_mermas imv ON imv.id = ri.merma_id
         WHERE ri.insumo_id = $1
           AND r.business_id = ANY($2)
           AND r.active = TRUE
-          AND ri.merma_id IS NULL
-          AND (ri.merma_ids IS NULL OR cardinality(ri.merma_ids) = 0)
+          AND ri.merma_id IS DISTINCT FROM $3
         ORDER BY titulo`,
-      [insumoId, orgBizIds]
+      [insumoId, orgBizIds, mermaId]
     );
 
     // Un insumo puede aparecer en más de un item de la misma receta: agrupamos por receta.
@@ -2400,29 +2406,12 @@ exports.mermasAplicarPreview = async (req, res) => {
         itemId: Number(row.item_id),
         cantidad: Number(row.cantidad),
         unidad: row.unidad,
+        mermaActual: row.merma_actual_nombre || null,
       });
     }
     const detalle = Array.from(porReceta.values());
 
-    // DEBUG TEMPORAL — diagnóstico de por qué el preview da 0 en un caso reportado.
-    // Sacar este bloque una vez resuelto.
-    const { rows: debugRows } = await pool.query(
-      `SELECT r.id AS receta_id, r.titulo, r.business_id, r.active,
-              ri.id AS item_id, ri.merma_id, ri.merma_ids
-         FROM receta_items ri
-         JOIN recetas r ON r.id = ri.receta_id
-        WHERE ri.insumo_id = $1`,
-      [insumoId]
-    );
-    const _debug = {
-      insumoId,
-      orgBizIds,
-      totalItemsSinFiltro: debugRows.length,
-      itemsDetalle: debugRows,
-    };
-    console.log('[mermasAplicarPreview DEBUG]', JSON.stringify(_debug));
-
-    return res.json({ ok: true, recetas: detalle.length, items: rows.length, detalle, _debug });
+    return res.json({ ok: true, recetas: detalle.length, items: rows.length, detalle });
   } catch (e) {
     console.error('mermasAplicarPreview error:', e);
     return res.status(500).json({ ok: false, error: e.message });
@@ -2430,10 +2419,12 @@ exports.mermasAplicarPreview = async (req, res) => {
 };
 
 // POST /insumos/:id/mermas/:mermaId/aplicar  body { recetaIds?: number[] }
-// Asigna esta merma a las líneas de receta de este insumo que hoy no tienen ninguna, y
-// ajusta el costo_unitario ya persistido multiplicándolo por el factor
-// peso_inicial/peso_final (mismo cálculo que calcFactorMerma en el frontend), para que
-// costo_total quede correcto de inmediato sin esperar a que se reabra cada receta.
+// Asigna esta merma a las líneas de receta de este insumo (tenían otra merma, o
+// ninguna), y ajusta el costo_unitario ya persistido: primero deshace el factor de la
+// merma vieja que pudieran tener (si no tenían ninguna, factor viejo = 1, no-op) y
+// aplica el factor peso_inicial/peso_final de la merma nueva — mismo cálculo que
+// calcFactorMerma en el frontend — para que costo_total quede correcto de inmediato
+// sin esperar a que se reabra cada receta.
 exports.mermasAplicar = async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2471,10 +2462,9 @@ exports.mermasAplicar = async (req, res) => {
          FROM receta_items ri
          JOIN recetas r ON r.id = ri.receta_id
         WHERE ri.insumo_id = $1 AND r.business_id = ANY($2) AND r.active = TRUE
-          AND ri.merma_id IS NULL
-          AND (ri.merma_ids IS NULL OR cardinality(ri.merma_ids) = 0)
-          AND ($3::int[] IS NULL OR r.id = ANY($3))`,
-      [insumoId, orgBizIds, recetaIdsFiltro]
+          AND ri.merma_id IS DISTINCT FROM $3
+          AND ($4::int[] IS NULL OR r.id = ANY($4))`,
+      [insumoId, orgBizIds, mermaId, recetaIdsFiltro]
     );
 
     if (itemsAfectados.length === 0) {
@@ -2483,13 +2473,22 @@ exports.mermasAplicar = async (req, res) => {
     }
 
     const itemIds = itemsAfectados.map(it => it.id);
+    // Deshace el factor de la merma vieja de cada item (1 si no tenía ninguna) antes de
+    // aplicar el factor de la nueva, para no pisar/componer sobre un costo ya ajustado.
     await client.query(
-      `UPDATE receta_items
+      `UPDATE receta_items ri
           SET merma_id = $1::int,
               merma_ids = ARRAY[$1::int],
-              costo_unitario = costo_unitario * $2::numeric,
+              costo_unitario = ri.costo_unitario / vieja.factor * $2::numeric,
               updated_at = NOW()
-        WHERE id = ANY($3::int[])`,
+         FROM (
+           SELECT ri2.id,
+                  CASE WHEN imv.peso_final > 0 THEN imv.peso_inicial::numeric / imv.peso_final ELSE 1 END AS factor
+             FROM receta_items ri2
+             LEFT JOIN insumo_mermas imv ON imv.id = ri2.merma_id
+            WHERE ri2.id = ANY($3::int[])
+         ) vieja
+        WHERE ri.id = vieja.id`,
       [mermaId, factor, itemIds]
     );
 
