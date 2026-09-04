@@ -2346,6 +2346,153 @@ exports.mermas_remove = async (req, res) => {
   }
 };
 
+// GET /insumos/:id/mermas/:mermaId/aplicar-preview
+// Recetas que usan este insumo y aún NO tienen ninguna merma asignada en la línea
+// (candidatas a recibir la merma que se acaba de marcar como default).
+exports.mermasAplicarPreview = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const orgBizIds = await getOrgBizIds(bizId);
+    const { rows } = await pool.query(
+      `SELECT ri.id AS item_id,
+              ri.receta_id,
+              ri.cantidad,
+              ri.unidad,
+              r.business_id,
+              r.article_id,
+              r.insumo_id AS receta_insumo_id,
+              COALESCE(NULLIF(r.nombre, ''), ma.nombre, ie.nombre, '(sin nombre)') AS titulo
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+         LEFT JOIN maxi_articles ma
+                ON ma.articulo_id = r.article_id
+               AND ma.business_id = r.business_id
+         LEFT JOIN insumos ie ON ie.id = r.insumo_id
+        WHERE ri.insumo_id = $1
+          AND r.business_id = ANY($2)
+          AND r.active = TRUE
+          AND ri.merma_id IS NULL
+          AND (ri.merma_ids IS NULL OR cardinality(ri.merma_ids) = 0)
+        ORDER BY titulo`,
+      [insumoId, orgBizIds]
+    );
+
+    // Un insumo puede aparecer en más de un item de la misma receta: agrupamos por receta.
+    const porReceta = new Map();
+    for (const row of rows) {
+      const rid = Number(row.receta_id);
+      if (!porReceta.has(rid)) {
+        porReceta.set(rid, {
+          recetaId: rid,
+          titulo: row.titulo,
+          businessId: Number(row.business_id),
+          esElaborado: row.receta_insumo_id != null,
+          items: [],
+        });
+      }
+      porReceta.get(rid).items.push({
+        itemId: Number(row.item_id),
+        cantidad: Number(row.cantidad),
+        unidad: row.unidad,
+      });
+    }
+    const detalle = Array.from(porReceta.values());
+
+    return res.json({ ok: true, recetas: detalle.length, items: rows.length, detalle });
+  } catch (e) {
+    console.error('mermasAplicarPreview error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// POST /insumos/:id/mermas/:mermaId/aplicar  body { recetaIds?: number[] }
+// Asigna esta merma a las líneas de receta de este insumo que hoy no tienen ninguna, y
+// ajusta el costo_unitario ya persistido multiplicándolo por el factor
+// peso_inicial/peso_final (mismo cálculo que calcFactorMerma en el frontend), para que
+// costo_total quede correcto de inmediato sin esperar a que se reabra cada receta.
+exports.mermasAplicar = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const mermaId = Number(req.params.mermaId);
+    const recetaIdsFiltro = Array.isArray(req.body?.recetaIds)
+      ? req.body.recetaIds.map(Number).filter(Number.isFinite)
+      : null;
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+
+    await client.query('BEGIN');
+
+    const { rows: mermaRows } = await client.query(
+      `SELECT peso_inicial, peso_final FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
+      [mermaId, insumoId]
+    );
+    if (!mermaRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+    }
+    const pesoInicial = Number(mermaRows[0].peso_inicial);
+    const pesoFinal = Number(mermaRows[0].peso_final);
+    const factor = pesoFinal > 0 ? pesoInicial / pesoFinal : 1;
+
+    const orgBizIds = await getOrgBizIds(bizId, client);
+    const { rows: itemsAfectados } = await client.query(
+      `SELECT ri.id, ri.receta_id
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.insumo_id = $1 AND r.business_id = ANY($2) AND r.active = TRUE
+          AND ri.merma_id IS NULL
+          AND (ri.merma_ids IS NULL OR cardinality(ri.merma_ids) = 0)
+          AND ($3::int[] IS NULL OR r.id = ANY($3))`,
+      [insumoId, orgBizIds, recetaIdsFiltro]
+    );
+
+    if (itemsAfectados.length === 0) {
+      await client.query('COMMIT');
+      return res.json({ ok: true, recetasAfectadas: 0, itemsAfectados: 0 });
+    }
+
+    const itemIds = itemsAfectados.map(it => it.id);
+    await client.query(
+      `UPDATE receta_items
+          SET merma_id = $1,
+              merma_ids = ARRAY[$1]::int[],
+              costo_unitario = costo_unitario * $2,
+              updated_at = NOW()
+        WHERE id = ANY($3)`,
+      [mermaId, factor, itemIds]
+    );
+
+    const recetaIds = [...new Set(itemsAfectados.map(it => it.receta_id))];
+    await recalcularCostoRecetas(recetaIds, client);
+
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      recetasAfectadas: recetaIds.length,
+      itemsAfectados: itemIds.length,
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('mermasAplicar error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
 // PUT /insumos/:id/desperdicio-override
 // Body: { pct: number | null }  (null = usar el global de config)
 exports.setDesperdicioOverride = async (req, res) => {
