@@ -2404,7 +2404,25 @@ exports.mermasAplicarPreview = async (req, res) => {
     }
     const detalle = Array.from(porReceta.values());
 
-    return res.json({ ok: true, recetas: detalle.length, items: rows.length, detalle });
+    // DEBUG TEMPORAL — diagnóstico de por qué el preview da 0 en un caso reportado.
+    // Sacar este bloque una vez resuelto.
+    const { rows: debugRows } = await pool.query(
+      `SELECT r.id AS receta_id, r.titulo, r.business_id, r.active,
+              ri.id AS item_id, ri.merma_id, ri.merma_ids
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.insumo_id = $1`,
+      [insumoId]
+    );
+    const _debug = {
+      insumoId,
+      orgBizIds,
+      totalItemsSinFiltro: debugRows.length,
+      itemsDetalle: debugRows,
+    };
+    console.log('[mermasAplicarPreview DEBUG]', JSON.stringify(_debug));
+
+    return res.json({ ok: true, recetas: detalle.length, items: rows.length, detalle, _debug });
   } catch (e) {
     console.error('mermasAplicarPreview error:', e);
     return res.status(500).json({ ok: false, error: e.message });
