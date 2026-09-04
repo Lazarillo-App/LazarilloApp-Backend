@@ -6,8 +6,18 @@ const pool = require('../config/db');
  * Servicio de reconciliación entre artículos manuales (id negativo) y
  * artículos de MaxiRest (id positivo) que se sincronizan después.
  *
- * Match strategy: nombre + rubro (categoria DB) + subrubro normalizados
- *   (lower, sin tildes, espacios colapsados). NO se usa precio como filtro.
+ * Match strategy:
+ *   1) Por código: si el manual tiene props.codigo_externo cargado (el "SKU /
+ *      Código de Maxi" que se puede tipear al crearlo a mano), se busca un
+ *      positivo cuyo articulo_id (que ES el código Maxi — codart/codigo/
+ *      codigoArticulo, ver getArticuloId en syncController.js) sea EXACTAMENTE
+ *      ese número. Es un match determinístico: si el manual tiene código
+ *      cargado, NO cae al fallback por nombre (el usuario fue explícito sobre
+ *      qué artículo espera; matchear por nombre parecido sería más riesgoso
+ *      que no matchear nada).
+ *   2) Por nombre + rubro (categoria DB) + subrubro normalizados (lower, sin
+ *      tildes, espacios colapsados) — SOLO para manuales sin código cargado.
+ *      NO se usa precio como filtro.
  *
  * Resultados:
  *   0 candidatos → no hace nada (el manual sigue siendo manual).
@@ -40,14 +50,17 @@ function matchKey({ nombre, categoria, subrubro }) {
  */
 async function findMatches(client, bizId) {
   const { rows } = await client.query(
-    `SELECT articulo_id, nombre, categoria, subrubro, precio
-       FROM maxi_articles
-      WHERE business_id = $1`,
+    `SELECT ma.articulo_id, ma.nombre, ma.categoria, ma.subrubro, ma.precio,
+            aa.props->>'codigo_externo' AS codigo_externo
+       FROM maxi_articles ma
+       LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = ma.business_id
+      WHERE ma.business_id = $1`,
     [bizId]
   );
 
   const manuals = [];
   const positivesByKey = new Map();
+  const positivesByCodigo = new Map(); // "código Maxi" (= articulo_id positivo) → fila
 
   for (const r of rows) {
     const id = Number(r.articulo_id);
@@ -57,13 +70,18 @@ async function findMatches(client, bizId) {
       const k = matchKey(r);
       if (!positivesByKey.has(k)) positivesByKey.set(k, []);
       positivesByKey.get(k).push(r);
+      positivesByCodigo.set(String(id), r);
     }
   }
 
-  return manuals.map(m => ({
-    manual: m,
-    candidates: positivesByKey.get(matchKey(m)) || [],
-  }));
+  return manuals.map(m => {
+    const codigo = String(m.codigo_externo || '').trim();
+    if (codigo) {
+      const exacto = positivesByCodigo.get(codigo);
+      return { manual: m, candidates: exacto ? [exacto] : [] };
+    }
+    return { manual: m, candidates: positivesByKey.get(matchKey(m)) || [] };
+  });
 }
 
 // ───────────────────────────────────────────────────────────────────────

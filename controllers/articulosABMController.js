@@ -848,8 +848,8 @@ exports.searchPadrino = async (req, res) => {
     }
 
     // Los artículos viven en el principal (Opción B)
-    // Los artículos viven en el principal (Opción B)
     const storageBizId = await resolveStorageBizId(bizId);
+    const isSubnegocio = storageBizId !== bizId;
 
     // Leer flag invertir_jerarquia del principal (define la convención rubro↔subrubro de la org)
     const { rows: storageRows } = await pool.query(
@@ -946,6 +946,15 @@ exports.searchPadrino = async (req, res) => {
 
     const candidatos = artRows
       .filter(r => !discontinuadosIds.has(Number(r.id)))
+      // Si estamos en un subnegocio, solo ofrecer como padrino artículos libres
+      // (sin agrupación real todavía) o ya asignados a ESTE subnegocio — antes se
+      // buscaba en todo el catálogo del principal sin importar a qué subnegocio
+      // de la org pertenecía cada candidato.
+      .filter(r => {
+        if (!isSubnegocio) return true;
+        const ag = articleToAgrup.get(Number(r.id));
+        return !ag || Number(ag.business_id) === Number(bizId);
+      })
       .slice(0, 15)
       .map(r => {
         const ag = articleToAgrup.get(Number(r.id)) || null;
