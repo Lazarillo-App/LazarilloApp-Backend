@@ -9,24 +9,26 @@ async function upsertFromMaxi(businessId, items = [], opts = {}) {
   try {
     await client.query('BEGIN');
 
-    // 1) cargar existentes en un solo tiro (solo para contar unchanged)
+    // 1) cargar existentes en un solo tiro — con id + origen, no solo el código,
+    // para poder distinguir "ya es un insumo real de Maxi" (no tocar, aditivo)
+    // de "es un manual/csv precargado a propósito con este código, fusionar".
     const codes = items
       .map(it => String(it.codigo_maxi ?? it.codigo ?? it.codigoMaxi ?? '').trim())
       .filter(Boolean);
 
-    const existingSet = new Set();
+    const existingByCode = new Map(); // codigo_maxi -> { id, origen }
     if (codes.length) {
       const { rows } = await client.query(
-        `SELECT codigo_maxi
+        `SELECT id, codigo_maxi, origen
            FROM insumos
           WHERE business_id = $1
             AND codigo_maxi = ANY($2::text[])`,
         [businessId, codes]
       );
-      for (const r of rows) existingSet.add(String(r.codigo_maxi));
+      for (const r of rows) existingByCode.set(String(r.codigo_maxi), { id: r.id, origen: r.origen });
     }
 
-    let inserted = 0, unchanged = 0, skipped = 0;
+    let inserted = 0, unchanged = 0, skipped = 0, merged = 0;
 
     for (const it of items) {
       const codigo = String(it.codigo_maxi ?? it.codigo ?? it.codigoMaxi ?? '').trim();
@@ -35,17 +37,38 @@ async function upsertFromMaxi(businessId, items = [], opts = {}) {
       const nombre = String(it.nombre ?? '').trim();
       if (!nombre) { skipped++; continue; }
 
-      // Si ya existe → no tocar, no actualizar nada
-      if (existingSet.has(codigo)) {
-        unchanged++;
-        continue;
-      }
-
-      // Solo insertar si es nuevo
       const precioRefIncoming = (it.precio_ref != null && Number(it.precio_ref) > 0)
         ? Number(it.precio_ref)
         : null;
 
+      const existing = existingByCode.get(codigo);
+      if (existing) {
+        // El código ya existe. Si la fila es un manual/csv (el usuario cargó de
+        // antemano el código que este insumo iba a tener en Maxi, precisamente
+        // para que se fusionen al llegar) — convertirla en el insumo real, sin
+        // pisar lo que el usuario ya haya cargado a mano (COALESCE conserva
+        // unidad/precio/rubro existentes, igual que la reconciliación por
+        // nombre de más abajo). Si ya era 'maxi', queda como estaba (aditivo).
+        if (existing.origen === 'manual' || existing.origen === 'csv') {
+          await client.query(
+            `UPDATE insumos SET
+               origen           = 'maxi',
+               sin_equivalencia = FALSE,
+               unidad_med       = COALESCE(unidad_med, $1),
+               precio_ref       = COALESCE(precio_ref, $2),
+               rubro            = COALESCE(rubro, $3),
+               updated_at       = NOW()
+             WHERE id = $4`,
+            [it.unidad_med ?? null, precioRefIncoming, it.rubro ?? null, existing.id]
+          );
+          merged++;
+        } else {
+          unchanged++;
+        }
+        continue;
+      }
+
+      // Nuevo: insertar
       const r = await client.query(
         `INSERT INTO insumos (
            business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado
@@ -154,7 +177,8 @@ async function upsertFromMaxi(businessId, items = [], opts = {}) {
       updated: 0,        // siempre 0 porque la sync es aditiva
       unchanged,
       skipped,
-      reconciled,
+      merged,            // fusionados por código (SKU precargado a mano)
+      reconciled: reconciled + merged, // total fusionado (por código + por nombre)
       changes: [],       // ya no detectamos cambios — nada se actualiza
     };
   } catch (e) {
