@@ -260,7 +260,7 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
 
     for (const a of articles) {
      values.push(
-        `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
+        `($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`
       );
       params.push(
         bizId,
@@ -274,17 +274,23 @@ async function importMaxiMenuForBusiness(businessId, options = {}) {
         a.cod_rua || null,
         a.cod_sua || null,
         a.nombre,              // nombre_maxi: espejo de lo que vino de Maxi
+        a.precio,              // precio_maxi: espejo de lo que vino de Maxi
       );
     }
 
     const insertedRes = await client.query(
       `INSERT INTO maxi_articles (
          business_id, articulo_id, nombre, categoria, subrubro,
-         precio, costo, raw, cod_rua, cod_sua, nombre_maxi
+         precio, costo, raw, cod_rua, cod_sua, nombre_maxi, precio_maxi
        )
        VALUES ${values.join(', ')}
        ON CONFLICT (business_id, articulo_id) DO UPDATE SET
-         precio     = EXCLUDED.precio,
+         precio     = CASE
+                        WHEN maxi_articles.precio IS DISTINCT FROM maxi_articles.precio_maxi
+                          THEN maxi_articles.precio
+                        ELSE EXCLUDED.precio
+                      END,
+         precio_maxi = EXCLUDED.precio,
          costo      = EXCLUDED.costo,
          nombre      = CASE
                          WHEN maxi_articles.nombre IS DISTINCT FROM maxi_articles.nombre_maxi

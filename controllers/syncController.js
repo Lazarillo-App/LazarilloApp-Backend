@@ -279,7 +279,7 @@ async function upsertArticles({ client, businessId, items }) {
       const precio = num(it.precio ?? it.precioVenta ?? it.importe, 0);
       const costo = num(it.costo ?? it.costoPromedio, 0);
 
-      values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},$${p + 6},$${p + 7}::jsonb,NOW(),$${p + 8},$${p + 9},$${p + 10})`);
+      values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},$${p + 6},$${p + 7}::jsonb,NOW(),$${p + 8},$${p + 9},$${p + 10},$${p + 11})`);
       params.push(
         businessId,
         id,
@@ -291,19 +291,25 @@ async function upsertArticles({ client, businessId, items }) {
         JSON.stringify(it.raw ?? it._raw ?? it),
         nombre,      // nombre_maxi: nace igual al de Maxi
         categoria,   // categoria_maxi
-        subrubro     // subrubro_maxi
+        subrubro,    // subrubro_maxi
+        precio       // precio_maxi
       );
-      p += 11;
+      p += 12;
     }
     if (!values.length) continue;
 
     const sql = `
       INSERT INTO public.maxi_articles
-        (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at, nombre_maxi, categoria_maxi, subrubro_maxi)
+        (business_id, articulo_id, nombre, categoria, subrubro, precio, costo, raw, updated_at, nombre_maxi, categoria_maxi, subrubro_maxi, precio_maxi)
       VALUES ${values.join(',')}
       ON CONFLICT (business_id, articulo_id)
       DO UPDATE SET
-        precio   = EXCLUDED.precio,
+        precio   = CASE
+                     WHEN maxi_articles.precio IS DISTINCT FROM maxi_articles.precio_maxi
+                       THEN maxi_articles.precio
+                     ELSE EXCLUDED.precio
+                   END,
+        precio_maxi = EXCLUDED.precio,
         costo    = EXCLUDED.costo,
         raw      = EXCLUDED.raw,
         nombre   = CASE

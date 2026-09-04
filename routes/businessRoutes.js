@@ -1,5 +1,5 @@
 // routes/businessRoutes.js
-const { cacheJson } = require('../middleware/cacheJson');
+const { cacheJson, invalidateCacheForBiz } = require('../middleware/cacheJson');
 const express = require('express');
 const router = express.Router();
 const path = require('path');
@@ -293,12 +293,14 @@ router.post('/:id/restore-maxi', async (req, res) => {
           SET nombre    = nombre_maxi,
               categoria = categoria_maxi,
               subrubro  = subrubro_maxi,
+              precio    = COALESCE(precio_maxi, precio),
               updated_at = NOW()
         WHERE business_id = $1
           AND origen = 'maxi'
           AND nombre_maxi IS NOT NULL`,
       [bizId]
     );
+    invalidateCacheForBiz(bizId);
     return res.json({ ok: true, restored: rowCount });
   } catch (e) {
     console.error('[restore-maxi] error:', e);
