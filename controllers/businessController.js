@@ -14,6 +14,7 @@ const { upsertSalesBatch } = require('../services/salesStore');
 
 // Artículos
 const { fetchArticlesTree } = require('../services/articlesRepo');
+const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 const MAXI_BASE = (process.env.MAXI_BASE_URL || 'https://api-mconn.maxisistemas.com.ar').replace(/\/+$/, '');
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -343,6 +344,17 @@ exports.remove = async (req, res) => {
       return res.status(404).json({ error: 'not_found' });
     }
 
+    // Negocios de la misma org (antes de borrar bizId, para que la subquery lo encuentre):
+    // sus catálogos de artículos/agrupaciones quedan viejos en el caché de 5 min
+    // (cacheJson) y en el caché de React Query del frontend una vez que este negocio
+    // se borre y sus artículos vuelvan a "Sin Agrupación" del principal.
+    const { rows: orgBizRows } = await client.query(
+      `SELECT id FROM app_businesses
+        WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1)`,
+      [bizId]
+    );
+    const bizIdsToInvalidate = orgBizRows.length ? orgBizRows.map(r => r.id) : [bizId];
+
     await client.query(
       `UPDATE app_users SET active_business_id = NULL WHERE id=$1 AND active_business_id=$2`,
       [uid, bizId]
@@ -374,6 +386,7 @@ exports.remove = async (req, res) => {
     }
 
     await client.query('COMMIT');
+    for (const id of bizIdsToInvalidate) invalidateCacheForBiz(id);
     res.status(204).end();
   } catch (e) {
     await client.query('ROLLBACK');
