@@ -124,11 +124,23 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       rendimientoPeso = null,
       unidadPeso = null,
       items = [],
+      notas,
+      foto,
+      fotos,
+      notasUpdatedAt,
     } = req.body || {};
 
     if (!Array.isArray(items)) {
       return res.status(400).json({ ok: false, error: 'items_must_be_array' });
     }
+
+    // Normalizar fotos: array de hasta 6. Compatibilidad con `foto` single.
+    // (mismo patrón que recetasController.js — acá faltaba por completo, por eso
+    // la foto del insumo/elaborado nunca se guardaba.)
+    let fotosArr = Array.isArray(fotos) ? fotos.filter(Boolean).slice(0, 6) : [];
+    if (fotosArr.length === 0 && foto) fotosArr = [foto];
+    const fotosJson = JSON.stringify(fotosArr);
+    const fotoPrincipal = fotosArr[0] || null;
 
     // Normalizar y validar campos del rendimiento del lote
     const VALID_RU = ['porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
@@ -177,10 +189,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
     const { rows: recetaRows } = await client.query(
       `INSERT INTO recetas
          (insumo_id, business_id, nombre, descripcion, porciones,
-          porcentaje_venta, costo_total,
+          porcentaje_venta, costo_total, notas, foto, fotos, notas_updated_at,
           rendimiento_unidad, rendimiento_peso, unidad_peso,
           active, origen, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'manual', $11, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, TRUE, 'manual', $15, NOW(), NOW())
        ON CONFLICT ON CONSTRAINT recetas_insumo_biz_key
        DO UPDATE SET
          nombre             = EXCLUDED.nombre,
@@ -188,6 +200,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
          porciones          = EXCLUDED.porciones,
          porcentaje_venta   = EXCLUDED.porcentaje_venta,
          costo_total        = EXCLUDED.costo_total,
+         notas              = EXCLUDED.notas,
+         foto               = EXCLUDED.foto,
+         fotos              = EXCLUDED.fotos,
+         notas_updated_at   = EXCLUDED.notas_updated_at,
          rendimiento_unidad = EXCLUDED.rendimiento_unidad,
          rendimiento_peso   = EXCLUDED.rendimiento_peso,
          unidad_peso        = EXCLUDED.unidad_peso,
@@ -202,6 +218,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
         porcionesNum,
         porcentajeNum,
         Math.round(costoTotal * 10000) / 10000,
+        notas?.trim() || null,
+        fotoPrincipal,
+        fotosJson,
+        notasUpdatedAt || null,
         ruFinal,
         rpFinal,
         upFinal,
@@ -250,15 +270,18 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       const pedido = item.pedido !== false;
       const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
+      const fotosUrlsItem = Array.isArray(item.fotosUrls)
+        ? item.fotosUrls.filter(u => typeof u === 'string' && u.startsWith('http'))
+        : [];
 
       const { rows: itemRows } = await client.query(
         `INSERT INTO receta_items
            (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
-            observaciones, merma, pedido, tipo_costo, orden, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+            observaciones, fotos_urls, merma, pedido, tipo_costo, orden, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
          RETURNING *`,
         [receta.id, supplyId, cantidad, unidad, costoUnitario, notas,
-          observaciones, merma, pedido, tipoCosto, orden]
+          observaciones, fotosUrlsItem, merma, pedido, tipoCosto, orden]
       );
 
       savedItems.push({
