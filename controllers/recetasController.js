@@ -35,10 +35,10 @@ exports.getReceta = async (req, res, next) => {
     const { rows: items } = await pool.query(
       `SELECT
          ri.id, ri.receta_id,
-         COALESCE(ri.insumo_id, ri.supply_id)                    AS supply_id,
-         COALESCE(i.nombre, ri.nombre_insumo_maxi, ms.nombre)    AS supply_nombre,
-         COALESCE(i.unidad_med, ri.unidad, ms.medida)            AS supply_medida,
-         COALESCE(i.precio_ref, 0)                               AS precio_ref_db,
+         COALESCE(ri.insumo_id, ri.supply_id)                            AS supply_id,
+         COALESCE(i.nombre, ma.nombre, ri.nombre_insumo_maxi, ms.nombre) AS supply_nombre,
+         COALESCE(i.unidad_med, ri.unidad, ms.medida)                    AS supply_medida,
+         COALESCE(i.precio_ref, 0)                                       AS precio_ref_db,
          ri.cantidad, ri.unidad, ri.costo_unitario,
          ROUND(ri.cantidad * ri.costo_unitario, 4)               AS costo_total_item,
          ri.notas, ri.observaciones, ri.fotos_urls,
@@ -49,9 +49,13 @@ exports.getReceta = async (req, res, next) => {
        FROM receta_items ri
        LEFT JOIN insumos i      ON i.id  = ri.insumo_id
        LEFT JOIN maxi_supplies ms ON ms.id = ri.supply_id
+       -- Ítem-artículo (article_ref_id): nombre en vivo, no el snapshot congelado
+       -- en nombre_insumo_maxi — sin esto, renombrar un artículo nunca se veía
+       -- reflejado en las recetas que lo usan como ingrediente.
+       LEFT JOIN maxi_articles ma ON ma.articulo_id = ri.article_ref_id AND ma.business_id = $2
       WHERE ri.receta_id = $1
       ORDER BY ri.orden ASC, ri.id ASC`,
-      [receta.id]
+      [receta.id, receta.business_id]
     );
 
     return res.json({ ok: true, receta: { ...receta, items } });
