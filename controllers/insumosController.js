@@ -2291,6 +2291,24 @@ exports.mermas_update = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
     await client.query('BEGIN');
+
+    // Pesos ANTES de tocar nada: si peso_inicial/peso_final cambian, hay que
+    // recalcular el costo de todas las recetas que ya tienen esta merma aplicada
+    // (su costo_unitario quedó persistido con el factor VIEJO la última vez que se
+    // guardó esa receta — sin esto, editar una merma no impactaba en ningún lado).
+    const pesosCambian = peso_inicial !== undefined || peso_final !== undefined;
+    let pesoInicialViejo = null, pesoFinalViejo = null;
+    if (pesosCambian) {
+      const { rows: viejaRows } = await client.query(
+        `SELECT peso_inicial, peso_final FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
+        [mermaId, insumoId]
+      );
+      if (viejaRows.length) {
+        pesoInicialViejo = Number(viejaRows[0].peso_inicial);
+        pesoFinalViejo = Number(viejaRows[0].peso_final);
+      }
+    }
+
     if (es_default === true) {
       await client.query(`UPDATE insumo_mermas SET es_default = FALSE WHERE insumo_id = $1`, [insumoId]);
     }
@@ -2308,8 +2326,31 @@ exports.mermas_update = async (req, res) => {
         RETURNING id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at`,
       vals
     );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+    }
+
+    if (pesosCambian && pesoInicialViejo != null) {
+      const factorViejo = pesoFinalViejo > 0 ? pesoInicialViejo / pesoFinalViejo : 1;
+      const pesoInicialNuevo = Number(rows[0].peso_inicial);
+      const pesoFinalNuevo = Number(rows[0].peso_final);
+      const factorNuevo = pesoFinalNuevo > 0 ? pesoInicialNuevo / pesoFinalNuevo : 1;
+      if (factorViejo !== factorNuevo && factorViejo > 0) {
+        const { rows: itemsAfectados } = await client.query(
+          `UPDATE receta_items
+              SET costo_unitario = costo_unitario / $1::numeric * $2::numeric,
+                  updated_at = NOW()
+            WHERE merma_id = $3
+           RETURNING receta_id`,
+          [factorViejo, factorNuevo, mermaId]
+        );
+        const recetaIds = [...new Set(itemsAfectados.map(it => it.receta_id))];
+        if (recetaIds.length) await recalcularCostoRecetas(recetaIds, client);
+      }
+    }
+
     await client.query('COMMIT');
-    if (!rows.length) return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
     return res.json({ ok: true, data: rows[0] });
   } catch (e) {
     await client.query('ROLLBACK');
