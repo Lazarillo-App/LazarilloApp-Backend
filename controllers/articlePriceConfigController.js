@@ -211,6 +211,11 @@ exports.savePriceConfig = async (req, res, next) => {
         : null;
     const listIdKey = listIdVal != null ? Number(listIdVal) : 0; // 0 = NULL para el UNIQUE
 
+    // Declarados afuera del if/else de abajo: se necesitan más adelante para decidir
+    // si hay que propagar el borrado de precio a los artículos vinculados.
+    let borrarManual = false;
+    let borrarObjetivo = false;
+
     // ── Upsert del registro principal (scope + scopeId + list_id) ────────────
     if (objetivoVal !== null || precioManualVal !== null || ultimoPctVal !== null
       || ajusteVal !== null || excluidoVal !== null) {
@@ -239,10 +244,14 @@ exports.savePriceConfig = async (req, res, next) => {
         [bizId, scope, scopeIdStr, listIdVal, objetivoVal, ajusteVal, precioManualVal, ultimoPctVal, excluidoVal]
       );
     } else {
-      // Borrar selectivamente según qué keys vinieron en el body
+      // Borrar selectivamente según qué keys vinieron en el body.
+      // `_deleteManual`: el botón "✕" de la tabla (TablaArticulos.jsx) manda este
+      // flag en vez de `precioManual: null` — sin reconocerlo acá, el borrado no
+      // hacía NADA en el backend (ni bodyKeys.includes('precioManual') ni la
+      // propagación a vinculados de más abajo se disparaban).
       const bodyKeys = Object.keys(req.body || {});
-      const borrarManual = bodyKeys.includes('precioManual');
-      const borrarObjetivo = bodyKeys.includes('objetivo');
+      borrarManual = bodyKeys.includes('precioManual') || req.body?._deleteManual === true;
+      borrarObjetivo = bodyKeys.includes('objetivo');
 
       if (borrarManual && borrarObjetivo) {
         await client.query(
@@ -381,6 +390,12 @@ exports.savePriceConfig = async (req, res, next) => {
         if (precioManualVal !== null) {
           propagatePrecioManual({ bizId, articleId: artId, precioManual: precioManualVal })
             .catch(e => console.warn('[savePriceConfig] propagatePrecioManual falló:', e.message));
+        } else if (borrarManual) {
+          // Borrar el precio manual también se propaga: si A,B,C,D están vinculados
+          // por precio y se borra el de C, los otros 3 deben quedar sin precio manual
+          // también (mismo criterio que fijar un valor nuevo).
+          propagatePrecioManual({ bizId, articleId: artId, precioManual: null })
+            .catch(e => console.warn('[savePriceConfig] propagatePrecioManual (borrado) falló:', e.message));
         }
       }
     }
