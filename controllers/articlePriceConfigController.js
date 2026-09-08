@@ -481,7 +481,12 @@ exports.getRecetasAlertas = async (req, res, next) => {
          )) FILTER (WHERE r.article_id IS NOT NULL) AS recetas_info
        FROM receta_items ri
        JOIN recetas r   ON r.id = ri.receta_id AND r.business_id = $1 AND r.active = TRUE
-       JOIN insumos i   ON i.id = ri.insumo_id
+         AND r.article_id IS NOT NULL   -- solo recetas de artículo: un insumo usado
+                                         -- únicamente adentro de OTRO elaborado no cuenta
+                                         -- como "en receta" acá (quedaba con 0 recetas)
+       JOIN insumos i   ON i.id = ri.insumo_id AND i.es_elaborado IS NOT TRUE
+                                         -- los elaborados no se compran (tienen receta
+                                         -- propia) — no aplica alertarlos por compra vencida
        LEFT JOIN app_articles a ON a.id = r.article_id AND a.business_id = $1
        LEFT JOIN purchase_items pi ON pi.insumo_id = i.id AND pi.precio > 0
        WHERE ri.tipo_costo != 'nulo'
