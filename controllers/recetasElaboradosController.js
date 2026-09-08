@@ -1,7 +1,7 @@
 // controllers/recetasElaboradosController.js
 const pool = require('../config/db');
-const { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo } = require('../services/costoRecetaService');
-const { factorConversion, normalizarCantidadUnidad } = require('../services/unidades');
+const { recalcularCostoReceta, propagarCostoInsumo } = require('../services/costoRecetaService');
+const { normalizarCantidadUnidad } = require('../services/unidades');
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/insumos/:insumoId/receta
@@ -41,7 +41,7 @@ exports.getRecetaElaborado = async (req, res, next) => {
          ri.cantidad, ri.unidad, ri.costo_unitario,
          ROUND(ri.cantidad * ri.costo_unitario, 4)               AS costo_total_item,
          ri.notas, ri.observaciones, ri.fotos_urls,
-         ri.merma, ri.merma_id, ri.merma_ids, ri.pedido, ri.tipo_costo, ri.orden,
+         ri.merma, ri.merma_id, ri.merma_ids, ri.pedido, ri.secreto, ri.tipo_costo, ri.orden,
          ri.codigo_maxi_insumo, ri.nombre_insumo_maxi
        FROM receta_items ri
        LEFT JOIN insumos i ON i.id = ri.insumo_id
@@ -267,7 +267,15 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       if (!insumoCheck.length) continue;
 
       const merma = item.merma !== false;
+      // Varias mermas por ítem, mismo criterio que recetasController.js — sin esto, la
+      // merma elegida para un ingrediente de la receta PROPIA de un elaborado nunca se
+      // persistía (esta INSERT no tenía las columnas), y al reabrir aparecía sin elegir.
+      const mermaIds = Array.isArray(item.mermaIds)
+        ? item.mermaIds.map(Number).filter(Number.isFinite)
+        : (item.mermaId != null ? [Number(item.mermaId)] : []);
+      const mermaId = mermaIds.length ? mermaIds[0] : null;
       const pedido = item.pedido !== false;
+      const secreto = item.secreto === true;
       const tipoCosto = (item.tipoCosto || 'total').trim();
       const observaciones = (item.observaciones || '').trim() || null;
       const fotosUrlsItem = Array.isArray(item.fotosUrls)
@@ -277,11 +285,13 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       const { rows: itemRows } = await client.query(
         `INSERT INTO receta_items
            (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
-            observaciones, fotos_urls, merma, pedido, tipo_costo, orden, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+            observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
+            merma_id, merma_ids, secreto, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
          RETURNING *`,
         [receta.id, supplyId, cantidad, unidad, costoUnitario, notas,
-          observaciones, fotosUrlsItem, merma, pedido, tipoCosto, orden]
+          observaciones, fotosUrlsItem, merma, pedido, tipoCosto, orden,
+          mermaId, mermaIds.length ? mermaIds : null, secreto]
       );
 
       savedItems.push({
@@ -319,46 +329,13 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       ]
     );
 
-// ── Propagación: recalcular recetas que usan este elaborado como ingrediente ──
-    // El rendimiento cambió → su costo_unitario cambió → actualizar los items que
-    // lo referencian (convertido a la unidad de cada item) y recalcular esas recetas.
-    const rendUnidElab = String(recetaCostos?.rendimiento_unidad || ruFinal || 'porcion').toLowerCase();
-    // Unidad base en la que está expresado costoUnitarioDB:
-    //  - porcion/u → 'u' (no se convierte por peso)
-    //  - gr/kg/ml/lt → esa unidad medible
-    const unidadBaseElab = ['gr','kg','ml','lt'].includes(rendUnidElab) ? rendUnidElab : 'u';
-    const { rows: itemsAfectados } = await client.query(
-      `SELECT ri.id, ri.receta_id, ri.unidad
-         FROM receta_items ri
-         JOIN recetas r ON r.id = ri.receta_id
-        WHERE ri.insumo_id = $1
-          AND r.business_id = $2
-          AND ri.receta_id <> $3`,
-      [insumoId, bizId, receta.id]
-    );
-    for (const it of itemsAfectados) {
-      const unidadItem = String(it.unidad || unidadBaseElab || 'u').toLowerCase().trim();
-      let nuevoCosto;
-      if (unidadBaseElab === 'u') {
-        // Elaborado por porción/unidad: el costo_unitario es por porción, sin conversión de peso
-        nuevoCosto = costoUnitarioDB;
-      } else {
-        // Elaborado medible: convertir de la unidad base a la unidad del item
-        const factor = factorConversion(unidadBaseElab, unidadItem);
-        nuevoCosto = factor > 0 ? costoUnitarioDB / factor : costoUnitarioDB;
-      }
-      await client.query(
-        `UPDATE receta_items SET costo_unitario = $1, updated_at = NOW() WHERE id = $2`,
-        [Number(nuevoCosto.toFixed(6)), it.id]
-      );
-    }
-    const recetasAfectadas = [...new Set(itemsAfectados.map(it => it.receta_id))];
-    if (recetasAfectadas.length) {
-      await recalcularCostoRecetas(recetasAfectadas, client);
-    }
-
     // ── Propagación en cascada: este elaborado cambió su costo/rendimiento →
-    // recalcular todas las recetas que lo usan (y elaborados anidados hacia arriba).
+    // recalcular todas las recetas que lo usan como ingrediente (y elaborados anidados
+    // hacia arriba). Antes había acá además un bloque manual que hacía exactamente el
+    // mismo trabajo (mismo query de items afectados, misma conversión de unidad, mismo
+    // recalcularCostoRecetas) ANTES de esta llamada — duplicaba el trabajo en cada
+    // guardado de receta de un elaborado usado en muchas recetas, y era la causa del
+    // "tarda demasiado guardando" reportado en cascada.
     await propagarCostoInsumo(insumoId, bizId, client);
 
     // Recalcular sugerido con el unitario materializado (correcto para peso)
