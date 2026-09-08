@@ -564,42 +564,47 @@ exports.eliminarAgrupacion = async (req, res) => {
 // ============================================================================
 exports.agregarArticulosAgrupacion = async (req, res) => {
   try {
-    let businessId = Number(req.params.businessId);
-    if (!Number.isFinite(businessId)) {
-      businessId = getBusinessId(req);
+    let requestBusinessId = Number(req.params.businessId);
+    if (!Number.isFinite(requestBusinessId)) {
+      requestBusinessId = getBusinessId(req);
     }
 
     const id = Number(req.params.id ?? req.params.agrupacionId);
-    console.log('[agregarArticulos] businessId:', businessId, '| id:', id);
-    console.log('[agregarArticulos] req.params:', req.params);
-    console.log('[agregarArticulos] req.businessId:', req.businessId);
-    console.log('[agregarArticulos] X-Business-Id header:', req.header('X-Business-Id'));
 
-    if (!Number.isFinite(businessId) || !Number.isFinite(id)) {
+    if (!Number.isFinite(requestBusinessId) || !Number.isFinite(id)) {
       return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
     }
 
+    // Buscar la agrupación por id solo: puede pertenecer al principal o a un subnegocio,
+    // y el business_id que calcula el frontend (fallback por localStorage/rootBizId) no
+    // siempre coincide con el real — sin esto, mover/agregar artículos a una agrupación
+    // de un subnegocio devolvía 404 "Agrupación no encontrada" en silencio (mismo
+    // criterio ya usado en eliminarArticuloDeAgrupacion y moveItemsBetweenGroups).
+    const { rows: agRows } = await pool.query(
+      `SELECT nombre, business_id FROM agrupaciones WHERE id = $1`, [id]
+    );
+    if (!agRows.length) {
+      return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
+    }
+
+    let businessId = Number(agRows[0].business_id);
+    const agNombre = agRows[0]?.nombre ?? '';
+
     // Si el grupo target es Discontinuados y estamos en subnegocio,
     // redirigir al Discontinuados del negocio principal
-    {
-      const { rows: agRows } = await pool.query(
-        `SELECT nombre FROM agrupaciones WHERE id = $1`, [id]
+    if (isDiscontinuadosName(agNombre)) {
+      const { rows: bizRows } = await pool.query(
+        `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [requestBusinessId]
       );
-      const agNombre = agRows[0]?.nombre ?? '';
-      if (isDiscontinuadosName(agNombre)) {
-        const { rows: bizRows } = await pool.query(
-          `SELECT created_from, organization_id FROM app_businesses WHERE id = $1`, [businessId]
+      const biz = bizRows[0];
+      if (biz?.created_from === 'from_group' && biz?.organization_id) {
+        const { rows: orgBiz } = await pool.query(
+          `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
+          [biz.organization_id]
         );
-        const biz = bizRows[0];
-        if (biz?.created_from === 'from_group' && biz?.organization_id) {
-          const { rows: orgBiz } = await pool.query(
-            `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
-            [biz.organization_id]
-          );
-          if (orgBiz[0]?.id) {
-            console.log(`[agregarArticulosAgrupacion] Redirigiendo Discontinuados de negocio ${businessId} al principal ${orgBiz[0].id}`);
-            businessId = orgBiz[0].id;
-          }
+        if (orgBiz[0]?.id) {
+          console.log(`[agregarArticulosAgrupacion] Redirigiendo Discontinuados de negocio ${requestBusinessId} al principal ${orgBiz[0].id}`);
+          businessId = orgBiz[0].id;
         }
       }
     }
@@ -635,7 +640,6 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
       `SELECT articulos FROM agrupaciones WHERE id=$1 AND business_id=$2`,
       [id, businessId]
     );
-    console.log('[agregarArticulos] query result rows:', r0.length, '| params:', [id, businessId]);
 
     if (!r0.length) {
       return res.status(404).json({ ok: false, error: 'Agrupación no encontrada' });
