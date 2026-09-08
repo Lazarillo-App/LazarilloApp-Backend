@@ -191,9 +191,10 @@ exports.bulkDelete = async (req, res, next) => {
  * POST /api/businesses/:businessId/recetas/bulk-add-insumo
  * Body: { articleIds: number[], insumoId: number, cantidad: number, unidad: string }
  *
- * Agrega un insumo a las recetas de todos los artículos indicados:
+ * Agrega (o actualiza) un insumo en las recetas de todos los artículos indicados:
  * - Si el artículo tiene receta activa y NO tiene el insumo → agrega el item.
- * - Si ya tiene el insumo → saltea (nunca duplica).
+ * - Si ya tiene el insumo → actualiza cantidad/unidad/costo_unitario del item existente
+ *   (permite corregir en bloque un insumo ya cargado en algunas o todas las recetas).
  * - Si no tiene receta → crea una receta mínima con ese único item.
  * Recalcula costo_total de cada receta tocada.
  */
@@ -217,7 +218,7 @@ exports.bulkAddInsumo = async (req, res, next) => {
 
     // Datos del insumo (precio y unidad base para costo_unitario)
     const { rows: insRows } = await client.query(
-      `SELECT id, nombre, unidad_med, precio_ref, codigo_maxi
+      `SELECT id, nombre, unidad_med, precio_ref, codigo_maxi, contenido_envase, unidad_envase
          FROM insumos
         WHERE id = $1 AND business_id = $2`,
       [insId, bizId]
@@ -228,28 +229,75 @@ exports.bulkAddInsumo = async (req, res, next) => {
     }
     const insumo = insRows[0];
 
-    // Conversión simple de unidades (kg↔gr, l↔ml). Mismo criterio que el front.
-    const normU = (u) => String(u || 'u').trim().toLowerCase()
-      .replace('grs', 'gr').replace('gramos', 'gr').replace('kilo', 'kg').replace('kgs', 'kg')
-      .replace('litro', 'l').replace('lt', 'l').replace('cc', 'ml');
-    const factorTo = (from, to) => {
-      const f = normU(from), t = normU(to);
-      if (f === t) return 1;
-      if (f === 'kg' && t === 'gr') return 1000;
-      if (f === 'gr' && t === 'kg') return 1 / 1000;
-      if (f === 'l' && t === 'ml') return 1000;
-      if (f === 'ml' && t === 'l') return 1 / 1000;
-      return 1; // unidades incompatibles: sin conversión
+    // Equivalencias propias del insumo (mismas que usa RecetaModal) — permiten elegir
+    // una unidad "nombrada" (ej. "Sobre", "Media oz") además de las unidades físicas.
+    const { rows: eqRows } = await client.query(
+      `SELECT nombre, contenido, unidad FROM insumo_equivalencias WHERE insumo_id = $1`,
+      [insId]
+    );
+
+    // Conversión de unidades físicas — mismo criterio que src/componentes/RecetaModal/helpers.js
+    // (canonicalUnit + getConversionFactor), para que "elegir la misma unidad que en la receta"
+    // dé el mismo costo acá y allá.
+    const UNIT_ALIASES = {
+      g: 'gr', gr: 'gr', grs: 'gr', gramo: 'gr', gramos: 'gr',
+      k: 'kg', kg: 'kg', kgs: 'kg', kilo: 'kg', kilos: 'kg', kilogramo: 'kg', kilogramos: 'kg',
+      ml: 'ml', mls: 'ml', cc: 'ml', mililitro: 'ml', mililitros: 'ml',
+      l: 'lt', lt: 'lt', lts: 'lt', litro: 'lt', litros: 'lt',
+      u: 'u', un: 'u', uni: 'u', unid: 'u', unidad: 'u', unidades: 'u', und: 'u', doc: 'u', docena: 'u',
+      oz: 'oz', onza: 'oz', onzas: 'oz', lb: 'lb', libra: 'lb', libras: 'lb',
     };
+    const canonicalUnit = (u) => {
+      const n = String(u || 'u').toLowerCase().trim();
+      return UNIT_ALIASES[n] || n;
+    };
+    const getConversionFactor = (from, to) => {
+      const PESO = { gr: 1, kg: 1000, oz: 28.35, lb: 453.59 };
+      const VOLUM = { ml: 1, lt: 1000, oz: 30 };
+      const f = canonicalUnit(from), t = canonicalUnit(to);
+      if (f === t) return 1;
+      if (PESO[f] !== undefined && PESO[t] !== undefined) return PESO[f] / PESO[t];
+      if (VOLUM[f] !== undefined && VOLUM[t] !== undefined) return VOLUM[f] / VOLUM[t];
+      return 1; // unidades incompatibles (o discretas, ej. "u"): sin conversión
+    };
+
     const unidadItem = unidad || insumo.unidad_med || 'u';
     const precioRef = Number(insumo.precio_ref) || 0;
-    // precio por 1 unidad elegida = precio_ref (en unidad base) / factor(base→elegida)
-    const factor = factorTo(insumo.unidad_med || 'u', unidadItem);
-    const costoUnitario = factor > 0 ? precioRef / factor : precioRef;
+    const unidadDB = canonicalUnit(insumo.unidad_med || 'u');
+    const contEnvase = Number(insumo.contenido_envase) || 0;
+    const uniEnvase = canonicalUnit(insumo.unidad_envase || '');
+
+    // ¿La unidad elegida es una equivalencia propia del insumo? (match case-insensitive
+    // por nombre, igual que eqNombreMatch en RecetaModal/calcCosto.js)
+    const eqSel = eqRows.find(e => String(e.nombre || '').trim().toLowerCase() === String(unidadItem).trim().toLowerCase());
+
+    let costoUnitario;
+    if (eqSel) {
+      const contenido = Number(eqSel.contenido) || 0;
+      const eqUnidad = canonicalUnit(eqSel.unidad);
+      if (unidadDB === 'u' && contEnvase > 0 && uniEnvase) {
+        const costoPorUnidadEnvase = precioRef / contEnvase;
+        const factor = getConversionFactor(eqUnidad, uniEnvase);
+        costoUnitario = contenido * factor * costoPorUnidadEnvase;
+      } else {
+        const factor = getConversionFactor(eqUnidad, unidadDB);
+        costoUnitario = contenido * factor * precioRef;
+      }
+    } else {
+      const unidadElegida = canonicalUnit(unidadItem);
+      if (unidadDB === 'u' && contEnvase > 0 && uniEnvase && unidadElegida !== 'u') {
+        const costoPorUnidadEnvase = precioRef / contEnvase;
+        const factor = getConversionFactor(unidadElegida, uniEnvase);
+        costoUnitario = factor * costoPorUnidadEnvase;
+      } else {
+        const factor = getConversionFactor(unidadDB, unidadElegida);
+        costoUnitario = factor > 0 ? precioRef / factor : precioRef;
+      }
+    }
 
     const cant = Number(cantidad) || 0;
 
-    let agregados = 0, salteados = 0, recetasCreadas = 0;
+    let agregados = 0, actualizados = 0, recetasCreadas = 0;
     const recetasTocadas = [];
 
     for (const artId of ids) {
@@ -271,12 +319,22 @@ exports.bulkAddInsumo = async (req, res, next) => {
           );
           recetasCreadas++;
         } else {
-          // Ya activa: ¿ya tiene el insumo?
+          // Ya activa: ¿ya tiene el insumo? Si sí, actualizar cantidad/unidad/costo en vez de duplicar.
           const { rows: existRows } = await client.query(
-            `SELECT 1 FROM receta_items WHERE receta_id = $1 AND insumo_id = $2 LIMIT 1`,
+            `SELECT id FROM receta_items WHERE receta_id = $1 AND insumo_id = $2 LIMIT 1`,
             [recetaId, insId]
           );
-          if (existRows.length) { salteados++; continue; }
+          if (existRows.length) {
+            await client.query(
+              `UPDATE receta_items
+                  SET cantidad = $1, unidad = $2, costo_unitario = $3, updated_at = NOW()
+                WHERE id = $4`,
+              [cant, unidadItem, Math.round(costoUnitario * 10000) / 10000, existRows[0].id]
+            );
+            recetasTocadas.push(recetaId);
+            actualizados++;
+            continue;
+          }
         }
       } else {
         // No existe ninguna receta → crear
@@ -316,7 +374,7 @@ exports.bulkAddInsumo = async (req, res, next) => {
     await recalcularCostoRecetas(recetasTocadas, client);
 
     await client.query('COMMIT');
-    return res.json({ ok: true, agregados, salteados, recetasCreadas, insumo: insumo.nombre });
+    return res.json({ ok: true, agregados, actualizados, recetasCreadas, insumo: insumo.nombre });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('[bulkAddInsumo]', e);
