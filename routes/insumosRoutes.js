@@ -103,6 +103,7 @@ router.post('/:id/bonificacion/descartar', ctrl.descartarBonificacion);
 
 /* ================== USO (recetas donde se usa el insumo) ================== */
 router.get('/:id/uso', ctrl.usoInsumo);
+router.put('/:id/uso/:itemId/merma', ctrl.usoInsumoCambiarMerma);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/', ctrl.crearManual);

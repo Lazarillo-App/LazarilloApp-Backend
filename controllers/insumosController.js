@@ -2664,6 +2664,7 @@ exports.usoInsumo = async (req, res) => {
          ri.cantidad,
          ri.unidad,
          ri.merma            AS aplica_merma,
+         ri.merma_id,
          im.nombre           AS merma_nombre,
          r.article_id,
          r.insumo_id         AS receta_insumo_id,
@@ -2691,12 +2692,101 @@ exports.usoInsumo = async (req, res) => {
       cantidad: Number(x.cantidad) || 0,
       unidad: x.unidad || 'u',
       aplica_merma: !!x.aplica_merma,
+      merma_id: x.merma_id ?? null,
       merma_nombre: x.merma_nombre || null,
     }));
     return res.json({ ok: true, uso, total: uso.length });
   } catch (e) {
     console.error('usoInsumo error:', { code: e.code, msg: e.message });
     return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// PUT /insumos/:id/uso/:itemId/merma  body { mermaId: number|null }
+// Reasigna la merma de UN ítem puntual (una fila de la pestaña Uso) sin pasar por
+// el guardado completo de esa receta. Ajusta costo_unitario (÷ factor viejo × factor
+// nuevo, mismo criterio que mermas_update al editar los pesos de una merma) y
+// recalcula la receta afectada.
+exports.usoInsumoCambiarMerma = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const itemId = Number(req.params.itemId);
+    const mermaIdNuevo = req.body?.mermaId != null ? Number(req.body.mermaId) : null;
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(itemId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+
+    await client.query('BEGIN');
+
+    const { rows: itemRows } = await client.query(
+      `SELECT ri.id, ri.receta_id, ri.costo_unitario, ri.merma_id, r.business_id
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.id = $1 AND ri.insumo_id = $2`,
+      [itemId, insumoId]
+    );
+    if (!itemRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Ítem no encontrado' });
+    }
+    const item = itemRows[0];
+
+    const orgBizIds = await getOrgBizIds(bizId, client);
+    if (!orgBizIds.includes(item.business_id)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ ok: false, error: 'No autorizado' });
+    }
+
+    const factorDe = async (mermaId) => {
+      if (mermaId == null) return 1;
+      const { rows } = await client.query(
+        `SELECT peso_inicial, peso_final FROM insumo_mermas WHERE id = $1`, [mermaId]
+      );
+      if (!rows.length) return null; // merma inexistente
+      return Number(rows[0].peso_final) > 0
+        ? Number(rows[0].peso_inicial) / Number(rows[0].peso_final)
+        : 1;
+    };
+
+    let factorNuevo = 1;
+    if (mermaIdNuevo != null) {
+      // La merma elegida debe pertenecer a ESTE insumo
+      const { rows: mRows } = await client.query(
+        `SELECT peso_inicial, peso_final FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
+        [mermaIdNuevo, insumoId]
+      );
+      if (!mRows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'La merma no pertenece a este insumo' });
+      }
+      factorNuevo = Number(mRows[0].peso_final) > 0
+        ? Number(mRows[0].peso_inicial) / Number(mRows[0].peso_final)
+        : 1;
+    }
+    const factorViejo = (await factorDe(item.merma_id)) ?? 1;
+
+    const costoViejo = Number(item.costo_unitario) || 0;
+    const costoNuevo = factorViejo > 0 ? (costoViejo / factorViejo) * factorNuevo : costoViejo * factorNuevo;
+
+    await client.query(
+      `UPDATE receta_items
+          SET merma_id = $1, merma_ids = $2, costo_unitario = $3, updated_at = NOW()
+        WHERE id = $4`,
+      [mermaIdNuevo, mermaIdNuevo != null ? [mermaIdNuevo] : null, Number(costoNuevo.toFixed(6)), itemId]
+    );
+    await recalcularCostoRecetas([item.receta_id], client);
+
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('usoInsumoCambiarMerma error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 
