@@ -179,9 +179,13 @@ exports.listar = async (req, res) => {
     // reposición. Filtrar acá solo por `i.business_id` (el raíz) hacía que un insumo
     // comprado nada más en un subnegocio (ej. "Ramos") apareciera siempre con
     // cantidad_compras=0 y fecha_ultima_compra=null, aunque sí tuviera compras.
+    // OJO: no empujar a `params` acá — ese array también lo usa countRes (con un
+    // whereSql que no referencia este placeholder); agregarlo ahí desalinea la
+    // cantidad de binds vs. los "$n" de esa consulta ("bind message supplies N
+    // parameters, but prepared statement requires N-1"). orgBizIds va SOLO en los
+    // values de dataRes, calculado sobre su propio array.
     const orgBizIds = await getOrgBizIds(businessId);
-    params.push(orgBizIds);
-    const orgIdx = params.length;
+    const orgIdx = params.length + 1;
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -259,10 +263,10 @@ exports.listar = async (req, res) => {
         ${whereSql}
         GROUP BY i.id, ir.nombre, ir.es_elaborador, lc.precio_promedio, lc.precio_ultima_compra, lc.fecha_ultima_compra, lc.cantidad_compras, rc.receta_updated_at, rc.receta_rend_unidad, rc.receta_rend_peso, rc.receta_unidad_peso, rc.receta_porciones, rc.receta_costo_unitario
         ORDER BY ${orderBySql} ${safeOrder}
-        LIMIT $${params.length + 1}
-        OFFSET $${params.length + 2}
+        LIMIT $${orgIdx + 1}
+        OFFSET $${orgIdx + 2}
         `,
-        [...params, hardLimit, offset]
+        [...params, orgBizIds, hardLimit, offset]
       ),
       pool.query(
         `
