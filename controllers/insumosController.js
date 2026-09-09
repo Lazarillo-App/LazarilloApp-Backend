@@ -173,6 +173,16 @@ exports.listar = async (req, res) => {
     const safeOrder = order === 'DESC' ? 'DESC' : 'ASC';
     const orderBySql = safeOrderBy.includes('.') ? safeOrderBy : `i.${safeOrderBy}`;
 
+    // Compras org-wide: los insumos viven en el negocio raíz, pero las compras se
+    // registran por sucursal/subnegocio (`purchase_items.business_id` real de la
+    // transacción) — igual criterio que getOrgBizIds documenta y ya usa costeo de
+    // reposición. Filtrar acá solo por `i.business_id` (el raíz) hacía que un insumo
+    // comprado nada más en un subnegocio (ej. "Ramos") apareciera siempre con
+    // cantidad_compras=0 y fecha_ultima_compra=null, aunque sí tuviera compras.
+    const orgBizIds = await getOrgBizIds(businessId);
+    params.push(orgBizIds);
+    const orgIdx = params.length;
+
     const [dataRes, countRes] = await Promise.all([
       pool.query(
         `
@@ -222,13 +232,13 @@ exports.listar = async (req, res) => {
           SELECT
             ROUND(AVG(CASE WHEN pi_all.fecha >= CURRENT_DATE - INTERVAL '90 days' THEN pi_all.precio END)::numeric, 4) AS precio_promedio,
             (SELECT pi_ult.precio FROM purchase_items pi_ult
-             WHERE pi_ult.insumo_id = i.id AND pi_ult.business_id = i.business_id AND pi_ult.precio > 0
+             WHERE pi_ult.insumo_id = i.id AND pi_ult.business_id = ANY($${orgIdx}::int[]) AND pi_ult.precio > 0
              ORDER BY pi_ult.fecha DESC LIMIT 1) AS precio_ultima_compra,
             MAX(pi_all.fecha) AS fecha_ultima_compra,
             COUNT(*)::int AS cantidad_compras
           FROM purchase_items pi_all
           WHERE pi_all.insumo_id = i.id
-            AND pi_all.business_id = i.business_id
+            AND pi_all.business_id = ANY($${orgIdx}::int[])
             AND pi_all.precio > 0
         ) lc ON true
         LEFT JOIN LATERAL (
