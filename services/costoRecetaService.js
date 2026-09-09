@@ -182,11 +182,27 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   );
   if (!items.length) return;
 
+  // Equivalencias propias del insumo (ej. "cucharon" = 60ml) — un item puede tener
+  // guardada una de estas como su `unidad` en vez de una unidad física. Sin este chequeo,
+  // factorConversion no reconoce el nombre, devuelve 1 (sin convertir) y el costo
+  // propagado queda siendo el precio de TODA una unidad física (ej. $/lt entero) en vez
+  // del costo de la porción real que representa la equivalencia (ej. $/cucharon).
+  const { rows: equivalencias } = await db.query(
+    `SELECT nombre, contenido, unidad FROM insumo_equivalencias WHERE insumo_id = $1`,
+    [insumoId]
+  );
+  const costoPorUnidadBase = costoPorGrBase > 0 ? costoPorGrBase : precioRef;
+
   // 2. Actualizar costo_unitario de cada item (convertido a su unidad)
   for (const it of items) {
     const unidadItem = String(it.unidad || unidadBase || 'u').toLowerCase().trim();
+    const eqSel = equivalencias.find(e => String(e.nombre || '').trim().toLowerCase() === unidadItem);
     let nuevoCosto;
-    if (costoPorGrBase > 0) {
+    if (eqSel) {
+      const contenido = Number(eqSel.contenido) || 0;
+      const factor = factorConversion(unidadBase, eqSel.unidad);
+      nuevoCosto = factor > 0 ? contenido * (costoPorUnidadBase / factor) : contenido * costoPorUnidadBase;
+    } else if (costoPorGrBase > 0) {
       // Elaborado en porción con equivalente: costo por gr base, convertido a la unidad del item.
       // Si el item lo usa en porción/u, usar el costo por porción directo.
       if (unidadItem === 'u' || unidadItem === 'porcion') {
