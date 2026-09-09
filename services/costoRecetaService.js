@@ -38,8 +38,15 @@ async function recalcularCostoReceta(recetaId, db = pool) {
   const costoTotal = Number(sumRows[0].total) || 0;
 
   // 2. Resolver divisor de rendimiento y la unidad en que queda el costo unitario.
-  //    - porcion/u SIN equivalente  → divisor = porciones; costo por porción.
-  //    - porcion/u CON rendimiento_peso → divisor = peso total (gr); costo por gr.
+  //    - porcion/u (con o sin rendimiento_peso) → divisor = porciones; costo por unidad.
+  //      rendimiento_peso/unidad_peso es solo el peso EQUIVALENTE de 1 unidad (dato
+  //      informativo para conversiones — ej. poder usar este elaborado como "150gr" en
+  //      otra receta en vez de "0.5 u"), NO el peso a dividir acá. Antes, si había un
+  //      rendimiento_peso cargado, el divisor pasaba a ser ESE peso (300gr) en vez de
+  //      porciones (40 unidades) — costo_unitario/precio_ref terminaba siendo el costo
+  //      del LOTE ENTERO dividido por el peso de UNA sola unidad (ej. $52.303,83/300 =
+  //      $174,35), un número que no es "por unidad" ni "por gramo" de nada real, y que
+  //      se propagaba tal cual a cualquier receta que use este elaborado.
   //    - medible directo (gr/kg/ml/lt) → divisor = porciones (que YA está en esa
   //      unidad); costo por 1 unidad de rendimiento. (Antes caía al fallback ÷1
   //      porque buscaba rendimiento_peso, que es NULL en este caso → bug del
@@ -49,15 +56,8 @@ async function recalcularCostoReceta(recetaId, db = pool) {
   let divisor;
   let unidadCostoUnitario;   // en qué unidad queda costoUnitario
   if (unidad === 'porcion' || unidad === 'u') {
-    const peso = Number(rec.rendimiento_peso) || 0;
-    if (peso > 0) {
-      const up = String(rec.unidad_peso || 'gr').toLowerCase().trim();
-      divisor = up === 'kg' ? peso * 1000 : peso;   // base gr/ml
-      unidadCostoUnitario = up === 'kg' ? 'gr' : (up || 'gr');
-    } else {
-      divisor = Number(rec.porciones) || 1;
-      unidadCostoUnitario = 'u';
-    }
+    divisor = Number(rec.porciones) || 1;
+    unidadCostoUnitario = 'u';
   } else if (MEDIBLES.includes(unidad)) {
     // porciones está expresado EN la unidad de rendimiento (ej: 300 gr, 8.35 kg)
     divisor = Number(rec.porciones) || 1;
