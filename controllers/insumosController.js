@@ -16,6 +16,7 @@ const { notifyAutoAssign } = require('../services/notificationService');
 const {
   createSyncNotificationForBusinessUsers
 } = require('../services/notificationService');
+const { logAudit, computeDiff } = require('../services/audit/auditLog');
 
 // ===================== HELPERS COMPARTIDOS ====================
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -627,6 +628,13 @@ exports.crearManual = async (req, res) => {
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(businessId);
 
+    await logAudit(null, {
+      userId: req.user?.id || null, businessId,
+      entityType: 'insumo', entityId: rows[0].id,
+      action: 'create',
+      diff: { after: { nombre: rows[0].nombre, unidadMed: rows[0].unidad_med, precioRef: rows[0].precio_ref, rubro: rows[0].rubro } },
+    });
+
     res.status(201).json({ ok: true, data: rows[0], sku: skuFinal });
   } catch (e) {
     console.error('crearManual error:', e);
@@ -670,6 +678,13 @@ exports.actualizar = async (req, res) => {
     // Los insumos son org-wide (viven en el principal). Desde un subnegocio hay que
     // resolver el scope a toda la org, si no el update no encuentra el insumo → 404.
     const orgBizIds = await getOrgBizIds(businessId);
+
+    const { rows: beforeRows } = await pool.query(
+      `SELECT nombre, unidad_med, precio_ref, rubro, estado, nota, costo_preferido, es_elaborado
+         FROM insumos WHERE id = $1 AND business_id = ANY($2::int[])`,
+      [id, orgBizIds]
+    );
+
     vals.push(id, orgBizIds);
     const { rows } = await pool.query(
       `
@@ -686,6 +701,18 @@ exports.actualizar = async (req, res) => {
     }
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(businessId);
+
+    await logAudit(null, {
+      userId: req.user?.id || null, businessId,
+      entityType: 'insumo', entityId: id,
+      action: 'update',
+      diff: computeDiff(beforeRows[0], {
+        nombre: rows[0].nombre, unidad_med: rows[0].unidad_med, precio_ref: rows[0].precio_ref,
+        rubro: rows[0].rubro, estado: rows[0].estado, nota: rows[0].nota,
+        costo_preferido: rows[0].costo_preferido, es_elaborado: rows[0].es_elaborado,
+      }),
+    });
+
     res.json({ ok: true, data: rows[0] });
   } catch (e) {
     console.error('actualizar error:', e);
@@ -747,6 +774,13 @@ exports.eliminar = async (req, res) => {
     if (!r.rowCount) {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
+
+    await logAudit(null, {
+      userId: req.user?.id || null, businessId,
+      entityType: 'insumo', entityId: id,
+      action: 'update',
+      diff: { after: { estado: 'discontinuado' } },
+    });
 
     res.json({ ok: true });
   } catch (e) {
@@ -2088,6 +2122,14 @@ exports.eliminarManual = async (req, res) => {
     );
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(businessId);
+
+    await logAudit(null, {
+      userId: req.user?.id || null, businessId,
+      entityType: 'insumo', entityId: id,
+      action: 'delete',
+      diff: {},
+    });
+
     return res.json({ ok: true, deleted: Number(id) });
   } catch (e) {
     console.error('eliminarManual error:', e);
@@ -2277,6 +2319,14 @@ exports.mermas_create = async (req, res) => {
        RETURNING id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at`,
       [insumoId, nombre.trim(), Number(peso_inicial), Number(peso_final), es_default === true]
     );
+
+    await logAudit(client, {
+      userId: req.user?.id || null, businessId: bizId,
+      entityType: 'merma', entityId: rows[0].id,
+      action: 'create',
+      diff: { after: { insumoId, nombre: rows[0].nombre, peso_inicial: rows[0].peso_inicial, peso_final: rows[0].peso_final } },
+    });
+
     await client.query('COMMIT');
     return res.status(201).json({ ok: true, data: rows[0] });
   } catch (e) {
@@ -2305,6 +2355,11 @@ exports.mermas_update = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
     await client.query('BEGIN');
+
+    const { rows: beforeMerma } = await client.query(
+      `SELECT nombre, peso_inicial, peso_final, es_default FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
+      [mermaId, insumoId]
+    );
 
     // Pesos ANTES de tocar nada: si peso_inicial/peso_final cambian, hay que
     // recalcular el costo de todas las recetas que ya tienen esta merma aplicada
@@ -2364,6 +2419,16 @@ exports.mermas_update = async (req, res) => {
       }
     }
 
+    await logAudit(client, {
+      userId: req.user?.id || null, businessId: bizId,
+      entityType: 'merma', entityId: mermaId,
+      action: 'update',
+      diff: computeDiff(beforeMerma[0], {
+        nombre: rows[0].nombre, peso_inicial: rows[0].peso_inicial,
+        peso_final: rows[0].peso_final, es_default: rows[0].es_default,
+      }),
+    });
+
     await client.query('COMMIT');
     return res.json({ ok: true, data: rows[0] });
   } catch (e) {
@@ -2394,6 +2459,14 @@ exports.mermas_remove = async (req, res) => {
       [mermaId, insumoId]
     );
     if (!rowCount) return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+
+    await logAudit(null, {
+      userId: req.user?.id || null, businessId: bizId,
+      entityType: 'merma', entityId: mermaId,
+      action: 'delete',
+      diff: { after: { insumoId } },
+    });
+
     return res.json({ ok: true, deleted: mermaId });
   } catch (e) {
     console.error('mermas_remove error:', e);
@@ -2792,6 +2865,14 @@ exports.usoInsumoCambiarMerma = async (req, res) => {
       [mermaIdNuevo, mermaIdNuevo != null ? [mermaIdNuevo] : null, Number(costoNuevo.toFixed(6)), itemId]
     );
     await recalcularCostoRecetas([item.receta_id], client);
+
+    await logAudit(client, {
+      userId: req.user?.id || null, businessId: item.business_id,
+      entityType: 'receta_item_merma', entityId: itemId,
+      action: 'update',
+      diff: { before: { mermaId: item.merma_id }, after: { mermaId: mermaIdNuevo } },
+      metadata: { insumoId, recetaId: item.receta_id },
+    });
 
     await client.query('COMMIT');
     return res.json({ ok: true });

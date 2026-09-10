@@ -3,6 +3,7 @@ const pool = require('../config/db');
 const { propagateRecipe } = require('../services/linkPropagation');
 const { recalcularCostoReceta } = require('../services/costoRecetaService');
 const { normalizarCantidadUnidad } = require('../services/unidades');
+const { logAudit } = require('../services/audit/auditLog');
 
 exports.getReceta = async (req, res, next) => {
   try {
@@ -345,6 +346,21 @@ exports.saveReceta = async (req, res, next) => {
       );
     }
 
+    await logAudit(client, {
+      userId: uid, businessId: bizId,
+      entityType: 'receta', entityId: articleId,
+      action: existing.length ? 'update' : 'create',
+      diff: {
+        after: {
+          nombre: receta.nombre,
+          porciones: receta.porciones,
+          porcentajeVenta: receta.porcentaje_venta,
+          costoTotal: costoTotalDB,
+          items: savedItems.length,
+        },
+      },
+    });
+
     await client.query('COMMIT');
 
     console.log(`✅ [saveReceta] Receta ID=${receta.id} | Art=${articleId} | Biz=${bizId} | ${savedItems.length} items | Costo=$${costoTotal.toFixed(4)}`);
@@ -371,6 +387,7 @@ exports.deleteReceta = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
     const articleId = Number(req.params.articleId);
+    const uid = req.user?.id || null;
 
     if (!bizId || !articleId) {
       return res.status(400).json({ ok: false, error: 'invalid_params' });
@@ -403,6 +420,13 @@ exports.deleteReceta = async (req, res, next) => {
     );
 
     console.log(`🗑️ [deleteReceta] Receta ID=${rows[0].id} desactivada`);
+
+    await logAudit(null, {
+      userId: uid, businessId: bizId,
+      entityType: 'receta', entityId: articleId,
+      action: 'delete',
+      diff: { after: { active: false } },
+    });
 
     return res.json({ ok: true, deleted: true });
   } catch (e) {

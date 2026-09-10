@@ -2,6 +2,7 @@
 const pool = require('../config/db');
 const { recalcularCostoReceta, propagarCostoInsumo } = require('../services/costoRecetaService');
 const { normalizarCantidadUnidad } = require('../services/unidades');
+const { logAudit } = require('../services/audit/auditLog');
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/insumos/:insumoId/receta
@@ -185,6 +186,11 @@ exports.saveRecetaElaborado = async (req, res, next) => {
 
     await client.query('BEGIN');
 
+    const { rows: existingReceta } = await client.query(
+      `SELECT id FROM recetas WHERE insumo_id = $1 AND business_id = $2`,
+      [insumoId, bizId]
+    );
+
     // UPSERT receta
     const { rows: recetaRows } = await client.query(
       `INSERT INTO recetas
@@ -340,6 +346,23 @@ exports.saveRecetaElaborado = async (req, res, next) => {
 
     // Recalcular sugerido con el unitario materializado (correcto para peso)
     const precioSugeridoDB = porcentajeNum > 0 ? costoUnitarioDB / (porcentajeNum / 100) : 0;
+
+    await logAudit(client, {
+      userId: uid, businessId: bizId,
+      entityType: 'receta_elaborado', entityId: insumoId,
+      action: existingReceta.length ? 'update' : 'create',
+      diff: {
+        after: {
+          nombre: receta.nombre,
+          porciones: porcionesNum,
+          porcentajeVenta: porcentajeNum,
+          costoTotal: costoTotalDB,
+          costoUnitario: costoUnitarioDB,
+          items: savedItems.length,
+        },
+      },
+    });
+
     await client.query('COMMIT');
 
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
@@ -370,6 +393,7 @@ exports.deleteRecetaElaborado = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
     const insumoId = Number(req.params.insumoId);
+    const uid = req.user?.id || null;
 
     if (!bizId || !insumoId) {
       return res.status(400).json({ ok: false, error: 'invalid_params' });
@@ -404,6 +428,13 @@ exports.deleteRecetaElaborado = async (req, res, next) => {
     invalidateCacheForBiz(bizId);
 
     console.log(`🗑️ [deleteRecetaElaborado] Receta ID=${rows[0].id} | Insumo=${insumoId} desactivada`);
+
+    await logAudit(null, {
+      userId: uid, businessId: bizId,
+      entityType: 'receta_elaborado', entityId: insumoId,
+      action: 'delete',
+      diff: { after: { active: false } },
+    });
 
     return res.json({ ok: true, deleted: true });
   } catch (e) {
