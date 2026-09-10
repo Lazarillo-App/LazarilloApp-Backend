@@ -335,6 +335,8 @@ exports.remove = async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // Borrar un negocio queda exclusivo del owner (a diferencia de crear/editar,
+    // que sí comparte el admin) — es la acción más irreversible de todas.
     const owner = await client.query(
       `SELECT id FROM app_businesses WHERE id=$1 AND owner_id=$2`,
       [bizId, uid]

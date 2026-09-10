@@ -137,9 +137,11 @@ exports.updateOrganization = async (req, res, next) => {
 
     const hasAccess = await checkOrgAccess(orgId, uid);
     if (!hasAccess) return res.status(403).json({ ok: false, error: 'forbidden' });
+    // El admin tiene los mismos derechos de gestión que el owner, salvo invitar a
+    // otro admin (eso queda aparte, en createInvitation).
     const callerRole = await getEffectiveRoleOnScope(uid, 'organization', orgId);
-    if (callerRole !== 'owner') {
-      return res.status(403).json({ ok: false, error: 'owner_required' });
+    if (!['owner', 'admin'].includes(callerRole)) {
+      return res.status(403).json({ ok: false, error: 'owner_or_admin_required' });
     }
     const { name, display_name, maxi_codcli } = req.body || {};
     if (!name?.trim()) return res.status(400).json({ ok: false, error: 'name_required' });
@@ -179,8 +181,8 @@ exports.createBusinessFromGroup = async (req, res, next) => {
     if (!hasAccess) return res.status(403).json({ ok: false, error: 'forbidden' });
 
     const callerRole = await getEffectiveRoleOnScope(uid, 'organization', orgId);
-    if (callerRole !== 'owner') {
-      return res.status(403).json({ ok: false, error: 'owner_required' });
+    if (!['owner', 'admin'].includes(callerRole)) {
+      return res.status(403).json({ ok: false, error: 'owner_or_admin_required' });
     }
 
     const {
@@ -434,9 +436,9 @@ exports.createOrganization = async (req, res, next) => {
     }
 
     const callerRoleOnBiz = await getEffectiveRole(uid, bizId);
-    if (callerRoleOnBiz !== 'owner') {
+    if (!['owner', 'admin'].includes(callerRoleOnBiz)) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ ok: false, error: 'owner_required' });
+      return res.status(403).json({ ok: false, error: 'owner_or_admin_required' });
     }
 
     if (bizCheck[0].organization_id) {
