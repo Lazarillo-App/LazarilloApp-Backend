@@ -281,25 +281,51 @@ exports.createInvitation = async (req, res, next) => {
     const client = await pool.connect();
     try {
         const uid = req.user?.id;
-        const { email, scopeType, scopeId, role, alias } = req.body || {};
+        const { email, role, alias } = req.body || {};
 
-        if (!email || !scopeType || !scopeId || !role || !alias?.trim()) {
+        // Uno o varios scopes de una sola vez: `scopes: [{scopeType, scopeId}, ...]`.
+        // Compat hacia atrás: si viene el formato viejo (scopeType/scopeId sueltos en
+        // el body), se arma un array de 1 elemento con eso.
+        const rawScopes = Array.isArray(req.body?.scopes) && req.body.scopes.length
+            ? req.body.scopes
+            : (req.body?.scopeType && req.body?.scopeId != null
+                ? [{ scopeType: req.body.scopeType, scopeId: req.body.scopeId }]
+                : []);
+
+        if (!email || !rawScopes.length || !role || !alias?.trim()) {
             return res.status(400).json({ ok: false, error: 'missing_fields' });
-        }
-        if (!isValidScopeType(scopeType)) {
-            return res.status(400).json({ ok: false, error: 'invalid_scope_type' });
         }
         if (!isValidRole(role)) {
             return res.status(400).json({ ok: false, error: 'invalid_role' });
         }
 
-        // Autorización del caller
-        const callerRole = await assertManagerOnScope(uid, scopeType, Number(scopeId), res);
-        if (!callerRole) return;
+        // Normalizar + validar cada scope, sin duplicados
+        const scopesSeen = new Set();
+        const scopes = [];
+        for (const s of rawScopes) {
+            const scopeType = s?.scopeType;
+            const scopeId = Number(s?.scopeId);
+            if (!isValidScopeType(scopeType) || !Number.isFinite(scopeId)) {
+                return res.status(400).json({ ok: false, error: 'invalid_scope_type' });
+            }
+            const key = `${scopeType}:${scopeId}`;
+            if (scopesSeen.has(key)) continue;
+            scopesSeen.add(key);
+            scopes.push({ scopeType, scopeId });
+        }
+        if (!scopes.length) {
+            return res.status(400).json({ ok: false, error: 'missing_fields' });
+        }
 
-        // Admin solo puede invitar staff
-        if (callerRole === 'admin' && role !== 'staff') {
-            return res.status(403).json({ ok: false, error: 'admin_can_only_invite_staff' });
+        // Autorización del caller en TODOS los scopes elegidos (si falla en alguno,
+        // assertManagerOnScope ya respondió 403 y cortamos acá).
+        for (const s of scopes) {
+            const r = await assertManagerOnScope(uid, s.scopeType, s.scopeId, res);
+            if (!r) return;
+            // Admin solo puede invitar staff
+            if (r === 'admin' && role !== 'staff') {
+                return res.status(403).json({ ok: false, error: 'admin_can_only_invite_staff' });
+            }
         }
 
         const rawEmail = normEmail(email);
@@ -363,59 +389,63 @@ exports.createInvitation = async (req, res, next) => {
             userId = inserted[0].id;
         }
 
-        // Crear assignment (o reactivar si estaba revocado)
-        const { rows: existingAssign } = await client.query(
-            `SELECT id, revoked_at FROM user_assignments
-        WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3 AND role = $4
-        LIMIT 1`,
-            [userId, scopeType, Number(scopeId), role]
-        );
-
-        let assignmentId;
-        if (existingAssign.length) {
-            assignmentId = existingAssign[0].id;
-            if (existingAssign[0].revoked_at) {
-                // Reactivar
-                await client.query(
-                    `UPDATE user_assignments
-              SET revoked_at = NULL,
-                  alias = $1,
-                  granted_by_user_id = $2,
-                  updated_at = NOW()
-            WHERE id = $3`,
-                    [aliasEfectivo, uid, assignmentId]
-                );
-            } else {
-                // Ya estaba activo: actualizar alias por las dudas
-                await client.query(
-                    `UPDATE user_assignments
-              SET alias = $1, updated_at = NOW()
-            WHERE id = $2`,
-                    [aliasEfectivo, assignmentId]
-                );
-            }
-        } else {
-            const { rows: newAssign } = await client.query(
-                `INSERT INTO user_assignments
-           (user_id, scope_type, scope_id, role, alias, granted_by_user_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id`,
-                [userId, scopeType, Number(scopeId), role, aliasEfectivo, uid]
+        // Crear (o reactivar) UN assignment por cada scope elegido
+        const assignmentIds = [];
+        for (const s of scopes) {
+            const { rows: existingAssign } = await client.query(
+                `SELECT id, revoked_at FROM user_assignments
+            WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3 AND role = $4
+            LIMIT 1`,
+                [userId, s.scopeType, s.scopeId, role]
             );
-            assignmentId = newAssign[0].id;
-        }
 
-        // Audit
-        await logAudit(client, {
-            userId: uid,
-            businessId: scopeType === 'business' ? Number(scopeId) : null,
-            organizationId: scopeType === 'organization' ? Number(scopeId) : null,
-            entityType: 'team_member',
-            entityId: assignmentId,
-            action: 'create',
-            diff: { after: { email: rawEmail, role, alias: alias.trim(), scopeType, scopeId: Number(scopeId) } },
-            metadata: { is_new_user: isNewUser },
-        });
+            let assignmentId;
+            if (existingAssign.length) {
+                assignmentId = existingAssign[0].id;
+                if (existingAssign[0].revoked_at) {
+                    // Reactivar
+                    await client.query(
+                        `UPDATE user_assignments
+                  SET revoked_at = NULL,
+                      alias = $1,
+                      granted_by_user_id = $2,
+                      updated_at = NOW()
+                WHERE id = $3`,
+                        [aliasEfectivo, uid, assignmentId]
+                    );
+                } else {
+                    // Ya estaba activo: actualizar alias por las dudas
+                    await client.query(
+                        `UPDATE user_assignments
+                  SET alias = $1, updated_at = NOW()
+                WHERE id = $2`,
+                        [aliasEfectivo, assignmentId]
+                    );
+                }
+            } else {
+                const { rows: newAssign } = await client.query(
+                    `INSERT INTO user_assignments
+               (user_id, scope_type, scope_id, role, alias, granted_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id`,
+                    [userId, s.scopeType, s.scopeId, role, aliasEfectivo, uid]
+                );
+                assignmentId = newAssign[0].id;
+            }
+            assignmentIds.push(assignmentId);
+
+            // Audit (uno por scope, para que quede el detalle de cada alcance tocado)
+            await logAudit(client, {
+                userId: uid,
+                businessId: s.scopeType === 'business' ? s.scopeId : null,
+                organizationId: s.scopeType === 'organization' ? s.scopeId : null,
+                entityType: 'team_member',
+                entityId: assignmentId,
+                action: 'create',
+                diff: { after: { email: rawEmail, role, alias: alias.trim(), scopeType: s.scopeType, scopeId: s.scopeId } },
+                metadata: { is_new_user: isNewUser },
+            });
+        }
 
         await client.query('COMMIT');
 
@@ -455,7 +485,8 @@ exports.createInvitation = async (req, res, next) => {
 
         return res.status(201).json({
             ok: true,
-            assignment_id: assignmentId,
+            assignment_ids: assignmentIds,
+            assignment_id: assignmentIds[0], // compat: primer scope, para quien lea el campo viejo
             user_id: userId,
             is_new_user: isNewUser,
             delivered,
