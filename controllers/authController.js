@@ -27,6 +27,7 @@ function signToken(user) {
   if (user.role === 'app_admin') payload.role = 'app_admin';
   return jwt.sign(payload, SECRET, opts);
 }
+exports.signToken = signToken;
 
 /* ===================== OPCIONAL: rate-limit simple de login ===================== */
 // Muy simple, en memoria. Activar si querés proteger de bruteforce sin Redis.
@@ -104,7 +105,7 @@ exports.login = async (req, res) => {
     const rawEmail = normEmail(email);
 
     const { rows } = await pool.query(
-      `SELECT id, name, email, password_hash, active_business_id, role, status,
+      `SELECT id, name, display_name, email, password_hash, active_business_id, role, status,
               account_status, trial_ends_at, subscription_ends_at
          FROM app_users WHERE email=$1 LIMIT 1`,
       [rawEmail]
@@ -144,6 +145,7 @@ exports.login = async (req, res) => {
       user: {
         id: user.id,
         name: user.name,
+        display_name: user.display_name || null,
         email: user.email,
         active_business_id: user.active_business_id || null,
         role: user.role === 'app_admin' ? 'app_admin' : null,
@@ -161,7 +163,7 @@ exports.login = async (req, res) => {
 exports.me = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, email, active_business_id, role, status,
+      `SELECT id, name, display_name, email, active_business_id, role, status,
               account_status, trial_ends_at, subscription_ends_at
          FROM app_users WHERE id=$1`,
       [req.user.id]
@@ -203,6 +205,45 @@ exports.updateMe = async (req, res) => {
   } catch (e) {
     console.error('[updateMe]', e.message);
     res.status(500).json({ error: 'internal' });
+  }
+};
+
+/**
+ * PUT /api/auth/change-password
+ * Cambiar la contraseña estando logueado (sabiendo la actual). Distinto del flujo
+ * de "olvidé mi contraseña" (requestPasswordReset/resetPassword), que no requiere
+ * saber la contraseña vieja pero sí un token por mail.
+ */
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword = '', newPassword = '' } = req.body || {};
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ ok: false, error: 'missing_fields' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ ok: false, error: 'password_too_short' });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, password_hash FROM app_users WHERE id = $1`,
+      [req.user.id]
+    );
+    const user = rows[0];
+    if (!user) return res.status(404).json({ ok: false, error: 'not_found' });
+
+    const ok = user.password_hash && await bcrypt.compare(currentPassword, user.password_hash);
+    if (!ok) return res.status(401).json({ ok: false, error: 'wrong_current_password' });
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      `UPDATE app_users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+      [hash, user.id]
+    );
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[changePassword]', e.message);
+    return res.status(500).json({ ok: false, error: 'internal' });
   }
 };
 

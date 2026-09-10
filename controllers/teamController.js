@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const pool = require('../config/db');
 const { sendEmail } = require('../utils/mailer');
+const { signToken } = require('./authController');
 const {
     getEffectiveRoleOnScope,
     ROLE_LEVEL,
@@ -748,7 +749,8 @@ exports.acceptInvitation = async (req, res, next) => {
         await client.query('BEGIN');
 
         const { rows } = await client.query(
-            `SELECT id, email, invitation_expires_at, account_status
+            `SELECT id, name, email, role, invitation_expires_at, account_status,
+                    trial_ends_at, subscription_ends_at
          FROM app_users
         WHERE email = $1 AND invitation_token_hash = $2
         LIMIT 1`,
@@ -811,7 +813,27 @@ exports.acceptInvitation = async (req, res, next) => {
 
         await client.query('COMMIT');
 
-        return res.json({ ok: true, active_business_id: activeBizId });
+        // Devolver token + user (mismo shape que /auth/login) para loguear directo:
+        // antes solo activaba la cuenta y el frontend tenía que mandar a la persona
+        // a una pantalla de login aparte a escribir de nuevo el mail/contraseña
+        // que recién acababa de definir acá mismo.
+        const jwtToken = signToken({ id: user.id, email: user.email, role: user.role });
+        return res.json({
+            ok: true,
+            active_business_id: activeBizId,
+            token: jwtToken,
+            user: {
+                id: user.id,
+                name: user.name,
+                display_name: displayNameClean,
+                email: user.email,
+                active_business_id: activeBizId,
+                role: user.role === 'app_admin' ? 'app_admin' : null,
+                account_status: 'active',
+                trial_ends_at: user.trial_ends_at || null,
+                subscription_ends_at: user.subscription_ends_at || null,
+            },
+        });
     } catch (e) {
         try { await client.query('ROLLBACK'); } catch { }
         console.error('[acceptInvitation]', e);
