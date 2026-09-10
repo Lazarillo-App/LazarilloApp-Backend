@@ -3,6 +3,7 @@
 
 const pool = require('../config/db');
 const { propagatePrecioManual, propagateObjetivo } = require('../services/linkPropagation');
+const { logAudit } = require('../services/audit/auditLog');
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/recetas-costos
@@ -136,6 +137,7 @@ exports.savePriceConfig = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+    const uid = req.user?.id || null;
 
     const {
       scope,
@@ -177,6 +179,14 @@ exports.savePriceConfig = async (req, res, next) => {
         );
 
         console.log(`[savePriceConfig] scope=global pisarTodo → limpiados todos los objetivos del negocio ${bizId}`);
+
+        await logAudit(client, {
+          userId: uid, businessId: bizId,
+          entityType: 'precio_config', entityId: 'global',
+          action: 'update',
+          diff: { after: { scope: 'global', pisarTodo: true } },
+          metadata: { scope: 'global', pisarTodo: true },
+        });
       }
       // Si pisarTodo=false para scope='global', no hacemos nada extra:
       // el global (articulos_costo_ideal en props) ya se guarda aparte
@@ -215,6 +225,7 @@ exports.savePriceConfig = async (req, res, next) => {
     // si hay que propagar el borrado de precio a los artículos vinculados.
     let borrarManual = false;
     let borrarObjetivo = false;
+    let auditAction = 'update';
 
     // ── Upsert del registro principal (scope + scopeId + list_id) ────────────
     if (objetivoVal !== null || precioManualVal !== null || ultimoPctVal !== null
@@ -254,6 +265,7 @@ exports.savePriceConfig = async (req, res, next) => {
       borrarObjetivo = bodyKeys.includes('objetivo');
 
       if (borrarManual && borrarObjetivo) {
+        auditAction = 'delete';
         await client.query(
           `DELETE FROM article_price_config
            WHERE business_id = $1 AND scope = $2 AND scope_id = $3`,
@@ -377,6 +389,28 @@ exports.savePriceConfig = async (req, res, next) => {
         }
       }
     }
+
+    await logAudit(client, {
+      userId: uid, businessId: bizId,
+      entityType: 'precio_config', entityId: scopeIdStr,
+      action: auditAction,
+      diff: {
+        after: {
+          objetivo: objetivoVal,
+          precioManual: precioManualVal,
+          ajuste: ajusteVal,
+          ultimoPct: ultimoPctVal,
+          excluido: excluidoVal,
+        },
+      },
+      metadata: {
+        scope,
+        listId: listIdVal,
+        borrarManual,
+        borrarObjetivo,
+        articulosAfectados: Array.isArray(articleIds) ? articleIds.length : 0,
+      },
+    });
 
     await client.query('COMMIT');
 
@@ -528,6 +562,7 @@ exports.bulkSavePriceConfig = async (req, res, next) => {
   try {
     const bizId = Number(req.params.businessId);
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+    const uid = req.user?.id || null;
 
     const { updates = [], deletes = [] } = req.body || {};
 
@@ -537,20 +572,46 @@ exports.bulkSavePriceConfig = async (req, res, next) => {
     for (const { artId, precioManual } of updates) {
       const id = Number(artId);
       if (!Number.isFinite(id) || id === 0) continue;
+
+      // Precio ANTES, para el historial de cambios.
+      const { rows: antesRows } = await client.query(
+        `SELECT precio_manual FROM article_price_config
+          WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2 AND list_id IS NULL`,
+        [bizId, String(id)]
+      );
+      const precioAntes = antesRows[0]?.precio_manual != null ? Number(antesRows[0].precio_manual) : null;
+      const precioDespues = Number(precioManual);
+
       await client.query(
         `INSERT INTO article_price_config
            (business_id, scope, scope_id, list_id, precio_manual, updated_at)
          VALUES ($1, 'articulo', $2, NULL, $3, NOW())
          ON CONFLICT (business_id, scope, scope_id, COALESCE(list_id, 0))
          DO UPDATE SET precio_manual = EXCLUDED.precio_manual, updated_at = NOW()`,
-        [bizId, String(id), Number(precioManual)]
+        [bizId, String(id), precioDespues]
       );
+
+      if (precioAntes !== precioDespues) {
+        await logAudit(client, {
+          userId: uid, businessId: bizId, entityType: 'precio_manual', entityId: id,
+          action: 'update',
+          diff: { before: { precioManual: precioAntes }, after: { precioManual: precioDespues } },
+        });
+      }
     }
 
     // Borrar precios manuales
     for (const { artId } of deletes) {
       const id = Number(artId);
       if (!Number.isFinite(id) || id === 0) continue;
+
+      const { rows: antesRows } = await client.query(
+        `SELECT precio_manual FROM article_price_config
+          WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2 AND list_id IS NULL`,
+        [bizId, String(id)]
+      );
+      const precioAntes = antesRows[0]?.precio_manual != null ? Number(antesRows[0].precio_manual) : null;
+
       await client.query(
         `UPDATE article_price_config
            SET precio_manual = NULL, updated_at = NOW()
@@ -564,6 +625,14 @@ exports.bulkSavePriceConfig = async (req, res, next) => {
            AND objetivo_pct IS NULL AND precio_manual IS NULL`,
         [bizId, String(id)]
       );
+
+      if (precioAntes != null) {
+        await logAudit(client, {
+          userId: uid, businessId: bizId, entityType: 'precio_manual', entityId: id,
+          action: 'delete',
+          diff: { before: { precioManual: precioAntes }, after: { precioManual: null } },
+        });
+      }
     }
 
     await client.query('COMMIT');
