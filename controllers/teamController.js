@@ -442,8 +442,12 @@ exports.createInvitation = async (req, res, next) => {
 
         let delivered = false;
         try {
-            const { accepted = [] } = await sendEmail(rawEmail, 'Invitación a Lazarillo', html);
-            delivered = Array.isArray(accepted) &&
+            const { accepted = [], simulated } = await sendEmail(rawEmail, 'Invitación a Lazarillo', html);
+            // `simulated` (mailer sin SMTP configurado) también devuelve `accepted` con el
+            // destinatario para no romper el resto del código — pero acá SÍ hay que
+            // distinguirlo: si no, delivered daba true aunque el mail nunca se mandó
+            // (quedaba simulado/logueado por consola), y el admin no tenía forma de saberlo.
+            delivered = !simulated && Array.isArray(accepted) &&
                 accepted.some(v => String(v).toLowerCase() === rawEmail);
         } catch (eMail) {
             console.error('[createInvitation] sendEmail failed:', eMail.message);
@@ -455,6 +459,9 @@ exports.createInvitation = async (req, res, next) => {
             user_id: userId,
             is_new_user: isNewUser,
             delivered,
+            // Siempre disponible para que el admin pueda copiarlo/compartirlo a mano,
+            // sobre todo cuando `delivered` da false.
+            link,
         });
     } catch (e) {
         try { await client.query('ROLLBACK'); } catch { }
@@ -519,14 +526,16 @@ exports.resendInvitation = async (req, res, next) => {
 
         let delivered = false;
         try {
-            const { accepted = [] } = await sendEmail(a.email, 'Invitación a Lazarillo (reenvío)', html);
-            delivered = Array.isArray(accepted) &&
+            const { accepted = [], simulated } = await sendEmail(a.email, 'Invitación a Lazarillo (reenvío)', html);
+            // Ver comentario equivalente en createInvitation: sin este chequeo, un mailer
+            // sin SMTP configurado (modo simulado) reportaba delivered=true igual.
+            delivered = !simulated && Array.isArray(accepted) &&
                 accepted.some(v => String(v).toLowerCase() === String(a.email).toLowerCase());
         } catch (eMail) {
             console.error('[resendInvitation] sendEmail failed:', eMail.message);
         }
 
-        return res.json({ ok: true, delivered });
+        return res.json({ ok: true, delivered, link });
     } catch (e) {
         console.error('[resendInvitation]', e);
         next(e);
