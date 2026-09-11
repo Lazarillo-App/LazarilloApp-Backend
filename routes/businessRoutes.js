@@ -506,6 +506,9 @@ router.delete('/:id/articles/batches/:batchId', ensureFn('artABM.deleteBatchArti
 // Alta manual de artículo
 router.post('/:id/articles/manual', ensureFn('artABM.crearArticulo', artABM.crearArticulo));
 
+// Normalizar nombres de TODOS los artículos del negocio (mayúscula / título)
+router.post('/:id/articles/normalizar-nombres', ensureFn('artABM.normalizarNombresArticulos', artABM.normalizarNombresArticulos));
+
 // Padrino de Articulo: buscar artículo en Maxi para mapear (sin crear manual)
 router.get('/:id/articles/search-padrino', searchPadrino);
 

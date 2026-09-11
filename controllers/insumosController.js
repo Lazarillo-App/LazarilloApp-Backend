@@ -498,6 +498,62 @@ exports.toggleElaboradoBulk = async (req, res) => {
   }
 };
 
+// 'mayuscula' → TODO MAYÚSCULA. 'titulo' → solo la primera letra del nombre en
+// mayúscula, el resto en minúscula (pedido explícito, no "Title Case" por
+// palabra). Misma función que articulosABMController — no compartida en un
+// helper común a propósito, para no acoplar los dos controllers por esto.
+function normalizarNombreFn(formato) {
+  return (s) => {
+    const t = String(s || '').trim();
+    if (!t) return t;
+    if (formato === 'mayuscula') return t.toUpperCase();
+    return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+  };
+}
+
+// POST /insumos/normalizar-nombres — Body: { formato: 'mayuscula' | 'titulo' }
+// La sync de insumos es aditiva (nunca vuelve a tocar el nombre de un insumo
+// ya existente — ver upsertFromMaxi), así que acá no hace falta ningún truco
+// de protección: se actualiza el nombre directo y queda así para siempre.
+exports.normalizarNombres = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'Negocio activo requerido' });
+    const formato = req.body?.formato === 'mayuscula' ? 'mayuscula' : 'titulo';
+    const transform = normalizarNombreFn(formato);
+
+    const { rows } = await pool.query(
+      `SELECT id, nombre FROM insumos WHERE business_id = $1`,
+      [businessId]
+    );
+
+    let cambiados = 0;
+    for (const r of rows) {
+      const nuevo = transform(r.nombre);
+      if (nuevo && nuevo !== r.nombre) {
+        await pool.query(`UPDATE insumos SET nombre = $1, updated_at = NOW() WHERE id = $2`, [nuevo, r.id]);
+        cambiados++;
+      }
+    }
+
+    await logAudit(null, {
+      userId: req.user?.id || null, businessId,
+      entityType: 'insumo', entityId: 0,
+      action: 'update',
+      diff: { after: { normalizarNombres: formato, cambiados } },
+      metadata: { formato, cambiados, bulk: true },
+    });
+
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+
+    return res.json({ ok: true, cambiados });
+  } catch (e) {
+    console.error('normalizarNombres error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
 // ===================== INSUMOS: CRUD BÁSICO =====================
 exports.crearManual = async (req, res) => {
   try {

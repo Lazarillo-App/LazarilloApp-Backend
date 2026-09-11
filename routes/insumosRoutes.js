@@ -106,6 +106,7 @@ router.get('/:id/uso', ctrl.usoInsumo);
 router.put('/:id/uso/:itemId/merma', ctrl.usoInsumoCambiarMerma);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
+router.post('/normalizar-nombres', ctrl.normalizarNombres);
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);
 router.get('/:id/compras', ctrl.getCompras);

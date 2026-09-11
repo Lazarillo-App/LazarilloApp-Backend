@@ -4,6 +4,19 @@
 
 const pool = require('../config/db');
 const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+const { logAudit } = require('../services/audit/auditLog');
+
+// 'mayuscula' → TODO MAYÚSCULA. 'titulo' → solo la primera letra del nombre en
+// mayúscula, el resto en minúscula (así lo pidió la usuaria explícitamente,
+// no es "Title Case" palabra por palabra).
+function normalizarNombreFn(formato) {
+  return (s) => {
+    const t = String(s || '').trim();
+    if (!t) return t;
+    if (formato === 'mayuscula') return t.toUpperCase();
+    return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+  };
+}
 
 function getBusinessId(req) {
   const ctx = Number(req.businessId);
@@ -504,6 +517,77 @@ exports.actualizarArticulo = async (req, res, next) => {
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('[actualizarArticulo]', e.message);
+    next(e);
+  } finally {
+    client.release();
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// POST /businesses/:id/articles/normalizar-nombres
+// Body: { formato: 'mayuscula' | 'titulo' }
+// Pasa el nombre de TODOS los artículos del negocio (maxi + manuales) al
+// formato elegido. Para los de MaxiRest, solo se toca maxi_articles.nombre
+// (nunca nombre_maxi) — el mismo truco que ya usa el renombre manual desde
+// ArticuloAccionesMenu para que la sync no lo pise después.
+// ─────────────────────────────────────────────────────────────
+exports.normalizarNombresArticulos = async (req, res, next) => {
+  const bizId = getBusinessId(req);
+  if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
+  const formato = req.body?.formato === 'mayuscula' ? 'mayuscula' : 'titulo';
+  const transform = normalizarNombreFn(formato);
+  const storageBizId = await resolveStorageBizId(bizId);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: maxiRows } = await client.query(
+      `SELECT articulo_id, nombre FROM maxi_articles WHERE business_id = $1`,
+      [storageBizId]
+    );
+    let cambiados = 0;
+    for (const r of maxiRows) {
+      const nuevo = transform(r.nombre);
+      if (nuevo && nuevo !== r.nombre) {
+        await client.query(
+          `UPDATE maxi_articles SET nombre = $1, updated_at = NOW() WHERE business_id = $2 AND articulo_id = $3`,
+          [nuevo, storageBizId, r.articulo_id]
+        );
+        cambiados++;
+      }
+    }
+
+    const { rows: manualRows } = await client.query(
+      `SELECT id, name FROM app_articles WHERE business_id = $1`,
+      [storageBizId]
+    );
+    for (const r of manualRows) {
+      const nuevo = transform(r.name);
+      if (nuevo && nuevo !== r.name) {
+        await client.query(`UPDATE app_articles SET name = $1, updated_at = NOW() WHERE id = $2 AND business_id = $3`, [nuevo, r.id, storageBizId]);
+        // Espejo en maxi_articles (los manuales también viven ahí, para el árbol).
+        await client.query(`UPDATE maxi_articles SET nombre = $1, updated_at = NOW() WHERE business_id = $2 AND articulo_id = $3`, [nuevo, storageBizId, r.id]);
+        cambiados++;
+      }
+    }
+
+    await logAudit(client, {
+      userId: req.user?.id || null, businessId: bizId,
+      entityType: 'articulo', entityId: 0,
+      action: 'update',
+      diff: { after: { normalizarNombres: formato, cambiados } },
+      metadata: { formato, cambiados, bulk: true },
+    });
+
+    await client.query('COMMIT');
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+
+    return res.json({ ok: true, cambiados });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[normalizarNombresArticulos]', e.message);
     next(e);
   } finally {
     client.release();
