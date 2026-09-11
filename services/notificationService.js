@@ -18,6 +18,7 @@ const ALLOWED_TYPES = new Set([
   'group_unfavorite',
   'discontinue',
   'move',
+  'receta_observacion',
 ]);
 
 function safeType(type) {

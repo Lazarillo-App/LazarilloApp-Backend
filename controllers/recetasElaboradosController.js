@@ -3,6 +3,57 @@ const pool = require('../config/db');
 const { recalcularCostoReceta, propagarCostoInsumo } = require('../services/costoRecetaService');
 const { normalizarCantidadUnidad } = require('../services/unidades');
 const { logAudit } = require('../services/audit/auditLog');
+const { listObservaciones, addObservacion } = require('../services/recetaObservaciones');
+
+async function resolveRecetaIdElaborado(insumoId, bizId) {
+  const { rows } = await pool.query(
+    `SELECT id FROM recetas WHERE insumo_id = $1 AND business_id = $2 AND active = TRUE LIMIT 1`,
+    [insumoId, bizId]
+  );
+  return rows[0]?.id || null;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   GET/POST /api/businesses/:businessId/insumos/:insumoId/receta/observaciones
+══════════════════════════════════════════════════════════════ */
+exports.listRecetaElaboradoObservaciones = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const insumoId = Number(req.params.insumoId);
+    if (!bizId || !insumoId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const recetaId = await resolveRecetaIdElaborado(insumoId, bizId);
+    if (!recetaId) return res.status(404).json({ ok: false, error: 'receta_not_found' });
+
+    const observaciones = await listObservaciones(recetaId);
+    return res.json({ ok: true, observaciones });
+  } catch (e) {
+    console.error('[listRecetaElaboradoObservaciones]', e);
+    next(e);
+  }
+};
+
+exports.addRecetaElaboradoObservacion = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const insumoId = Number(req.params.insumoId);
+    const uid = req.user?.id;
+    if (!bizId || !insumoId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const recetaId = await resolveRecetaIdElaborado(insumoId, bizId);
+    if (!recetaId) return res.status(404).json({ ok: false, error: 'receta_not_found' });
+
+    const observacion = await addObservacion({
+      recetaId, businessId: bizId, userId: uid, texto: req.body?.texto,
+      entityType: 'receta_elaborado', entityId: insumoId,
+    });
+    return res.status(201).json({ ok: true, observacion });
+  } catch (e) {
+    if (e.message === 'texto_requerido') return res.status(400).json({ ok: false, error: 'texto_requerido' });
+    console.error('[addRecetaElaboradoObservacion]', e);
+    next(e);
+  }
+};
 
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/insumos/:insumoId/receta
@@ -129,7 +180,17 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       foto,
       fotos,
       notasUpdatedAt,
+      metodoCoccion = null,
+      temperatura = null,
+      tiempoMin = null,
+      pasos = [],
     } = req.body || {};
+
+    const pasosArr = Array.isArray(pasos) ? pasos.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim()) : [];
+    const pasosJson = JSON.stringify(pasosArr);
+    const temperaturaVal = temperatura != null && temperatura !== '' ? Number(temperatura) : null;
+    const tiempoMinVal = tiempoMin != null && tiempoMin !== '' ? Number(tiempoMin) : null;
+    const metodoCoccionVal = (metodoCoccion || '').trim() || null;
 
     if (!Array.isArray(items)) {
       return res.status(400).json({ ok: false, error: 'items_must_be_array' });
@@ -197,8 +258,9 @@ exports.saveRecetaElaborado = async (req, res, next) => {
          (insumo_id, business_id, nombre, descripcion, porciones,
           porcentaje_venta, costo_total, notas, foto, fotos, notas_updated_at,
           rendimiento_unidad, rendimiento_peso, unidad_peso,
+          metodo_coccion, temperatura, tiempo_min, pasos,
           active, origen, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, TRUE, 'manual', $15, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, TRUE, 'manual', $19, NOW(), NOW())
        ON CONFLICT ON CONSTRAINT recetas_insumo_biz_key
        DO UPDATE SET
          nombre             = EXCLUDED.nombre,
@@ -213,6 +275,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
          rendimiento_unidad = EXCLUDED.rendimiento_unidad,
          rendimiento_peso   = EXCLUDED.rendimiento_peso,
          unidad_peso        = EXCLUDED.unidad_peso,
+         metodo_coccion     = EXCLUDED.metodo_coccion,
+         temperatura        = EXCLUDED.temperatura,
+         tiempo_min         = EXCLUDED.tiempo_min,
+         pasos              = EXCLUDED.pasos,
          active             = TRUE,
          origen             = 'manual',
          updated_at         = NOW()
@@ -231,6 +297,7 @@ exports.saveRecetaElaborado = async (req, res, next) => {
         ruFinal,
         rpFinal,
         upFinal,
+        metodoCoccionVal, temperaturaVal, tiempoMinVal, pasosJson,
         uid,
       ]
     );

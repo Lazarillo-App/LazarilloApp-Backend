@@ -4,6 +4,57 @@ const { propagateRecipe } = require('../services/linkPropagation');
 const { recalcularCostoReceta } = require('../services/costoRecetaService');
 const { normalizarCantidadUnidad } = require('../services/unidades');
 const { logAudit } = require('../services/audit/auditLog');
+const { listObservaciones, addObservacion } = require('../services/recetaObservaciones');
+
+async function resolveRecetaId(articleId, bizId) {
+  const { rows } = await pool.query(
+    `SELECT id FROM recetas WHERE article_id = $1 AND business_id = $2 AND active = TRUE LIMIT 1`,
+    [articleId, bizId]
+  );
+  return rows[0]?.id || null;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   GET/POST /api/businesses/:businessId/articles/:articleId/receta/observaciones
+══════════════════════════════════════════════════════════════ */
+exports.listRecetaObservaciones = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const articleId = Number(req.params.articleId);
+    if (!bizId || !articleId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const recetaId = await resolveRecetaId(articleId, bizId);
+    if (!recetaId) return res.status(404).json({ ok: false, error: 'receta_not_found' });
+
+    const observaciones = await listObservaciones(recetaId);
+    return res.json({ ok: true, observaciones });
+  } catch (e) {
+    console.error('[listRecetaObservaciones]', e);
+    next(e);
+  }
+};
+
+exports.addRecetaObservacion = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const articleId = Number(req.params.articleId);
+    const uid = req.user?.id;
+    if (!bizId || !articleId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const recetaId = await resolveRecetaId(articleId, bizId);
+    if (!recetaId) return res.status(404).json({ ok: false, error: 'receta_not_found' });
+
+    const observacion = await addObservacion({
+      recetaId, businessId: bizId, userId: uid, texto: req.body?.texto,
+      entityType: 'receta', entityId: articleId,
+    });
+    return res.status(201).json({ ok: true, observacion });
+  } catch (e) {
+    if (e.message === 'texto_requerido') return res.status(400).json({ ok: false, error: 'texto_requerido' });
+    console.error('[addRecetaObservacion]', e);
+    next(e);
+  }
+};
 
 exports.getReceta = async (req, res, next) => {
   try {
@@ -20,6 +71,7 @@ exports.getReceta = async (req, res, next) => {
          r.porciones, r.porcentaje_venta, r.costo_total, r.active,
          r.notas, r.foto, r.fotos, r.notas_updated_at,
          r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
+         r.metodo_coccion, r.temperatura, r.tiempo_min, r.pasos,
          r.created_at, r.updated_at
        FROM recetas r
       WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE
@@ -90,7 +142,17 @@ exports.saveReceta = async (req, res, next) => {
       foto,
       fotos,
       notasUpdatedAt,
+      metodoCoccion = null,
+      temperatura = null,
+      tiempoMin = null,
+      pasos = [],
     } = req.body || {};
+
+    const pasosArr = Array.isArray(pasos) ? pasos.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim()) : [];
+    const pasosJson = JSON.stringify(pasosArr);
+    const temperaturaVal = temperatura != null && temperatura !== '' ? Number(temperatura) : null;
+    const tiempoMinVal = tiempoMin != null && tiempoMin !== '' ? Number(tiempoMin) : null;
+    const metodoCoccionVal = (metodoCoccion || '').trim() || null;
 
     // Normalizar fotos: array de hasta 6. Compatibilidad con `foto` single.
     let fotosArr = Array.isArray(fotos) ? fotos.filter(Boolean).slice(0, 6) : [];
@@ -146,6 +208,10 @@ exports.saveReceta = async (req, res, next) => {
        rendimiento_unidad = $10,
        rendimiento_peso   = $11,
        unidad_peso        = $12,
+       metodo_coccion     = $14,
+       temperatura        = $15,
+       tiempo_min         = $16,
+       pasos              = $17::jsonb,
        active             = TRUE,
        origen             = 'manual',
        updated_at         = NOW()
@@ -163,6 +229,7 @@ exports.saveReceta = async (req, res, next) => {
           notasUpdatedAt || null,
           ruFinal, rpFinal, upFinal,
           existing[0].id,
+          metodoCoccionVal, temperaturaVal, tiempoMinVal, pasosJson,
         ]
       );
       recetaRows = rows;
@@ -172,8 +239,9 @@ exports.saveReceta = async (req, res, next) => {
        (article_id, business_id, nombre, descripcion, porciones,
         porcentaje_venta, costo_total, notas, foto, fotos, notas_updated_at,
         rendimiento_unidad, rendimiento_peso, unidad_peso,
+        metodo_coccion, temperatura, tiempo_min, pasos,
         active, origen, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, TRUE, 'manual', NOW(), NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, TRUE, 'manual', NOW(), NOW())
      RETURNING *`,
         [
           articleId, bizId,
@@ -187,6 +255,7 @@ exports.saveReceta = async (req, res, next) => {
           fotosJson,          // fotos jsonb
           notasUpdatedAt || null,
           ruFinal, rpFinal, upFinal,
+          metodoCoccionVal, temperaturaVal, tiempoMinVal, pasosJson,
         ]
       );
       recetaRows = rows;

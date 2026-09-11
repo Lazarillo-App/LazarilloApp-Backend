@@ -179,10 +179,51 @@ async function getEffectiveRoleOnScope(userId, scopeType, scopeId) {
   return null;
 }
 
+/**
+ * Devuelve los user_id con rol owner o admin sobre un negocio (directo +
+ * heredado de la organización). Usado para notificaciones dirigidas a
+ * "quien gestiona el negocio" (ej. observaciones de recetas que carga el
+ * staff), no para chequeos de permisos.
+ * @param {number} businessId
+ * @returns {Promise<number[]>}
+ */
+async function listManagersForBusiness(businessId) {
+  if (!businessId) return [];
+
+  const { rows } = await pool.query(
+    `
+    WITH biz AS (
+      SELECT id, owner_id, organization_id
+        FROM app_businesses
+       WHERE id = $1
+       LIMIT 1
+    )
+    SELECT owner_id AS user_id FROM biz WHERE owner_id IS NOT NULL
+    UNION
+    SELECT ua.user_id
+      FROM user_assignments ua
+     WHERE ua.scope_type = 'business'
+       AND ua.scope_id = $1
+       AND ua.role IN ('owner', 'admin')
+       AND ua.revoked_at IS NULL
+    UNION
+    SELECT ua.user_id
+      FROM user_assignments ua
+      JOIN biz b ON b.organization_id IS NOT NULL AND ua.scope_id = b.organization_id
+     WHERE ua.scope_type = 'organization'
+       AND ua.role IN ('owner', 'admin')
+       AND ua.revoked_at IS NULL
+    `,
+    [businessId]
+  );
+  return rows.map(r => Number(r.user_id)).filter(n => Number.isFinite(n) && n > 0);
+}
+
 module.exports = {
   ROLE_LEVEL,
   getEffectiveRole,
   getEffectiveRoleOnScope,
   requireRole,
   listAccessibleBusinesses,
+  listManagersForBusiness,
 };
