@@ -536,6 +536,39 @@ exports.normalizarNombres = async (req, res) => {
       }
     }
 
+    // Rubros del catálogo (insumo_rubros.nombre — la mayoría de los insumos
+    // referencian el rubro por código, así que alcanza con renombrar acá).
+    const { rows: rubroRows } = await pool.query(
+      `SELECT id, nombre FROM insumo_rubros WHERE business_id = $1`,
+      [businessId]
+    );
+    for (const r of rubroRows) {
+      const nuevo = transform(r.nombre);
+      if (nuevo && nuevo !== r.nombre) {
+        await pool.query(`UPDATE insumo_rubros SET nombre = $1, updated_at = NOW() WHERE id = $2`, [nuevo, r.id]);
+        cambiados++;
+      }
+    }
+
+    // Rubros "huérfanos": insumos.rubro guarda el nombre tal cual cuando no
+    // matcheó ningún código del catálogo (ver crearManual).
+    const { rows: rubroHuerfanoRows } = await pool.query(
+      `SELECT DISTINCT rubro FROM insumos
+        WHERE business_id = $1 AND rubro IS NOT NULL AND rubro != ''
+          AND rubro NOT IN (SELECT codigo::text FROM insumo_rubros WHERE business_id = $1)`,
+      [businessId]
+    );
+    for (const { rubro } of rubroHuerfanoRows) {
+      const nuevo = transform(rubro);
+      if (nuevo && nuevo !== rubro) {
+        await pool.query(
+          `UPDATE insumos SET rubro = $1, updated_at = NOW() WHERE business_id = $2 AND rubro = $3`,
+          [nuevo, businessId, rubro]
+        );
+        cambiados++;
+      }
+    }
+
     await logAudit(null, {
       userId: req.user?.id || null, businessId,
       entityType: 'insumo', entityId: 0,

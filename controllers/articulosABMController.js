@@ -572,6 +572,50 @@ exports.normalizarNombresArticulos = async (req, res, next) => {
       }
     }
 
+    // Rubro UI = maxi_articles.subrubro (convención invertida) + app_articles.rubro.
+    // Mismo mecanismo que renombrarRubro: se actualiza por valor distinto, sin tocar
+    // subrubro_maxi (así el próximo sync detecta la diferencia y no lo pisa).
+    const { rows: rubroRows } = await client.query(
+      `SELECT DISTINCT subrubro FROM maxi_articles
+        WHERE business_id = $1 AND subrubro IS NOT NULL AND subrubro != ''`,
+      [storageBizId]
+    );
+    for (const { subrubro } of rubroRows) {
+      const nuevo = transform(subrubro);
+      if (nuevo && nuevo !== subrubro) {
+        await client.query(
+          `UPDATE maxi_articles SET subrubro = $1, updated_at = NOW() WHERE business_id = $2 AND subrubro = $3`,
+          [nuevo, storageBizId, subrubro]
+        );
+        await client.query(
+          `UPDATE app_articles SET rubro = $1, updated_at = NOW() WHERE business_id = $2 AND rubro = $3`,
+          [nuevo, storageBizId, subrubro]
+        );
+        cambiados++;
+      }
+    }
+
+    // Subrubro UI = maxi_articles.categoria (convención invertida) + app_articles.subrubro.
+    const { rows: subrubroRows } = await client.query(
+      `SELECT DISTINCT categoria FROM maxi_articles
+        WHERE business_id = $1 AND categoria IS NOT NULL AND categoria != ''`,
+      [storageBizId]
+    );
+    for (const { categoria } of subrubroRows) {
+      const nuevo = transform(categoria);
+      if (nuevo && nuevo !== categoria) {
+        await client.query(
+          `UPDATE maxi_articles SET categoria = $1, updated_at = NOW() WHERE business_id = $2 AND categoria = $3`,
+          [nuevo, storageBizId, categoria]
+        );
+        await client.query(
+          `UPDATE app_articles SET subrubro = $1, updated_at = NOW() WHERE business_id = $2 AND subrubro = $3`,
+          [nuevo, storageBizId, categoria]
+        );
+        cambiados++;
+      }
+    }
+
     await logAudit(client, {
       userId: req.user?.id || null, businessId: bizId,
       entityType: 'articulo', entityId: 0,
