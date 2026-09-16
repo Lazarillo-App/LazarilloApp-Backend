@@ -1,5 +1,6 @@
 // middleware/allowAdminAsBusiness.js
 const pool = require('../config/db');
+const { logAudit } = require('../services/audit/auditLog');
 
 module.exports = async function allowAdminAsBusiness(req, res, next) {
   try {
@@ -26,6 +27,19 @@ module.exports = async function allowAdminAsBusiness(req, res, next) {
 
     req.businessId = biz.id;
     req.business   = biz;
+
+    // Auditoría: queda registro de cuándo y por qué se entró a ver un negocio
+    // ajeno en modo solo-lectura (nunca de escritura), sin frenar la request
+    // si el logging falla.
+    logAudit(null, {
+      userId: req.user?.id || null,
+      businessId: biz.id,
+      entityType: 'business',
+      entityId: biz.id,
+      action: 'view',
+      metadata: { path: req.originalUrl },
+    }).catch(() => {});
+
     next();
   } catch (e) {
     console.error('allowAdminAsBusiness error:', e);

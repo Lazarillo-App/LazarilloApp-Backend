@@ -24,7 +24,7 @@
 
 const pool = require('../../config/db');
 
-const ALLOWED_ACTIONS = new Set(['create', 'update', 'delete', 'restore', 'reassign']);
+const ALLOWED_ACTIONS = new Set(['create', 'update', 'delete', 'restore', 'reassign', 'view']);
 
 /**
  * Calcula un diff campo a campo entre `before` y `after`.

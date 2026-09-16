@@ -10,6 +10,7 @@ const peekCtrl = require('../controllers/admin/adminPeekController');
 const businessCtrl = require('../controllers/admin/adminBusinessController');
 const orgCtrl = require('../controllers/admin/adminOrgController');
 const maintenanceCtrl = require('../controllers/admin/adminMaintenanceController');
+const assignmentsCtrl = require('../controllers/admin/adminAssignmentsController');
 const salesSync = require('../controllers/salesSyncController');
 
 function ensureFn(name, fn) {
@@ -41,6 +42,11 @@ r.get(   '/businesses/:id', ensureFn('getBusiness',    businessCtrl?.getBusiness
 r.patch( '/businesses/:id', ensureFn('updateBusiness', businessCtrl?.updateBusiness));
 r.post(  '/businesses/:id/pause',  ensureFn('pauseBusiness',  businessCtrl?.pauseBusiness));
 r.post(  '/businesses/:id/resume', ensureFn('resumeBusiness', businessCtrl?.resumeBusiness));
+r.post(  '/businesses/:id/reassign-owner', ensureFn('reassignOwner', businessCtrl?.reassignOwner));
+
+/* ACCIONES "EN NOMBRE DE" (staff) */
+r.delete('/assignments/:id', ensureFn('revokeAssignment', assignmentsCtrl?.revokeAssignment));
+r.patch( '/assignments/:id', ensureFn('updateAssignmentRole', assignmentsCtrl?.updateAssignmentRole));
 
 /* ORGANIZACIONES */
 r.get('/organizations',     ensureFn('listOrganizations', orgCtrl?.listOrganizations));

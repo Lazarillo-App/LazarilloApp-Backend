@@ -174,6 +174,45 @@ exports.pauseBusiness = async (req, res) => {
   }
 };
 
+exports.reassignOwner = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const newOwnerUserId = Number(req.body?.newOwnerUserId);
+    if (!Number.isFinite(newOwnerUserId)) return res.status(400).json({ error: 'invalid_new_owner' });
+
+    const { rows: userRows } = await db.query(
+      `SELECT id, status FROM app_users WHERE id=$1 LIMIT 1`, [newOwnerUserId]
+    );
+    if (!userRows[0]) return res.status(404).json({ error: 'NEW_OWNER_NOT_FOUND' });
+    if (userRows[0].status === 'deleted') return res.status(400).json({ error: 'NEW_OWNER_DELETED' });
+
+    const { rows: beforeRows } = await db.query(
+      `SELECT id, owner_id FROM app_businesses WHERE id=$1 LIMIT 1`, [id]
+    );
+    const before = beforeRows[0];
+    if (!before) return res.status(404).json({ error: 'NOT_FOUND' });
+
+    const { rows } = await db.query(
+      `UPDATE app_businesses SET owner_id=$1 WHERE id=$2 RETURNING id, name, owner_id`,
+      [newOwnerUserId, id]
+    );
+
+    await logAudit(null, {
+      userId: req.user?.id || null,
+      businessId: id,
+      entityType: 'business',
+      entityId: id,
+      action: 'reassign',
+      diff: { before: { owner_id: before.owner_id }, after: { owner_id: newOwnerUserId } },
+    });
+
+    res.json({ ok: true, business: rows[0] });
+  } catch (e) {
+    console.error('ADMIN_BUSINESS_REASSIGN_OWNER_FAILED:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
+
 exports.resumeBusiness = async (req, res) => {
   try {
     const id = Number(req.params.id);
