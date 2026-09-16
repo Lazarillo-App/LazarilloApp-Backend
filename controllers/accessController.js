@@ -3,6 +3,7 @@
 
 const pool   = require('../config/db');
 const crypto = require('crypto');
+const { pauseOwnedBusinesses } = require('../services/admin/cascadePauseOwnerBusinesses');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -346,7 +347,13 @@ exports.suspendUser = async (req, res) => {
       [userId, adminId, notes || null]
     );
 
-    return res.json({ ok: true });
+    // Suspender la cuenta pausa en cascada los negocios que posee — sin perder
+    // nada, solo bloqueando el uso normal hasta que se despausen a mano.
+    const pausedBusinesses = await pauseOwnedBusinesses(pool, {
+      ownerUserId: userId, adminId, reason: 'owner_suspended',
+    });
+
+    return res.json({ ok: true, paused_businesses: pausedBusinesses });
   } catch (e) {
     return res.status(500).json({ ok: false, error: 'internal' });
   }

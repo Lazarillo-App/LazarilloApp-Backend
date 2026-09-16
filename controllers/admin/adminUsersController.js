@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { logAudit } = require('../../services/audit/auditLog');
 const { sendEmail } = require('../../utils/mailer');
 const { createOrReinviteUser, EmailAlreadyActiveError, INVITATION_TTL_DAYS } = require('../../services/users/provisionUser');
+const { pauseOwnedBusinesses } = require('../../services/admin/cascadePauseOwnerBusinesses');
 
 const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
 const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || '').replace(/\/+$/, '');
@@ -173,6 +174,8 @@ exports.updateUser = async (req, res) => {
 exports.softDeleteUser = async (req, res) => {
   try {
     const id = Number(req.params.id);
+    const confirm = req.query.confirm === '1' || req.body?.confirm === true;
+
     const { rows } = await db.query(
       `SELECT id, role FROM app_users WHERE id=$1 LIMIT 1`, [id]
     );
@@ -180,10 +183,28 @@ exports.softDeleteUser = async (req, res) => {
     if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
     if (target.role === 'app_admin') return res.status(403).json({ error: 'CANNOT_DELETE_ADMIN' });
 
+    // Borrado seguro: si el usuario todavía es dueño de negocios sin pausar,
+    // se pide confirmación explícita antes de eliminar (se van a pausar, nunca
+    // se borran ni se destruyen).
+    const { rows: activeBiz } = await db.query(
+      `SELECT id, name FROM app_businesses WHERE owner_id = $1 AND paused_at IS NULL`,
+      [id]
+    );
+    if (activeBiz.length && !confirm) {
+      return res.status(409).json({
+        error: 'HAS_ACTIVE_BUSINESSES',
+        businesses: activeBiz,
+      });
+    }
+
     await db.query(
       `UPDATE app_users SET status='deleted', account_status='suspended', updated_at=NOW() WHERE id=$1`,
       [id]
     );
+
+    const pausedBusinesses = await pauseOwnedBusinesses(db, {
+      ownerUserId: id, adminId: req.user?.id || null, reason: 'owner_deleted',
+    });
 
     await logAudit(null, {
       userId: req.user?.id || null,
@@ -192,7 +213,7 @@ exports.softDeleteUser = async (req, res) => {
       action: 'delete',
     });
 
-    res.json({ ok: true });
+    res.json({ ok: true, paused_businesses: pausedBusinesses });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'ADMIN_USER_DELETE_FAILED' });

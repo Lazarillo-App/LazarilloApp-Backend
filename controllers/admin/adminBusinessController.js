@@ -24,6 +24,7 @@ exports.listBusinesses = async (req, res) => {
       `SELECT b.id, b.name, b.slug, b.organization_id, o.name AS organization_name,
               b.owner_id, u.name AS owner_name, u.email AS owner_email,
               u.status AS owner_status, u.account_status AS owner_account_status,
+              b.paused_at, b.paused_reason, b.paused_by_cascade,
               b.created_at
          FROM app_businesses b
          LEFT JOIN organizations o ON o.id = b.organization_id
@@ -49,6 +50,7 @@ exports.getBusiness = async (req, res) => {
       `SELECT b.id, b.name, b.slug, b.color_hex, b.organization_id, o.name AS organization_name,
               b.owner_id, u.name AS owner_name, u.email AS owner_email,
               u.status AS owner_status, u.account_status AS owner_account_status,
+              b.paused_at, b.paused_reason, b.paused_by_cascade,
               b.created_at
          FROM app_businesses b
          LEFT JOIN organizations o ON o.id = b.organization_id
@@ -138,6 +140,65 @@ exports.updateBusiness = async (req, res) => {
     res.json({ ok: true, business: rows[0] });
   } catch (e) {
     console.error('ADMIN_BUSINESS_UPDATE_FAILED:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
+
+exports.pauseBusiness = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { reason } = req.body || {};
+
+    const { rows } = await db.query(
+      `UPDATE app_businesses
+          SET paused_at = NOW(), paused_reason = $1, paused_by = $2, paused_by_cascade = false
+        WHERE id = $3 AND paused_at IS NULL
+        RETURNING id, name, paused_at, paused_reason`,
+      [reason || null, req.user?.id || null, id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'NOT_FOUND_OR_ALREADY_PAUSED' });
+
+    await logAudit(null, {
+      userId: req.user?.id || null,
+      businessId: id,
+      entityType: 'business',
+      entityId: id,
+      action: 'update',
+      diff: { after: { paused_at: 'now', paused_reason: reason || null } },
+    });
+
+    res.json({ ok: true, business: rows[0] });
+  } catch (e) {
+    console.error('ADMIN_BUSINESS_PAUSE_FAILED:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
+
+exports.resumeBusiness = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { rows } = await db.query(
+      `UPDATE app_businesses
+          SET paused_at = NULL, paused_reason = NULL, paused_by = NULL, paused_by_cascade = false
+        WHERE id = $1 AND paused_at IS NOT NULL
+        RETURNING id, name`,
+      [id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'NOT_FOUND_OR_NOT_PAUSED' });
+
+    await logAudit(null, {
+      userId: req.user?.id || null,
+      businessId: id,
+      entityType: 'business',
+      entityId: id,
+      action: 'update',
+      diff: { after: { paused_at: null } },
+      metadata: { reason: 'resume' },
+    });
+
+    res.json({ ok: true, business: rows[0] });
+  } catch (e) {
+    console.error('ADMIN_BUSINESS_RESUME_FAILED:', e);
     res.status(500).json({ error: 'internal' });
   }
 };

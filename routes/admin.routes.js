@@ -38,6 +38,8 @@ r.get(   '/users/:id/activity',        ensureFn('userActivity',   usersCtrl?.use
 r.get(   '/businesses',     ensureFn('listBusinesses', businessCtrl?.listBusinesses));
 r.get(   '/businesses/:id', ensureFn('getBusiness',    businessCtrl?.getBusiness));
 r.patch( '/businesses/:id', ensureFn('updateBusiness', businessCtrl?.updateBusiness));
+r.post(  '/businesses/:id/pause',  ensureFn('pauseBusiness',  businessCtrl?.pauseBusiness));
+r.post(  '/businesses/:id/resume', ensureFn('resumeBusiness', businessCtrl?.resumeBusiness));
 
 /* ORGANIZACIONES */
 r.get('/organizations',     ensureFn('listOrganizations', orgCtrl?.listOrganizations));

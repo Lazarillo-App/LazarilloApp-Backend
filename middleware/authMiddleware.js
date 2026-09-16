@@ -149,6 +149,17 @@ async function loadActiveBusiness(req, res, next) {
     }
 
     const row = rows[0];
+
+    // Negocio pausado (por la dueña, o en cascada por suspensión del usuario dueño):
+    // se bloquea el uso normal, sin perder ningún dato — se despausa desde el admin.
+    if (row.paused_at) {
+      return res.status(403).json({
+        error: 'business_paused',
+        paused_at: row.paused_at,
+        paused_reason: row.paused_reason || null,
+      });
+    }
+
     const props = (row.props && typeof row.props === 'object') ? row.props : {};
     if (!props.maxi) props.maxi = {};
     req.businessId = row.id;
