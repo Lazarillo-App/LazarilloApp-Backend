@@ -37,6 +37,9 @@ r.get(   '/users/:id',                 ensureFn('getUser',       usersCtrl?.getU
 r.get(   '/users/:id/businesses',      ensureFn('userBusinesses', usersCtrl?.userBusinesses));
 r.get(   '/users/:id/activity',        ensureFn('userActivity',   usersCtrl?.userActivity));
 
+/* DASHBOARD */
+r.get('/dashboard/problemas', ensureFn('dashboardProblemas', businessCtrl?.dashboardProblemas));
+
 /* NEGOCIOS */
 r.get(   '/businesses',     ensureFn('listBusinesses', businessCtrl?.listBusinesses));
 r.get(   '/businesses/:id', ensureFn('getBusiness',    businessCtrl?.getBusiness));

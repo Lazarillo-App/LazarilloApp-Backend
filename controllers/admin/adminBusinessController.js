@@ -174,6 +174,58 @@ exports.pauseBusiness = async (req, res) => {
   }
 };
 
+// Umbral de "trial por vencer" — ajustar acá si hace falta, sin tocar la query.
+const TRIAL_WARNING_DAYS = 7;
+
+/**
+ * GET /admin/dashboard/problemas
+ * Señales ya disponibles hoy en el modelo de datos, sin instrumentación nueva:
+ * negocios pausados, con dueño vencido/suspendido, con trial por vencer, o
+ * huérfanos (dueño eliminado).
+ */
+exports.dashboardProblemas = async (_req, res) => {
+  try {
+    const [paused, ownerExpired, trialSoon, orphaned] = await Promise.all([
+      db.query(
+        `SELECT b.id, b.name, b.paused_reason, b.paused_by_cascade
+           FROM app_businesses b WHERE b.paused_at IS NOT NULL
+          ORDER BY b.name LIMIT 50`
+      ),
+      db.query(
+        `SELECT b.id, b.name, u.email AS owner_email, u.account_status
+           FROM app_businesses b JOIN app_users u ON u.id = b.owner_id
+          WHERE u.account_status IN ('expired','suspended') AND b.paused_at IS NULL
+          ORDER BY b.name LIMIT 50`
+      ),
+      db.query(
+        `SELECT b.id, b.name, u.email AS owner_email, u.trial_ends_at
+           FROM app_businesses b JOIN app_users u ON u.id = b.owner_id
+          WHERE u.account_status = 'trial' AND u.trial_ends_at IS NOT NULL
+            AND u.trial_ends_at <= NOW() + INTERVAL '${TRIAL_WARNING_DAYS} days'
+            AND b.paused_at IS NULL
+          ORDER BY u.trial_ends_at LIMIT 50`
+      ),
+      db.query(
+        `SELECT b.id, b.name, u.email AS owner_email
+           FROM app_businesses b JOIN app_users u ON u.id = b.owner_id
+          WHERE u.status = 'deleted'
+          ORDER BY b.name LIMIT 50`
+      ),
+    ]);
+
+    res.json({
+      ok: true,
+      paused: paused.rows,
+      owner_expired_or_suspended: ownerExpired.rows,
+      trial_ending_soon: trialSoon.rows,
+      orphaned: orphaned.rows,
+    });
+  } catch (e) {
+    console.error('ADMIN_DASHBOARD_PROBLEMAS_FAILED:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
+
 exports.reassignOwner = async (req, res) => {
   try {
     const id = Number(req.params.id);
