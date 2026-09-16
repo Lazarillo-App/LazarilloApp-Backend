@@ -52,10 +52,15 @@ async function main() {
   const bizIds = bizRows.map((b) => b.id);
 
   // Tablas reales (no solo las trackeadas en migraciones) con columna business_id.
+  // Se excluyen vistas (BASE TABLE solamente) — una vista no tiene datos propios
+  // para borrar, se vacía sola cuando se borra de las tablas base que refleja.
   const { rows: tableRows } = await pool.query(
-    `SELECT table_name FROM information_schema.columns
-      WHERE column_name = 'business_id' AND table_schema = 'public'
-      ORDER BY table_name`
+    `SELECT c.table_name FROM information_schema.columns c
+       JOIN information_schema.tables t
+         ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+      WHERE c.column_name = 'business_id' AND c.table_schema = 'public'
+        AND t.table_type = 'BASE TABLE'
+      ORDER BY c.table_name`
   );
   const tables = tableRows.map((r) => r.table_name).filter((t) => t !== 'app_businesses');
 
