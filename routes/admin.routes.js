@@ -11,6 +11,7 @@ const businessCtrl = require('../controllers/admin/adminBusinessController');
 const orgCtrl = require('../controllers/admin/adminOrgController');
 const maintenanceCtrl = require('../controllers/admin/adminMaintenanceController');
 const assignmentsCtrl = require('../controllers/admin/adminAssignmentsController');
+const auditCtrl = require('../controllers/admin/adminAuditController');
 const salesSync = require('../controllers/salesSyncController');
 
 function ensureFn(name, fn) {
@@ -51,6 +52,9 @@ r.patch( '/assignments/:id', ensureFn('updateAssignmentRole', assignmentsCtrl?.u
 /* ORGANIZACIONES */
 r.get('/organizations',     ensureFn('listOrganizations', orgCtrl?.listOrganizations));
 r.get('/organizations/:id', ensureFn('getOrganization',   orgCtrl?.getOrganization));
+
+/* AUDITORÍA DE PLATAFORMA */
+r.get('/audit', ensureFn('listPlatformAudit', auditCtrl?.listPlatformAudit));
 
 /* MANTENIMIENTO GLOBAL */
 r.get( '/maintenance', ensureFn('getMaintenance', maintenanceCtrl?.getMaintenance));
