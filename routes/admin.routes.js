@@ -5,8 +5,9 @@ const requireAppAdmin = require('../middleware/requireAppAdmin');
 const allowAdminAsBusiness = require('../middleware/allowAdminAsBusiness');
 
 // Controllers
-const adminCtrl = require('../controllers/adminController');
-const salesSync = require('../controllers/salesSyncController'); 
+const usersCtrl = require('../controllers/admin/adminUsersController');
+const peekCtrl = require('../controllers/admin/adminPeekController');
+const salesSync = require('../controllers/salesSyncController');
 
 function ensureFn(name, fn) {
   if (typeof fn === 'function') return fn;
@@ -18,47 +19,43 @@ function ensureFn(name, fn) {
 r.use(requireAppAdmin);
 
 /* OVERVIEW */
-r.get('/overview', ensureFn('overview', adminCtrl?.overview));
+r.get('/overview', ensureFn('overview', usersCtrl?.overview));
 
 /* USUARIOS */
-r.get(   '/users',          ensureFn('listUsers',    adminCtrl?.listUsers));
-r.post(  '/users',          ensureFn('createUser',   adminCtrl?.createUser));
-r.patch( '/users/:id',      ensureFn('updateUser',   adminCtrl?.updateUser));
-r.delete('/users/:id',      ensureFn('deleteUser',   adminCtrl?.deleteUser));
-r.post(  '/users/:id/restore',         ensureFn('restoreUser',   adminCtrl?.restoreUser));
-r.post(  '/users/:id/reset-password',  ensureFn('resetPassword', adminCtrl?.resetPassword));
-r.get(   '/users/:id',                 ensureFn('getUser',       adminCtrl?.getUser));
-
-/* NEGOCIOS */
-r.get(   '/businesses',     ensureFn('listBusinesses',   adminCtrl?.listBusinesses));
-r.post(  '/businesses',     ensureFn('createBusiness',   adminCtrl?.createBusiness));
-r.patch( '/businesses/:id', ensureFn('updateBusiness',   adminCtrl?.updateBusiness));
-r.delete('/businesses/:id', ensureFn('deleteBusiness',   adminCtrl?.deleteBusiness));
+r.get(   '/users',          ensureFn('listUsers',    usersCtrl?.listUsers));
+r.post(  '/users',          ensureFn('createUser',   usersCtrl?.createUser));
+r.patch( '/users/:id',      ensureFn('updateUser',   usersCtrl?.updateUser));
+r.delete('/users/:id',      ensureFn('deleteUser',   usersCtrl?.deleteUser));
+r.post(  '/users/:id/restore',         ensureFn('restoreUser',   usersCtrl?.restoreUser));
+r.post(  '/users/:id/reset-password',  ensureFn('resetPassword', usersCtrl?.resetPassword));
+r.get(   '/users/:id',                 ensureFn('getUser',       usersCtrl?.getUser));
+r.get(   '/users/:id/businesses',      ensureFn('userBusinesses', usersCtrl?.userBusinesses));
+r.get(   '/users/:id/activity',        ensureFn('userActivity',   usersCtrl?.userActivity));
 
 /* PEEK / AUDITORÍA (solo lectura) */
 r.get('/businesses/:id/ventas/summary',
   allowAdminAsBusiness,
-  ensureFn('peekVentasSummary', adminCtrl?.peekVentasSummary)
+  ensureFn('peekVentasSummary', peekCtrl?.peekVentasSummary)
 );
 
 r.get('/businesses/:id/articles/tree',
   allowAdminAsBusiness,
-  ensureFn('peekArticlesTree', adminCtrl?.peekArticlesTree)
+  ensureFn('peekArticlesTree', peekCtrl?.peekArticlesTree)
 );
 
 r.get('/businesses/:id/ventas/by-article',
   allowAdminAsBusiness,
-  ensureFn('peekVentasSeries', adminCtrl?.peekVentasSeries)
+  ensureFn('peekVentasSeries', peekCtrl?.peekVentasSeries)
 );
 
 r.get('/businesses/:id/maxi-status',
   allowAdminAsBusiness,
-  ensureFn('peekMaxiStatus', adminCtrl?.peekMaxiStatus)
+  ensureFn('peekMaxiStatus', peekCtrl?.peekMaxiStatus)
 );
 
 r.get('/businesses/:id/maxi-menu',
   allowAdminAsBusiness,
-  ensureFn('peekMaxiMenuCache', adminCtrl?.peekMaxiMenuCache)
+  ensureFn('peekMaxiMenuCache', peekCtrl?.peekMaxiMenuCache)
 );
 
 /* SYNC VENTAS (admin ejecuta para un negocio) */
