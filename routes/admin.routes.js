@@ -7,6 +7,8 @@ const allowAdminAsBusiness = require('../middleware/allowAdminAsBusiness');
 // Controllers
 const usersCtrl = require('../controllers/admin/adminUsersController');
 const peekCtrl = require('../controllers/admin/adminPeekController');
+const businessCtrl = require('../controllers/admin/adminBusinessController');
+const orgCtrl = require('../controllers/admin/adminOrgController');
 const salesSync = require('../controllers/salesSyncController');
 
 function ensureFn(name, fn) {
@@ -31,6 +33,15 @@ r.post(  '/users/:id/reset-password',  ensureFn('resetPassword', usersCtrl?.rese
 r.get(   '/users/:id',                 ensureFn('getUser',       usersCtrl?.getUser));
 r.get(   '/users/:id/businesses',      ensureFn('userBusinesses', usersCtrl?.userBusinesses));
 r.get(   '/users/:id/activity',        ensureFn('userActivity',   usersCtrl?.userActivity));
+
+/* NEGOCIOS */
+r.get(   '/businesses',     ensureFn('listBusinesses', businessCtrl?.listBusinesses));
+r.get(   '/businesses/:id', ensureFn('getBusiness',    businessCtrl?.getBusiness));
+r.patch( '/businesses/:id', ensureFn('updateBusiness', businessCtrl?.updateBusiness));
+
+/* ORGANIZACIONES */
+r.get('/organizations',     ensureFn('listOrganizations', orgCtrl?.listOrganizations));
+r.get('/organizations/:id', ensureFn('getOrganization',   orgCtrl?.getOrganization));
 
 /* PEEK / AUDITORÍA (solo lectura) */
 r.get('/businesses/:id/ventas/summary',
