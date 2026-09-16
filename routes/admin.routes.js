@@ -9,6 +9,7 @@ const usersCtrl = require('../controllers/admin/adminUsersController');
 const peekCtrl = require('../controllers/admin/adminPeekController');
 const businessCtrl = require('../controllers/admin/adminBusinessController');
 const orgCtrl = require('../controllers/admin/adminOrgController');
+const maintenanceCtrl = require('../controllers/admin/adminMaintenanceController');
 const salesSync = require('../controllers/salesSyncController');
 
 function ensureFn(name, fn) {
@@ -44,6 +45,10 @@ r.post(  '/businesses/:id/resume', ensureFn('resumeBusiness', businessCtrl?.resu
 /* ORGANIZACIONES */
 r.get('/organizations',     ensureFn('listOrganizations', orgCtrl?.listOrganizations));
 r.get('/organizations/:id', ensureFn('getOrganization',   orgCtrl?.getOrganization));
+
+/* MANTENIMIENTO GLOBAL */
+r.get( '/maintenance', ensureFn('getMaintenance', maintenanceCtrl?.getMaintenance));
+r.post('/maintenance', ensureFn('setMaintenance', maintenanceCtrl?.setMaintenance));
 
 /* PEEK / AUDITORÍA (solo lectura) */
 r.get('/businesses/:id/ventas/summary',

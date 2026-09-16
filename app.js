@@ -14,6 +14,7 @@ const { runMigrations } = require('./db/migrations');
 // Auth middlewares
 const { authRequired, loadActiveBusiness } = require('./middleware/authMiddleware');
 const requireAppAdmin = require('./middleware/requireAppAdmin');
+const maintenanceMode = require('./middleware/maintenanceMode');
 
 // Rutas
 const authRoutes = require('./routes/authRoutes');
@@ -123,6 +124,9 @@ const uploadsDir = path.join(__dirname, 'uploads');
 const logosDir = path.join(uploadsDir, 'logos');
 fs.mkdirSync(logosDir, { recursive: true });
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+/* ----------- modo mantenimiento global (antes que cualquier ruta /api) ----------- */
+app.use('/api', maintenanceMode);
 
 /* ----------- rutas públicas ----------- */
 app.use('/api/auth', authRoutes);
