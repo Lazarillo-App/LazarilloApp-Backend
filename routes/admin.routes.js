@@ -12,6 +12,7 @@ const orgCtrl = require('../controllers/admin/adminOrgController');
 const maintenanceCtrl = require('../controllers/admin/adminMaintenanceController');
 const assignmentsCtrl = require('../controllers/admin/adminAssignmentsController');
 const auditCtrl = require('../controllers/admin/adminAuditController');
+const searchCtrl = require('../controllers/admin/adminSearchController');
 const salesSync = require('../controllers/salesSyncController');
 
 function ensureFn(name, fn) {
@@ -36,6 +37,9 @@ r.post(  '/users/:id/reset-password',  ensureFn('resetPassword', usersCtrl?.rese
 r.get(   '/users/:id',                 ensureFn('getUser',       usersCtrl?.getUser));
 r.get(   '/users/:id/businesses',      ensureFn('userBusinesses', usersCtrl?.userBusinesses));
 r.get(   '/users/:id/activity',        ensureFn('userActivity',   usersCtrl?.userActivity));
+
+/* BUSCADOR GLOBAL */
+r.get('/search', ensureFn('globalSearch', searchCtrl?.globalSearch));
 
 /* DASHBOARD */
 r.get('/dashboard/problemas', ensureFn('dashboardProblemas', businessCtrl?.dashboardProblemas));
