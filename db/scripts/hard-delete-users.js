@@ -89,9 +89,13 @@ async function processOne(email, confirm, businessTables) {
   const { rows: actCount } = await pool.query(
     `SELECT COUNT(*)::int AS n FROM account_activations WHERE user_id = $1`, [user.id]
   );
+  const { rows: redCount } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM access_code_redemptions WHERE user_id = $1`, [user.id]
+  );
   console.log(`  user_assignments propias: ${uaCount[0].n}`);
   console.log(`  audit_log: ${auditCount[0].n}`);
   console.log(`  account_activations: ${actCount[0].n}`);
+  console.log(`  access_code_redemptions: ${redCount[0].n}`);
 
   if (!confirm) return;
 
@@ -115,6 +119,7 @@ async function processOne(email, confirm, businessTables) {
       [user.id, String(user.id)]
     );
     await client.query(`DELETE FROM account_activations WHERE user_id = $1`, [user.id]);
+    await client.query(`DELETE FROM access_code_redemptions WHERE user_id = $1`, [user.id]);
     await client.query(`DELETE FROM app_users WHERE id = $1`, [user.id]);
 
     await client.query('COMMIT');
