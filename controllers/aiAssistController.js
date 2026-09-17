@@ -23,7 +23,13 @@
 //       viene, así que esto es una comodidad, no un requisito).
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-sonnet-5';
+
+// Solo la búsqueda de negocio (websearch:true) necesita el modelo grande —
+// tiene que juzgar resultados ambiguos de la web real. Todo lo demás (leer un
+// PDF/foto, clasificar rubros en lotes, generar una receta) es una tarea
+// mecánica y acotada: Haiku 4.5 alcanza de sobra y sale mucho más barato.
+const MODEL_WEBSEARCH = 'claude-sonnet-5';
+const MODEL_DEFAULT = 'claude-haiku-4-5-20251001';
 
 // Mismo extractor "tolerante" que ya usa el frontend (busca el primer {..}/[..]
 // balanceado en el texto, por si el modelo agrega texto alrededor del JSON).
@@ -74,8 +80,12 @@ exports.assist = async (req, res) => {
       : system;
 
     const body = {
-      model: MODEL,
-      max_tokens: websearch ? 1500 : (Array.isArray(content) ? 1200 : 1024),
+      model: websearch ? MODEL_WEBSEARCH : MODEL_DEFAULT,
+      // Topes ajustados por tipo de tarea, no un único valor genérico:
+      // - websearch: hasta 8 negocios con datos cortos.
+      // - extracción de PDF/foto (content): una carta/lista por archivo.
+      // - texto plano (clasificación en lotes de ~35, receta de hasta 9 insumos, etc.)
+      max_tokens: websearch ? 1500 : (Array.isArray(content) ? 1200 : 2048),
       system: effectiveSystem,
       messages: [{ role: 'user', content: messageContent }],
     };
