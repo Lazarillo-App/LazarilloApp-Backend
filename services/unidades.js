@@ -7,7 +7,8 @@ function factorConversion(from, to) {
     const n = String(u || 'u').toLowerCase().trim();
     return { k: 'kg', g: 'gr', l: 'lt', cc: 'ml' }[n] || n;
   };
-  const PESO  = { gr: 1, kg: 1000, oz: 28.35, lb: 453.59 };
+  // "oz" acá es SIEMPRE onza fluida (volumen) — nunca onza de peso. No va en PESO.
+  const PESO  = { gr: 1, kg: 1000, lb: 453.59 };
   const VOLUM = { ml: 1, lt: 1000, oz: 30 };
   const f = norm(from), t = norm(to);
   if (f === t) return 1;

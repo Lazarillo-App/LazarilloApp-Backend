@@ -252,7 +252,8 @@ exports.bulkAddInsumo = async (req, res, next) => {
       return UNIT_ALIASES[n] || n;
     };
     const getConversionFactor = (from, to) => {
-      const PESO = { gr: 1, kg: 1000, oz: 28.35, lb: 453.59 };
+      // "oz" acá es SIEMPRE onza fluida (volumen) — nunca onza de peso. No va en PESO.
+      const PESO = { gr: 1, kg: 1000, lb: 453.59 };
       const VOLUM = { ml: 1, lt: 1000, oz: 30 };
       const f = canonicalUnit(from), t = canonicalUnit(to);
       if (f === t) return 1;
