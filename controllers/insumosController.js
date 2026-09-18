@@ -236,9 +236,22 @@ exports.listar = async (req, res) => {
         LEFT JOIN LATERAL (
           SELECT
             ROUND(AVG(CASE WHEN pi_all.fecha >= CURRENT_DATE - INTERVAL '90 days' THEN pi_all.precio END)::numeric, 4) AS precio_promedio,
-            (SELECT pi_ult.precio FROM purchase_items pi_ult
-             WHERE pi_ult.insumo_id = i.id AND pi_ult.business_id = ANY($${orgIdx}::int[]) AND pi_ult.precio > 0
-             ORDER BY pi_ult.fecha DESC LIMIT 1) AS precio_ultima_compra,
+            -- Costo REAL del último comprobante (mismo criterio que estadoBonificacion /
+            -- recalcularBonificaciones): importe total del comprobante ÷ unidades
+            -- recibidas (facturadas + bonificadas). Antes tomaba solo pi_ult.precio de la
+            -- última línea facturada, ignorando las unidades en $0 de esa misma compra —
+            -- con una promo 2x1, eso daba el precio de lista completo en vez del costo
+            -- promediado real, e "última compra (auto)" terminaba costeando la receta más
+            -- caro que la compra que le dio origen.
+            (SELECT CASE WHEN SUM(pi_ult.cantidad) > 0
+                     THEN ROUND((SUM(pi_ult.precio_total) / SUM(pi_ult.cantidad))::numeric, 4)
+                     ELSE NULL END
+             FROM purchase_items pi_ult
+             JOIN purchases p_ult ON p_ult.id = pi_ult.purchase_id
+             WHERE pi_ult.insumo_id = i.id AND pi_ult.business_id = ANY($${orgIdx}::int[])
+             GROUP BY p_ult.factura_key, p_ult.proveedor_id
+             ORDER BY MAX(p_ult.fecha) DESC, MAX(p_ult.id) DESC
+             LIMIT 1) AS precio_ultima_compra,
             MAX(pi_all.fecha) AS fecha_ultima_compra,
             COUNT(*)::int AS cantidad_compras
           FROM purchase_items pi_all
