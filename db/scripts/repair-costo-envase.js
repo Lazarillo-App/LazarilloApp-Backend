@@ -21,7 +21,7 @@
 'use strict';
 require('dotenv').config();
 const pool = require('../../config/db');
-const { propagarCostoInsumo } = require('../services/costoRecetaService');
+const { propagarCostoInsumo } = require('../../services/costoRecetaService');
 
 const bizArg = process.argv.find(a => a.startsWith('--business='));
 const bizId = bizArg ? Number(bizArg.split('=')[1]) : null;
