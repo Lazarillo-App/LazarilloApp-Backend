@@ -486,11 +486,17 @@ exports.listArticlesFromDB = async (req, res) => {
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
 
   const { principalId, assignedIds, orgId } = await getOrgArticleContext(biz.id, pool);
-  const isSubBusiness = orgId && Number(biz.id) !== Number(principalId);
+  // Antes solo se filtraba si el negocio NO era el "principal" de la organización —
+  // pero el principal es, en la práctica, un local más (ej. Container Bar), no un
+  // contenedor puramente administrativo: sin este cambio, veía sin filtrar los
+  // artículos ya organizados en agrupaciones de OTROS subnegocios de su misma
+  // organización (ej. Container FC). Ahora se filtra igual para cualquier negocio
+  // que pertenezca a una organización, sea o no el principal.
+  const perteneceAOrg = !!orgId;
 
   let allowedIds = null;
-  if (isSubBusiness) {
-    // Artículos propios del subnegocio (en sus agrupaciones reales)
+  if (perteneceAOrg) {
+    // Artículos propios de este negocio (en sus agrupaciones reales)
     const { rows: subAgRows } = await pool.query(
       `SELECT ag.articulos, ag.app_articles_ids
          FROM agrupaciones ag
@@ -614,12 +620,18 @@ exports.listArticlesTreeFromDB = async (req, res) => {
   if (!biz?.id) return res.status(400).json({ error: 'no_active_business' });
   try {
     const { principalId, assignedIds, orgId } = await getOrgArticleContext(biz.id, pool);
-    const isSubBusiness = orgId && Number(biz.id) !== Number(principalId);
+    // Antes solo se filtraba si el negocio NO era el "principal" de la organización —
+    // pero el principal es, en la práctica, un local más (ej. Container Bar), no un
+    // contenedor puramente administrativo: sin este cambio, veía sin filtrar los
+    // artículos ya organizados en agrupaciones de OTROS subnegocios de su misma
+    // organización (ej. Container FC). Ahora se filtra igual para cualquier negocio
+    // que pertenezca a una organización, sea o no el principal.
+    const perteneceAOrg = !!orgId;
 
-    // Para subnegocios: calcular qué artículos le pertenecen
-    // = los que están en sus propias agrupaciones (no globales)
-    let allowedIds = null; // null = sin filtro (principal o sin org)
-    if (isSubBusiness) {
+    // Para cualquier negocio de una organización: calcular qué artículos le pertenecen
+    // = los que están en sus propias agrupaciones (no globales) + los libres.
+    let allowedIds = null; // null = sin filtro (sin organización)
+    if (perteneceAOrg) {
       const { rows: subAgRows } = await pool.query(
         `SELECT ag.articulos, ag.app_articles_ids
            FROM agrupaciones ag
