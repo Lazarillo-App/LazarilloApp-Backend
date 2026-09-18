@@ -134,7 +134,7 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   // Datos del insumo cuyo costo cambió: su precio_ref (costo por unidad de rendimiento)
   // y la unidad base en la que está expresado.
   const { rows: insRows } = await db.query(
-    `SELECT i.id, i.precio_ref, i.unidad_med,
+    `SELECT i.id, i.precio_ref, i.unidad_med, i.contenido_envase, i.unidad_envase,
             r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso
        FROM insumos i
        LEFT JOIN recetas r ON r.insumo_id = i.id AND r.business_id = $2 AND r.active = TRUE
@@ -144,6 +144,8 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   if (!insRows.length) return;
   const ins = insRows[0];
   const precioRef = Number(ins.precio_ref) || 0;
+  const contEnvase = Number(ins.contenido_envase) || 0;
+  const uniEnvase = String(ins.unidad_envase || '').toLowerCase().trim();
 
   // Unidad base del costo del insumo:
   //  - si es elaborado con rendimiento medible (gr/kg/ml/lt) → esa unidad
@@ -211,6 +213,17 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
         const factor = factorConversion(unidadBase, unidadItem);  // gr→kg = 1000, gr→gr = 1
         nuevoCosto = factor > 0 ? costoPorGrBase / factor : costoPorGrBase;
       }
+    } else if (unidadBase === 'u' && contEnvase > 0 && uniEnvase && unidadItem !== 'u') {
+      // Insumo "u" CON envase (ej. una botella de 30ml a $3.549,99/u) usado en la
+      // receta por una unidad física (ml/gr/etc): el costo real es precioRef ÷
+      // contenido_envase, convertido a esa unidad — NO el precio de la unidad/
+      // envase entero. Sin esto, 10ml de esa botella se costeaban como $3.549,99
+      // (el precio de TODA la botella) en vez de la fracción real que representan
+      // esos 10ml — mismo cálculo que ya hace el frontend (calcCosto.js) para
+      // mostrar el costo en pantalla, pero que acá, al propagar, no se aplicaba.
+      const costoPorUnidadEnvase = precioRef / contEnvase;
+      const factorEnv = factorConversion(unidadItem, uniEnvase);
+      nuevoCosto = factorEnv > 0 ? factorEnv * costoPorUnidadEnvase : costoPorUnidadEnvase;
     } else if (unidadBase === 'u') {
       nuevoCosto = precioRef;   // por porción/unidad sin equivalente, sin conversión
     } else {
