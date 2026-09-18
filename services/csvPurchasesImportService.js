@@ -423,41 +423,19 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     const preciosActualizados = insumosActualizadosRows.length;
     if (preciosActualizados > 0) {
       console.log(`[CSV Purchases Import] precio_ref actualizado en ${preciosActualizados} insumos`);
-      // El precio de estos insumos cambió: propagar en cascada a las recetas que los usan
-      // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total de las recetas
-      // quedaba congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
-      for (const row of insumosActualizadosRows) {
-        try {
-          await propagarCostoInsumo(row.id, dataBizId, client);
-        } catch (e) {
-          console.error(`[CSV Purchases Import] propagarCostoInsumo error insumo ${row.id}:`, e.message);
-          // No abortar el import por esto: el precio_ref ya quedó actualizado.
-        }
-      }
     }
 
-    // ── Recalcular bonificaciones de insumos con bonif_aceptada tocados por este import ──
-    // Los insumos con bonificación NO fueron pisados por el UPDATE de arriba (blindados).
-    // Acá su costo se actualiza por la lógica de bonificación: si la nueva compra trae
-    // otra bonificación, la aplica; si dejó de traerla, vuelve a lista y apaga el flag.
-    let bonificacionesCambiadas = [];
-    try {
-      const { rows: tocados } = await client.query(
-        `SELECT DISTINCT pi.insumo_id
-           FROM purchase_items pi
-          WHERE pi.business_id = $1
-            AND pi.insumo_id IS NOT NULL
-            AND pi.fecha BETWEEN $2::date AND $3::date`,
-        [dataBizId, minDate, maxDate]
-      );
-      const insumoIdsTocados = tocados.map(r => r.insumo_id).filter(Boolean);
-      if (insumoIdsTocados.length) {
-        bonificacionesCambiadas = await recalcularBonificaciones(dataBizId, insumoIdsTocados, client);
-      }
-    } catch (e) {
-      console.error('[CSV Purchases Import] recalcularBonificaciones error:', e.message);
-      // No abortar el import por esto: las compras ya están insertadas.
-    }
+    // Insumos con bonif_aceptada tocados por este import (no fueron pisados por el
+    // UPDATE de arriba, están blindados) — se recalculan en 2° plano más abajo.
+    const { rows: tocadosRows } = await client.query(
+      `SELECT DISTINCT pi.insumo_id
+         FROM purchase_items pi
+        WHERE pi.business_id = $1
+          AND pi.insumo_id IS NOT NULL
+          AND pi.fecha BETWEEN $2::date AND $3::date`,
+      [dataBizId, minDate, maxDate]
+    );
+    const insumoIdsTocados = tocadosRows.map(r => r.insumo_id).filter(Boolean);
 
     await client.query('COMMIT');
     txOpen = false;
@@ -465,6 +443,16 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     try { fs.unlinkSync(filePath); } catch { }
 
     console.log(`[CSV Purchases Import] OK — dataBizId=${dataBizId} inserted=${insertedCount} range=${minDate}→${maxDate} batch=${batchId}`);
+
+    // ── Recalcular costos en 2° plano (no bloquea la respuesta) ──
+    // Antes esto corría acá mismo, adentro de la MISMA transacción del import, antes
+    // de responder — con un archivo que tocara varias docenas de insumos (cada uno
+    // propagando en cascada a sus recetas, y de ahí a elaborados anidados), eran
+    // cientos de consultas secuenciales y la pantalla de carga quedaba esperando
+    // minutos. Ahora las compras quedan guardadas y confirmadas al toque; el costo
+    // de las recetas se pone al día unos segundos después, solo.
+    propagarCambiosImportEnBackground(dataBizId, insumosActualizadosRows, insumoIdsTocados)
+      .catch(e => console.error('[CSV Purchases Import] error en recálculo de 2° plano:', e));
 
     return {
       ok: true,
@@ -479,7 +467,6 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
         date_range: { from: minDate, to: maxDate },
       },
       errors: errors.slice(0, 20),
-      bonificaciones_cambiadas: bonificacionesCambiadas,
     };
   } catch (error) {
     if (txOpen) { try { await client.query('ROLLBACK'); } catch { } }
@@ -498,6 +485,35 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
   } finally {
     client.release();
   }
+}
+
+// ── Recálculo posterior al import, fuera de la transacción principal ──
+// Corre con `pool` (conexiones propias, no la del import ya cerrada/commiteada).
+// Best-effort: si algo falla acá, las compras ya quedaron guardadas igual — mismo
+// criterio de tolerancia a errores que tenía este bloque cuando vivía adentro del
+// import (nunca abortaba el import por esto).
+async function propagarCambiosImportEnBackground(dataBizId, insumosActualizadosRows, insumoIdsTocados) {
+  const t0 = Date.now();
+
+  if (insumosActualizadosRows.length) {
+    for (const row of insumosActualizadosRows) {
+      try {
+        await propagarCostoInsumo(row.id, dataBizId, pool);
+      } catch (e) {
+        console.error(`[CSV Purchases Import 2°plano] propagarCostoInsumo error insumo ${row.id}:`, e.message);
+      }
+    }
+  }
+
+  if (insumoIdsTocados.length) {
+    try {
+      await recalcularBonificaciones(dataBizId, insumoIdsTocados, pool);
+    } catch (e) {
+      console.error('[CSV Purchases Import 2°plano] recalcularBonificaciones error:', e.message);
+    }
+  }
+
+  console.log(`[CSV Purchases Import 2°plano] listo en ${Date.now() - t0}ms — ${insumosActualizadosRows.length} insumos propagados`);
 }
 
 module.exports = { importPurchasesToDatabase };
