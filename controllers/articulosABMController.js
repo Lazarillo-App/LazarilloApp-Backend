@@ -678,16 +678,23 @@ exports.eliminarArticulo = async (req, res, next) => {
     // 🆕 Quitar el ID de las agrupaciones (sino queda huérfano y reaparece al refetch).
     // articulos: jsonb array de objetos {id,...} → filtrar por elem->>'id'
     // app_articles_ids: jsonb array de números → filtrar el valor
+    // jsonb_array_elements() revienta si la columna no es un array JSON (dato
+    // viejo/inconsistente: NULL literal, "{}", etc.) — el CASE la trata como "[]"
+    // en ese caso en vez de tirar abajo todo el borrado del artículo.
     await client.query(
       `UPDATE agrupaciones
           SET articulos = COALESCE((
                 SELECT jsonb_agg(elem)
-                  FROM jsonb_array_elements(articulos) elem
+                  FROM jsonb_array_elements(
+                         CASE WHEN jsonb_typeof(articulos) = 'array' THEN articulos ELSE '[]'::jsonb END
+                       ) elem
                  WHERE (elem->>'id')::int IS DISTINCT FROM $2
               ), '[]'::jsonb),
               app_articles_ids = COALESCE((
                 SELECT jsonb_agg(val)
-                  FROM jsonb_array_elements(app_articles_ids) val
+                  FROM jsonb_array_elements(
+                         CASE WHEN jsonb_typeof(app_articles_ids) = 'array' THEN app_articles_ids ELSE '[]'::jsonb END
+                       ) val
                  WHERE (val)::text::int IS DISTINCT FROM $2
               ), '[]'::jsonb),
               updated_at = NOW()
