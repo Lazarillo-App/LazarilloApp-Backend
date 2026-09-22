@@ -507,6 +507,7 @@ exports.getRecetasAlertas = async (req, res, next) => {
          i.id          AS insumo_id,
          i.nombre      AS insumo_nombre,
          i.unidad_med,
+         COALESCE(ir.nombre, i.rubro, 'Sin rubro') AS rubro,
          MAX(pi.fecha) AS fecha_ultima_compra,
          COUNT(DISTINCT r.article_id)::int AS en_recetas,
          json_agg(DISTINCT jsonb_build_object(
@@ -521,14 +522,15 @@ exports.getRecetasAlertas = async (req, res, next) => {
        JOIN insumos i   ON i.id = ri.insumo_id AND i.es_elaborado IS NOT TRUE
                                          -- los elaborados no se compran (tienen receta
                                          -- propia) — no aplica alertarlos por compra vencida
+       LEFT JOIN insumo_rubros ir ON ir.business_id = i.business_id AND ir.codigo::text = i.rubro
        LEFT JOIN app_articles a ON a.id = r.article_id AND a.business_id = $1
        LEFT JOIN purchase_items pi ON pi.insumo_id = i.id AND pi.precio > 0
        WHERE ri.tipo_costo != 'nulo'
-       GROUP BY i.id, i.nombre, i.unidad_med
+       GROUP BY i.id, i.nombre, i.unidad_med, ir.nombre
        HAVING
          MAX(pi.fecha) IS NOT NULL
          AND MAX(pi.fecha) < CURRENT_DATE - ($2 || ' weeks')::interval
-       ORDER BY fecha_ultima_compra ASC NULLS FIRST, i.nombre ASC`,
+       ORDER BY rubro ASC, fecha_ultima_compra ASC NULLS FIRST, i.nombre ASC`,
       [bizId, alertaSemanas]
     );
 
@@ -540,6 +542,7 @@ exports.getRecetasAlertas = async (req, res, next) => {
         insumoId: Number(r.insumo_id),
         nombre: r.insumo_nombre,
         unidadMed: r.unidad_med,
+        rubro: r.rubro,
         fechaUltimaCompra: r.fecha_ultima_compra
           ? String(r.fecha_ultima_compra).slice(0, 10)
           : null,
