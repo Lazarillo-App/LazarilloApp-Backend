@@ -284,6 +284,12 @@ exports.createInvitation = async (req, res, next) => {
         const uid = req.user?.id;
         const { email, role, alias } = req.body || {};
 
+        // Sector (Vista Operación) — solo aplica a invitaciones de Staff, y solo
+        // a los scopes de tipo 'business' (un sector vive adentro de un negocio).
+        const sectorIds = role === 'staff' && Array.isArray(req.body?.sectorIds)
+            ? [...new Set(req.body.sectorIds.map(Number).filter(Number.isFinite))]
+            : null;
+
         // Uno o varios scopes de una sola vez: `scopes: [{scopeType, scopeId}, ...]`.
         // Compat hacia atrás: si viene el formato viejo (scopeType/scopeId sueltos en
         // el body), se arma un array de 1 elemento con eso.
@@ -316,6 +322,23 @@ exports.createInvitation = async (req, res, next) => {
         }
         if (!scopes.length) {
             return res.status(400).json({ ok: false, error: 'missing_fields' });
+        }
+
+        // Validar que los sectores elegidos existan y sean de alguno de los
+        // negocios invitados (un sector nunca cruza de negocio).
+        if (sectorIds && sectorIds.length) {
+            const bizScopeIds = scopes.filter((s) => s.scopeType === 'business').map((s) => s.scopeId);
+            if (!bizScopeIds.length) {
+                return res.status(400).json({ ok: false, error: 'sector_requires_business_scope' });
+            }
+            const { rows: secRows } = await pool.query(
+                `SELECT id FROM sectores WHERE id = ANY($1::int[]) AND business_id = ANY($2::int[])`,
+                [sectorIds, bizScopeIds]
+            );
+            const validSectorIds = new Set(secRows.map((r) => Number(r.id)));
+            if (sectorIds.some((id) => !validSectorIds.has(id))) {
+                return res.status(400).json({ ok: false, error: 'invalid_sector' });
+            }
         }
 
         // Autorización del caller en TODOS los scopes elegidos (si falla en alguno,
@@ -393,6 +416,9 @@ exports.createInvitation = async (req, res, next) => {
         // Crear (o reactivar) UN assignment por cada scope elegido
         const assignmentIds = [];
         for (const s of scopes) {
+            // El sector solo aplica al scope de negocio (nunca a 'organization').
+            const scopeSectorIds = (s.scopeType === 'business' && sectorIds?.length) ? sectorIds : null;
+
             const { rows: existingAssign } = await client.query(
                 `SELECT id, revoked_at FROM user_assignments
             WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3 AND role = $4
@@ -410,26 +436,27 @@ exports.createInvitation = async (req, res, next) => {
                   SET revoked_at = NULL,
                       alias = $1,
                       granted_by_user_id = $2,
+                      sector_ids = $3,
                       updated_at = NOW()
-                WHERE id = $3`,
-                        [aliasEfectivo, uid, assignmentId]
+                WHERE id = $4`,
+                        [aliasEfectivo, uid, scopeSectorIds, assignmentId]
                     );
                 } else {
-                    // Ya estaba activo: actualizar alias por las dudas
+                    // Ya estaba activo: actualizar alias y sector por las dudas
                     await client.query(
                         `UPDATE user_assignments
-                  SET alias = $1, updated_at = NOW()
-                WHERE id = $2`,
-                        [aliasEfectivo, assignmentId]
+                  SET alias = $1, sector_ids = $2, updated_at = NOW()
+                WHERE id = $3`,
+                        [aliasEfectivo, scopeSectorIds, assignmentId]
                     );
                 }
             } else {
                 const { rows: newAssign } = await client.query(
                     `INSERT INTO user_assignments
-               (user_id, scope_type, scope_id, role, alias, granted_by_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6)
+               (user_id, scope_type, scope_id, role, alias, granted_by_user_id, sector_ids)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              RETURNING id`,
-                    [userId, s.scopeType, s.scopeId, role, aliasEfectivo, uid]
+                    [userId, s.scopeType, s.scopeId, role, aliasEfectivo, uid, scopeSectorIds]
                 );
                 assignmentId = newAssign[0].id;
             }
