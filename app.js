@@ -57,6 +57,8 @@ const requireActiveAccount = require('./middleware/requireActiveAccount');
 const syncRoutes = require('./routes/syncRoutes');
 const dashboardStoreRoutes = require('./routes/dashboardStore');
 const branchesRouter = require("./routes/branchesRoutes");
+const sectoresRoutes = require('./routes/sectoresRoutes');
+const sectoresByIdRoutes = require('./routes/sectoresByIdRoutes');
 const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
 const meRoutes = require('./routes/meRoutes');
@@ -175,6 +177,8 @@ app.use('/api/divisions', divisionsRoutes);
 app.use('/api/ventas-csv', ventasCSVRoutes);
 app.use('/api/insumos', insumosElaboradosRoutes);
 app.use("/api/businesses/:bizId/branches", branchesRouter);
+app.use('/api/businesses/:businessId/sectores', sectoresRoutes);
+app.use('/api/sectores', sectoresByIdRoutes);
 app.use('/api', maxiPriceListsRoutes);
 
 /* =========================================================
