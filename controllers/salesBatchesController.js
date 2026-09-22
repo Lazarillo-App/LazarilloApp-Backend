@@ -233,25 +233,47 @@ exports.moveBatch = async (req, res, next) => {
     try {
       await client.query('BEGIN');
 
-      // Verificar pertenencia
+      // Verificar pertenencia y obtener rango + branch_id del lote (hace
+      // falta ANTES de mover el header, para saber qué filas de
+      // sales_daily_items le corresponden).
       const { rows: check } = await client.query(
-        `SELECT id FROM sales_csv_imports WHERE id = $1 AND business_id = $2`,
+        `SELECT id, date_from, date_to, branch_id FROM sales_csv_imports WHERE id = $1 AND business_id = $2`,
         [batchId, bizId]
       );
       if (!check.length) {
         await client.query('ROLLBACK');
         return res.status(404).json({ ok: false, error: 'Lote no encontrado para este negocio' });
       }
+      const { date_from, date_to, branch_id } = check[0];
 
-      // Mover ítems
+      // Mover ítems (staging)
       await client.query(
         `UPDATE sales_csv_import_items SET business_id = $1 WHERE import_id = $2 AND business_id = $3`,
         [targetBusinessId, batchId, bizId]
       );
 
-      // Mover header
+      // Mover los datos ya procesados en sales_daily_items — sin esto el
+      // lote "se mueve" en la lista pero las ventas reales del período
+      // siguen contando para el negocio de origen en reportes/KPIs.
+      // branch_id se resetea a NULL: las sucursales son propias de cada
+      // negocio, así que una sucursal del origen no tiene sentido en el
+      // destino (mismo criterio que purchasesBatchesController.moveBatch).
+      const { rowCount: dailyMoved } = await client.query(
+        `UPDATE sales_daily_items
+            SET business_id = $1, branch_id = NULL
+          WHERE business_id = $2
+            AND source = 'csv'
+            AND day BETWEEN $3 AND $4
+            AND (
+              ($5::bigint IS NULL AND branch_id IS NULL)
+              OR branch_id = $5
+            )`,
+        [targetBusinessId, bizId, date_from, date_to, branch_id]
+      );
+
+      // Mover header (branch_id también se resetea, por la misma razón)
       const { rowCount: moved } = await client.query(
-        `UPDATE sales_csv_imports SET business_id = $1 WHERE id = $2 AND business_id = $3`,
+        `UPDATE sales_csv_imports SET business_id = $1, branch_id = NULL WHERE id = $2 AND business_id = $3`,
         [targetBusinessId, batchId, bizId]
       );
 
@@ -263,6 +285,7 @@ exports.moveBatch = async (req, res, next) => {
         from_business_id: bizId,
         to_business_id: targetBusinessId,
         imports_moved: moved,
+        daily_moved: dailyMoved,
       });
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch { }
