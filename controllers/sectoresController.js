@@ -169,7 +169,9 @@ async function reemplazarScope(client, sectorId, businessId, scope) {
       `SELECT id FROM agrupaciones WHERE id = ANY($1::int[]) AND business_id = ANY($2::int[])`,
       [agrupacionIds, bizIds]
     );
-    const validIds = new Set(agrRows.map((r) => r.id));
+    // agrupaciones.id es BIGINT: pg lo devuelve como string, no como number —
+    // sin este Number(...) el Set.has() de abajo nunca matcheaba (1114 !== "1114").
+    const validIds = new Set(agrRows.map((r) => Number(r.id)));
     const invalido = agrupacionIds.find((id) => !validIds.has(id));
     if (invalido) {
       const err = new Error('agrupacion_business_mismatch');
