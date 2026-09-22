@@ -136,6 +136,25 @@ exports.getSector = async (req, res, next) => {
   }
 };
 
+// Ids de negocio a considerar "del mismo negocio" para validar una
+// agrupación: si businessId es un subnegocio de una organización, las
+// agrupaciones "especiales" (Sin Agrupación, Discontinuados, etc.) y muchas
+// otras viven en el principal, no en el subnegocio — mismo criterio que ya
+// usa agrupacionesController.js en varios lugares (bizIds = toda la org).
+async function bizIdsDeOrg(client, businessId) {
+  const { rows } = await client.query(
+    `SELECT organization_id FROM app_businesses WHERE id = $1`,
+    [businessId]
+  );
+  const orgId = rows[0]?.organization_id;
+  if (!orgId) return [businessId];
+  const { rows: orgRows } = await client.query(
+    `SELECT id FROM app_businesses WHERE organization_id = $1`,
+    [orgId]
+  );
+  return orgRows.map((r) => Number(r.id));
+}
+
 // Reemplaza todo el scope de un sector de una (el editor manda el árbol
 // completo tildado, no altas/bajas incrementales) — mismo criterio que ya usa
 // el guardado de receta (DELETE + INSERT de receta_items).
@@ -145,9 +164,10 @@ async function reemplazarScope(client, sectorId, businessId, scope) {
 
   const agrupacionIds = [...new Set(scope.map((it) => num(it.agrupacionId)).filter(Boolean))];
   if (agrupacionIds.length) {
+    const bizIds = await bizIdsDeOrg(client, businessId);
     const { rows: agrRows } = await client.query(
-      `SELECT id FROM agrupaciones WHERE id = ANY($1::int[]) AND business_id = $2`,
-      [agrupacionIds, businessId]
+      `SELECT id FROM agrupaciones WHERE id = ANY($1::int[]) AND business_id = ANY($2::int[])`,
+      [agrupacionIds, bizIds]
     );
     const validIds = new Set(agrRows.map((r) => r.id));
     const invalido = agrupacionIds.find((id) => !validIds.has(id));
