@@ -8,6 +8,7 @@ const path = require('path');
 const { generateBatchId } = require('./purchasesStore');
 const { recalcularBonificaciones } = require('./bonificacionesService');
 const { propagarCostoInsumo } = require('./costoRecetaService');
+const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo } = require('./precioCosteoInsumos');
 
 /**
  * Columnas esperadas del informe de MaxiRest:
@@ -397,36 +398,7 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
         insertedCount, failed, JSON.stringify(errors)]
     );
 
-    // ── Actualizar precio_ref en insumos con el último precio pagado ──
-    // Solo actualiza insumos que tienen compras en este archivo (credsBizId = lista compartida)
-    const { rows: insumosActualizadosRows } = await client.query(
-      `UPDATE insumos i
-          SET precio_ref = sub.ultimo_precio,
-              updated_at = NOW()
-         FROM (
-           SELECT DISTINCT ON (pi.insumo_id)
-             pi.insumo_id,
-             pi.precio AS ultimo_precio
-           FROM purchase_items pi
-           WHERE pi.business_id = $1
-             AND pi.precio > 0
-             AND pi.insumo_id IS NOT NULL
-             AND pi.fecha BETWEEN $2::date AND $3::date
-           ORDER BY pi.insumo_id, pi.fecha DESC, pi.id DESC
-         ) sub
-        WHERE i.id = sub.insumo_id
-          AND i.business_id = $4
-          AND i.bonif_aceptada IS NOT TRUE
-        RETURNING i.id`,
-      [dataBizId, minDate, maxDate, credsBizId]
-    );
-    const preciosActualizados = insumosActualizadosRows.length;
-    if (preciosActualizados > 0) {
-      console.log(`[CSV Purchases Import] precio_ref actualizado en ${preciosActualizados} insumos`);
-    }
-
-    // Insumos con bonif_aceptada tocados por este import (no fueron pisados por el
-    // UPDATE de arriba, están blindados) — se recalculan en 2° plano más abajo.
+    // Insumos con compras en este archivo (dataBizId = donde vive la compra).
     const { rows: tocadosRows } = await client.query(
       `SELECT DISTINCT pi.insumo_id
          FROM purchase_items pi
@@ -436,6 +408,24 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       [dataBizId, minDate, maxDate]
     );
     const insumoIdsTocados = tocadosRows.map(r => r.insumo_id).filter(Boolean);
+
+    // ── Actualizar precio_ref en insumos según el modo de costeo elegido en
+    // Configuración > Insumos (última compra / promedio 30 días / precio fijo
+    // del sistema) — antes esto siempre usaba "última compra" sin mirar esa
+    // configuración. El modo vive en el negocio principal (credsBizId, donde
+    // viven los insumos); las compras en sí pueden estar en dataBizId (un
+    // subnegocio con las mismas credenciales de Maxi).
+    const modoCosteo = await getModoCosteo(credsBizId, client);
+    const preciosPorModo = await calcularPreciosPorModo(client, dataBizId, insumoIdsTocados, modoCosteo);
+    const idsActualizadosPorCompra = preciosPorModo
+      ? await aplicarPreciosCosteo(client, credsBizId, preciosPorModo)
+      : [];
+    // Mismo shape que antes ({ id }) — lo consume propagarCambiosImportEnBackground.
+    const insumosActualizadosRows = idsActualizadosPorCompra.map((id) => ({ id }));
+    const preciosActualizados = insumosActualizadosRows.length;
+    if (preciosActualizados > 0) {
+      console.log(`[CSV Purchases Import] precio_ref actualizado en ${preciosActualizados} insumos (modo: ${modoCosteo})`);
+    }
 
     await client.query('COMMIT');
     txOpen = false;

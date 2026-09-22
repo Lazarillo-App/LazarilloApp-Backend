@@ -3,6 +3,7 @@
 
 const pool = require('../config/db');
 const { propagarCostoInsumo } = require('./costoRecetaService');
+const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo } = require('./precioCosteoInsumos');
 
 /* ─── helper: genera batch_id único ─── */
 function generateBatchId() {
@@ -22,7 +23,7 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
   let inserted = 0, updated = 0, totalItems = 0;
   try {
     await client.query('BEGIN');
-    const ultimoPrecioMap = new Map();
+    const insumoIdsConCompra = new Set();
     for (const factura of facturas) {
       if (!factura) continue;
       const facturaKey = String(factura.numero ?? '').trim();
@@ -96,26 +97,25 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
         totalItems++;
 
         if (insumoId && precioUnitario > 0 && itemFecha) {
-          const prev = ultimoPrecioMap.get(insumoId);
-          if (!prev || itemFecha >= prev.fecha) {
-            ultimoPrecioMap.set(insumoId, { precio: precioUnitario, fecha: itemFecha });
-          }
+          insumoIdsConCompra.add(insumoId);
         }
       }
     }
 
+    // Qué precio le corresponde a precio_ref según el modo de costeo elegido
+    // en Configuración > Insumos (última compra / promedio 30 días / precio
+    // fijo del sistema) — antes esto siempre usaba "última compra" sin mirar
+    // esa configuración.
     let preciosActualizados = 0;
-    for (const [insumoId, { precio }] of ultimoPrecioMap.entries()) {
-      const upd = await client.query(
-        `UPDATE insumos SET precio_ref = $1, updated_at = NOW()
-         WHERE id = $2 AND business_id = $3 AND bonif_aceptada IS NOT TRUE`,
-        [precio.toFixed(4), insumoId, businessId]
-      );
-      if (upd.rowCount > 0) {
-        preciosActualizados++;
-        // El precio del insumo cambió: propagar en cascada a las recetas que lo usan
-        // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total quedaba
-        // congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
+    const modoCosteo = await getModoCosteo(businessId, client);
+    const precios = await calcularPreciosPorModo(client, businessId, [...insumoIdsConCompra], modoCosteo);
+    if (precios) {
+      const idsActualizados = await aplicarPreciosCosteo(client, businessId, precios);
+      preciosActualizados = idsActualizados.length;
+      // El precio del insumo cambió: propagar en cascada a las recetas que lo usan
+      // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total quedaba
+      // congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
+      for (const insumoId of idsActualizados) {
         await propagarCostoInsumo(insumoId, businessId, client);
       }
     }
