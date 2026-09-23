@@ -19,6 +19,7 @@ const ALLOWED_TYPES = new Set([
   'discontinue',
   'move',
   'receta_observacion',
+  'access_request',
 ]);
 
 function safeType(type) {

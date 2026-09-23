@@ -12,6 +12,7 @@ const bcrypt = require('bcryptjs');
 const pool = require('../config/db');
 const { sendEmail } = require('../utils/mailer');
 const { sendCode } = require('../utils/smsClient');
+const { createSyncNotificationForBusinessUsers } = require('../services/notificationService');
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 
@@ -295,6 +296,15 @@ exports.confirmAccess = async (req, res, next) => {
       [userId, requestId]
     );
     await client.query('COMMIT');
+
+    createSyncNotificationForBusinessUsers({
+      businessId: reqRow.business_id,
+      type: 'access_request',
+      title: 'Nuevo pedido de acceso',
+      message: `${reqRow.nombre} pidió sumarse al equipo. Andá a Configuración > Sectores para aprobarlo.`,
+      metadata: { request_id: reqRow.id, nombre: reqRow.nombre },
+      onlyAdmins: true,
+    }).catch((e) => console.error('[branchAccess] error notificando pedido de acceso:', e?.message));
 
     res.json({ ok: true, businessId: reqRow.business_id, contacto });
   } catch (e) {
