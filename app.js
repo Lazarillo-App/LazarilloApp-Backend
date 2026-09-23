@@ -59,6 +59,9 @@ const dashboardStoreRoutes = require('./routes/dashboardStore');
 const branchesRouter = require("./routes/branchesRoutes");
 const sectoresRoutes = require('./routes/sectoresRoutes');
 const sectoresByIdRoutes = require('./routes/sectoresByIdRoutes');
+const branchAccessRoutes = require('./routes/branchAccessRoutes');
+const accessRequestsByIdRoutes = require('./routes/accessRequestsByIdRoutes');
+const publicAccessRoutes = require('./routes/publicAccessRoutes');
 const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
 const meRoutes = require('./routes/meRoutes');
@@ -147,6 +150,9 @@ if (exposeProbe) {
 /* ── Acceso/cupones (status y redeem son semipúblicos) ── */
 app.use('/api/access', accessRoutes);
 
+/* ── Vista Operación: alta por QR — pública, sin auth ── */
+app.use('/api/public/access', publicAccessRoutes);
+
 /* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
 app.use('/api/cron', adminCronRoutes);
 
@@ -179,6 +185,8 @@ app.use('/api/insumos', insumosElaboradosRoutes);
 app.use("/api/businesses/:bizId/branches", branchesRouter);
 app.use('/api/businesses/:businessId/sectores', sectoresRoutes);
 app.use('/api/sectores', sectoresByIdRoutes);
+app.use('/api/businesses/:businessId', branchAccessRoutes);
+app.use('/api/access-requests', accessRequestsByIdRoutes);
 app.use('/api', maxiPriceListsRoutes);
 
 /* =========================================================
