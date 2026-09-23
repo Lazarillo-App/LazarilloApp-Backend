@@ -54,10 +54,11 @@ async function sendCode(canal, to, texto) {
 
   try {
     const toFinal = canal === 'whatsapp' ? `whatsapp:${to.replace(/^whatsapp:/, '')}` : to;
+    console.log('[smsClient] enviando →', { canal, from, to: toFinal });
     const msg = await tw.messages.create({ from, to: toFinal, body: texto });
     return { ok: true, simulated: false, sid: msg.sid };
   } catch (e) {
-    console.error('[smsClient] ❌ error enviando:', e.message);
+    console.error('[smsClient] ❌ error enviando:', e.message, '| code:', e.code, '| moreInfo:', e.moreInfo);
     return { ok: false, simulated: false, error: e.message };
   }
 }
