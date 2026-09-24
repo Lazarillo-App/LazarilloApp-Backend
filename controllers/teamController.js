@@ -92,7 +92,7 @@ exports.listMembers = async (req, res, next) => {
         UNION ALL
         SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
                b.id AS scope_id, 'owner'::text AS role,
-               u.name AS alias, NULL::bigint AS granted_by_user_id,
+               u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
                u.created_at, u.updated_at,
                u.email, u.name, u.account_status,
                u.invitation_expires_at, u.invitation_accepted_at,
@@ -114,7 +114,7 @@ exports.listMembers = async (req, res, next) => {
                 `
         SELECT * FROM (
           SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
-                 ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id,
+                 ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
                  ua.created_at, ua.updated_at,
                  u.email, u.name, u.account_status,
                  u.invitation_expires_at, u.invitation_accepted_at,
@@ -154,7 +154,7 @@ exports.listMembers = async (req, res, next) => {
            AND ua.role IN ('owner', 'admin')
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
-             ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id,
+             ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
              ua.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -170,7 +170,7 @@ exports.listMembers = async (req, res, next) => {
       -- Sin esto, mis negocios sin fila en user_assignments no aparecen en la vista.
       SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
              b.id AS scope_id, 'owner'::text AS role,
-             u.name AS alias, NULL::bigint AS granted_by_user_id,
+             u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
              u.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -611,9 +611,12 @@ exports.updateAssignment = async (req, res, next) => {
         const uid = req.user?.id;
         const assignmentId = Number(req.params.assignmentId);
         const { alias, role } = req.body || {};
+        const sectorIds = Array.isArray(req.body?.sectorIds)
+            ? [...new Set(req.body.sectorIds.map(Number).filter(Number.isFinite))]
+            : undefined;
 
         if (!assignmentId) return res.status(400).json({ ok: false, error: 'invalid_id' });
-        if (alias == null && role == null) {
+        if (alias == null && role == null && sectorIds === undefined) {
             return res.status(400).json({ ok: false, error: 'nothing_to_update' });
         }
         if (role && !isValidRole(role) && role !== 'owner') {
@@ -643,6 +646,23 @@ exports.updateAssignment = async (req, res, next) => {
             return res.status(403).json({ ok: false, error: 'admin_cannot_change_role' });
         }
 
+        // Sector (Vista Operación) — solo tiene sentido para Staff dentro de un
+        // negocio puntual, mismo criterio de validación que createInvitation.
+        const finalRole = role != null ? role : a.role;
+        if (sectorIds !== undefined && sectorIds.length) {
+            if (finalRole !== 'staff' || a.scope_type !== 'business') {
+                return res.status(400).json({ ok: false, error: 'sector_requires_staff_business' });
+            }
+            const { rows: secRows } = await pool.query(
+                `SELECT id FROM sectores WHERE id = ANY($1::int[]) AND business_id = $2`,
+                [sectorIds, a.scope_id]
+            );
+            const validSectorIds = new Set(secRows.map((r) => Number(r.id)));
+            if (sectorIds.some((id) => !validSectorIds.has(id))) {
+                return res.status(400).json({ ok: false, error: 'invalid_sector' });
+            }
+        }
+
         await client.query('BEGIN');
 
         const sets = [];
@@ -659,6 +679,10 @@ exports.updateAssignment = async (req, res, next) => {
         if (role != null) {
             sets.push(`role = $${i++}`);
             params.push(role);
+        }
+        if (sectorIds !== undefined) {
+            sets.push(`sector_ids = $${i++}`);
+            params.push(sectorIds.length ? sectorIds : null);
         }
         sets.push(`updated_at = NOW()`);
         params.push(assignmentId);
