@@ -73,7 +73,10 @@ exports.getMyOrganization = async (req, res, next) => {
        LIMIT 5`,
       [uid, activeBizId]
     );
-    return res.json({ ok: true, organization: rows[0] || null });
+    // organization: la del negocio activo (o la más nueva si no hay activo) — compat con
+    // quien solo necesita "la organización actual". organizations: TODAS las que ve el
+    // caller, ya ordenadas con la activa primero, para poder agruparlas todas en la UI.
+    return res.json({ ok: true, organization: rows[0] || null, organizations: rows });
   } catch (e) {
     console.error('[getMyOrganization]', e);
     next(e);
