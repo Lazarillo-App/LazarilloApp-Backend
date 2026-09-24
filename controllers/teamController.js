@@ -285,8 +285,12 @@ exports.createInvitation = async (req, res, next) => {
         const { email, role, alias } = req.body || {};
 
         // Sector (Vista Operación) — solo aplica a invitaciones de Staff, y solo
-        // a los scopes de tipo 'business' (un sector vive adentro de un negocio).
-        const sectorIds = role === 'staff' && Array.isArray(req.body?.sectorIds)
+        // a los scopes de tipo 'business' (un sector vive adentro de un negocio,
+        // nunca cruza a otro). Formato nuevo: cada scope trae su propio
+        // sectorIds (invitar a la vez a 2+ negocios, sector distinto en cada
+        // uno). Compat vieja: un sectorIds plano en el body, válido solo
+        // cuando hay un único scope de negocio en la invitación.
+        const legacySectorIds = role === 'staff' && Array.isArray(req.body?.sectorIds)
             ? [...new Set(req.body.sectorIds.map(Number).filter(Number.isFinite))]
             : null;
 
@@ -318,25 +322,34 @@ exports.createInvitation = async (req, res, next) => {
             const key = `${scopeType}:${scopeId}`;
             if (scopesSeen.has(key)) continue;
             scopesSeen.add(key);
-            scopes.push({ scopeType, scopeId });
+            const ownSectorIds = role === 'staff' && Array.isArray(s?.sectorIds)
+                ? [...new Set(s.sectorIds.map(Number).filter(Number.isFinite))]
+                : null;
+            scopes.push({ scopeType, scopeId, sectorIds: ownSectorIds });
         }
         if (!scopes.length) {
             return res.status(400).json({ ok: false, error: 'missing_fields' });
         }
 
-        // Validar que los sectores elegidos existan y sean de alguno de los
-        // negocios invitados (un sector nunca cruza de negocio).
-        if (sectorIds && sectorIds.length) {
-            const bizScopeIds = scopes.filter((s) => s.scopeType === 'business').map((s) => s.scopeId);
-            if (!bizScopeIds.length) {
-                return res.status(400).json({ ok: false, error: 'sector_requires_business_scope' });
+        // Compat: sectorIds plano solo se aplica cuando hay un único scope de
+        // negocio y ese scope no trajo ya su propio sectorIds.
+        if (legacySectorIds?.length) {
+            const bizScopes = scopes.filter((s) => s.scopeType === 'business');
+            if (bizScopes.length === 1 && !bizScopes[0].sectorIds) {
+                bizScopes[0].sectorIds = legacySectorIds;
             }
+        }
+
+        // Validar que los sectores elegidos existan y sean DE ESE negocio puntual
+        // (un sector nunca cruza de negocio, ni siquiera dentro de la misma invitación).
+        for (const s of scopes) {
+            if (s.scopeType !== 'business' || !s.sectorIds?.length) continue;
             const { rows: secRows } = await pool.query(
-                `SELECT id FROM sectores WHERE id = ANY($1::int[]) AND business_id = ANY($2::int[])`,
-                [sectorIds, bizScopeIds]
+                `SELECT id FROM sectores WHERE id = ANY($1::int[]) AND business_id = $2`,
+                [s.sectorIds, s.scopeId]
             );
             const validSectorIds = new Set(secRows.map((r) => Number(r.id)));
-            if (sectorIds.some((id) => !validSectorIds.has(id))) {
+            if (s.sectorIds.some((id) => !validSectorIds.has(id))) {
                 return res.status(400).json({ ok: false, error: 'invalid_sector' });
             }
         }
@@ -346,10 +359,6 @@ exports.createInvitation = async (req, res, next) => {
         for (const s of scopes) {
             const r = await assertManagerOnScope(uid, s.scopeType, s.scopeId, res);
             if (!r) return;
-            // Admin solo puede invitar staff
-            if (r === 'admin' && role !== 'staff') {
-                return res.status(403).json({ ok: false, error: 'admin_can_only_invite_staff' });
-            }
         }
 
         const rawEmail = normEmail(email);
@@ -417,7 +426,7 @@ exports.createInvitation = async (req, res, next) => {
         const assignmentIds = [];
         for (const s of scopes) {
             // El sector solo aplica al scope de negocio (nunca a 'organization').
-            const scopeSectorIds = (s.scopeType === 'business' && sectorIds?.length) ? sectorIds : null;
+            const scopeSectorIds = (s.scopeType === 'business' && s.sectorIds?.length) ? s.sectorIds : null;
 
             const { rows: existingAssign } = await client.query(
                 `SELECT id, revoked_at FROM user_assignments
@@ -640,10 +649,6 @@ exports.updateAssignment = async (req, res, next) => {
         // Admin solo puede tocar a quienes él creó
         if (callerRole === 'admin' && a.granted_by_user_id !== uid) {
             return res.status(403).json({ ok: false, error: 'forbidden' });
-        }
-        // Admin no puede promover a admin
-        if (callerRole === 'admin' && role && role !== 'staff') {
-            return res.status(403).json({ ok: false, error: 'admin_cannot_change_role' });
         }
 
         // Sector (Vista Operación) — solo tiene sentido para Staff dentro de un
