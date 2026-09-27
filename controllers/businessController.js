@@ -295,6 +295,37 @@ exports.update = async (req, res) => {
   return res.json({ business: saved });
 };
 
+// PATCH /businesses/:id/onboarding — flags de tours/tutoriales ya vistos
+// (mismo patrón que props.maxi: un objeto libre dentro de props, sin migración).
+// Body: { key: 'articulo_visto', value: true }
+exports.setOnboardingFlag = async (req, res) => {
+  const businessId = req.businessId || Number(req.params.id) || req.business?.id;
+  if (!businessId) return res.status(404).json({ error: 'not_found' });
+
+  const key = String(req.body?.key || '').trim();
+  if (!key) return res.status(400).json({ error: 'key_requerida' });
+  const value = req.body?.value !== false;
+
+  const { rows } = await pool.query(
+    `
+    UPDATE app_businesses
+       SET props = jsonb_set(
+             COALESCE(props, '{}'::jsonb),
+             '{onboarding}',
+             COALESCE(props->'onboarding', '{}'::jsonb) || jsonb_build_object($2::text, $3::boolean),
+             true
+           ),
+           updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, props->'onboarding' AS onboarding;
+    `,
+    [businessId, key, value]
+  );
+
+  if (!rows.length) return res.status(404).json({ error: 'not_found' });
+  return res.json({ ok: true, onboarding: rows[0].onboarding });
+};
+
 exports.select = async (req, res) => {
   try {
     const uid = req.user?.id;

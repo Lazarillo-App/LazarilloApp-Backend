@@ -534,6 +534,7 @@ router.patch('/:id/config-costeo', ensureFn('artABM.saveConfigCosteo', artABM.sa
 /* Por :id */
 router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOne));
 router.patch('/:id', ensureFn('businesses.update', businesses.update));
+router.patch('/:id/onboarding', ensureFn('businesses.setOnboardingFlag', businesses.setOnboardingFlag));
 router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
 router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 
