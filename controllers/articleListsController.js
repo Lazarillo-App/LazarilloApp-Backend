@@ -53,7 +53,12 @@ exports.getLists = async (req, res) => {
 };
 
 // POST /businesses/:id/article-lists
+// Body opcional: { ids: [articleId, ...] } — si viene, la lista se crea CON
+// sus artículos en la misma transacción. Antes era un POST (header) seguido
+// de un PUT (items) desde el front, sin transacción: si el segundo pedido
+// fallaba por lo que fuera, la lista quedaba creada pero vacía para siempre.
 exports.createList = async (req, res) => {
+  const client = await pool.connect();
   try {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId)) {
@@ -63,26 +68,47 @@ exports.createList = async (req, res) => {
     const name = String(req.body?.name ?? '').trim();
     const description = String(req.body?.description ?? '').trim() || null;
     const color = String(req.body?.color ?? '').trim() || null;
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map(Number).filter(Number.isFinite);
 
     if (!name) {
       return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
     }
 
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
       `INSERT INTO article_lists
          (business_id, name, description, color, scope)
        VALUES ($1, $2, $3, $4, 'article')
        RETURNING id, name, description, color, created_at`,
       [bizId, name, description, color]
     );
+    const list = rows[0];
 
-    return res.status(201).json({ ok: true, list: rows[0] });
+    let added = 0;
+    if (ids.length) {
+      const values = ids.map((_, i) => `($1, $${i + 2})`).join(', ');
+      const itemsRes = await client.query(
+        `INSERT INTO article_list_items (list_id, article_id)
+         VALUES ${values}
+         ON CONFLICT (list_id, article_id) DO NOTHING`,
+        [list.id, ...ids]
+      );
+      added = itemsRes.rowCount;
+    }
+
+    await client.query('COMMIT');
+    return res.status(201).json({ ok: true, list, added });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
     if (e.code === '23505') {
       return res.status(409).json({ ok: false, error: 'Ya existe una lista con ese nombre' });
     }
     console.error('[articleLists.createList]', e.message);
     return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 
@@ -293,7 +319,12 @@ exports.getInsumoLists = async (req, res) => {
 };
 
 // POST /businesses/:id/insumo-lists
+// Mismo criterio que createList (artículos): si viene `ids`, se crea la
+// lista y se cargan sus insumos en la misma transacción — antes era un
+// POST (header) + PUT (items) sin transacción desde el front, y si el
+// segundo pedido fallaba la lista quedaba creada pero vacía para siempre.
 exports.createInsumoList = async (req, res) => {
+  const client = await pool.connect();
   try {
     const bizId = getBusinessId(req);
     if (!Number.isFinite(bizId))
@@ -303,18 +334,41 @@ exports.createInsumoList = async (req, res) => {
     if (!name)
       return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
 
-    const { rows } = await pool.query(
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map(Number).filter(Number.isFinite);
+
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
       `INSERT INTO article_lists (business_id, name, scope)
        VALUES ($1, $2, 'insumo')
        RETURNING id, name, scope, created_at`,
       [bizId, name]
     );
-    return res.status(201).json({ ok: true, list: rows[0] });
+    const list = rows[0];
+
+    let added = 0;
+    if (ids.length) {
+      const values = ids.map((_, i) => `($1, $${i + 2})`).join(', ');
+      const itemsRes = await client.query(
+        `INSERT INTO insumo_list_items (list_id, insumo_id)
+         VALUES ${values}
+         ON CONFLICT (list_id, insumo_id) DO NOTHING`,
+        [list.id, ...ids]
+      );
+      added = itemsRes.rowCount;
+    }
+
+    await client.query('COMMIT');
+    return res.status(201).json({ ok: true, list, added });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
     if (e.code === '23505')
       return res.status(409).json({ ok: false, error: 'Ya existe una lista con ese nombre' });
     console.error('[articleLists.createInsumoList]', e.message);
     return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 
