@@ -22,6 +22,30 @@ function getBusinessId(req) {
   return NaN;
 }
 
+// Las listas son una "copia" independiente del artículo para gestiones
+// puntuales (bajar precio, armar un combo, etc.) — no deben perder de vista
+// un artículo solo porque hoy está agrupado en OTRO sub-negocio de la misma
+// organización. maxi_articles vive por el negocio "principal" de la org
+// (no por cada sub-negocio), así que alcanza con resolver ese id y leer
+// directo de ahí, sin aplicar el filtro de pertenencia por agrupación que
+// sí usa el árbol de Agrupaciones (syncController.listArticlesTreeFromDB).
+async function resolvePrincipalBusinessId(bizId) {
+  const { rows: bizRows } = await pool.query(
+    `SELECT organization_id FROM app_businesses WHERE id = $1`,
+    [bizId]
+  );
+  const orgId = bizRows[0]?.organization_id;
+  if (!orgId) return bizId;
+
+  const { rows: principalRows } = await pool.query(
+    `SELECT id FROM app_businesses
+      WHERE organization_id = $1 AND created_from != 'from_group'
+      ORDER BY created_at ASC LIMIT 1`,
+    [orgId]
+  );
+  return principalRows[0]?.id || bizId;
+}
+
 /* ========================= LISTAS DE ARTÍCULOS ========================= */
 
 // GET /businesses/:id/article-lists
@@ -208,12 +232,17 @@ exports.getListItems = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Lista no encontrada' });
     }
 
+    const principalId = await resolvePrincipalBusinessId(bizId);
+
     const { rows } = await pool.query(
-      `SELECT article_id, added_at
-       FROM article_list_items
-       WHERE list_id = $1
-       ORDER BY added_at ASC`,
-      [listId]
+      `SELECT li.article_id, li.added_at,
+              ma.nombre, ma.categoria, ma.subrubro, ma.precio, ma.costo, ma.origen
+         FROM article_list_items li
+         LEFT JOIN maxi_articles ma
+           ON ma.business_id = $2 AND ma.articulo_id = li.article_id
+        WHERE li.list_id = $1
+        ORDER BY li.added_at ASC`,
+      [listId, principalId]
     );
 
     return res.json({ ok: true, items: rows });
