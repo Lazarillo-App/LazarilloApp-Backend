@@ -18,6 +18,27 @@ async function requireAdminOrOwner(uid, bizId) {
 }
 
 /**
+ * Costo aproximado de un payload (antes o después) sin tocar la DB — suma
+ * cantidad×costoUnitario de los items y divide por el rendimiento. Es una
+ * aproximación (no replica el puente porción/peso de calcCosto.js en el
+ * front), pero alcanza para que el admin vea el impacto de un vistazo; el
+ * costo real definitivo se recalcula en writeArticleReceta/writeElaboradoReceta
+ * recién al aprobar.
+ */
+function computeCostoAprox(payload) {
+  if (!payload) return null;
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const total = items.reduce((acc, it) => {
+    const cant = Number(it.cantidad) || 0;
+    const costoU = Number(it.costoUnitario ?? it.costo_unitario) || 0;
+    return acc + cant * costoU;
+  }, 0);
+  const porciones = Math.max(0.001, Number(payload.porciones) || 1);
+  const unidad = payload.rendimientoUnidad || payload.rendimiento_unidad || 'u';
+  return { total, porUnidad: total / porciones, unidad };
+}
+
+/**
  * GET /businesses/:businessId/receta-proposals?status=pending,in_revision
  */
 exports.listProposals = async (req, res, next) => {
@@ -35,10 +56,12 @@ exports.listProposals = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT p.*,
               u.name AS created_by_name, u.email AS created_by_email,
-              r.nombre AS receta_nombre_actual
+              r.nombre AS receta_nombre_actual,
+              s.nombre AS sector_nombre
          FROM receta_proposals p
          LEFT JOIN app_users u ON u.id = p.created_by_user_id
          LEFT JOIN recetas r ON r.id = p.receta_id
+         LEFT JOIN sectores s ON s.id = p.sector_id
         WHERE p.business_id = $1 AND p.status = ANY($2::text[])
         ORDER BY p.created_at DESC`,
       [bizId, statusParam]
@@ -52,7 +75,12 @@ exports.listProposals = async (req, res, next) => {
     }
     const proposals = rows.map(r => {
       const key = r.receta_id ? `r:${r.receta_id}` : (r.article_id ? `a:${r.article_id}` : `i:${r.insumo_id}`);
-      return { ...r, concurrentes: countByTarget.get(key) };
+      return {
+        ...r,
+        concurrentes: countByTarget.get(key),
+        costo_antes: computeCostoAprox(r.payload_before),
+        costo_despues: computeCostoAprox(r.payload_after),
+      };
     });
 
     return res.json({ ok: true, proposals });

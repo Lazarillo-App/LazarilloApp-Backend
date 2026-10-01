@@ -26,13 +26,17 @@ async function snapshotReceta(articleId, bizId) {
   if (!recetaRows.length) return null;
   const receta = recetaRows[0];
   const { rows: items } = await pool.query(
-    `SELECT ri.id, COALESCE(ri.insumo_id, ri.supply_id) AS supply_id, ri.article_ref_id,
+    `SELECT ri.id, COALESCE(ri.insumo_id, ri.supply_id) AS supply_id,
+            COALESCE(i.nombre, ma.nombre, ri.nombre_insumo_maxi) AS supply_nombre,
+            ri.article_ref_id,
             ri.cantidad, ri.unidad, ri.costo_unitario, ri.notas, ri.observaciones,
             ri.merma, ri.pedido, ri.tipo_costo, ri.orden, ri.merma_id, ri.merma_ids, ri.secreto
        FROM receta_items ri
+       LEFT JOIN insumos i ON i.id = ri.insumo_id
+       LEFT JOIN maxi_articles ma ON ma.articulo_id = ri.article_ref_id AND ma.business_id = $2
       WHERE ri.receta_id = $1
       ORDER BY ri.orden ASC, ri.id ASC`,
-    [receta.id]
+    [receta.id, bizId]
   );
   return { ...receta, items };
 }
@@ -51,13 +55,17 @@ async function snapshotRecetaElaborado(insumoId, bizId) {
   if (!recetaRows.length) return null;
   const receta = recetaRows[0];
   const { rows: items } = await pool.query(
-    `SELECT ri.id, COALESCE(ri.insumo_id, ri.supply_id) AS supply_id, ri.article_ref_id,
+    `SELECT ri.id, COALESCE(ri.insumo_id, ri.supply_id) AS supply_id,
+            COALESCE(i.nombre, ma.nombre, ri.nombre_insumo_maxi) AS supply_nombre,
+            ri.article_ref_id,
             ri.cantidad, ri.unidad, ri.costo_unitario, ri.notas, ri.observaciones,
             ri.merma, ri.pedido, ri.tipo_costo, ri.orden, ri.merma_id, ri.merma_ids, ri.secreto
        FROM receta_items ri
+       LEFT JOIN insumos i ON i.id = ri.insumo_id
+       LEFT JOIN maxi_articles ma ON ma.articulo_id = ri.article_ref_id AND ma.business_id = $2
       WHERE ri.receta_id = $1
       ORDER BY ri.orden ASC, ri.id ASC`,
-    [receta.id]
+    [receta.id, bizId]
   );
   return { ...receta, items };
 }
@@ -68,7 +76,20 @@ async function snapshotRecetaElaborado(insumoId, bizId) {
  * que autoguarda o reintenta) — una propuesta "en revisión" o ya decidida NO
  * se pisa, queda su historial y se crea una nueva.
  */
+async function resolveSectorId(uid, bizId) {
+  const { rows } = await pool.query(
+    `SELECT sector_ids FROM user_assignments
+      WHERE user_id = $1 AND scope_type = 'business' AND scope_id = $2 AND revoked_at IS NULL
+        AND sector_ids IS NOT NULL AND array_length(sector_ids, 1) > 0
+      LIMIT 1`,
+    [uid, bizId]
+  );
+  const ids = rows[0]?.sector_ids;
+  return Array.isArray(ids) && ids.length ? ids[0] : null;
+}
+
 async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null, uid, body, snapshotBefore, nombreParaAviso }) {
+  const sectorId = await resolveSectorId(uid, bizId);
   const { rows: existingRows } = await pool.query(
     `SELECT id, receta_id FROM receta_proposals
       WHERE business_id = $1 AND created_by_user_id = $2 AND status = 'pending'
@@ -91,11 +112,11 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
     const recetaId = snapshotBefore?.id || null;
     const { rows } = await pool.query(
       `INSERT INTO receta_proposals
-         (business_id, receta_id, article_id, insumo_id, created_by_user_id,
+         (business_id, receta_id, article_id, insumo_id, sector_id, created_by_user_id,
           status, payload_before, payload_after, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 'pending', $6::jsonb, $7::jsonb, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7::jsonb, $8::jsonb, NOW(), NOW())
        RETURNING *`,
-      [bizId, recetaId, articleId, insumoId, uid,
+      [bizId, recetaId, articleId, insumoId, sectorId, uid,
         snapshotBefore ? JSON.stringify(snapshotBefore) : null, JSON.stringify(body)]
     );
     row = rows[0];
