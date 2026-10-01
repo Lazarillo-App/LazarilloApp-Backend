@@ -6,6 +6,7 @@ const router  = express.Router({ mergeParams: true });
 const ctrl    = require('../controllers/articlePriceConfigController');
 const { authRequired }           = require('../middleware/authMiddleware');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+const blockStaffWrite = require('../middleware/blockStaffWrite');
 
 router.use(authRequired);
 router.param('businessId', requireBusinessAccessParam);
@@ -24,14 +25,14 @@ router.get('/:businessId/article-price-config', ctrl.getPriceConfig);
 
 // POST /api/businesses/:businessId/article-price-config
 // Body: { scope, scopeId, objetivo?, precioManual?, articleIds? }
-router.post('/:businessId/article-price-config', ctrl.savePriceConfig);
+router.post('/:businessId/article-price-config', blockStaffWrite, ctrl.savePriceConfig);
 
 // DELETE /api/businesses/:businessId/article-price-config
 // Body: { scope, scopeId }
-router.delete('/:businessId/article-price-config', ctrl.deletePriceConfig);
+router.delete('/:businessId/article-price-config', blockStaffWrite, ctrl.deletePriceConfig);
 
 // POST /api/businesses/:businessId/article-price-config/bulk
 // Body: { configs: [ { scope, scopeId, objetivo?, precioManual?, articleIds? } ] }
-router.post('/:businessId/article-price-config/bulk', ctrl.bulkSavePriceConfig);
+router.post('/:businessId/article-price-config/bulk', blockStaffWrite, ctrl.bulkSavePriceConfig);
 
 module.exports = router;

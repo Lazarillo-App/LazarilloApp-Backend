@@ -1,5 +1,6 @@
 // routes/businessRoutes.js
 const { cacheJson, invalidateCacheForBiz } = require('../middleware/cacheJson');
+const blockStaffWrite = require('../middleware/blockStaffWrite');
 const express = require('express');
 const router = express.Router();
 const path = require('path');
@@ -501,26 +502,26 @@ router.get('/:id/articles/search', async (req, res, next) => {
 // Lotes de artículos importados manualmente
 router.get('/:id/articles/batches', ensureFn('artABM.listBatchesArticulos', artABM.listBatchesArticulos));
 router.get('/:id/articles/batches/:batchId/preview', ensureFn('artABM.previewBatchArticulos', artABM.previewBatchArticulos));
-router.delete('/:id/articles/batches/:batchId', ensureFn('artABM.deleteBatchArticulos', artABM.deleteBatchArticulos));
+router.delete('/:id/articles/batches/:batchId', blockStaffWrite, ensureFn('artABM.deleteBatchArticulos', artABM.deleteBatchArticulos));
 
 // Alta manual de artículo
-router.post('/:id/articles/manual', ensureFn('artABM.crearArticulo', artABM.crearArticulo));
+router.post('/:id/articles/manual', blockStaffWrite, ensureFn('artABM.crearArticulo', artABM.crearArticulo));
 
 // Normalizar nombres de TODOS los artículos del negocio (mayúscula / título)
-router.post('/:id/articles/normalizar-nombres', ensureFn('artABM.normalizarNombresArticulos', artABM.normalizarNombresArticulos));
+router.post('/:id/articles/normalizar-nombres', blockStaffWrite, ensureFn('artABM.normalizarNombresArticulos', artABM.normalizarNombresArticulos));
 
 // Padrino de Articulo: buscar artículo en Maxi para mapear (sin crear manual)
 router.get('/:id/articles/search-padrino', searchPadrino);
 
 // Editar artículo (manual o agregar equivalencia externa)
-router.patch('/:id/articles/:articleId', ensureFn('artABM.actualizarArticulo', artABM.actualizarArticulo));
+router.patch('/:id/articles/:articleId', blockStaffWrite, ensureFn('artABM.actualizarArticulo', artABM.actualizarArticulo));
 
 // Editar Insumo (manual o agregar equivalencia externa)
-router.put('/:id/articles/rubros/rename', ensureFn('artABM.renombrarRubro', artABM.renombrarRubro));
-router.put('/:id/articles/subrubros/rename', ensureFn('artABM.renombrarSubrubro', artABM.renombrarSubrubro));
+router.put('/:id/articles/rubros/rename', blockStaffWrite, ensureFn('artABM.renombrarRubro', artABM.renombrarRubro));
+router.put('/:id/articles/subrubros/rename', blockStaffWrite, ensureFn('artABM.renombrarSubrubro', artABM.renombrarSubrubro));
 
 // Eliminar artículo manual (solo id < 0)
-router.delete('/:id/articles/:articleId', ensureFn('artABM.eliminarArticulo', artABM.eliminarArticulo));
+router.delete('/:id/articles/:articleId', blockStaffWrite, ensureFn('artABM.eliminarArticulo', artABM.eliminarArticulo));
 
 // Alerta de ventas (última fecha con datos)
 router.get('/:id/articles-alertas-ventas', ensureFn('artABM.alertasVentas', artABM.alertasVentas));

@@ -9,6 +9,7 @@ const upload = multer({
 // ✅ CONTROLADOR UNIFICADO Y OPTIMIZADO
 const ctrl = require('../controllers/insumosController');
 const { authRequired } = require('../middleware/authMiddleware');
+const blockStaffWrite = require('../middleware/blockStaffWrite');
 
 /* ================== VISTAS Y ESTADÍSTICAS (NUEVAS) ================== */
 router.get('/tree-view', ctrl.getTreeView);
@@ -22,25 +23,25 @@ router.get('/maxi', ctrl.listarMaxi);
 router.post('/maxi/rubros/sync', ctrl.syncRubrosFromMaxi);
 router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
 router.get('/rubros', ctrl.getRubrosInsumos);
-router.put('/rubros/rename', ctrl.renombrarRubro);
+router.put('/rubros/rename', blockStaffWrite, ctrl.renombrarRubro);
 
 /* ================== AGRUPACIONES DE INSUMOS ================== */
-router.post('/groups/create-or-move', ctrl.groups_createOrMove);
+router.post('/groups/create-or-move', blockStaffWrite, ctrl.groups_createOrMove);
 
 router.get('/groups', ctrl.groups_list);
 router.get('/groups/:id', ctrl.groups_getOne);
-router.post('/groups', ctrl.groups_create);
-router.put('/groups/:id', ctrl.groups_update);
-router.delete('/groups/:id', ctrl.groups_remove);
+router.post('/groups', blockStaffWrite, ctrl.groups_create);
+router.put('/groups/:id', blockStaffWrite, ctrl.groups_update);
+router.delete('/groups/:id', blockStaffWrite, ctrl.groups_remove);
 
-router.post('/groups/:id/items/bulk', ctrl.groups_addMultiple);
-router.put('/groups/:id/items', ctrl.groups_replaceItems);
-router.post('/groups/:id/items', ctrl.groups_addItem);
-router.delete('/groups/:id/items/:insumoId', ctrl.groups_removeItem);
+router.post('/groups/:id/items/bulk', blockStaffWrite, ctrl.groups_addMultiple);
+router.put('/groups/:id/items', blockStaffWrite, ctrl.groups_replaceItems);
+router.post('/groups/:id/items', blockStaffWrite, ctrl.groups_addItem);
+router.delete('/groups/:id/items/:insumoId', blockStaffWrite, ctrl.groups_removeItem);
 
 router.get('/groups/:id/exclusions', ctrl.groups_getExclusions);
-router.post('/groups/:id/exclusions', ctrl.groups_addExclusions);
-router.delete('/groups/:id/exclusions', ctrl.groups_removeExclusions);
+router.post('/groups/:id/exclusions', blockStaffWrite, ctrl.groups_addExclusions);
+router.delete('/groups/:id/exclusions', blockStaffWrite, ctrl.groups_removeExclusions);
 
 /* ================== IMPORT PAIRED + PREVIEW (rutas específicas antes de CRUD) ================== */
 router.post(
@@ -79,45 +80,51 @@ router.post('/:id/reemplazar', ctrl.reemplazarInsumo);
 
 /* ================== DESPERDICIO ================== */
 
-router.put('/:id/desperdicio-override', ctrl.setDesperdicioOverride);
+router.put('/:id/desperdicio-override', blockStaffWrite, ctrl.setDesperdicioOverride);
 
 /* ================== MERMAS ================== */
 
 router.get('/:id/mermas', ctrl.mermas_list);
-router.post('/:id/mermas', ctrl.mermas_create);
-router.put('/:id/mermas/:mermaId', ctrl.mermas_update);
-router.delete('/:id/mermas/:mermaId', ctrl.mermas_remove);
+router.post('/:id/mermas', blockStaffWrite, ctrl.mermas_create);
+router.put('/:id/mermas/:mermaId', blockStaffWrite, ctrl.mermas_update);
+router.delete('/:id/mermas/:mermaId', blockStaffWrite, ctrl.mermas_remove);
 router.get('/:id/mermas/:mermaId/aplicar-preview', ctrl.mermasAplicarPreview);
-router.post('/:id/mermas/:mermaId/aplicar', ctrl.mermasAplicar);
+router.post('/:id/mermas/:mermaId/aplicar', blockStaffWrite, ctrl.mermasAplicar);
 
 /* ================== EQUIVALENCIAS ================== */
 router.get('/:id/equivalencias', ctrl.equivalencias_list);
-router.post('/:id/equivalencias', ctrl.equivalencias_create);
-router.put('/:id/equivalencias/:eqId', ctrl.equivalencias_update);
-router.delete('/:id/equivalencias/:eqId', ctrl.equivalencias_remove);
+router.post('/:id/equivalencias', blockStaffWrite, ctrl.equivalencias_create);
+router.put('/:id/equivalencias/:eqId', blockStaffWrite, ctrl.equivalencias_update);
+router.delete('/:id/equivalencias/:eqId', blockStaffWrite, ctrl.equivalencias_remove);
 
 /* ================== BONIFICACIONES ================== */
 router.get('/:id/bonificacion/estado', ctrl.estadoBonificacion);
-router.post('/:id/bonificacion/aplicar', ctrl.aplicarBonificacion);
-router.post('/:id/bonificacion/descartar', ctrl.descartarBonificacion);
+router.post('/:id/bonificacion/aplicar', blockStaffWrite, ctrl.aplicarBonificacion);
+router.post('/:id/bonificacion/descartar', blockStaffWrite, ctrl.descartarBonificacion);
 
 /* ================== USO (recetas donde se usa el insumo) ================== */
 router.get('/:id/uso', ctrl.usoInsumo);
-router.put('/:id/uso/:itemId/merma', ctrl.usoInsumoCambiarMerma);
+router.put('/:id/uso/:itemId/merma', blockStaffWrite, ctrl.usoInsumoCambiarMerma);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
-router.post('/normalizar-nombres', ctrl.normalizarNombres);
+router.post('/normalizar-nombres', blockStaffWrite, ctrl.normalizarNombres);
+// POST / (crearManual) queda SIN bloquear a propósito: es el camino usado
+// para dar de alta un insumo nuevo al vuelo desde el buscador de ingredientes
+// de una receta (ver RecetaModal/ItemRow.jsx) — Staff sigue necesitando poder
+// crear un insumo simple que todavía no existe para poder proponer la receta
+// que lo usa. Pendiente de confirmar con la usuaria si esto también debería
+// quedar a aprobación.
 router.post('/', ctrl.crearManual);
 router.get('/', ctrl.listar);
 router.get('/:id/compras', ctrl.getCompras);
 router.get('/search-padrino', ctrl.searchPadrinoInsumo);
-router.delete('/:id/manual', ctrl.eliminarManual);
-router.put('/:id', ctrl.actualizar);
-router.delete('/:id', ctrl.eliminar);
+router.delete('/:id/manual', blockStaffWrite, ctrl.eliminarManual);
+router.put('/:id', blockStaffWrite, ctrl.actualizar);
+router.delete('/:id', blockStaffWrite, ctrl.eliminar);
 
 /* ================== BULK (JSON / CSV) ================== */
-router.post('/bulk', ctrl.bulkUpsert);
-router.post('/bulk-csv', upload.single('file'), ctrl.bulkUpsertCSV);
+router.post('/bulk', blockStaffWrite, ctrl.bulkUpsert);
+router.post('/bulk-csv', upload.single('file'), blockStaffWrite, ctrl.bulkUpsertCSV);
 
 /* ================== BATCHES DE SUBIDA MANUAL ================== */
 router.get('/batches', ctrl.listBatchesInsumos);
