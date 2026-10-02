@@ -24,6 +24,7 @@ exports.getRecetasCostos = async (req, res, next) => {
          r.article_id,
          r.costo_total,
          r.porciones,
+         r.updated_at,
          ri.insumo_id,
          COALESCE(i.es_elaborado, FALSE) AS es_elaborado,
          COALESCE(i.tiene_receta, FALSE) AS tiene_receta,
@@ -51,6 +52,7 @@ exports.getRecetasCostos = async (req, res, next) => {
         costos[artId] = {
           costoTotal: Number(r.costo_total) || 0,
           porciones: Number(r.porciones) || 1,
+          updatedAt: r.updated_at || null,
           tieneAlerta: false,
           insumosAlerta: [],
         };
