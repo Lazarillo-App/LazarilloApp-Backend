@@ -10,7 +10,7 @@
 const pool = require('../config/db');
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { writeArticleReceta, writeElaboradoReceta } = require('../services/recetaWrite');
-const { createSyncNotificationForBusinessUsers } = require('../services/notificationService');
+const { createSyncNotification } = require('../services/notificationService');
 
 async function requireAdminOrOwner(uid, bizId) {
   const role = await getEffectiveRole(uid, bizId);
@@ -188,13 +188,15 @@ exports.approveProposal = async (req, res, next) => {
       [uid, bizId, id, proposal.article_id, proposal.insumo_id]
     );
 
-    createSyncNotificationForBusinessUsers({
+    // Solo a quien la propuso (no a todo el negocio) — quiere saber que su
+    // cambio se aplicó, el resto del equipo no necesita enterarse de cada uno.
+    createSyncNotification({
       businessId: bizId,
+      userId: proposal.created_by_user_id,
       type: 'ui_action',
-      title: 'Propuesta aprobada',
-      message: 'Se aprobó una propuesta de receta — ya está aplicada.',
+      title: 'Tu propuesta fue aprobada',
+      message: 'Se aplicó el cambio que propusiste en la receta.',
       metadata: { kind: 'receta_proposal_approved', proposal_id: id },
-      onlyAdmins: false,
     }).catch(() => {});
 
     return res.json({ ok: true, proposal: updatedRows[0], receta: result.receta });
@@ -238,13 +240,13 @@ exports.rejectProposal = async (req, res, next) => {
       }
     }
 
-    createSyncNotificationForBusinessUsers({
+    createSyncNotification({
       businessId: bizId,
+      userId: proposal.created_by_user_id,
       type: 'ui_action',
-      title: 'Propuesta rechazada',
-      message: req.body?.comment ? `Rechazada: ${req.body.comment}` : 'Se rechazó una propuesta de receta.',
+      title: 'Tu propuesta fue rechazada',
+      message: req.body?.comment ? `Motivo: ${req.body.comment}` : 'Se rechazó el cambio que propusiste en la receta.',
       metadata: { kind: 'receta_proposal_rejected', proposal_id: id },
-      onlyAdmins: false,
     }).catch(() => {});
 
     return res.json({ ok: true, proposal: rows[0] });
@@ -281,13 +283,13 @@ exports.requestRevision = async (req, res, next) => {
       [comment, id]
     );
 
-    createSyncNotificationForBusinessUsers({
+    createSyncNotification({
       businessId: bizId,
+      userId: proposal.created_by_user_id,
       type: 'ui_action',
       title: 'Tu propuesta necesita un ajuste',
       message: comment,
       metadata: { kind: 'receta_proposal_revision', proposal_id: id },
-      onlyAdmins: false,
     }).catch(() => {});
 
     return res.json({ ok: true, proposal: rows[0] });

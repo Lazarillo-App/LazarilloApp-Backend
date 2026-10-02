@@ -194,4 +194,4 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
   return row;
 }
 
-module.exports = { snapshotReceta, snapshotRecetaElaborado, createOrUpdateProposal };
+module.exports = { snapshotReceta, snapshotRecetaElaborado, createOrUpdateProposal, enrichItemsConNombre };
