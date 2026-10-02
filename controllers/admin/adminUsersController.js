@@ -5,6 +5,7 @@ const { logAudit } = require('../../services/audit/auditLog');
 const { sendEmail } = require('../../utils/mailer');
 const { createOrReinviteUser, EmailAlreadyActiveError, INVITATION_TTL_DAYS } = require('../../services/users/provisionUser');
 const { pauseOwnedBusinesses } = require('../../services/admin/cascadePauseOwnerBusinesses');
+const { hardDeleteUser } = require('../../services/hardDeleteUser');
 
 const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
 const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || '').replace(/\/+$/, '');
@@ -222,6 +223,44 @@ exports.softDeleteUser = async (req, res) => {
 
 // Alias para el route que lo registra como 'deleteUser'
 exports.deleteUser = exports.softDeleteUser;
+
+/**
+ * DELETE /admin/users/:id/hard   body: { confirmEmail }
+ * Borra la cuenta POR COMPLETO — irreversible. Reusa services/hardDeleteUser.js
+ * (misma lógica que el script de limpieza db/scripts/hard-delete-users.js).
+ * Exige que confirmEmail matchee el email real de la cuenta — además de la
+ * confirmación que ya pide la UI, para que un click accidental sin "tipear
+ * para confirmar" nunca llegue hasta acá.
+ */
+exports.hardDeleteUser = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { rows } = await db.query(`SELECT id, email, role FROM app_users WHERE id=$1 LIMIT 1`, [id]);
+    const target = rows[0];
+    if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
+    if (target.role === 'app_admin') return res.status(403).json({ error: 'CANNOT_DELETE_ADMIN' });
+
+    const confirmEmail = String(req.body?.confirmEmail || '').trim().toLowerCase();
+    if (confirmEmail !== target.email.toLowerCase()) {
+      return res.status(400).json({ error: 'CONFIRM_EMAIL_MISMATCH' });
+    }
+
+    const result = await hardDeleteUser({ userId: id });
+
+    await logAudit(null, {
+      userId: req.user?.id || null,
+      entityType: 'app_user',
+      entityId: id,
+      action: 'hard_delete',
+      diff: { before: { email: result.deleted.email, businesses: result.deleted.businesses } },
+    });
+
+    res.json(result);
+  } catch (e) {
+    console.error('ADMIN_USER_HARD_DELETE_FAILED:', e);
+    res.status(500).json({ error: 'ADMIN_USER_HARD_DELETE_FAILED', detail: e.message });
+  }
+};
 
 // + NUEVO: restaurar usuario soft-deleted
 exports.restoreUser = async (req, res) => {

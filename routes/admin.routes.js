@@ -32,6 +32,7 @@ r.get(   '/users',          ensureFn('listUsers',    usersCtrl?.listUsers));
 r.post(  '/users',          ensureFn('createUser',   usersCtrl?.createUser));
 r.patch( '/users/:id',      ensureFn('updateUser',   usersCtrl?.updateUser));
 r.delete('/users/:id',      ensureFn('deleteUser',   usersCtrl?.deleteUser));
+r.delete('/users/:id/hard', ensureFn('hardDeleteUser', usersCtrl?.hardDeleteUser));
 r.post(  '/users/:id/restore',         ensureFn('restoreUser',   usersCtrl?.restoreUser));
 r.post(  '/users/:id/reset-password',  ensureFn('resetPassword', usersCtrl?.resetPassword));
 r.get(   '/users/:id',                 ensureFn('getUser',       usersCtrl?.getUser));
