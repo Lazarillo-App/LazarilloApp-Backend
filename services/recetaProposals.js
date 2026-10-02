@@ -88,8 +88,61 @@ async function resolveSectorId(uid, bizId) {
   return Array.isArray(ids) && ids.length ? ids[0] : null;
 }
 
+/**
+ * El payload que manda el front al guardar (RecetaModal/index.jsx) NUNCA
+ * incluye el nombre del ingrediente — solo supplyId/articleRefId, porque el
+ * guardado directo lo resuelve en writeArticleReceta/writeElaboradoReceta
+ * via JOIN a insumos/maxi_articles. Una propuesta no pasa por ahí hasta que
+ * se aprueba, así que sin esto la bandeja mostraba "(sin nombre)" en cada
+ * ingrediente. Enriquece una COPIA de items con supplyNombre resuelto en
+ * el momento — no afecta el guardado real al aprobar (ese sigue resolviendo
+ * el nombre fresco desde la DB, ignora este campo).
+ */
+async function enrichItemsConNombre(items, bizId) {
+  if (!Array.isArray(items) || !items.length) return items;
+
+  const supplyIds = [...new Set(items.map(it => Number(it.supplyId)).filter(n => Number.isFinite(n) && n > 0))];
+  const articleRefIds = [...new Set(items.map(it => Number(it.articleRefId)).filter(n => Number.isFinite(n) && n !== 0))];
+
+  const nombresPorSupply = new Map();
+  if (supplyIds.length) {
+    const { rows } = await pool.query(
+      `SELECT id, nombre FROM insumos WHERE id = ANY($1::int[])`, [supplyIds]
+    );
+    for (const r of rows) nombresPorSupply.set(Number(r.id), r.nombre);
+  }
+
+  const nombresPorArticleRef = new Map();
+  const positivos = articleRefIds.filter(n => n > 0);
+  const negativos = articleRefIds.filter(n => n < 0);
+  if (positivos.length) {
+    const { rows } = await pool.query(
+      `SELECT articulo_id AS id, nombre FROM maxi_articles WHERE business_id = $1 AND articulo_id = ANY($2::int[])`,
+      [bizId, positivos]
+    );
+    for (const r of rows) nombresPorArticleRef.set(Number(r.id), r.nombre);
+  }
+  if (negativos.length) {
+    const { rows } = await pool.query(
+      `SELECT id, name AS nombre FROM app_articles WHERE business_id = $1 AND id = ANY($2::int[])`,
+      [bizId, negativos]
+    );
+    for (const r of rows) nombresPorArticleRef.set(Number(r.id), r.nombre);
+  }
+
+  return items.map(it => {
+    const refId = Number(it.articleRefId);
+    if (Number.isFinite(refId) && refId !== 0) {
+      return { ...it, supplyNombre: nombresPorArticleRef.get(refId) || null };
+    }
+    const sId = Number(it.supplyId);
+    return { ...it, supplyNombre: nombresPorSupply.get(sId) || null };
+  });
+}
+
 async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null, uid, body, snapshotBefore, nombreParaAviso }) {
   const sectorId = await resolveSectorId(uid, bizId);
+  const bodyEnriquecido = { ...body, items: await enrichItemsConNombre(body.items, bizId) };
   const { rows: existingRows } = await pool.query(
     `SELECT id, receta_id FROM receta_proposals
       WHERE business_id = $1 AND created_by_user_id = $2 AND status = 'pending'
@@ -105,7 +158,7 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
           SET payload_after = $1::jsonb, updated_at = NOW()
         WHERE id = $2
         RETURNING *`,
-      [JSON.stringify(body), existingRows[0].id]
+      [JSON.stringify(bodyEnriquecido), existingRows[0].id]
     );
     row = rows[0];
   } else {
@@ -117,7 +170,7 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
        VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7::jsonb, $8::jsonb, NOW(), NOW())
        RETURNING *`,
       [bizId, recetaId, articleId, insumoId, sectorId, uid,
-        snapshotBefore ? JSON.stringify(snapshotBefore) : null, JSON.stringify(body)]
+        snapshotBefore ? JSON.stringify(snapshotBefore) : null, JSON.stringify(bodyEnriquecido)]
     );
     row = rows[0];
 
