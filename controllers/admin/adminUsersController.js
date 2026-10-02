@@ -6,6 +6,7 @@ const { sendEmail } = require('../../utils/mailer');
 const { createOrReinviteUser, EmailAlreadyActiveError, INVITATION_TTL_DAYS } = require('../../services/users/provisionUser');
 const { pauseOwnedBusinesses } = require('../../services/admin/cascadePauseOwnerBusinesses');
 const { hardDeleteUser } = require('../../services/hardDeleteUser');
+const { signToken } = require('../authController');
 
 const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
 const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || '').replace(/\/+$/, '');
@@ -65,6 +66,57 @@ exports.getUser = async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'internal' });
+  }
+};
+
+/**
+ * POST /admin/users/:id/impersonate
+ * "Ver como": devuelve un token real a nombre del usuario objetivo, con el
+ * mismo shape que /auth/login, para que el frontend lo use directo en vez
+ * del propio. No se puede impersonar a otra cuenta app_admin. Queda logueado
+ * en auditoría (quién entró como quién) — es la alternativa a compartir
+ * contraseñas o tener una clave "universal".
+ */
+exports.impersonateUser = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { rows } = await db.query(
+      `SELECT id, name, display_name, email, active_business_id, role, status,
+              account_status, trial_ends_at, subscription_ends_at
+         FROM app_users WHERE id = $1 LIMIT 1`,
+      [id]
+    );
+    const target = rows[0];
+    if (!target) return res.status(404).json({ error: 'NOT_FOUND' });
+    if (target.role === 'app_admin') return res.status(403).json({ error: 'CANNOT_IMPERSONATE_ADMIN' });
+
+    const token = signToken(target);
+
+    await logAudit(null, {
+      userId: req.user?.id || null,
+      entityType: 'app_user',
+      entityId: id,
+      action: 'impersonate',
+      diff: { after: { target_email: target.email } },
+    });
+
+    res.json({
+      token,
+      user: {
+        id: target.id,
+        name: target.name,
+        display_name: target.display_name || null,
+        email: target.email,
+        active_business_id: target.active_business_id || null,
+        role: null, // nunca propagar app_admin acá — ya se rechazó arriba
+        account_status: target.account_status,
+        trial_ends_at: target.trial_ends_at || null,
+        subscription_ends_at: target.subscription_ends_at || null,
+      },
+    });
+  } catch (e) {
+    console.error('ADMIN_USER_IMPERSONATE_FAILED:', e);
+    res.status(500).json({ error: 'ADMIN_USER_IMPERSONATE_FAILED' });
   }
 };
 

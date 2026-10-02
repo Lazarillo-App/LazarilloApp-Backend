@@ -36,6 +36,7 @@ r.delete('/users/:id/hard', ensureFn('hardDeleteUser', usersCtrl?.hardDeleteUser
 r.post(  '/users/:id/restore',         ensureFn('restoreUser',   usersCtrl?.restoreUser));
 r.post(  '/users/:id/reset-password',  ensureFn('resetPassword', usersCtrl?.resetPassword));
 r.get(   '/users/:id',                 ensureFn('getUser',       usersCtrl?.getUser));
+r.post(  '/users/:id/impersonate',     ensureFn('impersonateUser', usersCtrl?.impersonateUser));
 r.get(   '/users/:id/businesses',      ensureFn('userBusinesses', usersCtrl?.userBusinesses));
 r.get(   '/users/:id/activity',        ensureFn('userActivity',   usersCtrl?.userActivity));
 
