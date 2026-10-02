@@ -738,6 +738,21 @@ exports.crearManual = async (req, res) => {
       diff: { after: { nombre: rows[0].nombre, unidadMed: rows[0].unidad_med, precioRef: rows[0].precio_ref, rubro: rows[0].rubro } },
     });
 
+    // Staff puede crear un insumo simple directo (lo necesita para poder
+    // proponer una receta que lo usa), pero admin/owner tienen que enterarse
+    // — ya pueden editarlo/borrarlo como a cualquier otro insumo, esto es
+    // solo el aviso.
+    if (req.businessRole === 'staff') {
+      createSyncNotificationForBusinessUsers({
+        businessId,
+        type: 'ui_action',
+        title: 'Insumo nuevo creado por el equipo',
+        message: `${req.user?.name || req.user?.email || 'Un miembro del equipo'} creó el insumo "${rows[0].nombre}" (${skuFinal}).`,
+        metadata: { kind: 'insumo_creado_staff', insumo_id: rows[0].id },
+        onlyAdmins: true,
+      }).catch((e) => console.error('[crearManual] error notificando alta de insumo:', e?.message));
+    }
+
     res.status(201).json({ ok: true, data: rows[0], sku: skuFinal });
   } catch (e) {
     console.error('crearManual error:', e);
