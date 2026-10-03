@@ -18,7 +18,7 @@ const UNIT_ALIASES = {
   l: 'lt', lt: 'lt', lts: 'lt', litro: 'lt', litros: 'lt',
   u: 'u', un: 'u', uni: 'u', unid: 'u', unidad: 'u', unidades: 'u', und: 'u',
   doc: 'u', docena: 'u',
-  porcion: 'u', porciones: 'u', 'porción': 'u', 'porciónes': 'u', p: 'u',
+  porcion: 'u', porciones: 'u', 'porción': 'u', 'porciónes': 'u',
   oz: 'oz', onza: 'oz', onzas: 'oz',
   lb: 'lb', libra: 'lb', libras: 'lb',
 };
