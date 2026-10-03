@@ -2206,8 +2206,53 @@ exports.searchPadrinoInsumo = async (req, res) => {
       sku: r.sku || null,
       agrupacion_id: r.agrupacion_id ? Number(r.agrupacion_id) : null,
       agrupacion_nombre: r.agrupacion_nombre || null,
+      esMatch: true,
     }));
-    return res.json({ ok: true, candidatos });
+
+    // Además de los que matchean el texto, traer el resto de insumos de ESOS
+    // MISMOS rubros — para que al tipear se vea de entrada todo lo que ya
+    // existe ahí y no se cargue un insumo duplicado por no haber mirado qué
+    // más hay en ese rubro.
+    const rubrosEncontrados = [...new Set(candidatos.map(c => c.rubro).filter(Boolean))];
+    let otrosEnRubro = [];
+    if (rubrosEncontrados.length) {
+      const idsYaListados = candidatos.map(c => c.id);
+      const { rows: otros } = await pool.query(
+        `SELECT DISTINCT ON (i.id)
+                i.id, i.nombre, i.unidad_med, i.precio_ref,
+                i.codigo_maxi AS sku,
+                COALESCE(ir.nombre, i.rubro) AS rubro,
+                g.id     AS agrupacion_id,
+                g.nombre AS agrupacion_nombre
+           FROM insumos i
+           LEFT JOIN insumo_rubros ir
+                  ON ir.business_id = i.business_id
+                 AND ir.codigo::text = i.rubro
+           LEFT JOIN insumo_group_items gi ON gi.insumo_id = i.id
+           LEFT JOIN insumo_groups g       ON g.id = gi.group_id
+          WHERE i.business_id = $1
+            AND i.estado = 'activo'
+            AND i.id <> ALL($2::int[])
+            AND COALESCE(ir.nombre, i.rubro) = ANY($3::text[])
+          ORDER BY i.id, i.nombre
+          LIMIT 40`,
+        [bizId, idsYaListados.length ? idsYaListados : [0], rubrosEncontrados]
+      );
+      otrosEnRubro = otros.map(r => ({
+        id: Number(r.id),
+        nombre: r.nombre,
+        rubro: r.rubro || null,
+        unidad_med: r.unidad_med || 'u',
+        precio_ref: Number(r.precio_ref) || 0,
+        precio: Number(r.precio_ref) || 0,
+        sku: r.sku || null,
+        agrupacion_id: r.agrupacion_id ? Number(r.agrupacion_id) : null,
+        agrupacion_nombre: r.agrupacion_nombre || null,
+        esMatch: false,
+      }));
+    }
+
+    return res.json({ ok: true, candidatos: [...candidatos, ...otrosEnRubro] });
   } catch (e) {
     console.error('searchPadrinoInsumo error:', e);
     return res.status(500).json({ ok: false, error: e.message });
