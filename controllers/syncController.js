@@ -543,9 +543,14 @@ exports.listArticlesFromDB = async (req, res) => {
     [principalId]
   );
 
-  // Artículos cargados manualmente (id negativo, tabla app_articles) — antes
-  // esta lista solo leía maxi_articles, así que un artículo manual nunca
-  // aparecía en el buscador global ni en ningún árbol armado desde acá.
+  // Artículos manuales (id negativo, tabla app_articles) — un artículo
+  // manual (o promo) también tiene una fila espejo en maxi_articles, pero esa
+  // copia NUNCA se actualiza cuando se edita (actualizarArticulo solo
+  // escribe app_articles) y nunca tuvo código. Antes este endpoint leía
+  // directo esa copia vieja — por eso el código no aparecía y por eso
+  // renombrar un artículo manual no se veía reflejado acá hasta quién sabe
+  // cuándo. app_articles es la fuente de verdad para estos: donde haya
+  // choque de id, pisa a la copia de maxi_articles en vez de sumarse aparte.
   // rubro/subrubro de app_articles van invertidos a categoria/subrubro de
   // salida, mismo criterio que maxi_articles (subrubro de salida = "Rubro"
   // en la UI, categoria de salida = "Subrubro" en la UI).
@@ -555,14 +560,19 @@ exports.listArticlesFromDB = async (req, res) => {
       WHERE business_id = $1 AND id < 0`,
     [principalId]
   );
-  const manualItems = manualRows.map((r) => ({
-    id: r.id, nombre: r.nombre, categoria: r.categoria, subrubro: r.subrubro,
-    precio: r.precio, costo: null, codigo_maxi: r.codigo, raw: { codigo_maxi: r.codigo }, origen: 'manual',
-  }));
+
+  const porId = new Map(rows.map((r) => [Number(r.id), r]));
+  for (const r of manualRows) {
+    porId.set(Number(r.id), {
+      id: r.id, nombre: r.nombre, categoria: r.categoria, subrubro: r.subrubro,
+      precio: r.precio, costo: null, codigo_maxi: r.codigo, raw: { codigo_maxi: r.codigo }, origen: 'manual',
+    });
+  }
+  const allItems = Array.from(porId.values());
 
   const items = allowedIds !== null
-    ? [...rows, ...manualItems].filter(r => allowedIds.has(Number(r.id)))
-    : [...rows, ...manualItems];
+    ? allItems.filter(r => allowedIds.has(Number(r.id)))
+    : allItems;
 
   res.json({ items });
 };
@@ -698,17 +708,23 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       [principalId]
     );
 
-    // Artículos manuales (id negativo) — sin esto, un artículo cargado a mano
-    // nunca aparecía en este árbol (sector, RubroEditModal, etc.). rubro/subrubro
-    // de app_articles van invertidos a categoria/subrubro, mismo criterio que
-    // la lista plana de listArticlesFromDB.
+    // Artículos manuales (id negativo) — tienen copia espejo en maxi_articles
+    // que nunca se actualiza al editar (actualizarArticulo solo escribe
+    // app_articles), así que donde haya choque de id app_articles pisa a esa
+    // copia vieja en vez de sumarse aparte (sino quedaba duplicado). rubro/
+    // subrubro de app_articles van invertidos a categoria/subrubro, mismo
+    // criterio que la lista plana de listArticlesFromDB.
     const { rows: manualRows } = await pool.query(
       `SELECT id AS articulo_id, name AS nombre, subrubro AS categoria, rubro AS subrubro, price AS precio
          FROM public.app_articles
         WHERE business_id = $1 AND id < 0`,
       [principalId]
     );
-    const allRows = [...rows, ...manualRows.map(r => ({ ...r, origen: 'manual' }))];
+    const porIdTree = new Map(rows.map(r => [Number(r.articulo_id), r]));
+    for (const r of manualRows) {
+      porIdTree.set(Number(r.articulo_id), { ...r, origen: 'manual' });
+    }
+    const allRows = Array.from(porIdTree.values());
 
     const bySub = new Map();
     for (const r of allRows) {
