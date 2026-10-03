@@ -4,6 +4,7 @@
 // dentro de su misma transacción, pasando el client.
 
 const pool = require('../config/db');
+const { factorConversion, canonicalUnit } = require('./unidades');
 
 /**
  * Recalcula y PERSISTE costo_total, costo_unitario y costo_total_con_merma
@@ -51,7 +52,7 @@ async function recalcularCostoReceta(recetaId, db = pool) {
   //      unidad); costo por 1 unidad de rendimiento. (Antes caía al fallback ÷1
   //      porque buscaba rendimiento_peso, que es NULL en este caso → bug del
   //      precio_ref = costo del lote entero.)
-  const unidad = String(rec.rendimiento_unidad || 'porcion').toLowerCase().trim();
+  const unidad = canonicalUnit(String(rec.rendimiento_unidad || 'porcion').toLowerCase().trim());
   const MEDIBLES = ['gr', 'kg', 'ml', 'lt'];
   let divisor;
   let unidadCostoUnitario;   // en qué unidad queda costoUnitario
@@ -125,7 +126,6 @@ async function recalcularCostoRecetas(recetaIds, db = pool) {
  * @param {number} depth      profundidad actual (interno)
  */
 async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
-  const { factorConversion } = require('./unidades');
   if (depth > 12) {
     console.warn(`[propagarCostoInsumo] profundidad máxima alcanzada en insumo ${insumoId}`);
     return;
@@ -151,15 +151,20 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   //  - si es elaborado con rendimiento medible (gr/kg/ml/lt) → esa unidad
   //  - si rinde en porcion/u → 'u' (no se convierte por peso)
   //  - si no es elaborado → su unidad_med
-  const rendU = String(ins.rendimiento_unidad || '').toLowerCase().trim();
+  // No usar canonicalUnit() acá directo: su default (cadena vacía → 'u') convertiría
+  // CUALQUIER insumo no-elaborado (rendimiento_unidad NULL, sin receta) en "rinde u",
+  // perdiendo la rama que usa unidad_med más abajo. Solo canonicalizar si hay algo
+  // cargado — así "porcion"/"porciones"/"p" siguen reconociéndose como "u".
+  const rendURaw = String(ins.rendimiento_unidad || '').toLowerCase().trim();
+  const rendU = rendURaw ? canonicalUnit(rendURaw) : '';
   const pesoEquiv = Number(ins.rendimiento_peso) || 0;   // peso de 1 porción (equivalente)
-  const unidadPesoEquiv = String(ins.unidad_peso || 'gr').toLowerCase().trim();
+  const unidadPesoEquiv = canonicalUnit(String(ins.unidad_peso || 'gr').toLowerCase().trim());
   let unidadBase;
   let costoPorGrBase = 0;   // costo por unidad base de peso, si aplica equivalente
   if (['gr','kg','ml','lt'].includes(rendU)) {
     // Rinde directamente en peso/volumen: precio_ref ya es por esa unidad
     unidadBase = rendU;
-  } else if ((rendU === 'porcion' || rendU === 'u') && pesoEquiv > 0) {
+  } else if (rendU === 'u' && pesoEquiv > 0) {
     // Rinde en porción CON equivalente: precio_ref es por porción, pero se puede
     // usar en peso. costo por gr = precio_ref / peso_equivalente (en gr).
     const pesoEnGr = unidadPesoEquiv === 'kg' ? pesoEquiv * 1000
@@ -170,8 +175,8 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
     unidadBase = (unidadPesoEquiv === 'kg' || unidadPesoEquiv === 'gr') ? 'gr' : 'ml';
   } else {
     // Rinde en porción/u SIN equivalente, o no es elaborado
-    unidadBase = (rendU === 'porcion' || rendU === 'u') ? 'u'
-      : String(ins.unidad_med || 'u').toLowerCase().trim();
+    unidadBase = rendU === 'u' ? 'u'
+      : canonicalUnit(String(ins.unidad_med || 'u').toLowerCase().trim());
   }
 
   // 1. Items que usan este insumo (en cualquier receta del biz)
@@ -197,8 +202,12 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
 
   // 2. Actualizar costo_unitario de cada item (convertido a su unidad)
   for (const it of items) {
-    const unidadItem = String(it.unidad || unidadBase || 'u').toLowerCase().trim();
-    const eqSel = equivalencias.find(e => String(e.nombre || '').trim().toLowerCase() === unidadItem);
+    // ATENCIÓN: la unidad del item se usa primero para buscar equivalencias por
+    // NOMBRE (ej. "cucharon"), así que esa búsqueda debe ir con el string crudo.
+    // canonicalUnit() recién se aplica si no matcheó ninguna equivalencia.
+    const unidadItemRaw = String(it.unidad || unidadBase || 'u').toLowerCase().trim();
+    const eqSel = equivalencias.find(e => String(e.nombre || '').trim().toLowerCase() === unidadItemRaw);
+    const unidadItem = canonicalUnit(unidadItemRaw);
     let nuevoCosto;
     if (eqSel) {
       const contenido = Number(eqSel.contenido) || 0;
@@ -207,7 +216,7 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
     } else if (costoPorGrBase > 0) {
       // Elaborado en porción con equivalente: costo por gr base, convertido a la unidad del item.
       // Si el item lo usa en porción/u, usar el costo por porción directo.
-      if (unidadItem === 'u' || unidadItem === 'porcion') {
+      if (unidadItem === 'u') {
         nuevoCosto = precioRef;   // por porción
       } else {
         const factor = factorConversion(unidadBase, unidadItem);  // gr→kg = 1000, gr→gr = 1
