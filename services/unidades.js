@@ -18,7 +18,15 @@ const UNIT_ALIASES = {
   l: 'lt', lt: 'lt', lts: 'lt', litro: 'lt', litros: 'lt',
   u: 'u', un: 'u', uni: 'u', unid: 'u', unidad: 'u', unidades: 'u', und: 'u',
   doc: 'u', docena: 'u',
-  porcion: 'u', porciones: 'u', 'porción': 'u', 'porciónes': 'u',
+  // "p" (porción abreviada) SÍ es un valor real guardado en receta_items.unidad — lo
+  // confirman los logs de producción ("no se puede convertir a 'p'", items 'cantidad
+  // en porciones' de recetas reales). Había una versión anterior de este alias que se
+  // sacó por las dudas, atribuyéndole sin confirmar la corrupción de CHEDDAR PASTA
+  // ELABORADO — esa corrupción en realidad era por un item en "gr" (una unidad física,
+  // no "p") sin peso equivalente cargado, caso que el guard de "no inventar costo" de
+  // más abajo sigue cubriendo igual. "p" en cambio es simplemente "u"/"porción" con
+  // otro nombre: no hace falta ningún puente de peso para convertirlo.
+  porcion: 'u', porciones: 'u', 'porción': 'u', 'porciónes': 'u', p: 'u',
   oz: 'oz', onza: 'oz', onzas: 'oz',
   lb: 'lb', libra: 'lb', libras: 'lb',
 };
