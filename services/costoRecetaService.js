@@ -234,7 +234,20 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
       const factorEnv = factorConversion(unidadItem, uniEnvase);
       nuevoCosto = factorEnv > 0 ? factorEnv * costoPorUnidadEnvase : costoPorUnidadEnvase;
     } else if (unidadBase === 'u') {
-      nuevoCosto = precioRef;   // por porción/unidad sin equivalente, sin conversión
+      if (unidadItem === 'u') {
+        nuevoCosto = precioRef;   // por porción/unidad sin equivalente, sin conversión
+      } else {
+        // Elaborado que rinde en porción/u SIN peso equivalente cargado (rendimiento_peso
+        // vacío): no hay forma válida de convertir su precio "por porción" a una unidad
+        // física (gr/kg/ml/lt) para este item. Antes se le asignaba precioRef igual — el
+        // precio de 1 PORCIÓN COMPLETA, sin importar cuántos gramos pedía el item — un
+        // número sin sentido (ej. 80gr cobrados al precio de toda la porción) que inflaba
+        // el costo_total de la receta. Mejor no inventar: se deja el costo_unitario que
+        // ya tenía este item y se loguea, para poder cargar el peso equivalente en la
+        // receta de ese elaborado (o cambiar la unidad del item a "u").
+        console.warn(`[propagarCostoInsumo] insumo ${insumoId} rinde "u" sin peso equivalente — no se puede convertir a "${unidadItem}" (receta_item ${it.id}, receta ${it.receta_id}). Cargale un peso equivalente a su receta o cambiá la unidad del ingrediente a "u".`);
+        continue;
+      }
     } else {
       const factor = factorConversion(unidadBase, unidadItem);
       nuevoCosto = factor > 0 ? precioRef / factor : precioRef;
