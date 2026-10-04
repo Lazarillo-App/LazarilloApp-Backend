@@ -1102,10 +1102,59 @@ exports.searchPadrino = async (req, res) => {
           sku: r.sku || null,
           agrupacion_id: ag?.id ?? null,
           agrupacion_nombre: ag?.nombre ?? null,
+          esMatch: true,
         };
       });
 
-    return res.json({ ok: true, candidatos });
+    // Además de los que matchean el texto, traer el resto de artículos de ESOS
+    // MISMOS rubros — mismo criterio que searchPadrinoInsumo (insumosController.js):
+    // ver de entrada todo lo que ya existe ahí, para no cargar un padrino duplicado.
+    const rubrosEncontrados = [...new Set(candidatos.map(c => c.rubro).filter(Boolean))];
+    let otrosEnRubro = [];
+    if (rubrosEncontrados.length) {
+      const idsYaListados = candidatos.map(c => c.id);
+      const { rows: otrosRows } = await pool.query(
+        `SELECT
+           ma.articulo_id AS id,
+           ma.nombre,
+           ${colRubro} AS rubro,
+           ${colSubrubro} AS subrubro,
+           ma.precio,
+           aa.codigo AS sku
+         FROM maxi_articles ma
+         LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = ma.business_id
+        WHERE ma.business_id = $1
+          AND ma.is_active = true
+          AND ma.articulo_id <> ALL($2::int[])
+          AND ${colRubro} = ANY($3::text[])
+        ORDER BY ma.nombre
+        LIMIT 40`,
+        [storageBizId, idsYaListados.length ? idsYaListados : [0], rubrosEncontrados]
+      );
+      otrosEnRubro = otrosRows
+        .filter(r => !discontinuadosIds.has(Number(r.id)))
+        .filter(r => {
+          if (!isSubnegocio) return true;
+          const ag = articleToAgrup.get(Number(r.id));
+          return !ag || Number(ag.business_id) === Number(bizId);
+        })
+        .map(r => {
+          const ag = articleToAgrup.get(Number(r.id)) || null;
+          return {
+            id: Number(r.id),
+            nombre: r.nombre,
+            rubro: r.rubro || null,
+            subrubro: r.subrubro || null,
+            precio: Number(r.precio) || 0,
+            sku: r.sku || null,
+            agrupacion_id: ag?.id ?? null,
+            agrupacion_nombre: ag?.nombre ?? null,
+            esMatch: false,
+          };
+        });
+    }
+
+    return res.json({ ok: true, candidatos: [...candidatos, ...otrosEnRubro] });
   } catch (e) {
     console.error('searchPadrino error:', e);
     return res.status(500).json({ ok: false, error: e.message });
