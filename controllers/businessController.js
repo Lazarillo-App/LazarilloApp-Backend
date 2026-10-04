@@ -224,8 +224,9 @@ exports.update = async (req, res) => {
     'compras_alerta_semanas',
     'ventas_alerta_dias',      
     'redondeo_precios',        
-    'redondeo_mostrar_modal',  
+    'redondeo_mostrar_modal',
     'desperdicio_global_pct',   // ← merma global (%)
+    'notificar_alta_articulo_insumo',
   ];
   const configPatch = {};
   for (const key of CONFIG_KEYS) {

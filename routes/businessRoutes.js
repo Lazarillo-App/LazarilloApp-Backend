@@ -380,6 +380,7 @@ router.get('/:id/config', async (req, res, next) => {
         redondeo_mostrar_modal: props.redondeo_mostrar_modal ?? true,
         desperdicio_global_pct: Number(props.desperdicio_global_pct ?? 5),
         divisa: props.divisa || 'ARS',
+        notificar_alta_articulo_insumo: props.notificar_alta_articulo_insumo ?? true,
       },
     });
   } catch (e) { next(e); }
