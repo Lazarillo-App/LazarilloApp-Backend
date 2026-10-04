@@ -179,12 +179,17 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
       : canonicalUnit(String(ins.unidad_med || 'u').toLowerCase().trim());
   }
 
-  // 1. Items que usan este insumo (en cualquier receta del biz)
+  // 1. Items que usan este insumo (en cualquier receta ACTIVA del biz)
+  // r.active=TRUE es crítico acá: una receta borrada/reemplazada (active=false) puede
+  // seguir teniendo receta_items colgando con costo_total viejo/absurdo. Sin este
+  // filtro, la cascada la "revive" cada vez que corre y pisa el precio_ref del insumo
+  // dueño de esa receta con ese dato muerto — pasó con "Barril Irish" (precio real por
+  // última compra ~$2.700/L, terminaba en ~$3.000.000/L por una receta #1327 inactiva).
   const { rows: items } = await db.query(
     `SELECT ri.id, ri.receta_id, ri.unidad
        FROM receta_items ri
        JOIN recetas r ON r.id = ri.receta_id
-      WHERE ri.insumo_id = $1 AND r.business_id = $2`,
+      WHERE ri.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE`,
     [insumoId, bizId]
   );
   if (!items.length) return;
