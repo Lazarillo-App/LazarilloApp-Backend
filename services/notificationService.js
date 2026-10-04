@@ -20,6 +20,12 @@ const ALLOWED_TYPES = new Set([
   'move',
   'receta_observacion',
   'access_request',
+  // Alta/baja/mover de artículos e insumos — permitidos en notificationsRoutes.js
+  // (allowedKinds) desde antes, pero faltaban acá: sin esto, createUiNotification
+  // los degradaba a 'ui_action' vía safeType() y el frontend perdía el kind real
+  // al releer la notificación guardada (backendNotifs mapea kind desde n.type).
+  'articulo_create', 'articulo_delete', 'articulo_move',
+  'insumo_create', 'insumo_delete', 'insumo_move',
 ]);
 
 function safeType(type) {
@@ -427,6 +433,12 @@ async function createUiNotification({
     group_unfavorite: 'group_unfavorite',
     discontinue: 'discontinue',
     move: 'move',
+    articulo_create: 'articulo_create',
+    articulo_delete: 'articulo_delete',
+    articulo_move: 'articulo_move',
+    insumo_create: 'insumo_create',
+    insumo_delete: 'insumo_delete',
+    insumo_move: 'insumo_move',
   };
 
   const type = typeMap[kind] || 'ui_action';
