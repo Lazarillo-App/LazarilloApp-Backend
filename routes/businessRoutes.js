@@ -514,6 +514,9 @@ router.post('/:id/articles/normalizar-nombres', blockStaffWrite, ensureFn('artAB
 // Padrino de Articulo: buscar artículo en Maxi para mapear (sin crear manual)
 router.get('/:id/articles/search-padrino', searchPadrino);
 
+// Datos completos de un artículo para el modal de edición (código, nombre_original)
+router.get('/:id/articles/:articleId', ensureFn('artABM.obtenerArticulo', artABM.obtenerArticulo));
+
 // Editar artículo (manual o agregar equivalencia externa)
 router.patch('/:id/articles/:articleId', blockStaffWrite, ensureFn('artABM.actualizarArticulo', artABM.actualizarArticulo));
 

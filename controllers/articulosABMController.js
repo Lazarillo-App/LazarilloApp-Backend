@@ -348,6 +348,44 @@ exports.crearArticulo = async (req, res, next) => {
 // Actualiza campos de un artículo (manual o con equivalencia)
 // Body: { nombre?, rubro?, subrubro?, precio?, codigoExterno? }
 // ─────────────────────────────────────────────────────────────
+// GET /:id/articles/:articleId — datos completos para el modal de edición
+// (código, nombre_original) que el objeto de fila de la tabla no siempre trae.
+exports.obtenerArticulo = async (req, res, next) => {
+  const bizId = getBusinessId(req);
+  const articleId = Number(req.params.articleId);
+  if (!Number.isFinite(bizId) || !Number.isFinite(articleId)) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+  try {
+    const storageBizId = await resolveStorageBizId(bizId);
+    if (articleId < 0) {
+      const { rows } = await pool.query(
+        `SELECT id, name AS nombre, rubro, subrubro, price AS precio, codigo,
+                nombre_original
+           FROM app_articles WHERE id = $1 AND business_id = $2`,
+        [articleId, storageBizId]
+      );
+      if (!rows.length) return res.status(404).json({ ok: false, error: 'No encontrado' });
+      return res.json({ ok: true, articulo: rows[0] });
+    }
+    // Recordatorio: en maxi_articles, subrubro DB = "Rubro" UI, categoria DB = "Subrubro" UI.
+    const { rows } = await pool.query(
+      `SELECT ma.articulo_id AS id, ma.nombre,
+              ma.subrubro AS rubro, ma.categoria AS subrubro,
+              ma.precio, aa.codigo, ma.nombre_original
+         FROM maxi_articles ma
+         LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = ma.business_id
+        WHERE ma.business_id = $1 AND ma.articulo_id = $2`,
+      [storageBizId, articleId]
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'No encontrado' });
+    return res.json({ ok: true, articulo: rows[0] });
+  } catch (e) {
+    console.error('[obtenerArticulo]', e.message);
+    next(e);
+  }
+};
+
 exports.actualizarArticulo = async (req, res, next) => {
   const bizId = getBusinessId(req);
   const articleId = Number(req.params.articleId);
@@ -379,7 +417,12 @@ exports.actualizarArticulo = async (req, res, next) => {
       const vals = [];
       let pi = 1;
 
-      if (nombre?.trim()) { sets.push(`nombre = $${pi++}`); vals.push(nombre.trim()); }
+      if (nombre?.trim() && nombre.trim() !== art.nombre) {
+        sets.push(`nombre = $${pi++}`); vals.push(nombre.trim());
+        // Congelar el nombre de origen (POS/sync) la PRIMERA vez que se renombra desde
+        // Lazarillo — después queda fijo aunque se vuelva a renombrar otra vez.
+        if (!art.nombre_original) { sets.push(`nombre_original = $${pi++}`); vals.push(art.nombre); }
+      }
       if (precio != null) { sets.push(`precio = $${pi++}`); vals.push(safeNum(precio) ?? 0); }
       // Recordatorio: en maxi_articles → subrubro DB = "Rubro" UI, categoria DB = "Subrubro" UI
       if (rubro?.trim() != null && rubro.trim() !== art.subrubro) {
@@ -424,7 +467,10 @@ exports.actualizarArticulo = async (req, res, next) => {
     const vals = [];
     let pi = 1;
 
-    if (nombre?.trim()) { sets.push(`name = $${pi++}`); vals.push(nombre.trim()); }
+    if (nombre?.trim() && nombre.trim() !== art.name) {
+      sets.push(`name = $${pi++}`); vals.push(nombre.trim());
+      if (!art.nombre_original) { sets.push(`nombre_original = $${pi++}`); vals.push(art.name); }
+    }
     if (precio != null) { sets.push(`price = $${pi++}`); vals.push(safeNum(precio) ?? 0); }
 
     let categoriaId = art.categoria_id;
