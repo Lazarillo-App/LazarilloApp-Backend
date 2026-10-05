@@ -2245,6 +2245,7 @@ exports.searchPadrinoInsumo = async (req, res) => {
       unidad_med: r.unidad_med || 'u',
       precio_ref: Number(r.precio_ref) || 0,
       precio: Number(r.precio_ref) || 0,          // el front lee padrino.precio
+      codigo: r.sku || null,                      // codigo_maxi (siempre tiene valor, sincronizado o L-provisorio)
       sku: r.sku || null,
       agrupacion_id: r.agrupacion_id ? Number(r.agrupacion_id) : null,
       agrupacion_nombre: r.agrupacion_nombre || null,
@@ -2287,6 +2288,7 @@ exports.searchPadrinoInsumo = async (req, res) => {
         unidad_med: r.unidad_med || 'u',
         precio_ref: Number(r.precio_ref) || 0,
         precio: Number(r.precio_ref) || 0,
+        codigo: r.sku || null,
         sku: r.sku || null,
         agrupacion_id: r.agrupacion_id ? Number(r.agrupacion_id) : null,
         agrupacion_nombre: r.agrupacion_nombre || null,

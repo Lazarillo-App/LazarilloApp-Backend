@@ -1145,6 +1145,11 @@ exports.searchPadrino = async (req, res) => {
           rubro: r.rubro || null,
           subrubro: r.subrubro || null,
           precio: Number(r.precio) || 0,
+          // "Código" = el id del artículo (mismo criterio que el modal de edición,
+          // ver TablaArticulos.jsx case "codigo"). aa.codigo/sku casi siempre es
+          // null para artículos ya sincronizados (solo existe esa fila espejo
+          // para los manuales), así que no sirve como código mostrable acá.
+          codigo: Number(r.id),
           sku: r.sku || null,
           agrupacion_id: ag?.id ?? null,
           agrupacion_nombre: ag?.nombre ?? null,
@@ -1192,6 +1197,7 @@ exports.searchPadrino = async (req, res) => {
             rubro: r.rubro || null,
             subrubro: r.subrubro || null,
             precio: Number(r.precio) || 0,
+            codigo: Number(r.id),
             sku: r.sku || null,
             agrupacion_id: ag?.id ?? null,
             agrupacion_nombre: ag?.nombre ?? null,
