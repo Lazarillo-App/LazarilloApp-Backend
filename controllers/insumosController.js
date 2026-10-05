@@ -769,6 +769,21 @@ exports.actualizar = async (req, res) => {
     }
 
     const b = req.body || {};
+    // Los insumos son org-wide (viven en el principal). Desde un subnegocio hay que
+    // resolver el scope a toda la org, si no el update no encuentra el insumo → 404.
+    const orgBizIds = await getOrgBizIds(businessId);
+
+    const { rows: beforeRows } = await pool.query(
+      `SELECT nombre, nombre_original, unidad_med, precio_ref, rubro, estado, nota,
+              costo_preferido, es_elaborado, codigo_maxi, origen
+         FROM insumos WHERE id = $1 AND business_id = ANY($2::int[])`,
+      [id, orgBizIds]
+    );
+    if (!beforeRows.length) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const before = beforeRows[0];
+
     const sets = [];
     const vals = [];
 
@@ -777,31 +792,58 @@ exports.actualizar = async (req, res) => {
       sets.push(`${c} = $${vals.length}`);
     };
 
-    if (b.nombre !== undefined) push('nombre', b.nombre);
+    if (b.nombre !== undefined && b.nombre !== before.nombre) {
+      push('nombre', b.nombre);
+      // Se congela el nombre_original la primera vez que se renombra desde
+      // Lazarillo (mismo criterio que artículos, ver actualizarArticulo) — si ya
+      // tenía uno guardado de una edición anterior, no se vuelve a tocar.
+      if (!before.nombre_original) push('nombre_original', before.nombre);
+    }
     if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
     if (b.contenidoEnvase !== undefined) push('contenido_envase', b.contenidoEnvase === null || b.contenidoEnvase === '' ? null : num(b.contenidoEnvase));
     if (b.unidadEnvase !== undefined) push('unidad_envase', b.unidadEnvase || null);
-    if (b.rubro !== undefined) push('rubro', b.rubro);
+    if (b.rubro !== undefined) {
+      // El rubro se guarda como CÓDIGO (igual que crearManual), no como nombre —
+      // así el JOIN con insumo_rubros sigue agrupando bien. Sin esto, editar el
+      // rubro desde el modal guardaba el nombre crudo y rompía el agrupamiento.
+      let rubroFinal = b.rubro;
+      if (rubroFinal) {
+        const { rows: rubroRows } = await pool.query(
+          `SELECT codigo FROM insumo_rubros
+            WHERE business_id = $1 AND lower(trim(nombre)) = lower(trim($2))
+            LIMIT 1`,
+          [businessId, rubroFinal]
+        );
+        if (rubroRows.length) rubroFinal = String(rubroRows[0].codigo);
+      }
+      push('rubro', rubroFinal);
+    }
     if (b.estado !== undefined) push('estado', b.estado);
     if (b.nota !== undefined) push('nota', b.nota);
     if (b.costoPreferido !== undefined) push('costo_preferido', b.costoPreferido || null);
+    // Código Maxi: solo editable mientras el insumo sigue siendo manual (no
+    // sincronizado todavía) — mismo criterio que el SKU de artículos manuales.
+    if (b.codigoMaxi !== undefined && before.origen === 'manual') {
+      const nuevoCodigo = (b.codigoMaxi && String(b.codigoMaxi).trim()) || null;
+      if (nuevoCodigo && nuevoCodigo !== before.codigo_maxi) {
+        const { rows: dupCodigo } = await pool.query(
+          `SELECT id FROM insumos WHERE business_id = $1 AND codigo_maxi = $2 AND id != $3 LIMIT 1`,
+          [businessId, nuevoCodigo, id]
+        );
+        if (dupCodigo.length) {
+          return res.status(409).json({ ok: false, error: `Ya existe un insumo con el código ${nuevoCodigo}.` });
+        }
+      }
+      push('codigo_maxi', nuevoCodigo);
+    }
 
     if (b.es_elaborado !== undefined) {
       push('es_elaborado', b.es_elaborado);
       push('es_elaborado_manual', true);
     }
 
-        if (!sets.length) return res.json({ ok: true });
-    // Los insumos son org-wide (viven en el principal). Desde un subnegocio hay que
-    // resolver el scope a toda la org, si no el update no encuentra el insumo → 404.
-    const orgBizIds = await getOrgBizIds(businessId);
-
-    const { rows: beforeRows } = await pool.query(
-      `SELECT nombre, unidad_med, precio_ref, rubro, estado, nota, costo_preferido, es_elaborado
-         FROM insumos WHERE id = $1 AND business_id = ANY($2::int[])`,
-      [id, orgBizIds]
-    );
+    if (!sets.length) return res.json({ ok: true });
 
     vals.push(id, orgBizIds);
     const { rows } = await pool.query(
