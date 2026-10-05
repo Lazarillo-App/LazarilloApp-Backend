@@ -2304,13 +2304,21 @@ exports.eliminarManual = async (req, res) => {
 // Verifica que el insumo pertenezca al negocio activo
 async function assertInsumoBiz(insumoId, bizId) {
   // El insumo es global por organización: validar que pertenezca a cualquier
-  // negocio de la misma org que el negocio activo (no solo al negocio exacto).
+  // negocio de la misma org que el negocio activo, o directo al negocio exacto.
+  // El OR con business_id = $2 es necesario para negocios SIN organización
+  // (organization_id NULL): "organization_id = NULL" nunca matchea nada en SQL,
+  // así que sin esto cualquier negocio standalone perdía acceso a sus propios
+  // insumos acá (mermas/equivalencias fallaban siempre, hubiera algo cargado o no).
   const { rows } = await pool.query(
     `SELECT 1 FROM insumos i
        WHERE i.id = $1
-         AND i.business_id = ANY(
-           SELECT id FROM app_businesses
-            WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $2)
+         AND (
+           i.business_id = $2
+           OR i.business_id = ANY(
+             SELECT id FROM app_businesses
+              WHERE organization_id IS NOT NULL
+                AND organization_id = (SELECT organization_id FROM app_businesses WHERE id = $2)
+           )
          )`,
     [insumoId, bizId]
   );
