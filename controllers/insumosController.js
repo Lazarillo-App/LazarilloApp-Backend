@@ -2293,10 +2293,67 @@ exports.searchPadrinoInsumo = async (req, res) => {
         agrupacion_id: r.agrupacion_id ? Number(r.agrupacion_id) : null,
         agrupacion_nombre: r.agrupacion_nombre || null,
         esMatch: false,
+        grupo: 'También en ese rubro',
       }));
     }
 
-    return res.json({ ok: true, candidatos: [...candidatos, ...otrosEnRubro] });
+    // Buscar también por RUBRO: si lo tipeado matchea el nombre de un rubro (no
+    // el de ningún insumo), mostrar TODOS sus insumos — a veces no te acordás
+    // cómo se llama el insumo pero sí en qué rubro está. Mismo criterio que
+    // searchPadrino (articulosABMController.js).
+    const idsYaListados = new Set([...candidatos.map(c => c.id), ...otrosEnRubro.map(c => c.id)]);
+    const { rows: rubroMatchRows } = await pool.query(
+      `SELECT DISTINCT COALESCE(ir.nombre, i.rubro) AS rubro
+         FROM insumos i
+         LEFT JOIN insumo_rubros ir ON ir.business_id = i.business_id AND ir.codigo::text = i.rubro
+        WHERE i.business_id = $1 AND i.estado = 'activo'
+          AND COALESCE(ir.nombre, i.rubro) ILIKE $2`,
+      [bizId, `%${q}%`]
+    );
+    let porRubro = [];
+    if (rubroMatchRows.length) {
+      const rubrosMatcheados = rubroMatchRows.map(r => r.rubro).filter(Boolean);
+      const { rows: rubroInsRows } = await pool.query(
+        `SELECT DISTINCT ON (i.id)
+                i.id, i.nombre, i.unidad_med, i.precio_ref,
+                i.codigo_maxi AS sku,
+                COALESCE(ir.nombre, i.rubro) AS rubro,
+                g.id     AS agrupacion_id,
+                g.nombre AS agrupacion_nombre
+           FROM insumos i
+           LEFT JOIN insumo_rubros ir
+                  ON ir.business_id = i.business_id
+                 AND ir.codigo::text = i.rubro
+           LEFT JOIN insumo_group_items gi ON gi.insumo_id = i.id
+           LEFT JOIN insumo_groups g       ON g.id = gi.group_id
+          WHERE i.business_id = $1
+            AND i.estado = 'activo'
+            AND COALESCE(ir.nombre, i.rubro) = ANY($2::text[])
+          ORDER BY i.id, i.nombre
+          LIMIT 100`,
+        [bizId, rubrosMatcheados]
+      );
+      porRubro = rubroInsRows
+        .filter(r => !idsYaListados.has(Number(r.id)))
+        .map(r => ({
+          id: Number(r.id),
+          nombre: r.nombre,
+          rubro: r.rubro || null,
+          unidad_med: r.unidad_med || 'u',
+          precio_ref: Number(r.precio_ref) || 0,
+          precio: Number(r.precio_ref) || 0,
+          codigo: r.sku || null,
+          sku: r.sku || null,
+          agrupacion_id: r.agrupacion_id ? Number(r.agrupacion_id) : null,
+          agrupacion_nombre: r.agrupacion_nombre || null,
+          esMatch: true,
+          grupo: `Rubro: ${r.rubro}`,
+        }));
+    }
+
+    const conGrupo = candidatos.map(c => ({ ...c, grupo: 'Coincide con la búsqueda' }));
+
+    return res.json({ ok: true, candidatos: [...conGrupo, ...porRubro, ...otrosEnRubro] });
   } catch (e) {
     console.error('searchPadrinoInsumo error:', e);
     return res.status(500).json({ ok: false, error: e.message });

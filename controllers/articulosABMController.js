@@ -1202,11 +1202,70 @@ exports.searchPadrino = async (req, res) => {
             agrupacion_id: ag?.id ?? null,
             agrupacion_nombre: ag?.nombre ?? null,
             esMatch: false,
+            grupo: 'También en ese rubro',
           };
         });
     }
 
-    return res.json({ ok: true, candidatos: [...candidatos, ...otrosEnRubro] });
+    // Buscar también por RUBRO: si lo tipeado matchea el nombre de un rubro (no
+    // el de ningún artículo), mostrar TODOS sus artículos — a veces no te acordás
+    // cómo se llama el artículo pero sí en qué rubro está. Quedan agrupados bajo
+    // el nombre real del rubro, no bajo un texto genérico.
+    const idsYaListados = new Set([...candidatos.map(c => c.id), ...otrosEnRubro.map(c => c.id)]);
+    const { rows: rubroMatchRows } = await pool.query(
+      `SELECT DISTINCT ${colRubro} AS rubro FROM maxi_articles
+        WHERE business_id = $1 AND is_active = true AND ${colRubro} ILIKE $2`,
+      [storageBizId, likeQuery]
+    );
+    let porRubro = [];
+    if (rubroMatchRows.length) {
+      const rubrosMatcheados = rubroMatchRows.map(r => r.rubro).filter(Boolean);
+      const { rows: rubroArtRows } = await pool.query(
+        `SELECT
+           ma.articulo_id AS id,
+           ma.nombre,
+           ${colRubro} AS rubro,
+           ${colSubrubro} AS subrubro,
+           ma.precio,
+           aa.codigo AS sku
+         FROM maxi_articles ma
+         LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = ma.business_id
+        WHERE ma.business_id = $1
+          AND ma.is_active = true
+          AND ${colRubro} = ANY($2::text[])
+        ORDER BY ${colRubro}, ma.nombre
+        LIMIT 100`,
+        [storageBizId, rubrosMatcheados]
+      );
+      porRubro = rubroArtRows
+        .filter(r => !idsYaListados.has(Number(r.id)))
+        .filter(r => !discontinuadosIds.has(Number(r.id)))
+        .filter(r => {
+          if (!isSubnegocio) return true;
+          const ag = articleToAgrup.get(Number(r.id));
+          return !ag || Number(ag.business_id) === Number(bizId);
+        })
+        .map(r => {
+          const ag = articleToAgrup.get(Number(r.id)) || null;
+          return {
+            id: Number(r.id),
+            nombre: r.nombre,
+            rubro: r.rubro || null,
+            subrubro: r.subrubro || null,
+            precio: Number(r.precio) || 0,
+            codigo: Number(r.id),
+            sku: r.sku || null,
+            agrupacion_id: ag?.id ?? null,
+            agrupacion_nombre: ag?.nombre ?? null,
+            esMatch: true,
+            grupo: `Rubro: ${r.rubro}`,
+          };
+        });
+    }
+
+    const conGrupo = candidatos.map(c => ({ ...c, grupo: 'Coincide con la búsqueda' }));
+
+    return res.json({ ok: true, candidatos: [...conGrupo, ...porRubro, ...otrosEnRubro] });
   } catch (e) {
     console.error('searchPadrino error:', e);
     return res.status(500).json({ ok: false, error: e.message });
