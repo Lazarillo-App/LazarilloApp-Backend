@@ -1213,8 +1213,8 @@ exports.searchPadrino = async (req, res) => {
     // el nombre real del rubro, no bajo un texto genérico.
     const idsYaListados = new Set([...candidatos.map(c => c.id), ...otrosEnRubro.map(c => c.id)]);
     const { rows: rubroMatchRows } = await pool.query(
-      `SELECT DISTINCT ${colRubro} AS rubro FROM maxi_articles
-        WHERE business_id = $1 AND is_active = true AND ${colRubro} ILIKE $2`,
+      `SELECT DISTINCT ${colRubro} AS rubro FROM maxi_articles ma
+        WHERE ma.business_id = $1 AND ma.is_active = true AND ${colRubro} ILIKE $2`,
       [storageBizId, likeQuery]
     );
     let porRubro = [];
