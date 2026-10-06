@@ -298,3 +298,27 @@ exports.requestRevision = async (req, res, next) => {
     next(e);
   }
 };
+
+/**
+ * GET /businesses/:businessId/receta-proposals/mine — propuestas que creó el usuario actual
+ * (cualquier estado), para que el staff vea qué pasó con sus cambios.
+ */
+exports.listMyProposals = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const uid = req.user?.id;
+    if (!bizId || !uid) return res.status(400).json({ ok: false, error: 'invalid_params' });
+    const { rows } = await pool.query(
+      `SELECT p.id, p.status, p.created_at, p.decided_at, p.admin_comment,
+              p.receta_id, p.article_id, p.insumo_id,
+              r.nombre AS receta_nombre_actual
+         FROM receta_proposals p
+         LEFT JOIN recetas r ON r.id = p.receta_id
+        WHERE p.business_id = $1 AND p.created_by_user_id = $2
+        ORDER BY p.created_at DESC
+        LIMIT 100`,
+      [bizId, uid]
+    );
+    return res.json({ ok: true, proposals: rows });
+  } catch (e) { next(e); }
+};
