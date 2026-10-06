@@ -125,9 +125,11 @@ exports.listar = async (req, res) => {
       where.push(`i.origen = $${params.length}`);
     }
 
-    if (estado && estado !== 'all') {
+    if (estado === 'activo') {
+      where.push(`i.estado IN ('activo','pendiente_aprobacion')`);
+    } else if (estado && estado !== 'all') {
       params.push(estado);
-      where.push(estado === 'activo' ? `i.estado IN ('activo','pendiente_aprobacion')` : `i.estado = ${params.length}`);
+      where.push(`i.estado = ${params.length}`);
     }
 
     if (groupId) {
