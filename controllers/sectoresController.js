@@ -37,7 +37,9 @@ async function scopeItemsPorSector(client, sectorIds) {
   if (!sectorIds.length) return new Map();
   const { rows } = await client.query(
     `SELECT ssi.sector_id, ssi.tipo, ssi.agrupacion_id, ssi.rubro, ssi.subrubro, ssi.articulo_id,
-            a.nombre AS agrupacion_nombre
+            a.nombre AS agrupacion_nombre,
+            (SELECT ma.nombre FROM maxi_articles ma JOIN sectores sc ON sc.id = ssi.sector_id
+              WHERE ma.articulo_id = ssi.articulo_id AND ma.business_id = sc.business_id LIMIT 1) AS articulo_nombre
        FROM sector_scope_items ssi
        LEFT JOIN agrupaciones a ON a.id = ssi.agrupacion_id
       WHERE ssi.sector_id = ANY($1::int[])
@@ -52,6 +54,7 @@ async function scopeItemsPorSector(client, sectorIds) {
       agrupacionId: r.agrupacion_id,
       agrupacionNombre: r.agrupacion_nombre,
       articuloId: r.articulo_id,
+      articuloNombre: r.articulo_nombre,
       rubro: r.rubro,
       subrubro: r.subrubro,
     });
