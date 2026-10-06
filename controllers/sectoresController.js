@@ -36,10 +36,10 @@ async function ensureSectorTodos(client, businessId) {
 async function scopeItemsPorSector(client, sectorIds) {
   if (!sectorIds.length) return new Map();
   const { rows } = await client.query(
-    `SELECT ssi.sector_id, ssi.tipo, ssi.agrupacion_id, ssi.rubro, ssi.subrubro,
+    `SELECT ssi.sector_id, ssi.tipo, ssi.agrupacion_id, ssi.rubro, ssi.subrubro, ssi.articulo_id,
             a.nombre AS agrupacion_nombre
        FROM sector_scope_items ssi
-       JOIN agrupaciones a ON a.id = ssi.agrupacion_id
+       LEFT JOIN agrupaciones a ON a.id = ssi.agrupacion_id
       WHERE ssi.sector_id = ANY($1::int[])
       ORDER BY a.nombre ASC, ssi.rubro ASC NULLS FIRST, ssi.subrubro ASC NULLS FIRST`,
     [sectorIds]
@@ -51,6 +51,7 @@ async function scopeItemsPorSector(client, sectorIds) {
       tipo: r.tipo,
       agrupacionId: r.agrupacion_id,
       agrupacionNombre: r.agrupacion_nombre,
+      articuloId: r.articulo_id,
       rubro: r.rubro,
       subrubro: r.subrubro,
     });
@@ -162,7 +163,7 @@ async function reemplazarScope(client, sectorId, businessId, scope) {
   await client.query(`DELETE FROM sector_scope_items WHERE sector_id = $1`, [sectorId]);
   if (!Array.isArray(scope) || !scope.length) return;
 
-  const agrupacionIds = [...new Set(scope.map((it) => num(it.agrupacionId)).filter(Boolean))];
+  const agrupacionIds = [...new Set(scope.filter((it) => it.tipo !== 'articulo').map((it) => num(it.agrupacionId)).filter(Boolean))];
   if (agrupacionIds.length) {
     const bizIds = await bizIdsDeOrg(client, businessId);
     const { rows: agrRows } = await client.query(
@@ -182,6 +183,16 @@ async function reemplazarScope(client, sectorId, businessId, scope) {
 
   for (const item of scope) {
     const tipo = item.tipo;
+    if (tipo === 'articulo') {
+      const articuloId = num(item.articuloId);
+      if (articuloId) {
+        await client.query(
+          `INSERT INTO sector_scope_items (sector_id, tipo, articulo_id) VALUES ($1, 'articulo', $2)`,
+          [sectorId, articuloId]
+        );
+      }
+      continue;
+    }
     const agrupacionId = num(item.agrupacionId);
     if (!['agrupacion', 'rubro', 'subrubro'].includes(tipo) || !agrupacionId) continue;
     const rubro = tipo !== 'agrupacion' ? String(item.rubro || '').trim() || null : null;

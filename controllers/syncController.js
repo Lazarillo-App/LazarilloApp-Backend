@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 const pool = require('../config/db');
+const { articleIdsPermitidos } = require('../services/sectorScope');
 const { decryptSecretCompat } = require('../utils/cryptoField');
 const { autoAssignNewArticles } = require('../services/autoGroupAssignment');
 const { notifyAutoAssign } = require('../services/notificationService');
@@ -570,9 +571,10 @@ exports.listArticlesFromDB = async (req, res) => {
   }
   const allItems = Array.from(porId.values());
 
-  const items = allowedIds !== null
-    ? allItems.filter(r => allowedIds.has(Number(r.id)))
-    : allItems;
+  const sectorSet = await articleIdsPermitidos(req.user?.id, biz.id, principalId);
+  const items = allItems
+    .filter(r => allowedIds === null || allowedIds.has(Number(r.id)))
+    .filter(r => !sectorSet || sectorSet.has(Number(r.id)));
 
   res.json({ items });
 };
@@ -726,10 +728,13 @@ exports.listArticlesTreeFromDB = async (req, res) => {
     }
     const allRows = Array.from(porIdTree.values());
 
+    const sectorSet = await articleIdsPermitidos(req.user?.id, biz.id, principalId);
     const bySub = new Map();
     for (const r of allRows) {
       // Para subnegocios: solo incluir artículos permitidos
       if (allowedIds !== null && !allowedIds.has(Number(r.articulo_id))) continue;
+      // Staff con sector: solo los artículos de su sector
+      if (sectorSet && !sectorSet.has(Number(r.articulo_id))) continue;
 
       const sub = (r.subrubro && r.subrubro.trim()) || 'Sin subrubro';
       const cat = (r.categoria && r.categoria.trim()) || 'Sin categoría';
