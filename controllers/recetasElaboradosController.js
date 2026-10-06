@@ -312,3 +312,42 @@ exports.getRecetasElaboradosMapa = async (req, res, next) => {
     next(e);
   }
 };
+/* ══════════════════════════════════════════════════════════════
+   POST /api/businesses/:businessId/insumos/batch-recetas
+   Body: { ids: [insumoId, ...] } — resumen de costo de varios elaborados en una llamada.
+   Usa la misma fórmula que getRecetaElaborado (precio_sugerido = costo / (pct / 100)).
+══════════════════════════════════════════════════════════════ */
+exports.batchRecetasElaborados = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId) || Number(req.headers['x-business-id']);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+    const ids = [...new Set((req.body?.ids || []).map(Number).filter((n) => Number.isFinite(n) && n > 0))].slice(0, 200);
+    if (!ids.length) return res.json({ ok: true, recetas: {} });
+
+    const { rows: bizRows } = await pool.query(`SELECT props FROM app_businesses WHERE id = $1 LIMIT 1`, [bizId]);
+    const objetivoBiz = Number(bizRows[0]?.props?.insumos_costo_ideal ?? 30);
+
+    const { rows } = await pool.query(
+      `SELECT r.insumo_id, r.costo_total, r.porciones, r.porcentaje_venta,
+              r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso
+         FROM recetas r
+        WHERE r.business_id = $1 AND r.active = TRUE AND r.insumo_id = ANY($2::int[])`,
+      [bizId, ids]
+    );
+
+    const recetas = {};
+    for (const r of rows) {
+      const costo = Number(r.costo_total) || 0;
+      const pct = Number(r.porcentaje_venta) || objetivoBiz;
+      recetas[String(r.insumo_id)] = {
+        costoTotal: costo,
+        porciones: Number(r.porciones) || 1,
+        precioSugerido: pct > 0 ? costo / (pct / 100) : 0,
+        rendimientoUnidad: r.rendimiento_unidad || 'porcion',
+        rendimientoPeso: r.rendimiento_peso != null ? Number(r.rendimiento_peso) : null,
+        unidadPeso: r.unidad_peso || null,
+      };
+    }
+    return res.json({ ok: true, recetas });
+  } catch (e) { next(e); }
+};

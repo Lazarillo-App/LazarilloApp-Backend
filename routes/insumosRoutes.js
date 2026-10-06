@@ -109,6 +109,7 @@ router.put('/:id/uso/:itemId/merma', blockStaffWrite, ctrl.usoInsumoCambiarMerma
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/normalizar-nombres', blockStaffWrite, ctrl.normalizarNombres);
 router.post('/batch-detalle', ctrl.batchDetalle);
+router.post('/batch-recetas', require('../controllers/recetasElaboradosController').batchRecetasElaborados);
 // POST / (crearManual) queda SIN bloquear a propósito: es el camino usado
 // para dar de alta un insumo nuevo al vuelo desde el buscador de ingredientes
 // de una receta (ver RecetaModal/ItemRow.jsx) — Staff sigue necesitando poder
