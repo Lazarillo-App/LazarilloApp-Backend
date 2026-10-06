@@ -2360,6 +2360,43 @@ exports.searchPadrinoInsumo = async (req, res) => {
   }
 };
 
+// POST /insumos/batch-detalle — equivalencias y mermas de varios insumos en una sola llamada
+// (antes el modal de recetas pedía 2 requests por ingrediente).
+exports.batchDetalle = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    if (!bizId) return res.status(400).json({ ok: false, error: "Negocio requerido" });
+    const ids = [...new Set((req.body?.ids || []).map(Number).filter((n) => Number.isFinite(n) && n > 0))].slice(0, 500);
+    if (!ids.length) return res.json({ ok: true, equivalencias: {}, mermas: {} });
+    const orgBizIds = await getOrgBizIds(bizId);
+    const { rows: validos } = await pool.query(
+      `SELECT id FROM insumos WHERE id = ANY($1::int[]) AND business_id = ANY($2::int[])`,
+      [ids, orgBizIds]
+    );
+    const idsOk = validos.map((r) => Number(r.id));
+    if (!idsOk.length) return res.json({ ok: true, equivalencias: {}, mermas: {} });
+    const [{ rows: eqs }, { rows: mermas }] = await Promise.all([
+      pool.query(
+        `SELECT id, insumo_id, nombre, contenido, unidad FROM insumo_equivalencias
+          WHERE insumo_id = ANY($1::int[]) ORDER BY nombre ASC`,
+        [idsOk]
+      ),
+      pool.query(
+        `SELECT id, insumo_id, nombre, peso_inicial, peso_final, es_default FROM insumo_mermas
+          WHERE insumo_id = ANY($1::int[]) ORDER BY es_default DESC, nombre ASC`,
+        [idsOk]
+      ),
+    ]);
+    const equivalencias = {}, mermasPorInsumo = {};
+    for (const r of eqs) (equivalencias[r.insumo_id] ||= []).push(r);
+    for (const r of mermas) (mermasPorInsumo[r.insumo_id] ||= []).push(r);
+    return res.json({ ok: true, equivalencias, mermas: mermasPorInsumo });
+  } catch (e) {
+    console.error("batchDetalle error:", e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
 // DELETE /insumos/:id/manual — borrado REAL, solo para insumos origen='manual'
 exports.eliminarManual = async (req, res) => {
   try {
