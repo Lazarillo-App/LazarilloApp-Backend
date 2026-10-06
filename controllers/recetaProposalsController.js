@@ -322,3 +322,50 @@ exports.listMyProposals = async (req, res, next) => {
     return res.json({ ok: true, proposals: rows });
   } catch (e) { next(e); }
 };
+
+/**
+ * POST /businesses/:businessId/receta-proposals/marcar-revision
+ * Body: { items: [{ tipo: 'articulo'|'insumo', id }], comment }
+ * Admin/owner marca una o más recetas/insumos para que alguien los revise, con una nota.
+ */
+exports.marcarRevision = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const uid = req.user?.id;
+    if (!bizId || !uid) return res.status(400).json({ ok: false, error: 'invalid_params' });
+    if (!(await requireAdminOrOwner(uid, bizId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const comment = String(req.body?.comment || '').trim();
+    if (!comment) return res.status(400).json({ ok: false, error: 'comment_required' });
+    const items = (Array.isArray(req.body?.items) ? req.body.items : [])
+      .map((it) => ({ tipo: it?.tipo === 'insumo' ? 'insumo' : 'articulo', id: Number(it?.id) }))
+      .filter((it) => Number.isFinite(it.id) && it.id !== 0)
+      .slice(0, 500);
+    if (!items.length) return res.status(400).json({ ok: false, error: 'items_required' });
+
+    let marcados = 0;
+    for (const it of items) {
+      const col = it.tipo === 'insumo' ? 'insumo_id' : 'article_id';
+      const { rows: ya } = await pool.query(
+        `SELECT 1 FROM receta_proposals WHERE business_id = $1 AND ${col} = $2 AND status = ANY($3::text[]) LIMIT 1`,
+        [bizId, it.id, ['pending', 'in_revision']]
+      );
+      if (ya.length) continue;
+      let recetaId = null;
+      if (it.tipo === 'articulo') {
+        const { rows: rr } = await pool.query(
+          `SELECT id FROM recetas WHERE business_id = $1 AND article_id = $2 AND active = TRUE ORDER BY id DESC LIMIT 1`,
+          [bizId, it.id]
+        );
+        recetaId = rr[0]?.id || null;
+      }
+      await pool.query(
+        `INSERT INTO receta_proposals (business_id, receta_id, article_id, insumo_id, created_by_user_id, status, payload_before, payload_after, admin_comment)
+         VALUES ($1, $2, $3, $4, $5, 'in_revision', NULL, '{}'::jsonb, $6)`,
+        [bizId, recetaId, it.tipo === 'articulo' ? it.id : null, it.tipo === 'insumo' ? it.id : null, uid, comment]
+      );
+      if (recetaId) await pool.query(`UPDATE recetas SET has_pending_proposal = TRUE WHERE id = $1`, [recetaId]);
+      marcados++;
+    }
+    return res.json({ ok: true, marcados });
+  } catch (e) { next(e); }
+};
