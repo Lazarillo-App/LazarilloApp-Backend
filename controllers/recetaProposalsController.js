@@ -322,7 +322,7 @@ exports.listMyProposals = async (req, res, next) => {
          LEFT JOIN recetas r ON r.id = p.receta_id
          LEFT JOIN insumos i ON i.id = p.insumo_id AND i.business_id = p.business_id
          LEFT JOIN maxi_articles ma ON ma.articulo_id = p.article_id AND ma.business_id = p.business_id
-        WHERE p.business_id = $1 AND p.created_by_user_id = $2
+        WHERE p.business_id = $1 AND (p.created_by_user_id = $2 OR p.asignado_a_user_id = $2)
         ORDER BY p.created_at DESC
         LIMIT 100`,
       [bizId, uid]
@@ -344,6 +344,7 @@ exports.marcarRevision = async (req, res, next) => {
     if (!(await requireAdminOrOwner(uid, bizId))) return res.status(403).json({ ok: false, error: 'forbidden' });
     const comment = String(req.body?.comment || '').trim();
     if (!comment) return res.status(400).json({ ok: false, error: 'comment_required' });
+    const asignadoA = Number(req.body?.asignadoA) || null;
     const items = (Array.isArray(req.body?.items) ? req.body.items : [])
       .map((it) => ({ tipo: it?.tipo === 'insumo' ? 'insumo' : 'articulo', id: Number(it?.id) }))
       .filter((it) => Number.isFinite(it.id) && it.id !== 0)
@@ -367,9 +368,9 @@ exports.marcarRevision = async (req, res, next) => {
         recetaId = rr[0]?.id || null;
       }
       await pool.query(
-        `INSERT INTO receta_proposals (business_id, receta_id, article_id, insumo_id, created_by_user_id, status, payload_before, payload_after, admin_comment)
-         VALUES ($1, $2, $3, $4, $5, 'in_revision', NULL, '{}'::jsonb, $6)`,
-        [bizId, recetaId, it.tipo === 'articulo' ? it.id : null, it.tipo === 'insumo' ? it.id : null, uid, comment]
+        `INSERT INTO receta_proposals (business_id, receta_id, article_id, insumo_id, created_by_user_id, status, payload_before, payload_after, admin_comment, asignado_a_user_id)
+         VALUES ($1, $2, $3, $4, $5, 'in_revision', NULL, '{}'::jsonb, $6, $7)`,
+        [bizId, recetaId, it.tipo === 'articulo' ? it.id : null, it.tipo === 'insumo' ? it.id : null, uid, comment, asignadoA]
       );
       if (recetaId) await pool.query(`UPDATE recetas SET has_pending_proposal = TRUE WHERE id = $1`, [recetaId]);
       marcados++;
