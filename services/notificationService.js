@@ -217,46 +217,37 @@ async function getUserNotifications(userId, { businessId, limit = 20, unreadOnly
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) return [];
 
-    let whereClause = 'WHERE n.user_id = $1';
     const params = [uid];
-    let paramIndex = 2;
-
+    let base = "WHERE n.user_id = $1";
     if (businessId) {
-      whereClause += ` AND n.business_id = $${paramIndex}`;
       params.push(Number(businessId));
-      paramIndex++;
-    }
-
-    if (unreadOnly) {
-      whereClause += ` AND n.read = false`;
+      base += ` AND n.business_id = $${params.length}`;
     }
 
     const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
-
-    const { rows } = await pool.query(
-      `
-      SELECT 
-        n.id,
-        n.business_id,
-        n.type,
-        n.title,
-        n.message,
-        n.metadata,
-        n.read,
-        n.created_at,
-        b.name AS business_name
+    const cols = `
+      SELECT
+        n.id, n.business_id, n.type, n.title, n.message, n.metadata,
+        n.read, n.created_at, b.name AS business_name
       FROM sync_notifications n
-      LEFT JOIN app_businesses b ON b.id = n.business_id
-      ${whereClause}
-      ORDER BY n.created_at DESC
-      LIMIT $${paramIndex}
-      `,
-      [...params, lim]
-    );
+      LEFT JOIN app_businesses b ON b.id = n.business_id`;
 
-    return rows;
+    // Las NO leídas se devuelven todas (no se cortan por el límite): quedan hasta
+    // que alguien las marque como leídas. Las leídas, solo las más recientes.
+    const { rows: noLeidas } = await pool.query(
+      `${cols} ${base} AND n.read = false ORDER BY n.created_at DESC LIMIT 500`,
+      params
+    );
+    if (unreadOnly) return noLeidas;
+
+    params.push(lim);
+    const { rows: leidas } = await pool.query(
+      `${cols} ${base} AND n.read = true ORDER BY n.created_at DESC LIMIT $${params.length}`,
+      params
+    );
+    return [...noLeidas, ...leidas];
   } catch (error) {
-    console.error('[notificationService] Error obteniendo notificaciones:', error);
+    console.error("[notificationService] Error obteniendo notificaciones:", error);
     return [];
   }
 }
