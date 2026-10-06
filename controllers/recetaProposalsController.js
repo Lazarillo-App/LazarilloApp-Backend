@@ -151,6 +151,15 @@ exports.approveProposal = async (req, res, next) => {
       return res.status(409).json({ ok: false, error: 'already_approved' });
     }
 
+    if (proposal.payload_after?.tipo === 'insumo_nuevo') {
+      await pool.query(`UPDATE insumos SET estado = 'activo', updated_at = NOW() WHERE id = $1 AND business_id = $2`, [proposal.insumo_id, bizId]);
+      const { rows: ap } = await pool.query(
+        `UPDATE receta_proposals SET status = 'approved', admin_comment = $1, decided_at = NOW(), decided_by = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
+        [(req.body?.comment || '').trim() || null, uid, id]
+      );
+      return res.json({ ok: true, proposal: ap[0] });
+    }
+
     let result;
     if (proposal.article_id) {
       result = await writeArticleReceta({
@@ -225,6 +234,9 @@ exports.rejectProposal = async (req, res, next) => {
 
     const proposal = await loadPendingProposal(id, bizId);
     if (!proposal) return res.status(404).json({ ok: false, error: 'proposal_not_found' });
+    if (proposal.payload_after?.tipo === 'insumo_nuevo') {
+      await pool.query(`UPDATE insumos SET estado = 'rechazado', updated_at = NOW() WHERE id = $1 AND business_id = $2`, [proposal.insumo_id, bizId]);
+    }
 
     const { rows } = await pool.query(
       `UPDATE receta_proposals

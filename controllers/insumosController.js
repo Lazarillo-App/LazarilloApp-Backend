@@ -127,7 +127,7 @@ exports.listar = async (req, res) => {
 
     if (estado && estado !== 'all') {
       params.push(estado);
-      where.push(`i.estado = $${params.length}`);
+      where.push(estado === 'activo' ? `i.estado IN ('activo','pendiente_aprobacion')` : `i.estado = ${params.length}`);
     }
 
     if (groupId) {
@@ -697,6 +697,18 @@ exports.crearManual = async (req, res) => {
         `manual-abm-${new Date().toISOString().slice(0, 10)}`,
       ]
     );
+
+    // Staff: el insumo queda pendiente de aprobación (no activo) y genera una propuesta
+    const { getEffectiveRole } = require('../services/auth/accessControl');
+    if ((await getEffectiveRole(req.user?.id, businessId)) === 'staff') {
+      await pool.query(`UPDATE insumos SET estado = 'pendiente_aprobacion' WHERE id = $1`, [rows[0].id]);
+      rows[0].estado = 'pendiente_aprobacion';
+      await pool.query(
+        `INSERT INTO receta_proposals (business_id, insumo_id, created_by_user_id, status, payload_before, payload_after)
+         VALUES ($1, $2, $3, 'pending', NULL, $4::jsonb)`,
+        [businessId, rows[0].id, req.user?.id, JSON.stringify({ tipo: 'insumo_nuevo', nombre: rows[0].nombre })]
+      );
+    }
 
     // Si no vino SKU externo, generar correlativo L1, L2, L3... por negocio
     let skuFinal = skuExterno;
