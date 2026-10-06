@@ -1265,7 +1265,10 @@ exports.searchPadrino = async (req, res) => {
 
     const conGrupo = candidatos.map(c => ({ ...c, grupo: 'Coincide con la búsqueda' }));
 
-    return res.json({ ok: true, candidatos: [...conGrupo, ...porRubro, ...otrosEnRubro] });
+    const { articleIdsPermitidos } = require('../services/sectorScope');
+    const visibles = await articleIdsPermitidos(req.user?.id, bizId, storageBizId).catch(() => null);
+    const todos = [...conGrupo, ...porRubro, ...otrosEnRubro];
+    return res.json({ ok: true, candidatos: visibles ? todos.filter((c) => visibles.has(Number(c.id))) : todos });
   } catch (e) {
     console.error('searchPadrino error:', e);
     return res.status(500).json({ ok: false, error: e.message });
