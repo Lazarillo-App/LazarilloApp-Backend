@@ -349,11 +349,22 @@ async function createSyncNotificationForBusinessUsers({
   // 1) buscar usuarios del negocio (app_memberships)
   let users = [];
   try {
-    const q = `
+    // onlyAdmins: dueño + admins asignados al negocio o a su organización (user_assignments)
+    const q = onlyAdmins
+      ? `
+        SELECT DISTINCT uid::int AS user_id FROM (
+          SELECT owner_id AS uid FROM app_businesses WHERE id = $1
+          UNION
+          SELECT ua.user_id AS uid FROM user_assignments ua
+           WHERE ua.revoked_at IS NULL AND ua.role IN ('admin','owner')
+             AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
+               OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
+        ) x WHERE uid IS NOT NULL
+      `
+      : `
       SELECT DISTINCT m.user_id::int AS user_id
       FROM app_memberships m
       WHERE m.business_id = $1
-      ${onlyAdmins ? "AND m.role IN ('owner','manager')" : ''}
     `;
     const { rows } = await pool.query(q, [bid]);
     users = rows.map(r => Number(r.user_id)).filter(n => Number.isFinite(n) && n > 0);
