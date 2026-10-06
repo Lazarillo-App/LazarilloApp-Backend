@@ -259,6 +259,18 @@ exports.obtenerAgrupaciones = async (req, res) => {
         articulosCount: Array.isArray(a.articulos) ? a.articulos.length : '?'
       }))
     });
+    // Staff con sector: solo las agrupaciones con artículos de su sector, y solo esos artículos
+    const { articleIdsPermitidos } = require('../services/sectorScope');
+    const visibles = await articleIdsPermitidos(req.user?.id, businessId, businessId).catch(() => null);
+    if (visibles) {
+      const filtradas = [];
+      for (const ag of agrupaciones) {
+        const arts = (Array.isArray(ag.articulos) ? ag.articulos : []).filter((x) => visibles.has(Number(x?.id ?? x?.articulo_id ?? x)));
+        const apps = (Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids : []).filter((x) => visibles.has(Number(x)));
+        if (arts.length || apps.length) filtradas.push({ ...ag, articulos: arts, app_articles_ids: apps });
+      }
+      return res.json({ ok: true, agrupaciones: filtradas, orgAssignedIds });
+    }
     return res.json({ ok: true, agrupaciones, orgAssignedIds });
   } catch (e) {
     console.error('obtenerAgrupaciones error', e);
