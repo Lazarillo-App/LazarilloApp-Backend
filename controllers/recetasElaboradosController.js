@@ -79,7 +79,8 @@ exports.getRecetaElaborado = async (req, res, next) => {
     );
 
     if (!recetaRows.length) {
-      return res.json({ ok: true, receta: null });
+      const propuesta_abierta = await propuestaAbiertaDe(bizId, { insumoId }).catch(() => null);
+      return res.json({ ok: true, receta: null, propuesta_abierta });
     }
 
     const receta = recetaRows[0];

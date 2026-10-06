@@ -81,7 +81,9 @@ exports.getReceta = async (req, res, next) => {
     );
 
     if (!recetaRows.length) {
-      return res.json({ ok: true, receta: null });
+      // Receta nueva propuesta por el staff: todavía no hay receta activa, pero sí propuesta abierta
+      const propuesta_abierta = await propuestaAbiertaDe(bizId, { articleId }).catch(() => null);
+      return res.json({ ok: true, receta: null, propuesta_abierta });
     }
 
     const receta = recetaRows[0];
