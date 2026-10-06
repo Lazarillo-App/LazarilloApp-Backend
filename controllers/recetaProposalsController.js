@@ -57,11 +57,15 @@ exports.listProposals = async (req, res, next) => {
       `SELECT p.*,
               u.name AS created_by_name, u.email AS created_by_email,
               r.nombre AS receta_nombre_actual,
-              s.nombre AS sector_nombre
+              s.nombre AS sector_nombre,
+              i.nombre AS insumo_nombre,
+              ma.nombre AS articulo_nombre
          FROM receta_proposals p
          LEFT JOIN app_users u ON u.id = p.created_by_user_id
          LEFT JOIN recetas r ON r.id = p.receta_id
          LEFT JOIN sectores s ON s.id = p.sector_id
+         LEFT JOIN insumos i ON i.id = p.insumo_id AND i.business_id = p.business_id
+         LEFT JOIN maxi_articles ma ON ma.articulo_id = p.article_id AND ma.business_id = p.business_id
         WHERE p.business_id = $1 AND p.status = ANY($2::text[])
         ORDER BY p.created_at DESC`,
       [bizId, statusParam]
@@ -311,9 +315,13 @@ exports.listMyProposals = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT p.id, p.status, p.created_at, p.decided_at, p.admin_comment,
               p.receta_id, p.article_id, p.insumo_id,
-              r.nombre AS receta_nombre_actual
+              r.nombre AS receta_nombre_actual,
+              i.nombre AS insumo_nombre,
+              ma.nombre AS articulo_nombre
          FROM receta_proposals p
          LEFT JOIN recetas r ON r.id = p.receta_id
+         LEFT JOIN insumos i ON i.id = p.insumo_id AND i.business_id = p.business_id
+         LEFT JOIN maxi_articles ma ON ma.articulo_id = p.article_id AND ma.business_id = p.business_id
         WHERE p.business_id = $1 AND p.created_by_user_id = $2
         ORDER BY p.created_at DESC
         LIMIT 100`,
