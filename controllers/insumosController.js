@@ -656,8 +656,21 @@ exports.crearManual = async (req, res) => {
       );
       if (rubroRows.length) {
         rubroFinal = String(rubroRows[0].codigo);   // guardar el código
+      } else {
+        // Rubro nuevo: se registra en insumo_rubros con el siguiente código libre, así
+        // aparece en la lista de rubros y la tabla lo agrupa (sino el insumo queda fuera de vista)
+        const { rows: maxRows } = await pool.query(
+          `SELECT GREATEST(COALESCE(MAX(codigo), 0) + 1, 9000) AS siguiente FROM insumo_rubros WHERE business_id = $1`,
+          [businessId]
+        );
+        const codigoNuevo = Number(maxRows[0].siguiente);
+        await pool.query(
+          `INSERT INTO insumo_rubros (business_id, codigo, codigo_maxi, nombre, es_elaborador, activo)
+           VALUES ($1, $2, $2, $3, FALSE, TRUE)`,
+          [businessId, codigoNuevo, rubroFinal.trim()]
+        );
+        rubroFinal = String(codigoNuevo);
       }
-      // Si no existe en insumo_rubros (rubro nuevo/manual), se guarda el nombre tal cual
     }
 
     const { rows: existing } = await pool.query(
