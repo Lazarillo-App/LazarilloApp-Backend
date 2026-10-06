@@ -3,7 +3,7 @@ const pool = require('../config/db');
 const { logAudit } = require('../services/audit/auditLog');
 const { listObservaciones, addObservacion } = require('../services/recetaObservaciones');
 const { getEffectiveRole } = require('../services/auth/accessControl');
-const { snapshotRecetaElaborado, createOrUpdateProposal } = require('../services/recetaProposals');
+const { snapshotRecetaElaborado, createOrUpdateProposal, propuestaAbiertaDe } = require('../services/recetaProposals');
 const { writeElaboradoReceta } = require('../services/recetaWrite');
 
 async function resolveRecetaIdElaborado(insumoId, bizId) {
@@ -119,6 +119,7 @@ exports.getRecetaElaborado = async (req, res, next) => {
     const pctVenta = Number(receta.porcentaje_venta) || insumosConfigObjetivo;
     const precioSugerido = pctVenta > 0 ? costoXPorcion / (pctVenta / 100) : 0;
 
+    const propuesta_abierta = await propuestaAbiertaDe(bizId, { insumoId }).catch(() => null);
     return res.json({
       ok: true,
       receta: { ...receta, items },
@@ -126,6 +127,7 @@ exports.getRecetaElaborado = async (req, res, next) => {
       precio_sugerido: precioSugerido,
       costo_por_porcion: costoXPorcion,
       porciones: Number(receta.porciones),
+      propuesta_abierta,
     });
   } catch (e) {
     console.error('[getRecetaElaborado]', e);

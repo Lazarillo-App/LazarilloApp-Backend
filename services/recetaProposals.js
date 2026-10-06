@@ -194,4 +194,21 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
   return row;
 }
 
-module.exports = { snapshotReceta, snapshotRecetaElaborado, createOrUpdateProposal, enrichItemsConNombre };
+
+// Propuesta abierta (pending/in_revision) de una receta: el front la usa para marcar en gris lo no aprobado.
+async function propuestaAbiertaDe(bizId, { articleId = null, insumoId = null } = {}) {
+  const col = articleId ? 'article_id' : 'insumo_id';
+  const val = articleId || insumoId;
+  if (!val) return null;
+  const { rows } = await pool.query(
+    `SELECT id, status, payload_after FROM receta_proposals
+      WHERE business_id = $1 AND ${col} = $2 AND status = ANY($3::text[])
+      ORDER BY created_at DESC LIMIT 1`,
+    [bizId, val, ['pending', 'in_revision']]
+  );
+  if (!rows.length) return null;
+  const items = Array.isArray(rows[0].payload_after?.items) ? rows[0].payload_after.items : [];
+  return { id: rows[0].id, status: rows[0].status, items };
+}
+
+module.exports = { propuestaAbiertaDe, snapshotReceta, snapshotRecetaElaborado, createOrUpdateProposal, enrichItemsConNombre };

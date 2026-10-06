@@ -4,7 +4,7 @@ const { propagateRecipe } = require('../services/linkPropagation');
 const { logAudit } = require('../services/audit/auditLog');
 const { listObservaciones, addObservacion } = require('../services/recetaObservaciones');
 const { getEffectiveRole } = require('../services/auth/accessControl');
-const { snapshotReceta, createOrUpdateProposal } = require('../services/recetaProposals');
+const { snapshotReceta, createOrUpdateProposal, propuestaAbiertaDe } = require('../services/recetaProposals');
 const { writeArticleReceta } = require('../services/recetaWrite');
 
 async function resolveRecetaId(articleId, bizId) {
@@ -112,7 +112,8 @@ exports.getReceta = async (req, res, next) => {
       [receta.id, receta.business_id]
     );
 
-    return res.json({ ok: true, receta: { ...receta, items } });
+    const propuesta_abierta = await propuestaAbiertaDe(bizId, { articleId }).catch(() => null);
+    return res.json({ ok: true, receta: { ...receta, items }, propuesta_abierta });
   } catch (e) {
     console.error('[getReceta]', e);
     next(e);
