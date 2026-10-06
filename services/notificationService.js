@@ -355,6 +355,9 @@ async function createSyncNotificationForBusinessUsers({
         SELECT DISTINCT uid::int AS user_id FROM (
           SELECT owner_id AS uid FROM app_businesses WHERE id = $1
           UNION
+          SELECT m.user_id AS uid FROM app_memberships m
+           WHERE m.business_id = $1 AND m.role IN ('owner','manager')
+          UNION
           SELECT ua.user_id AS uid FROM user_assignments ua
            WHERE ua.revoked_at IS NULL AND ua.role IN ('admin','owner')
              AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
