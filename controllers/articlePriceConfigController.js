@@ -571,77 +571,97 @@ exports.bulkSavePriceConfig = async (req, res, next) => {
 
     const { updates = [], deletes = [] } = req.body || {};
 
-    await client.query('BEGIN');
-
-    // Guardar precios manuales
+    // IDs + valores limpios de cada lado, una sola vez.
+    const updIds = [];
+    const updVals = [];
     for (const { artId, precioManual } of updates) {
       const id = Number(artId);
       if (!Number.isFinite(id) || id === 0) continue;
-
-      // Precio ANTES, para el historial de cambios.
-      const { rows: antesRows } = await client.query(
-        `SELECT precio_manual FROM article_price_config
-          WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2 AND list_id IS NULL`,
-        [bizId, String(id)]
-      );
-      const precioAntes = antesRows[0]?.precio_manual != null ? Number(antesRows[0].precio_manual) : null;
-      const precioDespues = Number(precioManual);
-
-      await client.query(
-        `INSERT INTO article_price_config
-           (business_id, scope, scope_id, list_id, precio_manual, updated_at)
-         VALUES ($1, 'articulo', $2, NULL, $3, NOW())
-         ON CONFLICT (business_id, scope, scope_id, COALESCE(list_id, 0))
-         DO UPDATE SET precio_manual = EXCLUDED.precio_manual, updated_at = NOW()`,
-        [bizId, String(id), precioDespues]
-      );
-
-      if (precioAntes !== precioDespues) {
-        await logAudit(client, {
-          userId: uid, businessId: bizId, entityType: 'precio_manual', entityId: id,
-          action: 'update',
-          diff: { before: { precioManual: precioAntes }, after: { precioManual: precioDespues } },
-        });
-      }
+      updIds.push(String(id));
+      updVals.push(Number(precioManual));
     }
-
-    // Borrar precios manuales
+    const delIds = [];
     for (const { artId } of deletes) {
       const id = Number(artId);
       if (!Number.isFinite(id) || id === 0) continue;
+      delIds.push(String(id));
+    }
+    const allIds = [...new Set([...updIds, ...delIds])];
 
-      const { rows: antesRows } = await client.query(
-        `SELECT precio_manual FROM article_price_config
-          WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2 AND list_id IS NULL`,
-        [bizId, String(id)]
+    await client.query('BEGIN');
+
+    // Precio ANTES de todos los ids tocados, en UNA sola consulta — antes era un
+    // SELECT + INSERT/UPDATE + DELETE por artículo, en un for secuencial con
+    // await: para un rubro de 40-50 artículos eso eran 100-150 round-trips a la
+    // DB uno atrás del otro (el "tarda un montón" al borrar/aplicar por rubro).
+    const antesMap = new Map();
+    if (allIds.length) {
+      const { rows } = await client.query(
+        `SELECT scope_id, precio_manual FROM article_price_config
+          WHERE business_id = $1 AND scope = 'articulo' AND scope_id = ANY($2::text[]) AND list_id IS NULL`,
+        [bizId, allIds]
       );
-      const precioAntes = antesRows[0]?.precio_manual != null ? Number(antesRows[0].precio_manual) : null;
+      for (const r of rows) antesMap.set(r.scope_id, r.precio_manual != null ? Number(r.precio_manual) : null);
+    }
 
+    // Guardar precios manuales — un solo INSERT ... ON CONFLICT para todos los updates.
+    if (updIds.length) {
+      await client.query(
+        `INSERT INTO article_price_config (business_id, scope, scope_id, list_id, precio_manual, updated_at)
+         SELECT $1, 'articulo', x.scope_id, NULL, x.precio_manual, NOW()
+           FROM unnest($2::text[], $3::numeric[]) AS x(scope_id, precio_manual)
+         ON CONFLICT (business_id, scope, scope_id, COALESCE(list_id, 0))
+         DO UPDATE SET precio_manual = EXCLUDED.precio_manual, updated_at = NOW()`,
+        [bizId, updIds, updVals]
+      );
+    }
+
+    // Borrar precios manuales — un solo UPDATE + un solo DELETE de limpieza.
+    if (delIds.length) {
       await client.query(
         `UPDATE article_price_config
-           SET precio_manual = NULL, updated_at = NOW()
-         WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2`,
-        [bizId, String(id)]
+            SET precio_manual = NULL, updated_at = NOW()
+          WHERE business_id = $1 AND scope = 'articulo' AND scope_id = ANY($2::text[])`,
+        [bizId, delIds]
       );
-      // Limpiar filas vacías
       await client.query(
         `DELETE FROM article_price_config
-         WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2
-           AND objetivo_pct IS NULL AND precio_manual IS NULL`,
-        [bizId, String(id)]
+          WHERE business_id = $1 AND scope = 'articulo' AND scope_id = ANY($2::text[])
+            AND objetivo_pct IS NULL AND precio_manual IS NULL`,
+        [bizId, delIds]
       );
-
-      if (precioAntes != null) {
-        await logAudit(client, {
-          userId: uid, businessId: bizId, entityType: 'precio_manual', entityId: id,
-          action: 'delete',
-          diff: { before: { precioManual: precioAntes }, after: { precioManual: null } },
-        });
-      }
     }
 
     await client.query('COMMIT');
-    return res.json({ ok: true, updated: updates.length, deleted: deletes.length });
+
+    // Historial de actividad: en paralelo y DESPUÉS del commit (va contra el pool, no
+    // contra `client` — ya liberado), para no sumar más round-trips secuenciales al
+    // guardado real. logAudit ya traga sus propios errores, así que esto nunca hace
+    // fallar la respuesta aunque el historial falle.
+    const auditJobs = [];
+    for (let i = 0; i < updIds.length; i++) {
+      const scopeId = updIds[i];
+      const precioDespues = updVals[i];
+      const precioAntes = antesMap.get(scopeId) ?? null;
+      if (precioAntes === precioDespues) continue;
+      auditJobs.push(logAudit(null, {
+        userId: uid, businessId: bizId, entityType: 'precio_manual', entityId: Number(scopeId),
+        action: 'update',
+        diff: { before: { precioManual: precioAntes }, after: { precioManual: precioDespues } },
+      }));
+    }
+    for (const scopeId of delIds) {
+      const precioAntes = antesMap.get(scopeId) ?? null;
+      if (precioAntes == null) continue;
+      auditJobs.push(logAudit(null, {
+        userId: uid, businessId: bizId, entityType: 'precio_manual', entityId: Number(scopeId),
+        action: 'delete',
+        diff: { before: { precioManual: precioAntes }, after: { precioManual: null } },
+      }));
+    }
+    Promise.all(auditJobs).catch((e) => console.error('[bulkSavePriceConfig] audit log:', e?.message));
+
+    return res.json({ ok: true, updated: updIds.length, deleted: delIds.length });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('[bulkSavePriceConfig]', e);
