@@ -11,6 +11,7 @@ const pool = require('../config/db');
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { writeArticleReceta, writeElaboradoReceta } = require('../services/recetaWrite');
 const { createSyncNotification } = require('../services/notificationService');
+const { logAudit } = require('../services/audit/auditLog');
 
 async function requireAdminOrOwner(uid, bizId) {
   const role = await getEffectiveRole(uid, bizId);
@@ -157,6 +158,11 @@ exports.approveProposal = async (req, res, next) => {
         `UPDATE receta_proposals SET status = 'approved', admin_comment = $1, decided_at = NOW(), decided_by = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
         [(req.body?.comment || '').trim() || null, uid, id]
       );
+      logAudit(null, {
+        userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
+        diff: { before: { estado: 'pendiente' }, after: { estado: 'aprobada' } },
+        metadata: { decision: 'approved', nombre: proposal.payload_after?.nombre || null, propuestoPorUserId: proposal.created_by_user_id },
+      }).catch((e) => console.error('[approveProposal] audit log:', e?.message));
       return res.json({ ok: true, proposal: ap[0] });
     }
 
@@ -212,6 +218,12 @@ exports.approveProposal = async (req, res, next) => {
       metadata: { kind: 'receta_proposal_approved', proposal_id: id },
     }).catch(() => {});
 
+    logAudit(null, {
+      userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
+      diff: { before: { estado: 'pendiente' }, after: { estado: 'aprobada' } },
+      metadata: { decision: 'approved', nombre: result.receta?.nombre || null, propuestoPorUserId: proposal.created_by_user_id },
+    }).catch((e) => console.error('[approveProposal] audit log:', e?.message));
+
     return res.json({ ok: true, proposal: updatedRows[0], receta: result.receta });
   } catch (e) {
     console.error('[approveProposal]', e);
@@ -265,6 +277,12 @@ exports.rejectProposal = async (req, res, next) => {
       metadata: { kind: 'receta_proposal_rejected', proposal_id: id },
     }).catch(() => {});
 
+    logAudit(null, {
+      userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
+      diff: { before: { estado: 'pendiente' }, after: { estado: 'rechazada' } },
+      metadata: { decision: 'rejected', comment: req.body?.comment || null, propuestoPorUserId: proposal.created_by_user_id },
+    }).catch((e) => console.error('[rejectProposal] audit log:', e?.message));
+
     return res.json({ ok: true, proposal: rows[0] });
   } catch (e) {
     console.error('[rejectProposal]', e);
@@ -307,6 +325,12 @@ exports.requestRevision = async (req, res, next) => {
       message: comment,
       metadata: { kind: 'receta_proposal_revision', proposal_id: id },
     }).catch(() => {});
+
+    logAudit(null, {
+      userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
+      diff: { before: { estado: 'pendiente' }, after: { estado: 'en_revision' } },
+      metadata: { decision: 'revision', comment, propuestoPorUserId: proposal.created_by_user_id },
+    }).catch((e) => console.error('[requestRevision] audit log:', e?.message));
 
     return res.json({ ok: true, proposal: rows[0] });
   } catch (e) {
@@ -379,12 +403,18 @@ exports.marcarRevision = async (req, res, next) => {
         );
         recetaId = rr[0]?.id || null;
       }
-      await pool.query(
+      const { rows: ins } = await pool.query(
         `INSERT INTO receta_proposals (business_id, receta_id, article_id, insumo_id, created_by_user_id, status, payload_before, payload_after, admin_comment, asignado_a_user_id)
-         VALUES ($1, $2, $3, $4, $5, 'in_revision', NULL, '{}'::jsonb, $6, $7)`,
+         VALUES ($1, $2, $3, $4, $5, 'in_revision', NULL, '{}'::jsonb, $6, $7)
+         RETURNING id`,
         [bizId, recetaId, it.tipo === 'articulo' ? it.id : null, it.tipo === 'insumo' ? it.id : null, uid, comment, asignadoA]
       );
       if (recetaId) await pool.query(`UPDATE recetas SET has_pending_proposal = TRUE WHERE id = $1`, [recetaId]);
+      logAudit(null, {
+        userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: ins[0].id, action: 'create',
+        diff: { after: { estado: 'en_revision' } },
+        metadata: { decision: 'marcada_revision', comment, asignadoAUserId: asignadoA, target: it.tipo, targetId: it.id },
+      }).catch((e) => console.error('[marcarRevision] audit log:', e?.message));
       marcados++;
     }
     return res.json({ ok: true, marcados });

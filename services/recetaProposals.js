@@ -11,6 +11,7 @@
 
 const pool = require('../config/db');
 const { createSyncNotificationForBusinessUsers } = require('./notificationService');
+const { logAudit } = require('./audit/auditLog');
 
 async function snapshotReceta(articleId, bizId) {
   const { rows: recetaRows } = await pool.query(
@@ -152,6 +153,7 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
   );
 
   let row;
+  let esNueva = false;
   if (existingRows.length) {
     const { rows } = await pool.query(
       `UPDATE receta_proposals
@@ -162,6 +164,7 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
     );
     row = rows[0];
   } else {
+    esNueva = true;
     const recetaId = snapshotBefore?.id || null;
     const { rows } = await pool.query(
       `INSERT INTO receta_proposals
@@ -190,6 +193,26 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
       onlyAdmins: true,
     }).catch((e) => console.error('[recetaProposals] error notificando propuesta:', e?.message));
   }
+
+  // Historial de actividad: antes esto no quedaba registrado para nada — un Staff
+  // podía proponer cambios una y otra vez y su historial (Configuración > Historial
+  // de actividad, filtrado por esa persona) no mostraba ni una fila. Se loguea bajo
+  // el usuario que PROPONE (uid), no el admin que después decide (eso se audita
+  // aparte en recetaProposalsController.js).
+  logAudit(null, {
+    userId: uid,
+    businessId: bizId,
+    entityType: 'receta_proposal',
+    entityId: row.id,
+    action: esNueva ? 'create' : 'update',
+    diff: { after: { items: (bodyEnriquecido.items || []).length, rendimiento: bodyEnriquecido.porciones ?? null } },
+    metadata: {
+      estado: 'pendiente',
+      nombre: nombreParaAviso || bodyEnriquecido.nombre || null,
+      target: articleId ? 'articulo' : 'insumo',
+      targetId: articleId || insumoId,
+    },
+  }).catch((e) => console.error('[recetaProposals] error en audit log:', e?.message));
 
   return row;
 }
