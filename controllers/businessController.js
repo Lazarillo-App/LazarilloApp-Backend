@@ -228,10 +228,17 @@ exports.update = async (req, res) => {
     'desperdicio_global_pct',   // ← merma global (%)
     'notificar_alta_articulo_insumo',
   ];
+  // Estas dos son booleanas (on/off), no numéricas — el Number(...) de abajo las
+  // convertía en 0/1 (Number(false)=0, Number(true)=1), guardando un número donde
+  // todo lo demás esperaba un boolean. No rompía las comparaciones existentes
+  // (todas usan ?? o coerción truthy), pero era el dato mal tipado de raíz.
+  const BOOL_CONFIG_KEYS = new Set(['redondeo_mostrar_modal', 'notificar_alta_articulo_insumo']);
   const configPatch = {};
   for (const key of CONFIG_KEYS) {
     if (incoming[key] !== undefined) {
-      configPatch[key] = incoming[key] != null ? Number(incoming[key]) : null;
+      configPatch[key] = incoming[key] == null
+        ? null
+        : (BOOL_CONFIG_KEYS.has(key) ? !!incoming[key] : Number(incoming[key]));
     }
   }
   const hasConfigPatch = Object.keys(configPatch).length > 0;
