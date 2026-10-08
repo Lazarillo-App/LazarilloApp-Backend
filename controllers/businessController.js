@@ -3,6 +3,7 @@ const path = require('path');
 const pool = require('../config/db');
 const { decryptSecretCompat, encryptSecret } = require('../utils/cryptoField');
 const { rebuildArticleMapFromAppArticles } = require('../services/maxiArticleMapService');
+const { getEffectiveRole } = require('../services/auth/accessControl');
 
 // fetch compatible en Node 18+ (usa global)
 const fetch = (...args) => globalThis.fetch(...args);
@@ -450,12 +451,19 @@ exports.maxiStatus = async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
     if (!Number.isFinite(bizId)) return res.status(400).json({ error: 'invalid_business_id' });
 
-    const { rows: access } = await pool.query(`
-  SELECT b.props, b.created_from
-    FROM app_businesses b
-        LEFT JOIN user_businesses ub ON ub.business_id=b.id AND ub.user_id=$2
-       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id IS NOT NULL)
-       LIMIT 1`, [bizId, uid]);
+    // Antes este chequeo solo miraba owner_id/user_businesses (mecanismos LEGACY) —
+    // un admin con acceso real vía user_assignments (el owner le "da" el negocio,
+    // el camino moderno que usa el resto de la app a través de getEffectiveRole)
+    // nunca aparecía acá, así que esto daba 404 y el front mostraba "Maxi no
+    // configurado" aunque sí lo estuviera — el admin veía todo igual que el owner
+    // EXCEPTO sincronizar, porque esta pantalla de estado fallaba antes de llegar
+    // a mirar el POS. Mismo bug en maxiSave, más abajo.
+    const effectiveRole = await getEffectiveRole(uid, bizId);
+    if (!effectiveRole) return res.status(404).json({ error: 'not_found' });
+    const { rows: access } = await pool.query(
+      `SELECT props, created_from FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [bizId]
+    );
     if (!access[0]) return res.status(404).json({ error: 'not_found' });
 
     const props = access[0].props || {};
@@ -488,17 +496,12 @@ exports.maxiSave = async (req, res) => {
     bodyKeys: Object.keys(req.body || {}),
   });
 
-  // ✅ Validar permisos
-  const { rows: belongs } = await pool.query(
-    `SELECT 1
-       FROM app_businesses b
-       LEFT JOIN user_businesses ub ON ub.business_id = b.id
-      WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
-      LIMIT 1`,
-    [bizId, uid]
-  );
-
-  if (!belongs.length) {
+  // ✅ Validar permisos — mismo fix que maxiStatus: el chequeo legacy (owner_id/
+  // user_businesses) no veía a un admin con acceso real vía user_assignments.
+  // Guardar las credenciales de Maxi queda para owner/admin (no para roles más
+  // bajos como staff), igual que el resto de la configuración del negocio.
+  const effectiveRole = await getEffectiveRole(uid, bizId);
+  if (!effectiveRole || !['owner', 'admin'].includes(effectiveRole)) {
     return res.status(404).json({ error: 'not_found' });
   }
 
