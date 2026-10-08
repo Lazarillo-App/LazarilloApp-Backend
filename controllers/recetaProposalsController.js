@@ -152,6 +152,23 @@ exports.approveProposal = async (req, res, next) => {
       return res.status(409).json({ ok: false, error: 'already_approved' });
     }
 
+    // BUG CRÍTICO (encontrado tras borrado real de recetas): "marcar a revisión"
+    // (ver marcarRevision más abajo) inserta la propuesta con payload_after = '{}' a
+    // propósito — es solo un flag de "revisar esto", sin ningún contenido todavía.
+    // Aprobar ESA propuesta como si fuera una real (de un staff que guardó cambios)
+    // llamaba a writeArticleReceta/writeElaboradoReceta con un body vacío, que
+    // BORRA la receta entera (nombre a null, costo a 0, DELETE de receta_items, sin
+    // volver a insertar nada porque items también venía vacío). Una propuesta real
+    // SIEMPRE trae `items` (el payload que arma RecetaModal al guardar, aunque sea un
+    // array vacío a propósito) — una marcada a revisión nunca lo trae. Se bloquea acá.
+    const tieneContenidoReal = proposal.payload_after
+      && typeof proposal.payload_after === 'object'
+      && Object.prototype.hasOwnProperty.call(proposal.payload_after, 'items');
+    if (proposal.payload_after?.tipo !== 'insumo_nuevo' && !tieneContenidoReal) {
+      const msg = 'Esta propuesta fue marcada a revisión sin ningún cambio cargado todavía — no hay nada que aprobar. Quien la tiene asignada tiene que abrir la receta, cargar el cambio y guardarlo primero.';
+      return res.status(409).json({ ok: false, error: 'sin_contenido_para_aplicar', detail: msg, message: msg });
+    }
+
     if (proposal.payload_after?.tipo === 'insumo_nuevo') {
       await pool.query(`UPDATE insumos SET estado = 'activo', updated_at = NOW() WHERE id = $1 AND business_id = $2`, [proposal.insumo_id, bizId]);
       const { rows: ap } = await pool.query(
