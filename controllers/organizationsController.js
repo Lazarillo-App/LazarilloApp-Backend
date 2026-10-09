@@ -7,14 +7,36 @@ const { getEffectiveRoleOnScope, getEffectiveRole } = require('../services/auth/
    HELPERS
 ══════════════════════════════════════════════════════════ */
 
+// Antes esto solo miraba owner_id/user_businesses (mecanismos LEGACY) — un admin
+// con acceso real vía user_assignments (el owner le "da" un negocio de la org, el
+// camino moderno que usa getEffectiveRole/getEffectiveRoleOnScope en el resto de la
+// app) nunca pasaba por acá, así que se quedaba afuera de ver/editar la org y crear
+// negocios desde un grupo — aunque el propio código de abajo (updateOrganization)
+// diga explícitamente "el admin tiene los mismos derechos que el owner". Mismo bug
+// que el de maxiStatus/maxiSave (ver businessController.js).
 async function checkOrgAccess(orgId, userId) {
   const { rows } = await pool.query(
     `SELECT 1
        FROM organizations o
-       JOIN app_businesses b ON b.organization_id = o.id
-       LEFT JOIN user_businesses ub ON ub.business_id = b.id AND ub.user_id = $2
       WHERE o.id = $1
-        AND (b.owner_id = $2 OR ub.user_id IS NOT NULL)
+        AND (
+          EXISTS (SELECT 1 FROM app_businesses b WHERE b.organization_id = o.id AND b.owner_id = $2)
+          OR EXISTS (
+            SELECT 1 FROM user_assignments ua
+             WHERE ua.user_id = $2 AND ua.revoked_at IS NULL
+               AND (
+                 (ua.scope_type = 'organization' AND ua.scope_id = o.id)
+                 OR (ua.scope_type = 'business' AND ua.scope_id IN (
+                       SELECT id FROM app_businesses WHERE organization_id = o.id
+                     ))
+               )
+          )
+          OR EXISTS (
+            SELECT 1 FROM user_businesses ub
+              JOIN app_businesses b2 ON b2.id = ub.business_id
+             WHERE b2.organization_id = o.id AND ub.user_id = $2
+          )
+        )
       LIMIT 1`,
     [orgId, userId]
   );
@@ -65,8 +87,22 @@ exports.getMyOrganization = async (req, res, next) => {
          MAX(CASE WHEN b.id = $2 THEN 1 ELSE 0 END) AS es_org_activa
        FROM organizations o
        JOIN app_businesses b ON b.organization_id = o.id
-       LEFT JOIN user_businesses ub ON ub.business_id = b.id AND ub.user_id = $1
-       WHERE (b.owner_id = $1 OR ub.user_id IS NOT NULL)
+       -- Mismo fix que checkOrgAccess: antes solo entraba un negocio acá por
+       -- owner_id/user_businesses (legacy) — un admin con acceso vía
+       -- user_assignments (directo al negocio, o heredado de la organización) no
+       -- lo veía listado, aunque sí pudiera abrirlo entrando por su URL directa.
+       WHERE (
+         b.owner_id = $1
+         OR EXISTS (SELECT 1 FROM user_businesses ub WHERE ub.business_id = b.id AND ub.user_id = $1)
+         OR EXISTS (
+           SELECT 1 FROM user_assignments ua
+            WHERE ua.user_id = $1 AND ua.revoked_at IS NULL
+              AND (
+                (ua.scope_type = 'business' AND ua.scope_id = b.id)
+                OR (ua.scope_type = 'organization' AND ua.scope_id = o.id)
+              )
+         )
+       )
        GROUP BY o.id
        -- 1º la org que contiene el negocio activo; luego la más reciente como fallback
        ORDER BY es_org_activa DESC, o.created_at DESC
@@ -422,26 +458,24 @@ exports.createOrganization = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // Verificar acceso al negocio
-    const { rows: bizCheck } = await client.query(
-      `SELECT id, organization_id FROM app_businesses
-        WHERE id = $1
-          AND (owner_id = $2 OR id IN (
-            SELECT business_id FROM user_businesses WHERE user_id = $2
-          ))
-        LIMIT 1`,
-      [bizId, uid]
-    );
-
-    if (!bizCheck.length) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ ok: false, error: 'forbidden_or_not_found' });
-    }
-
+    // Verificar acceso al negocio — getEffectiveRole ya cubre owner_id, user_businesses
+    // (legacy) y user_assignments (directo o heredado de org), así que alcanza con
+    // este único chequeo. Antes había además un pre-chequeo legacy-only (solo owner_id/
+    // user_businesses) que bloqueaba con 403 a un admin con acceso real vía
+    // user_assignments ANTES de llegar a mirar el rol de verdad acá abajo.
     const callerRoleOnBiz = await getEffectiveRole(uid, bizId);
     if (!['owner', 'admin'].includes(callerRoleOnBiz)) {
       await client.query('ROLLBACK');
       return res.status(403).json({ ok: false, error: 'owner_or_admin_required' });
+    }
+
+    const { rows: bizCheck } = await client.query(
+      `SELECT id, organization_id FROM app_businesses WHERE id = $1 LIMIT 1`,
+      [bizId]
+    );
+    if (!bizCheck.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'business_not_found' });
     }
 
     if (bizCheck[0].organization_id) {

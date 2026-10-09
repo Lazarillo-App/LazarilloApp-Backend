@@ -54,25 +54,9 @@ function clampToYesterday(fromStr, toStr) {
 }
 
 /* ───────────────── Negocios (CRUD + selección) ───────────────── */
-exports.listMine = async (req, res) => {
-  try {
-    const uid = req.user?.id;
-    if (!uid) return res.status(401).json({ error: 'unauthorized' });
-
-    const { rows } = await pool.query(`
-      SELECT DISTINCT b.id, b.name, b.slug, b.props, b.owner_id, b.created_at
-      FROM app_businesses b
-      LEFT JOIN user_businesses ub ON ub.business_id = b.id
-      WHERE (ub.user_id = $1 OR b.owner_id = $1)
-      ORDER BY b.created_at ASC;
-    `, [uid]);
-
-    res.json({ items: rows.map(attachBranding) });
-  } catch (e) {
-    console.error('GET /api/businesses error:', e);
-    res.status(500).json({ error: 'internal' });
-  }
-};
+// (el exports.listMine real — que cubre también user_assignments — está más abajo
+// en este archivo; esta definición vieja quedaba pisada/sin usar, se saca para no
+// repetir la confusión de "¿cuál de las dos corre realmente?")
 
 exports.getActive = async (req, res) => {
   try {
@@ -97,14 +81,12 @@ exports.setActive = async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
     if (!businessId) return res.status(400).json({ error: 'businessId requerido' });
 
-    const { rows: belongs } = await pool.query(`
-      SELECT 1
-        FROM app_businesses b
-        LEFT JOIN user_businesses ub ON ub.business_id=b.id
-       WHERE b.id=$1 AND (b.owner_id=$2 OR ub.user_id=$2)
-       LIMIT 1
-    `, [businessId, uid]);
-    if (!belongs.length) return res.status(403).json({ error: 'forbidden' });
+    // Mismo fix que maxiStatus/maxiSave/checkOrgAccess: el chequeo legacy (owner_id/
+    // user_businesses) no veía a un admin con acceso real vía user_assignments. El
+    // front llama esto en "best-effort" (no bloquea el cambio de negocio si falla,
+    // usa localStorage igual), pero dejaba active_business_id desactualizado en la DB.
+    const effectiveRole = await getEffectiveRole(uid, Number(businessId));
+    if (!effectiveRole) return res.status(403).json({ error: 'forbidden' });
 
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [businessId, uid]);
     res.json({ ok: true, activeBusinessId: Number(businessId) });
@@ -343,15 +325,9 @@ exports.select = async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'unauthorized' });
     if (!id) return res.status(400).json({ error: 'id_required' });
 
-    const { rows: belongs } = await pool.query(
-      `SELECT 1
-         FROM app_businesses b
-         LEFT JOIN user_businesses ub ON ub.business_id = b.id
-        WHERE b.id = $1 AND (b.owner_id = $2 OR ub.user_id = $2)
-        LIMIT 1`,
-      [id, uid]
-    );
-    if (!belongs.length) return res.status(404).json({ error: 'not_found' });
+    // Mismo fix que maxiStatus/maxiSave/setActive/checkOrgAccess.
+    const effectiveRole = await getEffectiveRole(uid, id);
+    if (!effectiveRole) return res.status(404).json({ error: 'not_found' });
 
     await pool.query(
       `UPDATE app_users SET active_business_id = $1 WHERE id = $2`,
