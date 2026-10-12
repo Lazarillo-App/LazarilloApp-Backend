@@ -3088,6 +3088,7 @@ exports.usoInsumo = async (req, res) => {
          ri.unidad,
          ri.merma            AS aplica_merma,
          ri.merma_id,
+         ri.merma_ids,
          im.nombre           AS merma_nombre,
          r.article_id,
          r.insumo_id         AS receta_insumo_id,
@@ -3116,6 +3117,7 @@ exports.usoInsumo = async (req, res) => {
       unidad: x.unidad || 'u',
       aplica_merma: !!x.aplica_merma,
       merma_id: x.merma_id ?? null,
+      merma_ids: Array.isArray(x.merma_ids) && x.merma_ids.length ? x.merma_ids : (x.merma_id != null ? [x.merma_id] : []),
       merma_nombre: x.merma_nombre || null,
     }));
     return res.json({ ok: true, uso, total: uso.length });
@@ -3193,18 +3195,21 @@ exports.usoInsumoResumen = async (req, res) => {
   }
 };
 
-// PUT /insumos/:id/uso/:itemId/merma  body { mermaId: number|null }
-// Reasigna la merma de UN ítem puntual (una fila de la pestaña Uso) sin pasar por
-// el guardado completo de esa receta. Ajusta costo_unitario (÷ factor viejo × factor
-// nuevo, mismo criterio que mermas_update al editar los pesos de una merma) y
-// recalcula la receta afectada.
+// PUT /insumos/:id/uso/:itemId/merma  body { mermaIds: number[] }  (admite legacy { mermaId })
+// Reasigna la(s) merma(s) de UN ítem puntual (una fila de la pestaña Uso) sin pasar
+// por el guardado completo de esa receta — puede ser más de una combinada, igual
+// que el multi-select de "avanzadas" en el editor de receta. Ajusta costo_unitario
+// (÷ factor viejo × factor nuevo combinado, mismo criterio que mermas_update al
+// editar los pesos de una merma) y recalcula la receta afectada.
 exports.usoInsumoCambiarMerma = async (req, res) => {
   const client = await pool.connect();
   try {
     const bizId = getBusinessId(req);
     const insumoId = Number(req.params.id);
     const itemId = Number(req.params.itemId);
-    const mermaIdNuevo = req.body?.mermaId != null ? Number(req.body.mermaId) : null;
+    const mermaIdsNuevo = Array.isArray(req.body?.mermaIds)
+      ? req.body.mermaIds.map(Number).filter(n => Number.isFinite(n) && n > 0)
+      : (req.body?.mermaId != null ? [Number(req.body.mermaId)] : []);
     if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
     if (!Number.isFinite(insumoId) || !Number.isFinite(itemId)) {
       return res.status(400).json({ ok: false, error: 'ID inválido' });
@@ -3213,7 +3218,7 @@ exports.usoInsumoCambiarMerma = async (req, res) => {
     await client.query('BEGIN');
 
     const { rows: itemRows } = await client.query(
-      `SELECT ri.id, ri.receta_id, ri.costo_unitario, ri.merma_id, r.business_id
+      `SELECT ri.id, ri.receta_id, ri.costo_unitario, ri.merma_id, ri.merma_ids, r.business_id
          FROM receta_items ri
          JOIN recetas r ON r.id = ri.receta_id
         WHERE ri.id = $1 AND ri.insumo_id = $2`,
@@ -3231,33 +3236,32 @@ exports.usoInsumoCambiarMerma = async (req, res) => {
       return res.status(403).json({ ok: false, error: 'No autorizado' });
     }
 
-    const factorDe = async (mermaId) => {
-      if (mermaId == null) return 1;
+    // Factor combinado: producto de (peso_inicial/peso_final) de cada merma elegida
+    // — mismo criterio que el renderValue del multi-select de "avanzadas". `null`
+    // significa que alguna de las ids no existe o no pertenece a este insumo.
+    const factorCombinadoDe = async (ids) => {
+      if (!ids.length) return 1;
       const { rows } = await client.query(
-        `SELECT peso_inicial, peso_final FROM insumo_mermas WHERE id = $1`, [mermaId]
+        `SELECT id, peso_inicial, peso_final FROM insumo_mermas WHERE id = ANY($1::int[]) AND insumo_id = $2`,
+        [ids, insumoId]
       );
-      if (!rows.length) return null; // merma inexistente
-      return Number(rows[0].peso_final) > 0
-        ? Number(rows[0].peso_inicial) / Number(rows[0].peso_final)
-        : 1;
+      if (rows.length !== ids.length) return null;
+      return rows.reduce((acc, m) => {
+        const f = Number(m.peso_final) > 0 ? Number(m.peso_inicial) / Number(m.peso_final) : 1;
+        return acc * f;
+      }, 1);
     };
 
-    let factorNuevo = 1;
-    if (mermaIdNuevo != null) {
-      // La merma elegida debe pertenecer a ESTE insumo
-      const { rows: mRows } = await client.query(
-        `SELECT peso_inicial, peso_final FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
-        [mermaIdNuevo, insumoId]
-      );
-      if (!mRows.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ ok: false, error: 'La merma no pertenece a este insumo' });
-      }
-      factorNuevo = Number(mRows[0].peso_final) > 0
-        ? Number(mRows[0].peso_inicial) / Number(mRows[0].peso_final)
-        : 1;
+    const factorNuevo = await factorCombinadoDe(mermaIdsNuevo);
+    if (factorNuevo == null) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ ok: false, error: 'Alguna merma no pertenece a este insumo' });
     }
-    const factorViejo = (await factorDe(item.merma_id)) ?? 1;
+
+    const idsViejos = Array.isArray(item.merma_ids) && item.merma_ids.length
+      ? item.merma_ids
+      : (item.merma_id != null ? [item.merma_id] : []);
+    const factorViejo = (await factorCombinadoDe(idsViejos)) ?? 1;
 
     const costoViejo = Number(item.costo_unitario) || 0;
     const costoNuevo = factorViejo > 0 ? (costoViejo / factorViejo) * factorNuevo : costoViejo * factorNuevo;
@@ -3266,7 +3270,7 @@ exports.usoInsumoCambiarMerma = async (req, res) => {
       `UPDATE receta_items
           SET merma_id = $1, merma_ids = $2, costo_unitario = $3, updated_at = NOW()
         WHERE id = $4`,
-      [mermaIdNuevo, mermaIdNuevo != null ? [mermaIdNuevo] : null, Number(costoNuevo.toFixed(6)), itemId]
+      [mermaIdsNuevo[0] ?? null, mermaIdsNuevo.length ? mermaIdsNuevo : null, Number(costoNuevo.toFixed(6)), itemId]
     );
     await recalcularCostoRecetas([item.receta_id], client);
 
@@ -3274,7 +3278,7 @@ exports.usoInsumoCambiarMerma = async (req, res) => {
       userId: req.user?.id || null, businessId: item.business_id,
       entityType: 'receta_item_merma', entityId: itemId,
       action: 'update',
-      diff: { before: { mermaId: item.merma_id }, after: { mermaId: mermaIdNuevo } },
+      diff: { before: { mermaIds: idsViejos }, after: { mermaIds: mermaIdsNuevo } },
       metadata: { insumoId, recetaId: item.receta_id },
     });
 
