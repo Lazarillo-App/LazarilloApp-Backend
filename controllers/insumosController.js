@@ -3125,6 +3125,74 @@ exports.usoInsumo = async (req, res) => {
   }
 };
 
+// GET /insumos/:id/uso-resumen?limit=5 → versión liviana de usoInsumo para el
+// tooltip de la columna "Uso": top N recetas (deduplicadas) ordenadas por venta
+// del artículo en los últimos 30 días — las de un elaborado sin venta propia
+// (o sin ventas en el período) quedan al final, en 0. No reemplaza la pestaña
+// "Uso" completa (TabUsoInsumo), que sigue trayendo el detalle fila por fila.
+exports.usoInsumoResumen = async (req, res) => {
+  try {
+    const businessId = Number(req.business?.id) || getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    if (!Number.isFinite(businessId) || !Number.isFinite(insumoId)) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 5, 1), 20);
+    const to = new Date();
+    const from = new Date(to);
+    from.setDate(from.getDate() - 30);
+    const toStr = to.toISOString().slice(0, 10);
+    const fromStr = from.toISOString().slice(0, 10);
+
+    const { rows } = await pool.query(
+      `SELECT DISTINCT r.id AS receta_id, r.article_id, r.insumo_id AS receta_insumo_id,
+              r.nombre AS receta_nombre,
+              ma.nombre AS art_nombre, ie.nombre AS elab_nombre
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+         LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
+         LEFT JOIN insumos ie ON ie.id = r.insumo_id
+        WHERE ri.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE`,
+      [insumoId, businessId]
+    );
+
+    const articleIds = [...new Set(rows.filter(r => r.article_id != null).map(r => Number(r.article_id)))];
+    const ventasByArticle = new Map();
+    if (articleIds.length) {
+      const { rows: ventas } = await pool.query(
+        `SELECT article_id, SUM(amount)::numeric AS total_amount, SUM(qty)::numeric AS total_qty
+           FROM sales_daily_items
+          WHERE business_id = $1 AND day BETWEEN $2::date AND $3::date AND article_id = ANY($4::int[])
+          GROUP BY article_id`,
+        [businessId, fromStr, toStr, articleIds]
+      );
+      for (const v of ventas) {
+        ventasByArticle.set(Number(v.article_id), { amount: Number(v.total_amount) || 0, qty: Number(v.total_qty) || 0 });
+      }
+    }
+
+    const items = rows
+      .map((r) => {
+        const esElaborado = r.receta_insumo_id != null;
+        const nombre = esElaborado ? (r.elab_nombre || r.receta_nombre) : (r.art_nombre || r.receta_nombre);
+        const ventas = r.article_id != null ? (ventasByArticle.get(Number(r.article_id)) || { amount: 0, qty: 0 }) : { amount: 0, qty: 0 };
+        return {
+          receta_id: r.receta_id,
+          nombre: nombre || `Receta #${r.receta_id}`,
+          es_elaborado: esElaborado,
+          ventas_amount: ventas.amount,
+          ventas_qty: ventas.qty,
+        };
+      })
+      .sort((a, b) => b.ventas_amount - a.ventas_amount);
+
+    return res.json({ ok: true, total: items.length, items: items.slice(0, limit) });
+  } catch (e) {
+    console.error('usoInsumoResumen error:', { code: e.code, msg: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
 // PUT /insumos/:id/uso/:itemId/merma  body { mermaId: number|null }
 // Reasigna la merma de UN ítem puntual (una fila de la pestaña Uso) sin pasar por
 // el guardado completo de esa receta. Ajusta costo_unitario (÷ factor viejo × factor

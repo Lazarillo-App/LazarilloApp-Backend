@@ -104,6 +104,7 @@ router.post('/:id/bonificacion/descartar', blockStaffWrite, ctrl.descartarBonifi
 
 /* ================== USO (recetas donde se usa el insumo) ================== */
 router.get('/:id/uso', ctrl.usoInsumo);
+router.get('/:id/uso-resumen', ctrl.usoInsumoResumen);
 router.put('/:id/uso/:itemId/merma', blockStaffWrite, ctrl.usoInsumoCambiarMerma);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
