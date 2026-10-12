@@ -10,6 +10,7 @@
 const pool = require('../config/db');
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { writeArticleReceta, writeElaboradoReceta } = require('../services/recetaWrite');
+const { crearPropuestaDiscontinuarInsumo } = require('../services/recetaProposals');
 const { createSyncNotification } = require('../services/notificationService');
 const { logAudit } = require('../services/audit/auditLog');
 
@@ -164,12 +165,58 @@ exports.approveProposal = async (req, res, next) => {
     const tieneContenidoReal = proposal.payload_after
       && typeof proposal.payload_after === 'object'
       && Object.prototype.hasOwnProperty.call(proposal.payload_after, 'items');
-    if (proposal.payload_after?.tipo !== 'insumo_nuevo' && !tieneContenidoReal) {
+    const tipoEspecial = proposal.payload_after?.tipo;
+    // 'discontinuar' (Vista Operación, Fase 4) es, como 'insumo_nuevo', una acción
+    // directa sin payload de receta — nunca va a traer `items`, así que se excluye
+    // del mismo chequeo que bloquea aprobar una "marcada a revisión" vacía.
+    const tiposSinContenidoEsperado = ['insumo_nuevo', 'discontinuar'];
+    if (!tiposSinContenidoEsperado.includes(tipoEspecial) && !tieneContenidoReal) {
       const msg = 'Esta propuesta fue marcada a revisión sin ningún cambio cargado todavía — no hay nada que aprobar. Quien la tiene asignada tiene que abrir la receta, cargar el cambio y guardarlo primero.';
       return res.status(409).json({ ok: false, error: 'sin_contenido_para_aplicar', detail: msg, message: msg });
     }
 
-    if (proposal.payload_after?.tipo === 'insumo_nuevo') {
+    if (tipoEspecial === 'discontinuar' && proposal.insumo_id) {
+      const { rows: discRows } = await pool.query(
+        `SELECT id FROM insumo_groups WHERE business_id = $1 AND lower(nombre) IN ('discontinuados','descontinuados') LIMIT 1`,
+        [bizId]
+      );
+      let discGroupId = discRows[0]?.id;
+      if (!discGroupId) {
+        const { rows: created } = await pool.query(
+          `INSERT INTO insumo_groups (business_id, nombre, descripcion) VALUES ($1, 'Discontinuados', 'Insumos discontinuados') RETURNING id`,
+          [bizId]
+        );
+        discGroupId = created[0].id;
+      }
+      await pool.query(
+        `INSERT INTO insumo_group_items (group_id, insumo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [discGroupId, proposal.insumo_id]
+      );
+
+      const { rows: ap } = await pool.query(
+        `UPDATE receta_proposals SET status = 'approved', admin_comment = $1, decided_at = NOW(), decided_by = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
+        [(req.body?.comment || '').trim() || null, uid, id]
+      );
+
+      createSyncNotification({
+        businessId: bizId,
+        userId: proposal.created_by_user_id,
+        type: 'ui_action',
+        title: 'Tu propuesta fue aprobada',
+        message: 'Se discontinuó el insumo que propusiste.',
+        metadata: { kind: 'receta_proposal_approved', proposal_id: id },
+      }).catch(() => {});
+
+      logAudit(null, {
+        userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
+        diff: { before: { estado: 'pendiente' }, after: { estado: 'aprobada' } },
+        metadata: { decision: 'approved', tipo: 'discontinuar', propuestoPorUserId: proposal.created_by_user_id },
+      }).catch((e) => console.error('[approveProposal] audit log:', e?.message));
+
+      return res.json({ ok: true, proposal: ap[0] });
+    }
+
+    if (tipoEspecial === 'insumo_nuevo') {
       await pool.query(`UPDATE insumos SET estado = 'activo', updated_at = NOW() WHERE id = $1 AND business_id = $2`, [proposal.insumo_id, bizId]);
       const { rows: ap } = await pool.query(
         `UPDATE receta_proposals SET status = 'approved', admin_comment = $1, decided_at = NOW(), decided_by = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
@@ -352,6 +399,36 @@ exports.requestRevision = async (req, res, next) => {
     return res.json({ ok: true, proposal: rows[0] });
   } catch (e) {
     console.error('[requestRevision]', e);
+    next(e);
+  }
+};
+
+/**
+ * POST /businesses/:businessId/receta-proposals/insumo/:insumoId/discontinuar
+ * Vista Operación, Fase 4: Staff propone discontinuar un insumo (elaborado o
+ * no) desde el menú de 3 puntos de la tabla de Insumos. No se aplica directo
+ * — queda pendiente en la Bandeja hasta que un admin/owner la apruebe.
+ */
+exports.proponerDiscontinuarInsumo = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const insumoId = Number(req.params.insumoId);
+    const uid = req.user?.id;
+    if (!bizId || !insumoId || !uid) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const { rows } = await pool.query(
+      `SELECT id, nombre FROM insumos WHERE id = $1 AND business_id = $2`,
+      [insumoId, bizId]
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'insumo_not_found' });
+
+    const row = await crearPropuestaDiscontinuarInsumo({ bizId, insumoId, uid, insumoNombre: rows[0].nombre });
+    return res.json({ ok: true, proposal: row });
+  } catch (e) {
+    if (e?.code === 'duplicate_proposal') {
+      return res.status(409).json({ ok: false, error: 'duplicate_proposal', message: e.message });
+    }
+    console.error('[proponerDiscontinuarInsumo]', e);
     next(e);
   }
 };

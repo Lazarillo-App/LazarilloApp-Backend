@@ -289,7 +289,63 @@ async function resolverMarcasDeRevision({ bizId, articleId = null, insumoId = nu
   }
 }
 
+/**
+ * Vista Operación — Fase 4: Staff propone discontinuar un insumo (elaborado o
+ * no) desde el menú de 3 puntos de la tabla. No se aplica directo (igual que
+ * una receta) — queda pendiente hasta que un admin/owner la apruebe desde la
+ * Bandeja. payload_after = { tipo: 'discontinuar' }, sin `items` a propósito:
+ * approveProposal ya sabe tratar este tipo como "sin contenido esperado"
+ * (mismo criterio que 'insumo_nuevo') y aplica la discontinuación de verdad.
+ */
+async function crearPropuestaDiscontinuarInsumo({ bizId, insumoId, uid, insumoNombre }) {
+  const sectorId = await resolveSectorId(uid, bizId);
+
+  const { rows: dup } = await pool.query(
+    `SELECT id FROM receta_proposals
+      WHERE business_id = $1 AND insumo_id = $2 AND status = ANY($3::text[])
+        AND payload_after->>'tipo' = 'discontinuar'
+      LIMIT 1`,
+    [bizId, insumoId, ['pending', 'in_revision']]
+  );
+  if (dup.length) {
+    const err = new Error('Ya hay una propuesta de discontinuar pendiente para este insumo.');
+    err.code = 'duplicate_proposal';
+    throw err;
+  }
+
+  const payloadAfter = { tipo: 'discontinuar' };
+  const { rows } = await pool.query(
+    `INSERT INTO receta_proposals
+       (business_id, insumo_id, sector_id, created_by_user_id, status, payload_after, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, NOW(), NOW())
+     RETURNING *`,
+    [bizId, insumoId, sectorId, uid, JSON.stringify(payloadAfter)]
+  );
+  const row = rows[0];
+
+  createSyncNotificationForBusinessUsers({
+    businessId: bizId,
+    type: 'ui_action',
+    title: 'Propuesta para discontinuar un insumo',
+    message: `Se propuso discontinuar "${insumoNombre}". Andá a Configuración > Aprobaciones para revisarlo.`,
+    metadata: { kind: 'receta_proposal', proposal_id: row.id },
+    onlyAdmins: true,
+  }).catch((e) => console.error('[crearPropuestaDiscontinuarInsumo] error notificando:', e?.message));
+
+  logAudit(null, {
+    userId: uid,
+    businessId: bizId,
+    entityType: 'receta_proposal',
+    entityId: row.id,
+    action: 'create',
+    diff: { after: payloadAfter },
+    metadata: { estado: 'pendiente', nombre: insumoNombre || null, target: 'insumo', targetId: insumoId, tipo: 'discontinuar' },
+  }).catch((e) => console.error('[crearPropuestaDiscontinuarInsumo] error en audit log:', e?.message));
+
+  return row;
+}
+
 module.exports = {
   propuestaAbiertaDe, snapshotReceta, snapshotRecetaElaborado, createOrUpdateProposal,
-  enrichItemsConNombre, resolverMarcasDeRevision,
+  enrichItemsConNombre, resolverMarcasDeRevision, crearPropuestaDiscontinuarInsumo,
 };

@@ -8,6 +8,7 @@ const ctrl = require('../controllers/recetaProposalsController');
 router.get('/', ctrl.listProposals);
 router.get('/mine', ctrl.listMyProposals);
 router.post('/marcar-revision', ctrl.marcarRevision);
+router.post('/insumo/:insumoId/discontinuar', ctrl.proponerDiscontinuarInsumo);
 router.get('/:id', ctrl.getProposal);
 router.post('/:id/approve', ctrl.approveProposal);
 router.post('/:id/reject', ctrl.rejectProposal);
