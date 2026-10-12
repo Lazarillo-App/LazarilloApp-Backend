@@ -129,7 +129,7 @@ exports.listar = async (req, res) => {
       where.push(`i.estado IN ('activo','pendiente_aprobacion')`);
     } else if (estado && estado !== 'all') {
       params.push(estado);
-      where.push(`i.estado = ${params.length}`);
+      where.push(`i.estado = $${params.length}`);
     }
 
     if (groupId) {
