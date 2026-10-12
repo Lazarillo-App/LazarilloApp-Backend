@@ -10,6 +10,7 @@ router.get('/',           ctrl.list);
 router.get('/suppliers',       ctrl.listSuppliers);
 router.get('/export/csv',      ctrl.exportCsv);
 router.get('/summary',         ctrl.summary);
+router.get('/food-cost',       ctrl.foodCost);
 router.get('/first-date',      ctrl.firstDate);
 
 // ── Gestión de lotes ──────────────────────────────────────────

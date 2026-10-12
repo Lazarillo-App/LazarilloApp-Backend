@@ -386,6 +386,23 @@ router.get('/:id/config', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* KPI de Food Cost — array completo, separado de /config para no engordar ese
+   payload (se consulta en cada carga de ConfigContext). Se guarda con el
+   PATCH /:id genérico de arriba, mandando { props: { food_cost_kpis: [...] } }. */
+router.get('/:id/food-cost-kpis', async (req, res, next) => {
+  try {
+    const pool = require('../config/db');
+    const bizId = Number(req.params.id);
+    if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'ID inválido' });
+    const { rows } = await pool.query(
+      'SELECT props FROM app_businesses WHERE id = $1 LIMIT 1',
+      [bizId]
+    );
+    const kpis = rows[0]?.props?.food_cost_kpis;
+    res.json({ ok: true, kpis: Array.isArray(kpis) ? kpis : [] });
+  } catch (e) { next(e); }
+});
+
 /* ───────── Import CSV de insumos (alias para UploadInsumosModal) ───────── */
 const multerInsumos = require('multer')({ storage: require('multer').memoryStorage() });
 const insumosCtrl = require('../controllers/insumosController');

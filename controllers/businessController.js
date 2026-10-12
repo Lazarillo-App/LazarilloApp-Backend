@@ -199,6 +199,7 @@ exports.update = async (req, res) => {
   const social = incoming.social || null;
   const description = (incoming.description ?? null);
   const carta = incoming.carta || null;   // diseño de la carta/menú (jsonb libre)
+  const foodCostKpis = incoming.food_cost_kpis || null;   // KPI de food cost (jsonb libre, array completo)
 
   // Keys de configuración que se pueden guardar directamente en props
   const CONFIG_KEYS = [
@@ -235,6 +236,7 @@ exports.update = async (req, res) => {
   if (social) patchParts.push({ social });
   if (description !== null) patchParts.push({ description });
   if (carta) patchParts.push({ carta });
+  if (foodCostKpis) patchParts.push({ food_cost_kpis: foodCostKpis });
   if (hasConfigPatch) patchParts.push(configPatch);
   const patchIsEmpty = patchParts.length === 0;
 

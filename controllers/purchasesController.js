@@ -263,6 +263,70 @@ exports.list = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/purchases/food-cost?from=&to=&branch_id=
+// Compras agregadas POR INSUMO con su rubro y agrupación, para el KPI de Food
+// Cost de Gestión de Artículos — ver KpiFoodCost.jsx / kpi-foodcost.schema.json
+// (campo "itemCompra": id, nombre, agrupacion, rubro, importe).
+// Agrupación: la primera agrupación REAL del insumo (insumo_group_items),
+// excluyendo Todo/Sin agrupación/Discontinuados — mismo criterio que ya usa
+// el front (esTodoGroup/esDiscontinuadosGroup) para no contar esos grupos
+// especiales como clasificación real.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.foodCost = async (req, res, next) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+
+    const baseParams = [businessId];
+    const baseWhere = ['pi.business_id = $1'];
+    const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
+    const allWhere = [...baseWhere, ...extraWhere];
+    const allParams = [...baseParams, ...extraParams];
+
+    const { rows } = await pool.query(
+      `SELECT
+         i.id,
+         i.nombre,
+         COALESCE(ag.nombre, 'Sin agrupación') AS agrupacion,
+         COALESCE(ir.nombre, NULLIF(i.rubro, ''), 'Sin rubro') AS rubro,
+         SUM(pi.neto + pi.iva)::numeric AS importe
+       FROM purchase_items pi
+       JOIN purchases p ON p.id = pi.purchase_id
+       JOIN insumos i   ON i.id = pi.insumo_id
+       LEFT JOIN insumo_rubros ir
+         ON ir.business_id = i.business_id AND ir.codigo::text = i.rubro
+       LEFT JOIN LATERAL (
+         SELECT ig2.nombre
+           FROM insumo_group_items igi2
+           JOIN insumo_groups ig2 ON ig2.id = igi2.group_id
+          WHERE igi2.insumo_id = i.id
+            AND lower(trim(ig2.nombre)) NOT IN
+              ('discontinuados', 'descontinuados', 'todo', 'sin agrupacion', 'sin agrupación', 'sin agrupar', 'sin grupo')
+          ORDER BY ig2.id ASC
+          LIMIT 1
+       ) ag ON TRUE
+       WHERE ${allWhere.join(' AND ')}
+       GROUP BY i.id, i.nombre, ag.nombre, ir.nombre, i.rubro
+      HAVING SUM(pi.neto + pi.iva) <> 0`,
+      allParams
+    );
+
+    const items = rows.map(r => ({
+      id: String(r.id),
+      nombre: r.nombre,
+      agrupacion: r.agrupacion,
+      rubro: r.rubro,
+      importe: Number(r.importe) || 0,
+    }));
+
+    return res.json({ ok: true, items });
+  } catch (e) {
+    console.error('[purchases.foodCost] error:', e);
+    next(e);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/purchases/summary?from=&to=&branch_id=
 // ─────────────────────────────────────────────────────────────────────────────
 exports.summary = async (req, res, next) => {
