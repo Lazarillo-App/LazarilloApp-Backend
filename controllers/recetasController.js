@@ -4,7 +4,7 @@ const { propagateRecipe } = require('../services/linkPropagation');
 const { logAudit } = require('../services/audit/auditLog');
 const { listObservaciones, addObservacion } = require('../services/recetaObservaciones');
 const { getEffectiveRole } = require('../services/auth/accessControl');
-const { snapshotReceta, createOrUpdateProposal, propuestaAbiertaDe } = require('../services/recetaProposals');
+const { snapshotReceta, createOrUpdateProposal, propuestaAbiertaDe, resolverMarcasDeRevision } = require('../services/recetaProposals');
 const { writeArticleReceta } = require('../services/recetaWrite');
 
 async function resolveRecetaId(articleId, bizId) {
@@ -152,6 +152,12 @@ exports.saveReceta = async (req, res, next) => {
     const { receta, recetaCostos, savedItems } = await writeArticleReceta({
       bizId, articleId, uid, body: req.body,
     });
+
+    // Guardado directo (owner/admin): si había una marca de "revisión" (con o sin
+    // contenido real) todavía abierta sobre esta receta, queda resuelta — ya se
+    // corrigió de la forma más directa posible, no tiene sentido que siga pidiendo
+    // aprobación aparte ni bloqueando volver a marcarla más adelante.
+    resolverMarcasDeRevision({ bizId, articleId, uid }).catch(() => {});
 
     return res.json({
       ok: true,

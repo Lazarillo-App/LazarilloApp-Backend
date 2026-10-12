@@ -3,7 +3,7 @@ const pool = require('../config/db');
 const { logAudit } = require('../services/audit/auditLog');
 const { listObservaciones, addObservacion } = require('../services/recetaObservaciones');
 const { getEffectiveRole } = require('../services/auth/accessControl');
-const { snapshotRecetaElaborado, createOrUpdateProposal, propuestaAbiertaDe } = require('../services/recetaProposals');
+const { snapshotRecetaElaborado, createOrUpdateProposal, propuestaAbiertaDe, resolverMarcasDeRevision } = require('../services/recetaProposals');
 const { writeElaboradoReceta } = require('../services/recetaWrite');
 
 async function resolveRecetaIdElaborado(insumoId, bizId) {
@@ -178,6 +178,10 @@ exports.saveRecetaElaborado = async (req, res, next) => {
       receta, recetaCostos, savedItems,
       costoUnitarioDB, precioSugeridoDB, porcionesNum,
     } = await writeElaboradoReceta({ bizId, insumoId, uid, body: req.body, insumo });
+
+    // Guardado directo (owner/admin): mismo criterio que recetasController.js —
+    // resolver cualquier marca de revisión que siguiera abierta sobre este insumo.
+    resolverMarcasDeRevision({ bizId, insumoId, uid }).catch(() => {});
 
     return res.json({
       ok: true,

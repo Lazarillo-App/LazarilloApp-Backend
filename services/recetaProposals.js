@@ -224,14 +224,72 @@ async function propuestaAbiertaDe(bizId, { articleId = null, insumoId = null } =
   const val = articleId || insumoId;
   if (!val) return null;
   const { rows } = await pool.query(
-    `SELECT id, status, payload_after FROM receta_proposals
+    `SELECT id, status, payload_after, admin_comment, asignado_a_user_id,
+            (SELECT COALESCE(name, email) FROM app_users WHERE id = receta_proposals.asignado_a_user_id) AS asignado_a_nombre
+       FROM receta_proposals
       WHERE business_id = $1 AND ${col} = $2 AND status = ANY($3::text[])
       ORDER BY created_at DESC LIMIT 1`,
     [bizId, val, ['pending', 'in_revision']]
   );
   if (!rows.length) return null;
   const items = Array.isArray(rows[0].payload_after?.items) ? rows[0].payload_after.items : [];
-  return { id: rows[0].id, status: rows[0].status, items };
+  // "Marcada a revisión" (desde Sectores/Aprobaciones o el header de la receta) se
+  // crea con payload_after = {} A PROPÓSITO — sin contenido todavía. El front la usa
+  // para distinguir "hay un cambio de verdad esperando aprobación" (no tocar,
+  // esperar) de "esto es solo un flag de revisar, podés seguir editando normal".
+  const tieneContenido = rows[0].payload_after
+    && typeof rows[0].payload_after === 'object'
+    && Object.prototype.hasOwnProperty.call(rows[0].payload_after, 'items');
+  return {
+    id: rows[0].id,
+    status: rows[0].status,
+    items,
+    tieneContenido,
+    adminComment: rows[0].admin_comment || null,
+    asignadoA: rows[0].asignado_a_nombre || null,
+  };
 }
 
-module.exports = { propuestaAbiertaDe, snapshotReceta, snapshotRecetaElaborado, createOrUpdateProposal, enrichItemsConNombre };
+/**
+ * Cuando se guarda una receta DIRECTO (owner/admin, sin pasar por el circuito de
+ * propuestas), cualquier propuesta pending/in_revision que siguiera abierta sobre
+ * esa misma receta queda resuelta. Cubre dos casos reales:
+ *  - Una "marcada a revisión" (payload_after={}, sin contenido) — antes nadie la
+ *    cerraba nunca: quedaba en Aprobaciones para siempre aunque ya se hubiera
+ *    corregido a mano, y bloqueaba volver a marcarla si hacía falta de nuevo.
+ *  - Una propuesta real de un Staff que quedó obsoleta porque el admin/owner editó
+ *    la receta directo mientras tanto (mismo criterio que ya usa approveProposal al
+ *    aplicar una propuesta: las demás abiertas sobre la misma receta se cierran).
+ */
+async function resolverMarcasDeRevision({ bizId, articleId = null, insumoId = null, uid }) {
+  const col = articleId ? 'article_id' : 'insumo_id';
+  const val = articleId || insumoId;
+  if (!val) return;
+  try {
+    await pool.query(
+      `UPDATE receta_proposals
+          SET status = 'rejected',
+              admin_comment = CASE
+                WHEN admin_comment IS NULL OR admin_comment = '' THEN 'Resuelta: la receta se editó y guardó directamente.'
+                ELSE admin_comment || ' · Resuelta: la receta se editó y guardó directamente.'
+              END,
+              decided_at = NOW(), decided_by = $3, updated_at = NOW()
+        WHERE business_id = $1 AND ${col} = $2 AND status IN ('pending', 'in_revision')`,
+      [bizId, val, uid || null]
+    );
+    // Ya no queda ninguna abierta sobre esta receta — sacarle la marca de "tiene
+    // propuesta pendiente" (si no, Aprobaciones/el badge de pendientes la seguían
+    // contando aunque recién se hayan cerrado todas arriba).
+    await pool.query(
+      `UPDATE recetas SET has_pending_proposal = FALSE WHERE business_id = $1 AND ${col} = $2`,
+      [bizId, val]
+    );
+  } catch (e) {
+    console.error('[resolverMarcasDeRevision]', e?.message);
+  }
+}
+
+module.exports = {
+  propuestaAbiertaDe, snapshotReceta, snapshotRecetaElaborado, createOrUpdateProposal,
+  enrichItemsConNombre, resolverMarcasDeRevision,
+};
