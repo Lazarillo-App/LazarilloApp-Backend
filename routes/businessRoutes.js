@@ -199,6 +199,12 @@ router.get(
   ensureFn('sales.salesSummary', sales.salesSummary)
 );
 
+/* ───────── Ventas: total del negocio por mes (sin desglose por artículo) ───────── */
+router.get(
+  '/:id/sales/monthly',
+  ensureFn('sales.salesMonthly', sales.salesMonthly)
+);
+
 /* ───────── Ventas: primera fecha con datos (para Histórico) ───────── */
 router.get(
   '/:id/sales/first-date',

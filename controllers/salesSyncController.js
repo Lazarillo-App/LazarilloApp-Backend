@@ -831,6 +831,64 @@ exports.getFirstSaleDate = async (req, res, next) => {
   }
 };
 
+/* ══════════════════════════════════════════════════════════
+   GET /api/businesses/:id/sales/monthly?from=&to=&branch_id=
+   Total de ventas del negocio agrupado por mes, sin desglose por artículo —
+   para KPIs que necesitan "cuánto facturó el negocio en el mes X" (ver
+   ComprasMiniDetalleModal.jsx: prop facturacionPorMes).
+══════════════════════════════════════════════════════════ */
+exports.salesMonthly = async (req, res, next) => {
+  try {
+    const biz = req.business;
+    const { from, to, source = 'csv', branch_id: rawBranchId = null } = req.query;
+
+    if (!from || !to) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'from y to son requeridos (YYYY-MM-DD)',
+      });
+    }
+
+    const { salesBizId } = await resolveSalesBusiness(biz);
+
+    const params = [salesBizId, from, to, source];
+    let branchFilter = '';
+    // Mismo criterio que salesSummary: 'main' = sin sucursal, número = esa
+    // sucursal, ausente/null = todas.
+    if (rawBranchId === 'main') {
+      branchFilter = 'AND sdi.branch_id IS NULL';
+    } else if (rawBranchId && rawBranchId !== '' && rawBranchId !== 'null') {
+      const bid = Number(rawBranchId);
+      if (Number.isFinite(bid) && bid > 0) {
+        params.push(bid);
+        branchFilter = `AND sdi.branch_id = $${params.length}`;
+      }
+    }
+
+    const { rows } = await pool.query(
+      `SELECT date_trunc('month', sdi.day)::date::text AS mes,
+              SUM(sdi.amount)::numeric AS total_amount
+         FROM sales_daily_items sdi
+        WHERE sdi.business_id = $1
+          AND sdi.day BETWEEN $2::date AND $3::date
+          AND sdi.source = $4
+          ${branchFilter}
+        GROUP BY 1
+        ORDER BY 1`,
+      params
+    );
+
+    const porMes = {};
+    for (const r of rows) {
+      porMes[String(r.mes).slice(0, 7)] = Number(r.total_amount) || 0;
+    }
+
+    return res.json({ ok: true, business_id: String(biz.id), from, to, porMes });
+  } catch (e) {
+    next(e);
+  }
+};
+
 module.exports = {
   maxiPing: exports.maxiPing,
   syncWindow: exports.syncWindow,
@@ -843,6 +901,7 @@ module.exports = {
   exportSalesCsv: exports.exportSalesCsv,
   diagnosticRaw: exports.diagnosticRaw,
   salesSummary: exports.salesSummary,
+  salesMonthly: exports.salesMonthly,
   getFirstSaleDate: exports.getFirstSaleDate,
   resolveCredsBizId,
 };
