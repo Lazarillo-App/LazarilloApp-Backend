@@ -263,6 +263,93 @@ exports.list = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/purchases/ranking?from=&to=&branch_id=&pin=&limit=20
+// Ranking de insumos por gasto total en el período — para el chip "Top N por
+// gasto" del detalle de compras (ComprasMiniDetalleModal.jsx). Devuelve los
+// primeros `limit` (default 20) más, si `pin` (el insumo que se está viendo)
+// queda afuera de ese corte, su fila también — con su rank REAL sobre el
+// total de insumos, no sobre el top. total_insumos/total_gasto vienen en
+// cada fila (window function) para no pegarle dos veces a la base.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.ranking = async (req, res, next) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+
+    const { from, to, branch_id: rawBranchId, pin, limit: rawLimit } = req.query;
+    if (!from || !to) {
+      return res.status(400).json({ ok: false, error: 'from y to son requeridos (YYYY-MM-DD)' });
+    }
+
+    const limit = Math.min(Math.max(Number(rawLimit) || 20, 1), 100);
+    const pinId = Number(pin) || null;
+
+    const params = [businessId, from, to];
+    let branchFilter = '';
+    if (rawBranchId === 'none') {
+      branchFilter = 'AND p.branch_id IS NULL';
+    } else if (rawBranchId && rawBranchId !== 'all' && rawBranchId !== '') {
+      const bid = Number(rawBranchId);
+      if (Number.isFinite(bid) && bid > 0) {
+        params.push(bid);
+        branchFilter = `AND p.branch_id = $${params.length}`;
+      }
+    }
+
+    params.push(limit);
+    const limitIdx = params.length;
+    let pinClause = '';
+    if (pinId) {
+      params.push(pinId);
+      pinClause = `OR r.id = $${params.length}`;
+    }
+
+    const { rows } = await pool.query(
+      `WITH totals AS (
+         SELECT pi.insumo_id AS id, SUM(pi.neto + pi.iva)::numeric AS total
+           FROM purchase_items pi
+           JOIN purchases p ON p.id = pi.purchase_id
+          WHERE pi.business_id = $1 AND pi.fecha BETWEEN $2::date AND $3::date
+            ${branchFilter}
+          GROUP BY pi.insumo_id
+         HAVING SUM(pi.neto + pi.iva) > 0
+       ),
+       ranked AS (
+         SELECT id, total,
+                RANK() OVER (ORDER BY total DESC)::int AS rank,
+                COUNT(*) OVER ()::int AS total_insumos,
+                SUM(total) OVER ()::numeric AS total_gasto
+           FROM totals
+       )
+       SELECT r.id, r.total, r.rank, r.total_insumos, r.total_gasto,
+              i.nombre, i.codigo_mostrar, i.codigo_maxi, i.unidad_med
+         FROM ranked r
+         JOIN insumos i ON i.id = r.id
+        WHERE r.rank <= $${limitIdx} ${pinClause}
+        ORDER BY r.rank ASC`,
+      params
+    );
+
+    const totalInsumos = rows[0] ? Number(rows[0].total_insumos) : 0;
+    const totalGasto = rows[0] ? Number(rows[0].total_gasto) : 0;
+
+    const items = rows.map(r => ({
+      id: String(r.id),
+      nombre: r.nombre,
+      codigo: r.codigo_mostrar || r.codigo_maxi || null,
+      unidad_med: r.unidad_med || 'u',
+      total: Number(r.total) || 0,
+      rank: Number(r.rank),
+    }));
+
+    return res.json({ ok: true, total_insumos: totalInsumos, total_gasto: totalGasto, items });
+  } catch (e) {
+    console.error('[purchases.ranking] error:', e);
+    next(e);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/purchases/food-cost?from=&to=&branch_id=
 // Compras agregadas POR INSUMO con su rubro y agrupación, para el KPI de Food
 // Cost de Gestión de Artículos — ver KpiFoodCost.jsx / kpi-foodcost.schema.json
