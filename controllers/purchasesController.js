@@ -306,13 +306,14 @@ exports.ranking = async (req, res, next) => {
 
     const { rows } = await pool.query(
       `WITH totals AS (
-         SELECT pi.insumo_id AS id, SUM(pi.neto + pi.iva)::numeric AS total
+         SELECT pi.insumo_id AS id,
+                SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0))::numeric AS total
            FROM purchase_items pi
            JOIN purchases p ON p.id = pi.purchase_id
           WHERE pi.business_id = $1 AND pi.fecha BETWEEN $2::date AND $3::date
             ${branchFilter}
           GROUP BY pi.insumo_id
-         HAVING SUM(pi.neto + pi.iva) > 0
+         HAVING SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0)) > 0
        ),
        ranked AS (
          SELECT id, total,
@@ -376,7 +377,7 @@ exports.foodCost = async (req, res, next) => {
          i.nombre,
          COALESCE(ag.nombre, 'Sin agrupación') AS agrupacion,
          COALESCE(ir.nombre, NULLIF(i.rubro, ''), 'Sin rubro') AS rubro,
-         SUM(pi.neto + pi.iva)::numeric AS importe
+         SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0))::numeric AS importe
        FROM purchase_items pi
        JOIN purchases p ON p.id = pi.purchase_id
        JOIN insumos i   ON i.id = pi.insumo_id
@@ -394,7 +395,7 @@ exports.foodCost = async (req, res, next) => {
        ) ag ON TRUE
        WHERE ${allWhere.join(' AND ')}
        GROUP BY i.id, i.nombre, ag.nombre, ir.nombre, i.rubro
-      HAVING SUM(pi.neto + pi.iva) <> 0`,
+      HAVING SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0)) <> 0`,
       allParams
     );
 
