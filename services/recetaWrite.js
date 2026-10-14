@@ -387,7 +387,11 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
       return acc + (cant * Number(item.costoUnitario || 0));
     }, 0);
 
-    const porcionesNum = Math.max(1, Number(porciones) || 1);
+    // Piso mínimo solo para evitar división por cero — NO forzar a 1: cuando
+    // rendimientoUnidad es una cantidad física (lt/ml/kg/gr/u) un lote de
+    // menos de 1 es perfectamente válido (ej. 0,95 lt), y antes quedaba
+    // silenciosamente redondeado hacia arriba a 1 por este Math.max(1, ...).
+    const porcionesNum = Math.max(0.001, Number(porciones) || 1);
     const costoXPorcion = costoTotal / porcionesNum;
     let porcentajeNum = Number(porcentajeVenta) || 0;
     if (!porcentajeNum) {
