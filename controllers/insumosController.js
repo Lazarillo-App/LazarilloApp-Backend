@@ -3334,6 +3334,12 @@ exports.usoInsumoCambiarCantidad = async (req, res) => {
 
     const orgBizIds = await getOrgBizIds(bizId, client);
     if (!orgBizIds.includes(item.business_id)) {
+      // TEMPORAL: diagnóstico del 403 reportado — sacar una vez resuelto.
+      console.warn('[usoInsumoCambiarCantidad] 403 No autorizado', {
+        bizId, itemId, insumoId,
+        itemBusinessId: item.business_id, itemBusinessIdType: typeof item.business_id,
+        orgBizIds, orgBizIdsTypes: orgBizIds.map(x => typeof x),
+      });
       await client.query('ROLLBACK');
       return res.status(403).json({ ok: false, error: 'No autorizado' });
     }
