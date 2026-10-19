@@ -106,6 +106,7 @@ router.post('/:id/bonificacion/descartar', blockStaffWrite, ctrl.descartarBonifi
 router.get('/:id/uso', ctrl.usoInsumo);
 router.get('/:id/uso-resumen', ctrl.usoInsumoResumen);
 router.put('/:id/uso/:itemId/merma', blockStaffWrite, ctrl.usoInsumoCambiarMerma);
+router.put('/:id/uso/:itemId/cantidad', blockStaffWrite, ctrl.usoInsumoCambiarCantidad);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
 router.post('/normalizar-nombres', blockStaffWrite, ctrl.normalizarNombres);

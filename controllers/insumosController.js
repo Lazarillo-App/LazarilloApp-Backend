@@ -3111,6 +3111,9 @@ exports.usoInsumo = async (req, res) => {
       item_id: x.item_id,
       receta_id: x.receta_id,
       es_elaborado: x.receta_insumo_id != null,
+      // id del artículo o insumo elaborado DUEÑO de esta receta — permite abrirla
+      // directo desde la pestaña Uso (ver TabUsoInsumo.jsx) sin pasar por receta_id.
+      owner_id: x.receta_insumo_id != null ? x.receta_insumo_id : (x.article_id ?? null),
       codigo: x.receta_insumo_id != null ? (x.elab_codigo || null) : (x.art_codigo != null ? String(x.art_codigo) : null),
       nombre: x.receta_insumo_id != null ? (x.elab_nombre || x.receta_nombre) : (x.art_nombre || x.receta_nombre),
       cantidad: Number(x.cantidad) || 0,
@@ -3287,6 +3290,73 @@ exports.usoInsumoCambiarMerma = async (req, res) => {
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('usoInsumoCambiarMerma error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+// PUT /insumos/:id/uso/:itemId/cantidad  body { cantidad: number }
+// Corrige la cantidad de UN ítem puntual (una fila de la pestaña Uso) sin pasar
+// por el guardado completo de esa receta — mismo patrón que
+// usoInsumoCambiarMerma (UPDATE puntual por id, no el DELETE+INSERT que hace
+// el guardado completo de recetaWrite.js). No toca costo_unitario (no cambia
+// al variar la cantidad): solo recalcula el costo_total de la receta afectada.
+exports.usoInsumoCambiarCantidad = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const itemId = Number(req.params.itemId);
+    const cantidadNueva = Number(req.body?.cantidad);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(itemId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!Number.isFinite(cantidadNueva) || cantidadNueva <= 0) {
+      return res.status(400).json({ ok: false, error: 'Cantidad inválida' });
+    }
+
+    await client.query('BEGIN');
+
+    const { rows: itemRows } = await client.query(
+      `SELECT ri.id, ri.receta_id, ri.cantidad AS cantidad_vieja, r.business_id
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.id = $1 AND ri.insumo_id = $2`,
+      [itemId, insumoId]
+    );
+    if (!itemRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Ítem no encontrado' });
+    }
+    const item = itemRows[0];
+
+    const orgBizIds = await getOrgBizIds(bizId, client);
+    if (!orgBizIds.includes(item.business_id)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ ok: false, error: 'No autorizado' });
+    }
+
+    await client.query(
+      `UPDATE receta_items SET cantidad = $1, updated_at = NOW() WHERE id = $2`,
+      [cantidadNueva, itemId]
+    );
+    await recalcularCostoRecetas([item.receta_id], client);
+
+    await logAudit(client, {
+      userId: req.user?.id || null, businessId: item.business_id,
+      entityType: 'receta_item_cantidad', entityId: itemId,
+      action: 'update',
+      diff: { before: { cantidad: Number(item.cantidad_vieja) }, after: { cantidad: cantidadNueva } },
+      metadata: { insumoId, recetaId: item.receta_id },
+    });
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, cantidad: cantidadNueva });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('usoInsumoCambiarCantidad error:', e);
     return res.status(500).json({ ok: false, error: e.message });
   } finally {
     client.release();
