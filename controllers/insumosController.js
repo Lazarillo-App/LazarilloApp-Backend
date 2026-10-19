@@ -3234,7 +3234,11 @@ exports.usoInsumoCambiarMerma = async (req, res) => {
     const item = itemRows[0];
 
     const orgBizIds = await getOrgBizIds(bizId, client);
-    if (!orgBizIds.includes(item.business_id)) {
+    // Number(): r.business_id viene como STRING de la DB (bigint) — .includes()
+    // no convierte tipos, así que sin este cast esta validación daba siempre
+    // falso (bug real, detectado al diagnosticar el mismo chequeo en
+    // usoInsumoCambiarCantidad).
+    if (!orgBizIds.includes(Number(item.business_id))) {
       await client.query('ROLLBACK');
       return res.status(403).json({ ok: false, error: 'No autorizado' });
     }
@@ -3333,13 +3337,11 @@ exports.usoInsumoCambiarCantidad = async (req, res) => {
     const item = itemRows[0];
 
     const orgBizIds = await getOrgBizIds(bizId, client);
-    if (!orgBizIds.includes(item.business_id)) {
-      // TEMPORAL: diagnóstico del 403 reportado — sacar una vez resuelto.
-      console.warn('[usoInsumoCambiarCantidad] 403 No autorizado', {
-        bizId, itemId, insumoId,
-        itemBusinessId: item.business_id, itemBusinessIdType: typeof item.business_id,
-        orgBizIds, orgBizIdsTypes: orgBizIds.map(x => typeof x),
-      });
+    // Number(): r.business_id viene como STRING de la DB (bigint) — .includes()
+    // no convierte tipos, así que sin este cast esta validación daba siempre
+    // falso (confirmado con el log de diagnóstico: itemBusinessId '213' string
+    // vs orgBizIds [213] number).
+    if (!orgBizIds.includes(Number(item.business_id))) {
       await client.query('ROLLBACK');
       return res.status(403).json({ ok: false, error: 'No autorizado' });
     }
