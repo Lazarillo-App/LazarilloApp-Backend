@@ -85,6 +85,7 @@ function getBusinessId(req) {
 const TODO_NAME_INITIAL = 'Sin Agrupacion';
 const TODO_NAME_LEGACY = 'Sin Agrupación';
 const DISC_NAME = 'Discontinuados';
+const TOP20_NAME = 'Top 20';
 
 const normName = (s) =>
   String(s || '')
@@ -102,6 +103,8 @@ const isDiscontinuadosName = (s) => {
   const n = normName(s);
   return n === 'discontinuados' || n === 'descontinuados';
 };
+
+const isTop20Name = (s) => normName(s) === 'top 20';
 
 /* ========================= AGRUPACIONES (tabla: agrupaciones) ========================= */
 
@@ -544,7 +547,7 @@ exports.eliminarAgrupacion = async (req, res) => {
       }
     }
 
-    if (isTodoName(nombre) || isDiscontinuadosName(nombre)) {
+    if (isTodoName(nombre) || isDiscontinuadosName(nombre) || isTop20Name(nombre)) {
       return res
         .status(400)
         .json({ ok: false, error: 'Esta agrupación especial no se puede eliminar' });
@@ -1100,6 +1103,45 @@ exports.ensureTodoAgrupacion = async (req, res) => {
     return res.json(todoRow);
   } catch (e) {
     console.error('ensureTodoAgrupacion error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ============================================================================
+// PUT /businesses/:businessId/agrupaciones/top20
+// Garantiza que exista la agrupación fija "Top 20" (automática, sin gestión
+// manual — su membresía se calcula en el frontend por facturación del
+// período elegido, esta fila solo le da un id real para aparecer en el
+// desplegable). Mismo patrón idempotente que ensureTodoAgrupacion, pero sin
+// la lógica de subnegocio (Top 20 existe en cualquier negocio).
+// ============================================================================
+exports.ensureTop20Agrupacion = async (req, res) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!Number.isFinite(businessId)) {
+      return res.status(400).json({ ok: false, error: 'businessId requerido' });
+    }
+
+    const { rows: all } = await pool.query(
+      `SELECT id, nombre FROM agrupaciones WHERE business_id = $1`,
+      [businessId]
+    );
+    let top20Row = all.find((r) => isTop20Name(r.nombre)) || null;
+
+    if (!top20Row) {
+      const { rows } = await pool.query(
+        `INSERT INTO agrupaciones (business_id, nombre, articulos)
+         VALUES ($1, $2, '[]'::jsonb)
+         ON CONFLICT (business_id, nombre) DO UPDATE SET updated_at = NOW()
+         RETURNING id, nombre`,
+        [businessId, TOP20_NAME]
+      );
+      top20Row = rows[0] || null;
+    }
+
+    return res.json(top20Row);
+  } catch (e) {
+    console.error('ensureTop20Agrupacion error:', e);
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
