@@ -3371,6 +3371,81 @@ exports.usoInsumoCambiarCantidad = async (req, res) => {
   }
 };
 
+// POST /insumos/:id/uso/quitar  body { itemIds: number[] }
+// Saca el insumo de una o varias recetas (filas de la pestaña Uso) de un
+// plumazo — DELETE directo de esas filas de receta_items (no un guardado
+// completo de cada receta) y recalcula el costo de las recetas afectadas.
+// Filas que no pertenezcan a este insumo o a un negocio de la organización
+// se ignoran en silencio (no rompen el resto del lote).
+exports.usoInsumoQuitar = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const itemIds = Array.isArray(req.body?.itemIds)
+      ? req.body.itemIds.map(Number).filter(n => Number.isFinite(n) && n > 0)
+      : [];
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!itemIds.length) {
+      return res.status(400).json({ ok: false, error: 'itemIds requerido' });
+    }
+
+    await client.query('BEGIN');
+
+    const { rows: itemRows } = await client.query(
+      `SELECT ri.id, ri.receta_id, ri.cantidad, r.business_id
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ri.id = ANY($1::int[]) AND ri.insumo_id = $2`,
+      [itemIds, insumoId]
+    );
+    if (!itemRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Ítems no encontrados' });
+    }
+
+    const orgBizIds = await getOrgBizIds(bizId, client);
+    // Mismo cast que usoInsumoCambiarMerma/Cantidad: business_id viene como
+    // string (bigint) de la DB — sin Number(), .includes() nunca matchea.
+    const autorizados = itemRows.filter(r => orgBizIds.includes(Number(r.business_id)));
+    if (!autorizados.length) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ ok: false, error: 'No autorizado' });
+    }
+
+    const idsAEliminar = autorizados.map(r => r.id);
+    await client.query(
+      `DELETE FROM receta_items WHERE id = ANY($1::int[])`,
+      [idsAEliminar]
+    );
+
+    const recetaIds = [...new Set(autorizados.map(r => r.receta_id))];
+    await recalcularCostoRecetas(recetaIds, client);
+
+    await client.query('COMMIT');
+
+    const uid = req.user?.id || null;
+    Promise.all(autorizados.map(r => logAudit(null, {
+      userId: uid, businessId: r.business_id,
+      entityType: 'receta_item', entityId: r.id,
+      action: 'delete',
+      diff: { before: { insumoId, cantidad: Number(r.cantidad) || 0 }, after: null },
+      metadata: { insumoId, recetaId: r.receta_id },
+    }))).catch(e => console.error('[usoInsumoQuitar] audit log:', e?.message));
+
+    return res.json({ ok: true, removed: idsAEliminar.length, recetasAfectadas: recetaIds.length });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('usoInsumoQuitar error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
 // POST /insumos/:id/reemplazar  body { nuevoInsumoId }
 // Reemplaza el insumo viejo por el nuevo en todas las recetas del negocio activo.
 exports.reemplazarInsumo = async (req, res) => {
