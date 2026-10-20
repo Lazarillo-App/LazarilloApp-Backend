@@ -60,9 +60,17 @@ async function recalcularCostoReceta(recetaId, db = pool) {
     divisor = Number(rec.porciones) || 1;
     unidadCostoUnitario = 'u';
   } else if (MEDIBLES.includes(unidad)) {
-    // porciones está expresado EN la unidad de rendimiento (ej: 300 gr, 8.35 kg)
-    divisor = Number(rec.porciones) || 1;
-    unidadCostoUnitario = unidad;
+    // porciones está expresado EN la unidad de rendimiento elegida (ej: 300 gr,
+    // 1000 ml) — pero costo_unitario/precio_ref SIEMPRE debe quedar por KILO o
+    // por LITRO, nunca por gramo/mL: un rendimiento cargado en mL (ej. "1000"
+    // para un lote de 1 litro) daba un costo_unitario mil veces más chico del
+    // real, que después la tabla de Insumos mostraba tal cual junto a una
+    // unidad "L" — un costo "por mL" disfrazado de "por L". Convertir acá
+    // antes de dividir deja a cualquier consumidor de precio_ref (tabla de
+    // Insumos, propagarCostoInsumo de abajo) con una única unidad posible.
+    unidadCostoUnitario = (unidad === 'ml' || unidad === 'lt') ? 'lt' : 'kg';
+    const porcionesCanonicas = (Number(rec.porciones) || 1) * factorConversion(unidad, unidadCostoUnitario);
+    divisor = porcionesCanonicas;
   } else {
     divisor = Number(rec.porciones) || 1;
     unidadCostoUnitario = 'u';
@@ -162,8 +170,11 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   let unidadBase;
   let costoPorGrBase = 0;   // costo por unidad base de peso, si aplica equivalente
   if (['gr','kg','ml','lt'].includes(rendU)) {
-    // Rinde directamente en peso/volumen: precio_ref ya es por esa unidad
-    unidadBase = rendU;
+    // Rinde directamente en peso/volumen: precio_ref ya está SIEMPRE por kg o
+    // por lt (ver recalcularCostoReceta), sin importar en qué unidad se haya
+    // cargado el rendimiento (ml/gr incluidos) — unidadBase tiene que ser esa
+    // misma canónica, no la cruda, o esta conversión quedaría 1000 veces mal.
+    unidadBase = (rendU === 'ml' || rendU === 'lt') ? 'lt' : 'kg';
   } else if (rendU === 'u' && pesoEquiv > 0) {
     // Rinde en porción CON equivalente: precio_ref es por porción, pero se puede
     // usar en peso. costo por gr = precio_ref / peso_equivalente (en gr).
