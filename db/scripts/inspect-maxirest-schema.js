@@ -15,6 +15,16 @@ const pool = require('../../config/db');
 const SCHEMA = 'maxirest_14536_ramos';
 const filtro = process.argv[2] || null;
 
+// Los nombres de tabla de MaxiRest son códigos cortos (mxcpb, mxren, etc.),
+// no dicen nada por sí solos. En vez de adivinar la abreviatura, se buscan
+// las tablas por las COLUMNAS que tendría un comprobante/renglón de compra:
+// importe, cantidad, proveedor, número de comprobante, fecha, código.
+const PISTAS_COLUMNAS = [
+  'importe', 'cant', 'preciounit', 'precio', 'proveedor', 'prov',
+  'comprobante', 'cpb', 'factura', 'numero', 'nrocomp', 'fecha',
+  'codigo', 'cod_art', 'idart', 'rubro', 'medida', 'iva',
+];
+
 async function main() {
   const { rows: tablas } = await pool.query(
     `SELECT table_name FROM information_schema.tables
@@ -22,6 +32,31 @@ async function main() {
     [SCHEMA]
   );
   console.log(`Schema ${SCHEMA}: ${tablas.length} tablas\n`);
+
+  if (filtro === '--pistas') {
+    // Modo búsqueda: qué tablas tienen columnas que suenan a comprobante/compra
+    const { rows: cols } = await pool.query(
+      `SELECT table_name, column_name FROM information_schema.columns
+        WHERE table_schema = $1`,
+      [SCHEMA]
+    );
+    const porTabla = new Map();
+    for (const c of cols) {
+      const colLow = c.column_name.toLowerCase();
+      if (PISTAS_COLUMNAS.some((p) => colLow.includes(p))) {
+        if (!porTabla.has(c.table_name)) porTabla.set(c.table_name, []);
+        porTabla.get(c.table_name).push(c.column_name);
+      }
+    }
+    const ordenado = [...porTabla.entries()].sort((a, b) => b[1].length - a[1].length);
+    console.log(`\n${ordenado.length} tablas con columnas sospechosas de compra/comprobante:\n`);
+    for (const [tabla, columnas] of ordenado) {
+      console.log(`${tabla} (${columnas.length}): ${columnas.join(', ')}`);
+    }
+    await pool.end();
+    return;
+  }
+
   console.log(tablas.map(t => t.table_name).join(', '));
 
   const objetivo = filtro
