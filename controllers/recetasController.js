@@ -108,6 +108,7 @@ exports.getReceta = async (req, res, next) => {
          r.notas, r.foto, r.fotos, r.notas_updated_at,
          r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
          r.metodo_coccion, r.temperatura, r.tiempo_min, r.pasos,
+         r.almacenamiento_freezer, r.almacenamiento_heladera,
          r.created_at, r.updated_at
        FROM recetas r
       WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE

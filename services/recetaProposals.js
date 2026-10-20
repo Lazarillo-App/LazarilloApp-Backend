@@ -18,7 +18,8 @@ async function snapshotReceta(articleId, bizId) {
     `SELECT r.id, r.nombre, r.descripcion, r.porciones, r.porcentaje_venta,
             r.costo_total, r.notas, r.foto, r.fotos, r.notas_updated_at,
             r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
-            r.metodo_coccion, r.temperatura, r.tiempo_min, r.pasos
+            r.metodo_coccion, r.temperatura, r.tiempo_min, r.pasos,
+            r.almacenamiento_freezer, r.almacenamiento_heladera
        FROM recetas r
       WHERE r.article_id = $1 AND r.business_id = $2 AND r.active = TRUE
       LIMIT 1`,
@@ -47,7 +48,8 @@ async function snapshotRecetaElaborado(insumoId, bizId) {
     `SELECT r.id, r.nombre, r.descripcion, r.porciones, r.porcentaje_venta,
             r.costo_total, r.notas, r.foto, r.fotos, r.notas_updated_at,
             r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
-            r.metodo_coccion, r.temperatura, r.tiempo_min, r.pasos
+            r.metodo_coccion, r.temperatura, r.tiempo_min, r.pasos,
+            r.almacenamiento_freezer, r.almacenamiento_heladera
        FROM recetas r
       WHERE r.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE
       LIMIT 1`,

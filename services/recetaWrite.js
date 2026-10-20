@@ -39,6 +39,8 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
       temperatura = null,
       tiempoMin = null,
       pasos = [],
+      almacenamientoFreezer = null,
+      almacenamientoHeladera = null,
     } = body || {};
 
     const pasosArr = Array.isArray(pasos) ? pasos.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim()) : [];
@@ -46,6 +48,8 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
     const temperaturaVal = temperatura != null && temperatura !== '' ? Number(temperatura) : null;
     const tiempoMinVal = tiempoMin != null && tiempoMin !== '' ? Number(tiempoMin) : null;
     const metodoCoccionVal = (metodoCoccion || '').trim() || null;
+    const almacenamientoFreezerVal = (almacenamientoFreezer || '').trim() || null;
+    const almacenamientoHeladeraVal = (almacenamientoHeladera || '').trim() || null;
 
     let fotosArr = Array.isArray(fotos) ? fotos.filter(Boolean).slice(0, 6) : [];
     if (fotosArr.length === 0 && foto) fotosArr = [foto];
@@ -100,6 +104,8 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
        temperatura        = $15,
        tiempo_min         = $16,
        pasos              = $17::jsonb,
+       almacenamiento_freezer  = $18,
+       almacenamiento_heladera = $19,
        active             = TRUE,
        origen             = 'manual',
        updated_at         = NOW()
@@ -118,6 +124,7 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
           ruFinal, rpFinal, upFinal,
           existing[0].id,
           metodoCoccionVal, temperaturaVal, tiempoMinVal, pasosJson,
+          almacenamientoFreezerVal, almacenamientoHeladeraVal,
         ]
       );
       recetaRows = rows;
@@ -128,8 +135,9 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
         porcentaje_venta, costo_total, notas, foto, fotos, notas_updated_at,
         rendimiento_unidad, rendimiento_peso, unidad_peso,
         metodo_coccion, temperatura, tiempo_min, pasos,
+        almacenamiento_freezer, almacenamiento_heladera,
         active, origen, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, TRUE, 'manual', NOW(), NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20, TRUE, 'manual', NOW(), NOW())
      RETURNING *`,
         [
           articleId, bizId,
@@ -144,6 +152,7 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
           notasUpdatedAt || null,
           ruFinal, rpFinal, upFinal,
           metodoCoccionVal, temperaturaVal, tiempoMinVal, pasosJson,
+          almacenamientoFreezerVal, almacenamientoHeladeraVal,
         ]
       );
       recetaRows = rows;
@@ -353,6 +362,8 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
       temperatura = null,
       tiempoMin = null,
       pasos = [],
+      almacenamientoFreezer = null,
+      almacenamientoHeladera = null,
     } = body || {};
 
     const pasosArr = Array.isArray(pasos) ? pasos.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim()) : [];
@@ -360,6 +371,8 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
     const temperaturaVal = temperatura != null && temperatura !== '' ? Number(temperatura) : null;
     const tiempoMinVal = tiempoMin != null && tiempoMin !== '' ? Number(tiempoMin) : null;
     const metodoCoccionVal = (metodoCoccion || '').trim() || null;
+    const almacenamientoFreezerVal = (almacenamientoFreezer || '').trim() || null;
+    const almacenamientoHeladeraVal = (almacenamientoHeladera || '').trim() || null;
 
     if (!Array.isArray(items)) {
       const err = new Error('items_must_be_array');
@@ -420,8 +433,9 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
           porcentaje_venta, costo_total, notas, foto, fotos, notas_updated_at,
           rendimiento_unidad, rendimiento_peso, unidad_peso,
           metodo_coccion, temperatura, tiempo_min, pasos,
+          almacenamiento_freezer, almacenamiento_heladera,
           active, origen, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, TRUE, 'manual', $19, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20, TRUE, 'manual', $21, NOW(), NOW())
        ON CONFLICT ON CONSTRAINT recetas_insumo_biz_key
        DO UPDATE SET
          nombre             = EXCLUDED.nombre,
@@ -440,6 +454,8 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
          temperatura        = EXCLUDED.temperatura,
          tiempo_min         = EXCLUDED.tiempo_min,
          pasos              = EXCLUDED.pasos,
+         almacenamiento_freezer  = EXCLUDED.almacenamiento_freezer,
+         almacenamiento_heladera = EXCLUDED.almacenamiento_heladera,
          active             = TRUE,
          origen             = 'manual',
          updated_at         = NOW()
@@ -459,6 +475,7 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
         rpFinal,
         upFinal,
         metodoCoccionVal, temperaturaVal, tiempoMinVal, pasosJson,
+        almacenamientoFreezerVal, almacenamientoHeladeraVal,
         uid,
       ]
     );
