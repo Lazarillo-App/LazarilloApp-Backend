@@ -59,6 +59,31 @@ async function main() {
 
   console.log(tablas.map(t => t.table_name).join(', '));
 
+  // --tablas=mxcpb,mxren,...  → columnas completas + 3 filas de muestra de
+  // cada una. Para confirmar qué significa cada tabla candidata una vez
+  // acotada la lista por --pistas.
+  if (filtro && filtro.startsWith('--tablas=')) {
+    const nombres = filtro.replace('--tablas=', '').split(',').map((s) => s.trim());
+    for (const table_name of nombres) {
+      const cols = await pool.query(
+        `SELECT column_name, data_type FROM information_schema.columns
+          WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
+        [SCHEMA, table_name]
+      );
+      console.log(`\n══ ${table_name} — columnas (${cols.rows.length}) ══`);
+      console.table(cols.rows);
+      try {
+        const sample = await pool.query(`SELECT * FROM "${SCHEMA}"."${table_name}" LIMIT 3`);
+        console.log(`── ${table_name} — muestra de filas ──`);
+        console.table(sample.rows);
+      } catch (e) {
+        console.log(`(no se pudo leer muestra: ${e.message})`);
+      }
+    }
+    await pool.end();
+    return;
+  }
+
   const objetivo = filtro
     ? tablas.filter(t => t.table_name.toLowerCase().includes(filtro.toLowerCase()))
     : tablas;
