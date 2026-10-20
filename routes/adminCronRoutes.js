@@ -25,6 +25,9 @@ const { syncArticlesAllBusinesses } = require('../services/sync/articlesSyncPoli
 // Ventas (policy existente)
 const { runDailyAuto, ensureInitialBackfillOnce } = require('../services/salesSyncPolicy');
 
+// Ingesta directa desde staging (agente Python → mxitc, ver plan de ingesta Maxi)
+const { syncPurchasesFromStaging } = require('../services/purchasesStagingSync');
+
 /* ==================== MIDDLEWARE DE AUTENTICACIÓN ==================== */
 
 function verifyCronSecret(req, res, next) {
@@ -233,6 +236,59 @@ router.post('/sync-one/:businessId', async (req, res) => {
     return res.json({ ok: true, businessId, detail });
   } catch (err) {
     console.error(`❌ [cron] Error en sync-one (${businessId}):`, err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ==================== ENDPOINTS: INGESTA DIRECTA MAXI (staging) ==================== */
+
+async function listBusinessesWithDirectDb(dominio) {
+  const { rows } = await pool.query(
+    `SELECT id FROM app_businesses
+      WHERE (props->'maxi'->'direct_db'->>$1) = 'true'
+        AND deleted_at IS NULL
+      ORDER BY id`,
+    [dominio]
+  );
+  return rows.map((r) => Number(r.id)).filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/**
+ * POST /api/cron/sync-purchases-staging?dry_run=true
+ *
+ * Fase 1 de la ingesta automática de MaxiRest (ver plan "virtual-tumbling-
+ * moonbeam"): normaliza lo que el agente Python del colega haya dejado en
+ * `maxi_purchases_staging` y lo vuelca en purchases/purchase_items vía
+ * purchasesStore.upsertPurchasesBatch (sin reimplementar esa lógica acá).
+ *
+ * Solo corre para negocios con props.maxi.direct_db.compras = true — hoy
+ * ninguno lo tiene, así que este endpoint no afecta nada hasta que se
+ * active a mano para el negocio piloto.
+ */
+router.post('/sync-purchases-staging', async (req, res) => {
+  const dryRun = req.query.dry_run === 'true';
+  console.log(`🤖 [cron] Ejecutando: sync-purchases-staging${dryRun ? ' (dry-run)' : ''}`);
+
+  try {
+    const businessIds = await listBusinessesWithDirectDb('compras');
+
+    const details = [];
+    let ok = 0, fail = 0;
+
+    for (const businessId of businessIds) {
+      try {
+        const detail = await syncPurchasesFromStaging(businessId, { dryRun });
+        details.push({ businessId, ok: true, detail });
+        ok++;
+      } catch (e) {
+        details.push({ businessId, ok: false, error: e?.message });
+        fail++;
+      }
+    }
+
+    return res.json({ ok: true, dryRun, ran: businessIds.length, ok_count: ok, fail_count: fail, details });
+  } catch (err) {
+    console.error('❌ [cron] Error en sync-purchases-staging:', err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });

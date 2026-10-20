@@ -34,6 +34,10 @@ async function resolveSupplierBizId(bizId) {
 }
 
 // ── Mapa codigo_maxi → insumo_id ──
+// Exportada (además de usarse acá adentro) para que services/purchasesStagingSync.js
+// la reutilice tal cual, en vez de duplicar esta query.
+exports.buildInsumoMap = buildInsumoMap;
+exports.resolveCredsBizId = resolveCredsBizId;
 async function buildInsumoMap(businessId) {
   const { rows } = await pool.query(
     `SELECT id, codigo_maxi::bigint AS codigo_maxi
