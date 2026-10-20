@@ -2,7 +2,7 @@
 const pool = require('../config/db');
 const { propagateRecipe } = require('../services/linkPropagation');
 const { logAudit } = require('../services/audit/auditLog');
-const { listObservaciones, addObservacion } = require('../services/recetaObservaciones');
+const { listObservaciones, addObservacion, editObservacion, deleteObservacion } = require('../services/recetaObservaciones');
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { snapshotReceta, createOrUpdateProposal, propuestaAbiertaDe, resolverMarcasDeRevision } = require('../services/recetaProposals');
 const { writeArticleReceta } = require('../services/recetaWrite');
@@ -53,6 +53,41 @@ exports.addRecetaObservacion = async (req, res, next) => {
   } catch (e) {
     if (e.message === 'texto_requerido') return res.status(400).json({ ok: false, error: 'texto_requerido' });
     console.error('[addRecetaObservacion]', e);
+    next(e);
+  }
+};
+
+exports.editRecetaObservacion = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const obsId = Number(req.params.obsId);
+    const uid = req.user?.id;
+    if (!bizId || !obsId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const observacion = await editObservacion({ observacionId: obsId, businessId: bizId, userId: uid, texto: req.body?.texto });
+    return res.json({ ok: true, observacion });
+  } catch (e) {
+    if (e.message === 'texto_requerido') return res.status(400).json({ ok: false, error: 'texto_requerido' });
+    if (e.status === 404) return res.status(404).json({ ok: false, error: 'No encontrada o no te pertenece' });
+    console.error('[editRecetaObservacion]', e);
+    next(e);
+  }
+};
+
+exports.deleteRecetaObservacion = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const obsId = Number(req.params.obsId);
+    const uid = req.user?.id;
+    if (!bizId || !obsId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+
+    const role = await getEffectiveRole(uid, bizId);
+    const isManager = role === 'admin' || role === 'owner';
+    await deleteObservacion({ observacionId: obsId, businessId: bizId, userId: uid, isManager });
+    return res.json({ ok: true });
+  } catch (e) {
+    if (e.status === 404) return res.status(404).json({ ok: false, error: 'No encontrada o no te pertenece' });
+    console.error('[deleteRecetaObservacion]', e);
     next(e);
   }
 };

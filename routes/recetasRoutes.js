@@ -85,6 +85,8 @@ router.delete('/', ctrl.deleteReceta);
 // GET/POST /api/businesses/:businessId/articles/:articleId/receta/observaciones
 router.get('/observaciones', ctrl.listRecetaObservaciones);
 router.post('/observaciones', ctrl.addRecetaObservacion);
+router.put('/observaciones/:obsId', ctrl.editRecetaObservacion);
+router.delete('/observaciones/:obsId', ctrl.deleteRecetaObservacion);
 
 router.post('/propagate-delete', async (req, res, next) => {
   try {

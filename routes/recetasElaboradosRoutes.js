@@ -13,5 +13,7 @@ router.delete('/', ctrl.deleteRecetaElaborado);
 // GET/POST /api/businesses/:businessId/insumos/:insumoId/receta/observaciones
 router.get('/observaciones', ctrl.listRecetaElaboradoObservaciones);
 router.post('/observaciones', ctrl.addRecetaElaboradoObservacion);
+router.put('/observaciones/:obsId', ctrl.editRecetaElaboradoObservacion);
+router.delete('/observaciones/:obsId', ctrl.deleteRecetaElaboradoObservacion);
 
 module.exports = router;

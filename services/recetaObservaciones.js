@@ -82,4 +82,45 @@ async function addObservacion({ recetaId, businessId, userId, texto, entityType,
   return observacion;
 }
 
-module.exports = { listObservaciones, addObservacion };
+/**
+ * Edita el texto de una observación propia — solo el autor puede editar la suya.
+ */
+async function editObservacion({ observacionId, businessId, userId, texto }) {
+  const limpio = String(texto || '').trim();
+  if (!limpio) throw new Error('texto_requerido');
+
+  const { rows } = await pool.query(
+    `UPDATE receta_observaciones
+        SET texto = $1
+      WHERE id = $2 AND business_id = $3 AND user_id = $4
+      RETURNING id, user_id, autor_alias_snapshot, texto, created_at`,
+    [limpio, observacionId, businessId, userId]
+  );
+  if (!rows.length) {
+    const e = new Error('no encontrada o no te pertenece');
+    e.status = 404;
+    throw e;
+  }
+  return rows[0];
+}
+
+/**
+ * Borra una observación — el autor puede borrar la suya; admin/owner puede
+ * borrar cualquiera del negocio (moderación).
+ */
+async function deleteObservacion({ observacionId, businessId, userId, isManager }) {
+  const { rows } = await pool.query(
+    isManager
+      ? `DELETE FROM receta_observaciones WHERE id = $1 AND business_id = $2 RETURNING id`
+      : `DELETE FROM receta_observaciones WHERE id = $1 AND business_id = $2 AND user_id = $3 RETURNING id`,
+    isManager ? [observacionId, businessId] : [observacionId, businessId, userId]
+  );
+  if (!rows.length) {
+    const e = new Error('no encontrada o no te pertenece');
+    e.status = 404;
+    throw e;
+  }
+  return true;
+}
+
+module.exports = { listObservaciones, addObservacion, editObservacion, deleteObservacion };
