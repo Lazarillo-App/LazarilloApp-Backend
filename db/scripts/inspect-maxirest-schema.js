@@ -92,12 +92,13 @@ async function main() {
   // agrupa bien un comprobante multi-línea, y si cod_suc realmente varía
   // (si siempre es 0, no hace falta modelar sucursales todavía).
   if (filtro === '--validar-compras') {
-    const { rows: totalRows } = await pool.query(`SELECT COUNT(*)::int AS n FROM mxitc`);
+    const T = `"${SCHEMA}"."mxitc"`;
+    const { rows: totalRows } = await pool.query(`SELECT COUNT(*)::int AS n FROM ${T}`);
     console.log(`\nTotal filas en mxitc: ${totalRows[0].n}`);
 
     const { rows: multi } = await pool.query(`
       SELECT cod_pro, cod_cpb, numero1, cod_suc, COUNT(*)::int AS lineas
-        FROM mxitc
+        FROM ${T}
        GROUP BY cod_pro, cod_cpb, numero1, cod_suc
       HAVING COUNT(*) > 1
        ORDER BY lineas DESC
@@ -108,12 +109,12 @@ async function main() {
 
     const { rows: unicos } = await pool.query(`
       SELECT COUNT(*)::int AS total_comprobantes
-        FROM (SELECT DISTINCT cod_pro, cod_cpb, numero1, cod_suc FROM mxitc) t
+        FROM (SELECT DISTINCT cod_pro, cod_cpb, numero1, cod_suc FROM ${T}) t
     `);
     console.log(`Total de comprobantes distintos: ${unicos[0].total_comprobantes}`);
 
     const { rows: sucursales } = await pool.query(`
-      SELECT cod_suc, COUNT(*)::int AS filas FROM mxitc GROUP BY cod_suc ORDER BY filas DESC
+      SELECT cod_suc, COUNT(*)::int AS filas FROM ${T} GROUP BY cod_suc ORDER BY filas DESC
     `);
     console.log(`\nDistribución de cod_suc en mxitc:`);
     console.table(sucursales);
