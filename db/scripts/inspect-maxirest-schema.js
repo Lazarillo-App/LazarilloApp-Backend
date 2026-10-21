@@ -23,6 +23,9 @@ const PISTAS_COLUMNAS = [
   'importe', 'cant', 'preciounit', 'precio', 'proveedor', 'prov',
   'comprobante', 'cpb', 'factura', 'numero', 'nrocomp', 'fecha',
   'codigo', 'cod_art', 'idart', 'rubro', 'medida', 'iva',
+  // ronda 2: maestro de proveedores (cuit/razón social/domicilio) y
+  // catálogo de artículos para la venta (precio de venta)
+  'cuit', 'razon', 'domicilio', 'telefono', 'localidad', 'vta', 'pvta',
 ];
 
 async function main() {
