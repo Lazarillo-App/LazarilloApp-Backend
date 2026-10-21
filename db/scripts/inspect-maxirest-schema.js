@@ -87,6 +87,41 @@ async function main() {
     return;
   }
 
+  // --validar-compras: confirma los dos supuestos del pipeline de compras
+  // antes de confiar en el mapeo (ver plan de ingesta Maxi): que numero1
+  // agrupa bien un comprobante multi-línea, y si cod_suc realmente varía
+  // (si siempre es 0, no hace falta modelar sucursales todavía).
+  if (filtro === '--validar-compras') {
+    const { rows: totalRows } = await pool.query(`SELECT COUNT(*)::int AS n FROM mxitc`);
+    console.log(`\nTotal filas en mxitc: ${totalRows[0].n}`);
+
+    const { rows: multi } = await pool.query(`
+      SELECT cod_pro, cod_cpb, numero1, cod_suc, COUNT(*)::int AS lineas
+        FROM mxitc
+       GROUP BY cod_pro, cod_cpb, numero1, cod_suc
+      HAVING COUNT(*) > 1
+       ORDER BY lineas DESC
+       LIMIT 10
+    `);
+    console.log(`\nComprobantes con más de una línea (agrupando por cod_pro+cod_cpb+numero1+cod_suc) — top 10:`);
+    console.table(multi);
+
+    const { rows: unicos } = await pool.query(`
+      SELECT COUNT(*)::int AS total_comprobantes
+        FROM (SELECT DISTINCT cod_pro, cod_cpb, numero1, cod_suc FROM mxitc) t
+    `);
+    console.log(`Total de comprobantes distintos: ${unicos[0].total_comprobantes}`);
+
+    const { rows: sucursales } = await pool.query(`
+      SELECT cod_suc, COUNT(*)::int AS filas FROM mxitc GROUP BY cod_suc ORDER BY filas DESC
+    `);
+    console.log(`\nDistribución de cod_suc en mxitc:`);
+    console.table(sucursales);
+
+    await pool.end();
+    return;
+  }
+
   const objetivo = filtro
     ? tablas.filter(t => t.table_name.toLowerCase().includes(filtro.toLowerCase()))
     : tablas;
