@@ -419,6 +419,73 @@ exports.foodCost = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/purchases/food-cost-monthly?from=&to=&branch_id=
+// Igual que food-cost, pero partido mes a mes — para el gráfico de evolución
+// de KpiFoodCost.jsx (prop `porMes`). Mismo criterio de rubro/agrupación que
+// food-cost, agregando además `to_char(pi.fecha,'YYYY-MM')` al group by.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.foodCostMonthly = async (req, res, next) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+
+    const baseParams = [businessId];
+    const baseWhere = ['pi.business_id = $1'];
+    const { where: extraWhere, params: extraParams } = buildPurchaseFilters(req.query, 2);
+    const allWhere = [...baseWhere, ...extraWhere];
+    const allParams = [...baseParams, ...extraParams];
+
+    const { rows } = await pool.query(
+      `SELECT
+         to_char(pi.fecha, 'YYYY-MM') AS mes,
+         i.id,
+         i.nombre,
+         COALESCE(ag.nombre, 'Sin agrupación') AS agrupacion,
+         COALESCE(ir.nombre, NULLIF(i.rubro, ''), 'Sin rubro') AS rubro,
+         SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0))::numeric AS importe
+       FROM purchase_items pi
+       JOIN purchases p ON p.id = pi.purchase_id
+       JOIN insumos i   ON i.id = pi.insumo_id
+       LEFT JOIN insumo_rubros ir
+         ON ir.business_id = i.business_id AND ir.codigo::text = i.rubro
+       LEFT JOIN LATERAL (
+         SELECT ig2.nombre
+           FROM insumo_group_items igi2
+           JOIN insumo_groups ig2 ON ig2.id = igi2.group_id
+          WHERE igi2.insumo_id = i.id
+            AND lower(trim(ig2.nombre)) NOT IN
+              ('discontinuados', 'descontinuados', 'todo', 'sin agrupacion', 'sin agrupación', 'sin agrupar', 'sin grupo')
+          ORDER BY ig2.id ASC
+          LIMIT 1
+       ) ag ON TRUE
+       WHERE ${allWhere.join(' AND ')}
+       GROUP BY to_char(pi.fecha, 'YYYY-MM'), i.id, i.nombre, ag.nombre, ir.nombre, i.rubro
+      HAVING SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0)) <> 0
+       ORDER BY mes ASC`,
+      allParams
+    );
+
+    const porMes = new Map();
+    for (const r of rows) {
+      if (!porMes.has(r.mes)) porMes.set(r.mes, []);
+      porMes.get(r.mes).push({
+        id: String(r.id),
+        nombre: r.nombre,
+        agrupacion: r.agrupacion,
+        rubro: r.rubro,
+        importe: Number(r.importe) || 0,
+      });
+    }
+    const months = [...porMes.entries()].map(([mes, items]) => ({ mes, items }));
+
+    return res.json({ ok: true, months });
+  } catch (e) {
+    console.error('[purchases.foodCostMonthly] error:', e);
+    next(e);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/purchases/summary?from=&to=&branch_id=
 // ─────────────────────────────────────────────────────────────────────────────
 exports.summary = async (req, res, next) => {
