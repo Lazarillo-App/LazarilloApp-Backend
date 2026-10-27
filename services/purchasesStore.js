@@ -112,14 +112,7 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
     // esa configuración.
     let preciosActualizados = 0;
     const modoCosteo = await getModoCosteo(businessId, client);
-    const idsParaPrecio = [...insumoIdsConCompra];
-    // TEMPORAL — sacar una vez que se entienda por qué preciosActualizados
-    // viene en 0 en corridas reales (sync-maxi-pipeline-compras) a pesar de
-    // que calcularPreciosPorModo funciona bien llamado por separado con los
-    // mismos insumo_id ya insertados.
-    console.log(`[debug-precio] modoCosteo=${modoCosteo} insumoIdsConCompra=${idsParaPrecio.length}`, idsParaPrecio.slice(0, 10));
-    const precios = await calcularPreciosPorModo(client, businessId, idsParaPrecio, modoCosteo);
-    console.log(`[debug-precio] precios devueltos: ${precios ? precios.size : precios}`);
+    const precios = await calcularPreciosPorModo(client, businessId, [...insumoIdsConCompra], modoCosteo);
     if (precios) {
       const idsActualizados = await aplicarPreciosCosteo(client, businessId, precios);
       preciosActualizados = idsActualizados.length;
