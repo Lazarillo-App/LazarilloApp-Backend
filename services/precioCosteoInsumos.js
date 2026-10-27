@@ -50,10 +50,19 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
     // de 200 y seguiría ignorando las líneas en $0.
     const { rows } = await runner.query(
       `SELECT insumo_id, ROUND((SUM(precio_total) / NULLIF(SUM(cantidad), 0))::numeric, 4) AS precio
-         FROM purchase_items
+         FROM purchase_items pi
         WHERE business_id = $1
           AND insumo_id = ANY($2::int[])
           AND fecha >= CURRENT_DATE - INTERVAL '30 days'
+          -- Un elaborado (receta propia activa) nunca saca precio_ref de una
+          -- compra, aunque tenga líneas reales: su costo sale de la receta
+          -- (propagarCostoInsumo). Sin este filtro, cualquier compra pegada a
+          -- su codigo_maxi (real o por colisión de código) le pisa el costo
+          -- calculado con un número que no tiene que ver con su receta.
+          AND NOT EXISTS (
+            SELECT 1 FROM recetas r
+             WHERE r.insumo_id = pi.insumo_id AND r.business_id = pi.business_id AND r.active = TRUE
+          )
         GROUP BY insumo_id
         HAVING SUM(precio_total) > 0`,
       [businessId, insumoIds]
@@ -73,6 +82,12 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
          FROM purchase_items pi
          JOIN purchases p ON p.id = pi.purchase_id
         WHERE pi.business_id = $1 AND pi.insumo_id = ANY($2::int[])
+          -- Ver comentario equivalente en la rama 'promedio_30': un elaborado
+          -- nunca saca precio_ref de una compra, sale de su receta.
+          AND NOT EXISTS (
+            SELECT 1 FROM recetas r
+             WHERE r.insumo_id = pi.insumo_id AND r.business_id = pi.business_id AND r.active = TRUE
+          )
         GROUP BY pi.insumo_id, p.factura_key, p.proveedor_id
      ),
      ultimo AS (

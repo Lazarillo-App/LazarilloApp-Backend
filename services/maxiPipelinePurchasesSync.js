@@ -39,6 +39,17 @@ function facturaKeyDe(cod_cpb, numero1, numero2) {
   return `${String(cod_cpb ?? '').trim()}-${numero1}-${numero2}`;
 }
 
+// Comprobantes de GASTO administrativo (no mercadería): confirmado cruzando
+// purchase_items ya ingresados — TODO comprobante cod_cpb='C' encontrado era
+// un gasto (Contador, Mantenimiento, Administración redes sociales, Diseño
+// Gráfico, etc.) cuyo "codigo" de MaxiRest coincidía por pura casualidad
+// numérica con el codigo_maxi de un insumo real (ej. "Diseño Grafico" código
+// 931 == "Barril Golden" código 931), pisándole precio_ref con el importe del
+// gasto. 'N' tiene el mismo patrón (Plataforma Mercadopago, Librería). Estos
+// comprobantes NUNCA deben buscar insumo — quedan sin stock asociado, igual
+// que la mercadería sin detalle.
+const TIPOS_GASTO = new Set(['C', 'N']);
+
 // Las tablas son "prefijo_AÑO" y AÑO rota cada enero (conviven el actual y el
 // anterior) — se resuelven por información real del schema, nunca
 // hardcodeadas, para no romperse solas en cada Año Nuevo.
@@ -90,6 +101,7 @@ async function listarCodigosSinInsumo(businessId) {
 
   const porCodigo = new Map();
   for (const f of filas) {
+    if (TIPOS_GASTO.has(String(f.cod_cpb ?? '').trim().toUpperCase())) continue;
     if (f.codigo != null && insumoMap.has(Number(f.codigo))) continue;
     const key = String(f.codigo);
     if (!porCodigo.has(key)) {
@@ -119,8 +131,9 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
     if (!porFactura.has(key)) {
       porFactura.set(key, { numero: key, proveedor: f.cod_pro, items: [] });
     }
+    const esGasto = TIPOS_GASTO.has(String(f.cod_cpb ?? '').trim().toUpperCase());
     porFactura.get(key).items.push({
-      insumo: f.codigo,
+      insumo: esGasto ? null : f.codigo,
       fecha: f.fecha,
       cantidad: f.cantidad,
       neto: f.neto,           // precio unitario neto (confirmado: neto * cantidad = totalins)
