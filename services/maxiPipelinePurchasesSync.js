@@ -183,16 +183,28 @@ async function syncPagosDeNegocio(businessId, pdv, schema, { dryRun = false } = 
 
   if (dryRun) return { insertados: filas.length, dryRun };
 
+  // orden_maxi puede repetirse entre la tabla del año anterior y la del
+  // actual (el pago de una factura puede fecharse meses después de la
+  // factura y terminar exportado en las dos) — "ON CONFLICT DO UPDATE" no
+  // admite el mismo conflict target dos veces en una sola sentencia, así
+  // que se deduplica por orden ANTES de armar los lotes (se queda con la
+  // última ocurrencia, que es la más reciente dentro de este fetch).
+  const porOrden = new Map();
+  for (const f of filas) {
+    const orden = f.orden != null ? Number(f.orden) : null;
+    if (!Number.isFinite(orden)) continue;
+    porOrden.set(orden, { ...f, orden });
+  }
+  const filasUnicas = [...porOrden.values()];
+
   // Bulk (UNNEST), no una query por fila — con ~2500+ pagos, una fila a la
   // vez tardaba minutos y en una corrida se cortó la conexión a mitad de
   // camino (cada INSERT individual tardaba 500-1400ms). En lotes de 500 es
   // una sola ida y vuelta por lote.
   const LOTE = 500;
   let insertados = 0;
-  for (let i = 0; i < filas.length; i += LOTE) {
-    const lote = filas.slice(i, i + LOTE)
-      .map((f) => ({ ...f, orden: f.orden != null ? Number(f.orden) : null }))
-      .filter((f) => Number.isFinite(f.orden));
+  for (let i = 0; i < filasUnicas.length; i += LOTE) {
+    const lote = filasUnicas.slice(i, i + LOTE);
     if (!lote.length) continue;
 
     const businessIds = lote.map(() => businessId);
