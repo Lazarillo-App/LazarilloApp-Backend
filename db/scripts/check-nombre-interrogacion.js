@@ -1,11 +1,13 @@
 // db/scripts/check-nombre-interrogacion.js
 //
 // Diagnóstico de SOLO LECTURA — no modifica nada. Busca en maxi_articles
-// todo nombre con un "?" metido ADENTRO de una palabra (no al final de una
-// frase ni suelto) — la firma típica de una Ñ que MaxiRest exportó mal.
-// Para cada fila, muestra el nombre tal cual está guardado y una propuesta
-// de arreglo (? -> Ñ o ñ según mayúscula/minúscula de las letras de al lado),
-// para revisar ANTES de correr ningún backfill.
+// nombres con un "?" metido adentro de una palabra (la firma típica de un
+// acento o Ñ que MaxiRest exportó mal) y propone el arreglo SOLO para
+// palabras ya verificadas a mano en DICCIONARIO — no adivina letra por
+// letra. Un primer intento asumía que todo "?" era una Ñ, y eso rompía
+// casos reales (ej. "Energ?tico" es "Energético", con É, no con Ñ) — por
+// eso ahora cualquier palabra que no esté en el diccionario se lista aparte
+// para revisar a mano, en vez de arriesgar una propuesta.
 //
 // Uso: node db/scripts/check-nombre-interrogacion.js            (todos los negocios)
 //      node db/scripts/check-nombre-interrogacion.js 147         (solo ese negocio)
@@ -13,16 +15,50 @@
 require('dotenv').config();
 const pool = require('../../config/db');
 
-// "?" con letra de ambos lados (sin espacio ni otro "?" al lado) — así no
-// entran signos de pregunta reales ("¿Hay stock?", "Promo?") que sí tienen
-// un espacio o el final del texto de un lado.
-const PATRON = /[A-Za-zÁÉÍÓÚáéíóúÑñ]\?[A-Za-zÁÉÍÓÚáéíóúÑñ]/;
+// Palabras confirmadas a mano contra la base real (correr este script antes
+// de aplicar nada si aparece una palabra nueva no listada acá).
+// Clave: la palabra ROTA en minúscula, con "?" en el lugar de la letra
+// perdida. Valor: la palabra correcta en minúscula (se re-aplica mayúscula
+// letra por letra al reemplazar, para no romper "CUMPLEA?OS" ni "Pi?a").
+const DICCIONARIO = {
+  'cumplea?os': 'cumpleaños',
+  'cuplea?os': 'cupleaños',       // typo previo (falta una "m") — se preserva, no es parte de este bug
+  'bu?uelos': 'buñuelos',
+  'pi?a': 'piña',
+  'ni?os': 'niños',
+  'ma?ana': 'mañana',
+  'peque?o': 'pequeño',
+  'peque?a': 'pequeña',
+  'entra?a': 'entraña',
+  'energ?tico': 'energético',
+  'energ?tica': 'energética',
+};
+
+function aplicarMayusculas(rota, correcta) {
+  // letra por letra: si la letra de la rota era mayúscula, la correspondiente
+  // en la corrección también lo es — así "CUMPLEA?OS" no se convierte en
+  // "cumpleaÑos" ni "Pi?a" en "piÑa". El "?" no tiene mayúscula/minúscula
+  // propia, así que justo ahí se mira la letra de al lado para saber el
+  // case real (si no, siempre salía en minúscula).
+  let out = '';
+  for (let i = 0; i < correcta.length; i++) {
+    const c = correcta[i];
+    let orig = rota[i];
+    if (orig === '?') orig = rota[i - 1] || rota[i + 1] || c;
+    out += (orig && orig === orig.toUpperCase() && orig !== orig.toLowerCase())
+      ? c.toUpperCase() : c;
+  }
+  return out;
+}
 
 function proponer(nombre) {
-  return nombre.replace(/([A-Za-zÁÉÍÓÚáéíóúÑñ])\?([A-Za-zÁÉÍÓÚáéíóúÑñ])/g, (m, a, b) => {
-    const mayus = a === a.toUpperCase() && a !== a.toLowerCase();
-    return a + (mayus ? 'Ñ' : 'ñ') + b;
-  });
+  let out = nombre;
+  let huboCambio = false;
+  for (const [rota, correcta] of Object.entries(DICCIONARIO)) {
+    const re = new RegExp(rota.replace(/\?/g, '\\?'), 'gi');
+    out = out.replace(re, (m) => { huboCambio = true; return aplicarMayusculas(m, correcta); });
+  }
+  return huboCambio ? out : null;
 }
 
 async function main() {
@@ -38,23 +74,27 @@ async function main() {
     bizId ? [bizId] : []
   );
 
-  const sospechosos = rows.filter((r) => PATRON.test(r.nombre));
-  const otros = rows.filter((r) => !PATRON.test(r.nombre));
+  const conPropuesta = [];
+  const sinPropuesta = [];
+  for (const r of rows) {
+    const nuevo = proponer(r.nombre);
+    if (nuevo && nuevo !== r.nombre) conPropuesta.push({ ...r, nuevo });
+    else sinPropuesta.push(r);
+  }
 
   console.log(`Filas con "?" en el nombre: ${rows.length}`);
-  console.log(`  - con pinta de Ñ perdida (? entre letras): ${sospechosos.length}`);
-  console.log(`  - otras (? suelto o al final — probablemente un "?" real, NO tocar): ${otros.length}`);
+  console.log(`  - con propuesta de arreglo (palabra ya verificada): ${conPropuesta.length}`);
+  console.log(`  - SIN propuesta (palabra no reconocida o "?" suelto — revisar a mano): ${sinPropuesta.length}`);
 
-  if (sospechosos.length) {
+  if (conPropuesta.length) {
     console.log('\n=== Propuesta de arreglo (NO aplicado todavía) ===');
-    sospechosos.forEach((r) => {
-      const nuevo = proponer(r.nombre);
-      console.log(`  negocio ${r.business_id} · art #${r.articulo_id}: ${JSON.stringify(r.nombre)} -> ${JSON.stringify(nuevo)}`);
+    conPropuesta.forEach((r) => {
+      console.log(`  negocio ${r.business_id} · art #${r.articulo_id}: ${JSON.stringify(r.nombre)} -> ${JSON.stringify(r.nuevo)}`);
     });
   }
-  if (otros.length) {
-    console.log('\n=== Con "?" pero NO parece Ñ perdida (se listan para que las revises vos) ===');
-    otros.forEach((r) => {
+  if (sinPropuesta.length) {
+    console.log('\n=== SIN propuesta automática — revisar y corregir a mano ===');
+    sinPropuesta.forEach((r) => {
       console.log(`  negocio ${r.business_id} · art #${r.articulo_id}: ${JSON.stringify(r.nombre)}`);
     });
   }
