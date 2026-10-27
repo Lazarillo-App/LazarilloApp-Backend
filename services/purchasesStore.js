@@ -31,13 +31,17 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
       const proveedorId = factura.proveedor ? Number(factura.proveedor) : null;
       const items = Array.isArray(factura.items) ? factura.items : [];
 
-      let netoTotal = 0, ivaTotal = 0, impIntTotal = 0;
+      let netoTotal = 0, ivaTotal = 0, impIntTotal = 0, percepTotal = 0;
       for (const it of items) {
         netoTotal   += Number(it.preciotot  ?? 0);
         ivaTotal    += Number(it.iva_total  ?? 0);
         impIntTotal += Number(it.imp_inttot ?? 0);
+        // Percepciones (ej. IIBB) — solo las manda el pipeline nuevo de
+        // MaxiRest (i25); el resto de los orígenes no tiene este campo y
+        // queda en 0, sin cambiar nada de lo ya existente.
+        percepTotal += Number(it.percep ?? 0);
       }
-      const total = netoTotal + ivaTotal + impIntTotal;
+      const total = netoTotal + ivaTotal + impIntTotal + percepTotal;
       const fecha = items[0]?.fecha ?? null;
 
       const upsertRes = await client.query(
