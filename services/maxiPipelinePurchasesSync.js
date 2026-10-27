@@ -183,25 +183,61 @@ async function syncPagosDeNegocio(businessId, pdv, schema, { dryRun = false } = 
 
   if (dryRun) return { insertados: filas.length, dryRun };
 
+  // Bulk (UNNEST), no una query por fila — con ~2500+ pagos, una fila a la
+  // vez tardaba minutos y en una corrida se cortó la conexión a mitad de
+  // camino (cada INSERT individual tardaba 500-1400ms). En lotes de 500 es
+  // una sola ida y vuelta por lote.
+  const LOTE = 500;
   let insertados = 0;
-  for (const f of filas) {
-    const orden = f.orden != null ? Number(f.orden) : null;
-    if (!Number.isFinite(orden)) continue;
-    const facturaKey = facturaKeyDe(f.cod_cpb, f.prefijo, f.numero);
+  for (let i = 0; i < filas.length; i += LOTE) {
+    const lote = filas.slice(i, i + LOTE)
+      .map((f) => ({ ...f, orden: f.orden != null ? Number(f.orden) : null }))
+      .filter((f) => Number.isFinite(f.orden));
+    if (!lote.length) continue;
 
-    await pool.query(
-      `INSERT INTO purchase_payments (
+    const businessIds = lote.map(() => businessId);
+    const facturaKeys = lote.map((f) => facturaKeyDe(f.cod_cpb, f.prefijo, f.numero));
+    const pdvs = lote.map(() => pdv);
+    const ordenes = lote.map((f) => f.orden);
+    const formasPago = lote.map((f) => f.pago ?? null);
+    const importes = lote.map((f) => f.importe ?? null);
+    const fechasPago = lote.map((f) => f.fecha_pago ?? null);
+    const chequeNumeros = lote.map((f) => f.numero_val ?? null);
+    const chequeFechasVto = lote.map((f) => f.fecha_val ?? null);
+    const chequeImportes = lote.map((f) => f.imp_val ?? null);
+    const bancoCodigos = lote.map((f) => f.cod_ban ?? null);
+    const bancoNombres = lote.map((f) => f.nom_ban ?? null);
+    const codCgas = lote.map((f) => f.cod_cga ?? null);
+    const nomCgas = lote.map((f) => f.nom_cga ?? null);
+    const codRgas = lote.map((f) => f.cod_rga ?? null);
+    const nomRgas = lote.map((f) => f.nom_rga ?? null);
+    const codCtgs = lote.map((f) => f.cod_ctg ?? null);
+    const nomCtgs = lote.map((f) => f.nom_ctg ?? null);
+
+    const r = await pool.query(
+      `WITH datos AS (
+         SELECT * FROM UNNEST(
+           $1::bigint[], $2::text[], $3::text[], $4::bigint[], $5::text[],
+           $6::numeric[], $7::date[], $8::bigint[], $9::text[], $10::numeric[],
+           $11::bigint[], $12::text[], $13::bigint[], $14::text[],
+           $15::bigint[], $16::text[], $17::bigint[], $18::text[]
+         ) AS t(business_id, factura_key, pdv, orden_maxi, forma_pago, importe, fecha_pago,
+                cheque_numero, cheque_fecha_vto, cheque_importe, banco_codigo, banco_nombre,
+                cod_cga, nom_cga, cod_rga, nom_rga, cod_ctg, nom_ctg)
+       )
+       INSERT INTO purchase_payments (
          business_id, purchase_id, factura_key, pdv, orden_maxi, forma_pago,
          importe, fecha_pago, cheque_numero, cheque_fecha_vto, cheque_importe,
          banco_codigo, banco_nombre, cod_cga, nom_cga, cod_rga, nom_rga, cod_ctg, nom_ctg,
          synced_at
        )
-       VALUES (
-         $1,
-         (SELECT id FROM purchases WHERE business_id = $1 AND factura_key = $2 LIMIT 1),
-         $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+       SELECT
+         d.business_id, p.id, d.factura_key, d.pdv, d.orden_maxi, d.forma_pago,
+         d.importe, d.fecha_pago, d.cheque_numero, d.cheque_fecha_vto, d.cheque_importe,
+         d.banco_codigo, d.banco_nombre, d.cod_cga, d.nom_cga, d.cod_rga, d.nom_rga, d.cod_ctg, d.nom_ctg,
          NOW()
-       )
+       FROM datos d
+       LEFT JOIN purchases p ON p.business_id = d.business_id AND p.factura_key = d.factura_key
        ON CONFLICT (business_id, orden_maxi) DO UPDATE SET
          purchase_id      = EXCLUDED.purchase_id,
          factura_key      = EXCLUDED.factura_key,
@@ -218,16 +254,12 @@ async function syncPagosDeNegocio(businessId, pdv, schema, { dryRun = false } = 
          cod_ctg = EXCLUDED.cod_ctg, nom_ctg = EXCLUDED.nom_ctg,
          synced_at = NOW()`,
       [
-        businessId, facturaKey, pdv, orden, f.pago ?? null,
-        f.importe ?? null, f.fecha_pago ?? null,
-        f.numero_val ?? null, f.fecha_val ?? null, f.imp_val ?? null,
-        f.cod_ban ?? null, f.nom_ban ?? null,
-        f.cod_cga ?? null, f.nom_cga ?? null,
-        f.cod_rga ?? null, f.nom_rga ?? null,
-        f.cod_ctg ?? null, f.nom_ctg ?? null,
+        businessIds, facturaKeys, pdvs, ordenes, formasPago,
+        importes, fechasPago, chequeNumeros, chequeFechasVto, chequeImportes,
+        bancoCodigos, bancoNombres, codCgas, nomCgas, codRgas, nomRgas, codCtgs, nomCtgs,
       ]
     );
-    insertados++;
+    insertados += r.rowCount;
   }
 
   return { insertados, dryRun };
