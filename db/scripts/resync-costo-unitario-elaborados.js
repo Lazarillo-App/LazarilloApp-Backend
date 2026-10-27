@@ -35,7 +35,12 @@ async function main() {
     : '── Aplicando cambios en la base ──');
   if (SOLO_BIZ) console.log(`Limitado al negocio ${SOLO_BIZ}`);
 
-  // Elaborados = insumos con una receta PROPIA activa (r.insumo_id = i.id).
+  // Elaborados = insumos con una receta PROPIA activa (r.insumo_id = i.id)
+  // Y CON AL MENOS UN INGREDIENTE. Un insumo comprado directo puede tener una
+  // receta propia VACÍA (ej. de rendimiento/equivalencias, no de costeo —
+  // visto con "GINPAFF BOTELLA"); sin la condición de receta_items, este
+  // script le recalcula costo_total=0 (SUM de cero filas) y le pisa un
+  // precio_ref real con $0.
   const { rows: elaborados } = await pool.query(
     `SELECT r.id AS receta_id, i.id AS insumo_id, i.business_id, i.nombre,
             i.precio_ref AS precio_ref_antes
@@ -43,6 +48,7 @@ async function main() {
        JOIN insumos i ON i.id = r.insumo_id
       WHERE r.active = TRUE
         AND r.insumo_id IS NOT NULL
+        AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
         ${SOLO_BIZ ? 'AND i.business_id = $1' : ''}
       ORDER BY i.business_id, i.id`,
     SOLO_BIZ ? [SOLO_BIZ] : []

@@ -54,14 +54,17 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
         WHERE business_id = $1
           AND insumo_id = ANY($2::int[])
           AND fecha >= CURRENT_DATE - INTERVAL '30 days'
-          -- Un elaborado (receta propia activa) nunca saca precio_ref de una
-          -- compra, aunque tenga líneas reales: su costo sale de la receta
-          -- (propagarCostoInsumo). Sin este filtro, cualquier compra pegada a
-          -- su codigo_maxi (real o por colisión de código) le pisa el costo
-          -- calculado con un número que no tiene que ver con su receta.
+          -- Un elaborado de verdad (receta propia activa CON ingredientes)
+          -- nunca saca precio_ref de una compra, aunque tenga líneas reales:
+          -- su costo sale de la receta (propagarCostoInsumo). El filtro exige
+          -- ingredientes porque un insumo comprado directo puede tener una
+          -- receta propia VACÍA (ej. de rendimiento/equivalencias, como
+          -- "GINPAFF BOTELLA") — sin esa condición, un insumo real quedaría
+          -- con precio_ref=0 apenas corriera el backfill de elaborados.
           AND NOT EXISTS (
             SELECT 1 FROM recetas r
              WHERE r.insumo_id = pi.insumo_id AND r.business_id = pi.business_id AND r.active = TRUE
+               AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
           )
         GROUP BY insumo_id
         HAVING SUM(precio_total) > 0`,
@@ -87,6 +90,7 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
           AND NOT EXISTS (
             SELECT 1 FROM recetas r
              WHERE r.insumo_id = pi.insumo_id AND r.business_id = pi.business_id AND r.active = TRUE
+               AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
           )
         GROUP BY pi.insumo_id, p.factura_key, p.proveedor_id
      ),

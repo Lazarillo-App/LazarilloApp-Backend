@@ -19,8 +19,11 @@ async function main() {
     process.exit(1);
   }
 
-  // "Elaborado" = insumo con una receta PROPIA activa (receta.insumo_id = insumo.id).
-  // Su costo debe salir de esa receta (propagarCostoInsumo), nunca de purchase_items.
+  // "Elaborado" = insumo con una receta PROPIA activa Y CON INGREDIENTES
+  // (receta.insumo_id = insumo.id). Una receta propia VACÍA es de rendimiento/
+  // equivalencias (ej. "GINPAFF BOTELLA"), no de costeo — ese caso se compra
+  // de verdad y no debe aparecer acá. Su costo debe salir de la receta
+  // (propagarCostoInsumo), nunca de purchase_items.
   const { rows } = await pool.query(
     `SELECT i.id, i.nombre, i.codigo_maxi, i.precio_ref, i.bonif_aceptada,
             COUNT(pi.id)::int AS lineas_compra,
@@ -30,6 +33,7 @@ async function main() {
        JOIN purchase_items pi ON pi.insumo_id = i.id AND pi.business_id = i.business_id
        JOIN purchases p ON p.id = pi.purchase_id
       WHERE i.business_id = $1
+        AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
       GROUP BY i.id, i.nombre, i.codigo_maxi, i.precio_ref, i.bonif_aceptada
       ORDER BY lineas_compra DESC`,
     [businessId]
