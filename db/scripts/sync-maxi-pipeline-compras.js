@@ -9,7 +9,7 @@
 'use strict';
 require('dotenv').config();
 const pool = require('../../config/db');
-const { syncComprasDeNegocio } = require('../services/maxiPipelinePurchasesSync');
+const { syncComprasDeNegocio } = require('../../services/maxiPipelinePurchasesSync');
 
 async function main() {
   const args = process.argv.slice(2);
