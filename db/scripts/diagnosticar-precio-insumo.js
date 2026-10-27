@@ -46,6 +46,18 @@ async function main() {
   console.log(`\n=== Receta propia (elaborado?) — ${recRows.length} fila(s) ===`);
   console.table(recRows);
 
+  for (const rec of recRows) {
+    const { rows: itemsRec } = await pool.query(
+      `SELECT ri.id, ri.insumo_id, i2.nombre AS ingrediente, ri.cantidad, ri.unidad, ri.costo_unitario
+         FROM receta_items ri
+         LEFT JOIN insumos i2 ON i2.id = ri.insumo_id
+        WHERE ri.receta_id = $1`,
+      [rec.id]
+    );
+    console.log(`\n--- Ingredientes de la receta ${rec.id} "${rec.nombre}" — ${itemsRec.length} línea(s) ---`);
+    console.table(itemsRec);
+  }
+
   // TODOS los grupos (factura_key, proveedor_id) para este insumo en este
   // negocio — mismo agrupado que calcularPreciosPorModo (ultima_compra).
   const { rows: grupos } = await pool.query(
