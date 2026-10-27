@@ -20,6 +20,7 @@ const {
   eliminarArticulosDeAgrupacionBulk,
   moveCrossBiz,
   ensureTop20Agrupacion,
+  upsertArticuloGroupRule,
 } = require('../controllers/agrupacionesController');
 
 const { materializeGroupsFromTaxonomy } = require('../services/autoGroupingService');
@@ -37,6 +38,7 @@ router.get('/agrupaciones', safe(obtenerAgrupaciones, 'obtenerAgrupaciones'));
 router.put('/agrupaciones/todo', safe(ensureTodoAgrupacion, 'ensureTodoAgrupacion'));
 router.put('/agrupaciones/top20', safe(ensureTop20Agrupacion, 'ensureTop20Agrupacion'));
 router.post('/agrupaciones/create-or-move', blockStaffWrite, safe(createOrMoveAgrupacion, 'createOrMoveAgrupacion'));
+router.post('/agrupaciones/group-rules', blockStaffWrite, safe(upsertArticuloGroupRule, 'upsertArticuloGroupRule'));
 router.get('/agrupaciones/articulo/:articuloId/origen', safe(getArticuloOrigen, 'getArticuloOrigen'));
 router.post('/agrupaciones/articulos/origenes', safe(getArticulosOrigenes, 'getArticulosOrigenes'));
 router.post('/agrupaciones/auto-from-taxonomy', blockStaffWrite, async (req, res, next) => {

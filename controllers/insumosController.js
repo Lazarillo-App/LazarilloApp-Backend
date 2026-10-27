@@ -2008,6 +2008,37 @@ exports.groups_createOrMove = async (req, res) => {
   }
 };
 
+/* ─── REGLA PERSISTENTE rubro→agrupación ─────────────────────────────
+   insumo_group_rules (business_id, rubro_codigo, es_elaborador, group_id):
+   ya la lee autoAssignNewInsumos.js para auto-asignar insumos nuevos que
+   lleguen por sync de Maxi (cron y botón manual), pero hasta ahora ningún
+   endpoint escribía en ella. Se guarda al mover un rubro completo desde
+   Sin Agrupación: "este rubro, de ahora en más, va a X". */
+exports.groups_upsertRule = async (req, res) => {
+  const bizId = getBusinessId(req);
+  if (!bizId) return sendError(res, 400, 'business_id requerido');
+
+  const rubroCodigo = String(req.body?.rubro_codigo ?? '').trim();
+  const groupId = Number(req.body?.group_id);
+  const esElaborador = req.body?.es_elaborador === true;
+  if (!rubroCodigo) return sendError(res, 400, 'rubro_codigo es requerido');
+  if (!Number.isFinite(groupId) || groupId <= 0) return sendError(res, 400, 'group_id inválido');
+
+  try {
+    await pool.query(
+      `INSERT INTO insumo_group_rules (business_id, rubro_codigo, es_elaborador, group_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (business_id, rubro_codigo, es_elaborador)
+       DO UPDATE SET group_id = EXCLUDED.group_id`,
+      [bizId, rubroCodigo, esElaborador, groupId]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[groups_upsertRule] error:', err);
+    return sendError(res, 500, 'Error al guardar la regla de rubro');
+  }
+};
+
 /**
  * POST /businesses/:id/insumos/import-csv-paired
  * Body multipart con dos archivos:

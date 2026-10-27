@@ -1029,6 +1029,39 @@ exports.createOrMoveAgrupacion = async (req, res) => {
 };
 
 // ============================================================================
+// POST /agrupaciones/group-rules
+// Regla persistente rubro→agrupación para Artículos — equivalente de
+// insumo_group_rules (insumosController.js: groups_upsertRule) del lado de
+// Artículos. "Rubro" en la UI es la columna de texto libre
+// maxi_articles.subrubro (no hay un código propio como insumo_rubros), así
+// que se guarda el texto tal cual. La aplica applyArticuloGroupRules
+// (services/autoGroupAssignment.js) en cada sync de Maxi.
+// ============================================================================
+exports.upsertArticuloGroupRule = async (req, res) => {
+  const businessId = getBusinessId(req);
+  const rubro = String(req.body?.rubro || '').trim();
+  const groupId = Number(req.body?.group_id);
+
+  if (!Number.isFinite(businessId)) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+  if (!rubro) return res.status(400).json({ ok: false, error: 'rubro es requerido' });
+  if (!Number.isFinite(groupId) || groupId <= 0) return res.status(400).json({ ok: false, error: 'group_id inválido' });
+
+  try {
+    await pool.query(
+      `INSERT INTO articulo_group_rules (business_id, rubro, group_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (business_id, rubro)
+       DO UPDATE SET group_id = EXCLUDED.group_id`,
+      [businessId, rubro, groupId]
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[upsertArticuloGroupRule] error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// ============================================================================
 // PUT /businesses/:businessId/agrupaciones/todo
 // Garantiza que exista "Sin Agrupación/TODO" y "Discontinuados".
 // ============================================================================

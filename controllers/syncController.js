@@ -2,7 +2,7 @@
 const pool = require('../config/db');
 const { articleIdsPermitidos } = require('../services/sectorScope');
 const { decryptSecretCompat } = require('../utils/cryptoField');
-const { autoAssignNewArticles } = require('../services/autoGroupAssignment');
+const { autoAssignNewArticles, applyArticuloGroupRules } = require('../services/autoGroupAssignment');
 const { notifyAutoAssign } = require('../services/notificationService');
 const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
 const { reconcileManualsAfterSync } = require('../services/manualReconciliation');
@@ -423,6 +423,18 @@ exports.syncNow = async (req, res) => {
         }
       } catch (recErr) {
         console.error('[syncNow] Error en reconciliación (no crítico):', recErr.message);
+      }
+
+      // 🆕 REGLA PERSISTENTE rubro→agrupación — ANTES de mandar lo que
+      // sobra a Sin Agrupación: lo que matchea una regla ya no cuenta como
+      // "sin asignar" para el paso de abajo.
+      try {
+        const reglaResult = await applyArticuloGroupRules(biz.id);
+        if (reglaResult.assigned > 0) {
+          console.log(`[syncNow] ${reglaResult.assigned} artículo(s) auto-asignados por regla de rubro`);
+        }
+      } catch (reglaErr) {
+        console.error('[syncNow] Error aplicando reglas de rubro (no crítico):', reglaErr.message);
       }
 
       // 🆕 AUTO-ASIGNACIÓN POST-SYNC + NOTIFICACIÓN

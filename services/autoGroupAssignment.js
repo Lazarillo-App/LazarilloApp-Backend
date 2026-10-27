@@ -1,6 +1,105 @@
 // services/autoGroupAssignment.js
 const pool = require('../config/db');
 
+const norm = (s) => String(s || '').trim().toLowerCase();
+
+/**
+ * Regla persistente rubro→agrupación (articulo_group_rules): antes de mandar
+ * los artículos sin asignar a "Sin Agrupación" (autoAssignNewArticles, más
+ * abajo), si su rubro ("Rubro" en la UI = columna maxi_articles.subrubro)
+ * tiene una regla guardada, van directo a esa agrupación. La regla se guarda
+ * al mover un rubro completo desde Sin Agrupación (ver SubrubroAccionesMenu.jsx).
+ *
+ * IMPORTANTE: llamar ANTES de autoAssignNewArticles en el mismo sync — lo que
+ * esta función ya asigna queda afuera del cálculo de "sin asignar" de esa
+ * otra (porque ya están en una agrupación real), así que el orden alcanza
+ * solo, sin coordinación extra entre las dos.
+ */
+async function applyArticuloGroupRules(businessId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: rules } = await client.query(
+      `SELECT r.rubro, r.group_id
+         FROM articulo_group_rules r
+         JOIN agrupaciones g ON g.id = r.group_id
+        WHERE r.business_id = $1
+          AND g.business_id = $1
+          AND g.moved_to_business_id IS NULL
+          AND LOWER(g.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'sin agrupar', 'sin grupo', 'discontinuados', 'descontinuados')`,
+      [businessId]
+    );
+    if (!rules.length) { await client.query('COMMIT'); return { assigned: 0, details: [] }; }
+    const ruleMap = new Map(rules.map((r) => [norm(r.rubro), Number(r.group_id)]));
+
+    const { rows: allArticles } = await client.query(
+      `SELECT ma.articulo_id, ma.subrubro AS rubro FROM maxi_articles ma WHERE ma.business_id = $1`,
+      [businessId]
+    );
+    if (!allArticles.length) { await client.query('COMMIT'); return { assigned: 0, details: [] }; }
+
+    // Mismo criterio que autoAssignNewArticles: ya asignado a cualquier
+    // agrupación real = no se toca.
+    const { rows: assignedRows } = await client.query(
+      `WITH article_ids AS (
+          SELECT (elem->>'id')::int AS articulo_id
+          FROM agrupaciones ag,
+          LATERAL jsonb_array_elements(ag.articulos) AS elem
+          WHERE ag.business_id = $1
+            AND LOWER(ag.nombre) NOT IN ('todo', 'sin agrupacion', 'sin agrupación', 'discontinuados', 'descontinuados')
+            AND ag.moved_to_business_id IS NULL
+        )
+        SELECT DISTINCT articulo_id FROM article_ids WHERE articulo_id IS NOT NULL`,
+      [businessId]
+    );
+    const assignedIds = new Set(
+      assignedRows.map((r) => Number(r.articulo_id)).filter((n) => Number.isFinite(n) && n > 0)
+    );
+
+    const porGrupo = new Map(); // group_id -> [articulo_id]
+    for (const a of allArticles) {
+      const id = Number(a.articulo_id);
+      if (!Number.isFinite(id) || id <= 0 || assignedIds.has(id)) continue;
+      const gid = ruleMap.get(norm(a.rubro));
+      if (!gid) continue;
+      if (!porGrupo.has(gid)) porGrupo.set(gid, []);
+      porGrupo.get(gid).push(id);
+    }
+
+    let total = 0;
+    const details = [];
+    for (const [gid, ids] of porGrupo) {
+      const { rows: yaEn } = await client.query(
+        `SELECT (elem->>'id')::int AS articulo_id
+           FROM agrupaciones, LATERAL jsonb_array_elements(articulos) elem
+          WHERE id = $1`,
+        [gid]
+      );
+      const yaIds = new Set(yaEn.map((r) => Number(r.articulo_id)).filter((n) => n > 0));
+      const nuevos = ids.filter((id) => !yaIds.has(id));
+      if (!nuevos.length) continue;
+
+      await client.query(
+        `UPDATE agrupaciones SET articulos = articulos || $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [gid, JSON.stringify(nuevos.map((id) => ({ id })))]
+      );
+      total += nuevos.length;
+      details.push({ agrupacion_id: gid, articulos_agregados: nuevos.length });
+    }
+
+    console.log(`[articulo-group-rules] ${total} artículo(s) auto-asignados por regla de rubro (negocio ${businessId})`);
+    await client.query('COMMIT');
+    return { assigned: total, details };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[articulo-group-rules] ERROR:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /**
  * Asigna automáticamente artículos nuevos a agrupaciones existentes
  * basándose en coincidencias de categoria/subrubro
@@ -111,5 +210,6 @@ async function autoAssignNewArticles(businessId) {
 
 
 module.exports = {
-  autoAssignNewArticles
+  autoAssignNewArticles,
+  applyArticuloGroupRules,
 };

@@ -4,6 +4,7 @@
 const pool = require('../../config/db');
 const { importMaxiMenuForBusiness } = require('../maxiMenuService');
 const { createSyncNotificationForBusinessUsers } = require('../notificationService');
+const { applyArticuloGroupRules } = require('../autoGroupAssignment');
 
 function lockKeyForArticles(businessId) {
   // Key estable distinta a insumos para evitar colisiones
@@ -56,6 +57,17 @@ async function syncOneBusinessArticles({ businessId, businessName, req }) {
     const result = await importMaxiMenuForBusiness(businessId, { req });
 
     const imported = Number(result?.imported_articles || 0);
+
+    // Regla persistente rubro→agrupación — este path (cron) nunca corrió
+    // auto-asignación de ningún tipo hasta ahora; sin esto, una regla
+    // guardada solo se aplicaría al tocar el botón manual de sync.
+    if (imported > 0) {
+      try {
+        await applyArticuloGroupRules(businessId);
+      } catch (reglaErr) {
+        console.error(`[articlesSyncPolicy] Error aplicando reglas de rubro (no crítico) negocio ${businessId}:`, reglaErr.message);
+      }
+    }
 
     // Notificar solo si hubo artículos (si vino 0, normalmente es porque Maxi devolvió vacío)
     if (imported > 0) {

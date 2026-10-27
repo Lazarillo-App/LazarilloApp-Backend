@@ -43,6 +43,9 @@ router.get('/groups/:id/exclusions', ctrl.groups_getExclusions);
 router.post('/groups/:id/exclusions', blockStaffWrite, ctrl.groups_addExclusions);
 router.delete('/groups/:id/exclusions', blockStaffWrite, ctrl.groups_removeExclusions);
 
+/* Regla persistente rubro→agrupación — ver autoAssignNewInsumos.js */
+router.post('/group-rules', blockStaffWrite, ctrl.groups_upsertRule);
+
 /* ================== IMPORT PAIRED + PREVIEW (rutas específicas antes de CRUD) ================== */
 router.post(
   '/import-csv-paired',
