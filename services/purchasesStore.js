@@ -86,12 +86,12 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
         await client.query(
           `INSERT INTO purchase_items
              (purchase_id, business_id, insumo_id, fecha,
-              sucursal, cantidad, neto, precio, precio_total,
+              branch_id, cantidad, neto, precio, precio_total,
               iva_tasa, iva, iva_total_item,
               imp_int, imp_int_total, orden_compra, cpto_caja, referencia)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
           [purchaseId, businessId, insumoId,
-           itemFecha, it.sucursal ?? 0,
+           itemFecha, it.sucursal ?? null,
            cantidadTotal, factorNeto, precioUnitario,
            it.preciotot ?? 0,
            it.iva_tasa ?? 0, it.iva ?? 0, it.iva_total ?? 0,
