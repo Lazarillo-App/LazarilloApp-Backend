@@ -12,7 +12,7 @@
 'use strict';
 require('dotenv').config();
 const pool = require('../../config/db');
-const { resolveCredsBizId } = require('../controllers/purchasesController');
+const { resolveCredsBizId } = require('../../controllers/purchasesController');
 
 async function main() {
   const businessId = Number(process.argv[2]);
