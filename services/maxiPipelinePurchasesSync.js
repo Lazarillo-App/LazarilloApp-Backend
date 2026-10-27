@@ -57,19 +57,14 @@ async function resolverTablasDelAnio(schema, prefijo) {
     .filter((t) => new RegExp(`^${prefijo}_\\d{4}$`).test(t));
 }
 
-async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
+function resolverPdv(businessId) {
   const entry = Object.entries(PDV_MAP).find(([, v]) => v.businessId === Number(businessId));
-  if (!entry) {
-    return { ok: false, error: `Negocio ${businessId} no está en PDV_MAP todavía` };
-  }
-  const [pdv, { schema }] = entry;
+  return entry ? { pdv: entry[0], schema: entry[1].schema } : null;
+}
 
+async function obtenerFilasI25(pdv, schema) {
   const tablas25 = await resolverTablasDelAnio(schema, 'i25_compras_detalle_de_compras');
-  if (!tablas25.length) {
-    return { ok: true, facturas: 0, items: 0, sinInsumo: 0, pagos: 0, dryRun };
-  }
-
-  // Todas las filas de ESTE pdv, de todos los años disponibles.
+  if (!tablas25.length) return [];
   let filas = [];
   for (const tabla of tablas25) {
     const { rows } = await pool.query(
@@ -78,6 +73,41 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
     );
     filas = filas.concat(rows);
   }
+  return filas;
+}
+
+// Diagnóstico: qué códigos de insumo de MaxiRest no matchean ningún insumo
+// de Lazarillo (insumos.codigo_maxi) — para revisar antes de aplicar si son
+// insumos que faltan crear, o un problema de datos (codigo_maxi mal cargado).
+async function listarCodigosSinInsumo(businessId) {
+  const resuelto = resolverPdv(businessId);
+  if (!resuelto) return { ok: false, error: `Negocio ${businessId} no está en PDV_MAP todavía` };
+  const { pdv, schema } = resuelto;
+
+  const filas = await obtenerFilasI25(pdv, schema);
+  const credsBizId = await resolveCredsBizId(businessId);
+  const insumoMap = await buildInsumoMap(credsBizId);
+
+  const porCodigo = new Map();
+  for (const f of filas) {
+    if (f.codigo != null && insumoMap.has(Number(f.codigo))) continue;
+    const key = String(f.codigo);
+    if (!porCodigo.has(key)) {
+      porCodigo.set(key, { codigo: f.codigo, nombre: f.nombre, rubro: f.nom_cga, lineas: 0 });
+    }
+    porCodigo.get(key).lineas++;
+  }
+  return { ok: true, codigos: [...porCodigo.values()].sort((a, b) => b.lineas - a.lineas) };
+}
+
+async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
+  const resuelto = resolverPdv(businessId);
+  if (!resuelto) {
+    return { ok: false, error: `Negocio ${businessId} no está en PDV_MAP todavía` };
+  }
+  const { pdv, schema } = resuelto;
+
+  const filas = await obtenerFilasI25(pdv, schema);
   if (!filas.length) {
     return { ok: true, facturas: 0, items: 0, sinInsumo: 0, pagos: 0, dryRun };
   }
@@ -118,13 +148,13 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
     }
   }
 
+  const pagosResultado = await syncPagosDeNegocio(businessId, pdv, schema, { dryRun });
+
   if (dryRun) {
-    return { ok: true, facturas: facturas.length, items: filas.length, sinInsumo, pagos: 0, dryRun };
+    return { ok: true, facturas: facturas.length, items: filas.length, sinInsumo, pagos: pagosResultado, dryRun };
   }
 
   const resultadoCompras = await upsertPurchasesBatch(businessId, facturas, insumoMap, null);
-
-  const pagosResultado = await syncPagosDeNegocio(businessId, pdv, schema, { dryRun });
 
   return {
     ok: true,
@@ -203,4 +233,4 @@ async function syncPagosDeNegocio(businessId, pdv, schema, { dryRun = false } = 
   return { insertados, dryRun };
 }
 
-module.exports = { syncComprasDeNegocio, PDV_MAP };
+module.exports = { syncComprasDeNegocio, listarCodigosSinInsumo, PDV_MAP };
