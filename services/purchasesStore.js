@@ -5,6 +5,36 @@ const pool = require('../config/db');
 const { propagarCostoInsumo } = require('./costoRecetaService');
 const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo } = require('./precioCosteoInsumos');
 
+// Un código de MaxiRest puede coincidir por pura casualidad numérica con el
+// codigo_maxi de un insumo real (confirmado con decenas de casos: gastos
+// administrativos — luz, impuestos, seguros, contador, comisiones de
+// delivery — matcheando insumos como Barril Golden, Agua Sin Gas, Medallón
+// Carne, con precios hasta 4000 veces el real). El tipo de comprobante y el
+// rubro de origen (cod_cga) NO alcanzan como filtro: hay demasiadas
+// variantes y crecen con cada negocio nuevo. En cambio, el precio real
+// pagado por un insumo cambia poco de una compra a otra (como mucho unas
+// pocas veces por inflación) — un salto de 15x o más contra la mediana de
+// lo ya comprado es, en la práctica, siempre un code mismatch, nunca una
+// suba de precio real. Protege cualquier vía de ingreso de compras (no solo
+// MaxiRest), ya que vive en el punto compartido donde se resuelve insumo_id.
+const RATIO_PRECIO_SOSPECHOSO = 15;
+
+// Mediana de precio unitario ya pagado por cada insumo (sobre lo ya
+// cargado en purchase_items) — la vara contra la que se mide cada línea
+// NUEVA, de a una, para no rechazar un insumo entero por culpa de una sola
+// línea sucia mezclada con compras reales en el mismo lote.
+async function obtenerMedianasPrevias(client, businessId, insumoIds) {
+  if (!insumoIds.length) return new Map();
+  const { rows } = await client.query(
+    `SELECT insumo_id, percentile_cont(0.5) WITHIN GROUP (ORDER BY precio) AS mediana
+       FROM purchase_items
+      WHERE business_id = $1 AND insumo_id = ANY($2::int[]) AND precio > 0
+      GROUP BY insumo_id`,
+    [businessId, insumoIds]
+  );
+  return new Map(rows.map((r) => [Number(r.insumo_id), Number(r.mediana)]));
+}
+
 /* ─── helper: genera batch_id único ─── */
 function generateBatchId() {
   const now = new Date();
@@ -23,6 +53,20 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
   let inserted = 0, updated = 0, totalItems = 0;
   try {
     await client.query('BEGIN');
+
+    // Candidatos a insumo_id de todo el batch, para pedir de una sola vez la
+    // mediana histórica de cada uno (ver filtro de precio sospechoso abajo).
+    const idsCandidatos = new Set();
+    for (const factura of facturas) {
+      for (const it of (factura?.items || [])) {
+        const codigoMaxi = it.insumo != null ? Number(it.insumo) : null;
+        const candidato = codigoMaxi != null ? insumoMap.get(codigoMaxi) : null;
+        if (candidato) idsCandidatos.add(candidato);
+      }
+    }
+    const medianas = await obtenerMedianasPrevias(client, businessId, [...idsCandidatos]);
+    let matchesDescartados = 0;
+
     const insumoIdsConCompra = new Set();
     for (const factura of facturas) {
       if (!factura) continue;
@@ -76,12 +120,27 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
 
       for (const it of items) {
         const codigoMaxi = it.insumo != null ? Number(it.insumo) : null;
-        const insumoId   = codigoMaxi != null ? (insumoMap.get(codigoMaxi) ?? null) : null;
+        let insumoId     = codigoMaxi != null ? (insumoMap.get(codigoMaxi) ?? null) : null;
         const itemFecha  = it.fecha ?? fecha;
 
         const cantidadTotal  = Number(it.cantidad ?? 0);
         const precioUnitario = Number(it.precio ?? 0);
         const factorNeto     = Number(it.neto ?? 0);
+
+        // Filtro de precio sospechoso: un código de origen puede coincidir
+        // por casualidad con el codigo_maxi de un insumo real (gastos
+        // administrativos — luz, impuestos, comisiones — matcheando
+        // mercadería real). Un salto de RATIO_PRECIO_SOSPECHOSO veces o más
+        // contra la mediana ya pagada por ese insumo nunca es una suba de
+        // precio real — se descarta el match, la línea queda sin insumo.
+        if (insumoId && precioUnitario > 0 && medianas.has(insumoId)) {
+          const mediana = medianas.get(insumoId);
+          const ratio = Math.max(precioUnitario / mediana, mediana / precioUnitario);
+          if (ratio >= RATIO_PRECIO_SOSPECHOSO) {
+            insumoId = null;
+            matchesDescartados++;
+          }
+        }
 
         await client.query(
           `INSERT INTO purchase_items
@@ -125,7 +184,7 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
     }
 
     await client.query('COMMIT');
-    return { inserted, updated, items: totalItems, preciosActualizados, batch_id: effectiveBatchId };
+    return { inserted, updated, items: totalItems, preciosActualizados, matchesDescartados, batch_id: effectiveBatchId };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
