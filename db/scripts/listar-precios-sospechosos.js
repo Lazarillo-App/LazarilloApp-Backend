@@ -42,7 +42,17 @@ async function main() {
          FROM ultimo WHERE importe > 0
      )
      SELECT i.id, i.nombre, i.unidad_med, i.precio_ref, i.bonif_aceptada,
-            f.precio_fresco, f.fecha_ultima_compra
+            f.precio_fresco, f.fecha_ultima_compra,
+            EXISTS (
+              SELECT 1 FROM recetas r
+               WHERE r.insumo_id = i.id AND r.business_id = i.business_id AND r.active = TRUE
+                 AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
+            ) AS es_elaborado_real,
+            EXISTS (
+              SELECT 1 FROM recetas r
+               WHERE r.insumo_id = i.id AND r.business_id = i.business_id AND r.active = TRUE
+                 AND NOT EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
+            ) AS tiene_receta_vacia
        FROM insumos i
        JOIN fresco f ON f.insumo_id = i.id
       WHERE i.business_id = $1
@@ -55,12 +65,17 @@ async function main() {
 
   console.log(`${rows.length} insumo(s) con precio_ref muy distinto al de su última compra real (umbral ${umbral}x):\n`);
   const conBonif = rows.filter((r) => r.bonif_aceptada === true).length;
+  const elaboradosReales = rows.filter((r) => r.es_elaborado_real).length;
+  const recetaVacia = rows.filter((r) => r.tiene_receta_vacia).length;
   console.log(`  - con bonif_aceptada=true (precio_ref congelado a propósito): ${conBonif}`);
-  console.log(`  - sin ese flag (la diferencia es otra cosa): ${rows.length - conBonif}\n`);
+  console.log(`  - elaborado real (receta con ingredientes — diferencia esperada, no tocar): ${elaboradosReales}`);
+  console.log(`  - con receta propia VACÍA (sospechoso: insumo comprado con una receta rendimiento/equivalencias pisándole el precio): ${recetaVacia}`);
+  console.log(`  - resto (sin ninguna de las anteriores — investigar): ${rows.length - conBonif - elaboradosReales - recetaVacia}\n`);
 
   rows.forEach((r) => {
     const ratio = (Number(r.precio_ref) / Number(r.precio_fresco)).toFixed(1);
-    console.log(`  #${r.id} "${r.nombre}" (${r.unidad_med}) — precio_ref: $${r.precio_ref} | última compra real: $${r.precio_fresco} (${new Date(r.fecha_ultima_compra).toISOString().slice(0,10)}) — ratio ${ratio}x — bonif_aceptada: ${r.bonif_aceptada === true}`);
+    const etiqueta = r.es_elaborado_real ? ' [ELABORADO REAL]' : r.tiene_receta_vacia ? ' [RECETA VACÍA]' : '';
+    console.log(`  #${r.id} "${r.nombre}" (${r.unidad_med}) — precio_ref: $${r.precio_ref} | última compra real: $${r.precio_fresco} (${new Date(r.fecha_ultima_compra).toISOString().slice(0,10)}) — ratio ${ratio}x — bonif_aceptada: ${r.bonif_aceptada === true}${etiqueta}`);
   });
 
   await pool.end();
