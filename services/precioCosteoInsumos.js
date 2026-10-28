@@ -88,58 +88,69 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
   // proveedor), no de la última línea: con una promo 2+1, la última línea
   // bonificada en $0 o la última facturada por separado dan un precio que no
   // es ni el de lista ni el real pagado por lo recibido.
+  //
+  // La base solo agrupa (igual de barato que antes); caminar hacia atrás
+  // buscando un precio "razonable" se hace en Node, no en SQL — una función
+  // de ventana calculando una mediana por cada fila, para insumos con 100+
+  // compras históricas, es demasiado para una base con 0.1 CPU. En Node es
+  // trivial incluso con cientos de filas por insumo.
   const { rows } = await runner.query(
-    `WITH comp AS (
-       SELECT pi.insumo_id, p.factura_key, p.proveedor_id,
-              MAX(p.fecha) AS fecha, MAX(p.id) AS pid,
-              SUM(pi.precio_total) AS importe, SUM(pi.cantidad) AS unidades
-         FROM purchase_items pi
-         JOIN purchases p ON p.id = pi.purchase_id
-        WHERE pi.business_id = $1 AND pi.insumo_id = ANY($2::int[])
-          -- Ver comentario equivalente en la rama 'promedio_30': un elaborado
-          -- nunca saca precio_ref de una compra, sale de su receta.
-          AND NOT EXISTS (
-            SELECT 1 FROM recetas r
-             WHERE r.insumo_id = pi.insumo_id AND r.business_id = pi.business_id AND r.active = TRUE
-               AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
-          )
-        GROUP BY pi.insumo_id, p.factura_key, p.proveedor_id
-     ),
-     valido AS (
-       SELECT insumo_id, fecha, pid, (importe / unidades) AS precio
-         FROM comp
-        WHERE unidades > 0 AND importe > 0
-     ),
-     -- Mediana de TODO lo pagado antes de esta compra (nunca incluye la
-     -- compra en sí ni nada posterior) — la vara contra la que se mide cada
-     -- una, en el orden en que de verdad fueron pagadas.
-     con_mediana_previa AS (
-       SELECT *,
-              percentile_cont(0.5) WITHIN GROUP (ORDER BY precio) OVER (
-                PARTITION BY insumo_id ORDER BY fecha, pid
-                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-              ) AS mediana_previa
-         FROM valido
-     ),
-     evaluado AS (
-       SELECT *,
-              (mediana_previa IS NOT NULL
-               AND GREATEST(precio / mediana_previa, mediana_previa / precio) >= ${RATIO_PRECIO_SOSPECHOSO}
-              ) AS es_outlier
-         FROM con_mediana_previa
-     ),
-     rankeado AS (
-       SELECT *, ROW_NUMBER() OVER (
-                   PARTITION BY insumo_id ORDER BY es_outlier ASC, fecha DESC, pid DESC
-                 ) AS rn
-         FROM evaluado
-     )
-     SELECT insumo_id, ROUND(precio::numeric, 4) AS precio
-       FROM rankeado
-      WHERE rn = 1`,
+    `SELECT pi.insumo_id, p.factura_key, p.proveedor_id,
+            MAX(p.fecha) AS fecha, MAX(p.id) AS pid,
+            SUM(pi.precio_total) AS importe, SUM(pi.cantidad) AS unidades
+       FROM purchase_items pi
+       JOIN purchases p ON p.id = pi.purchase_id
+      WHERE pi.business_id = $1 AND pi.insumo_id = ANY($2::int[])
+        -- Ver comentario equivalente en la rama 'promedio_30': un elaborado
+        -- nunca saca precio_ref de una compra, sale de su receta.
+        AND NOT EXISTS (
+          SELECT 1 FROM recetas r
+           WHERE r.insumo_id = pi.insumo_id AND r.business_id = pi.business_id AND r.active = TRUE
+             AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
+        )
+      GROUP BY pi.insumo_id, p.factura_key, p.proveedor_id`,
     [businessId, insumoIds]
   );
-  return new Map(rows.map((r) => [Number(r.insumo_id), Number(r.precio)]));
+
+  const porInsumo = new Map();
+  for (const r of rows) {
+    const unidades = Number(r.unidades);
+    const importe = Number(r.importe);
+    if (!(unidades > 0) || !(importe > 0)) continue;
+    const insumoId = Number(r.insumo_id);
+    if (!porInsumo.has(insumoId)) porInsumo.set(insumoId, []);
+    porInsumo.get(insumoId).push({ fecha: r.fecha, pid: Number(r.pid), precio: importe / unidades });
+  }
+
+  const resultado = new Map();
+  for (const [insumoId, grupos] of porInsumo) {
+    // Orden cronológico real (fecha asc, desempate por id de compra).
+    grupos.sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : a.pid - b.pid));
+    // Caminando de más viejo a más nuevo: cada uno se mide contra la
+    // mediana de SOLO lo que se pagó antes (nunca incluye la compra en sí
+    // ni nada posterior).
+    const previos = [];
+    for (const g of grupos) {
+      const medianaPrevia = previos.length ? mediana(previos) : null;
+      g.esOutlier = medianaPrevia != null
+        && Math.max(g.precio / medianaPrevia, medianaPrevia / g.precio) >= RATIO_PRECIO_SOSPECHOSO;
+      previos.push(g.precio);
+    }
+    // El elegido: el más reciente que no haya quedado marcado como outlier.
+    for (let i = grupos.length - 1; i >= 0; i--) {
+      if (!grupos[i].esOutlier) {
+        resultado.set(insumoId, Math.round(grupos[i].precio * 10000) / 10000);
+        break;
+      }
+    }
+  }
+  return resultado;
+}
+
+function mediana(valores) {
+  const ordenados = [...valores].sort((a, b) => a - b);
+  const mid = Math.floor(ordenados.length / 2);
+  return ordenados.length % 2 ? ordenados[mid] : (ordenados[mid - 1] + ordenados[mid]) / 2;
 }
 
 // Aplica el Map de precios (insumo_id → precio) a insumos.precio_ref de una,
