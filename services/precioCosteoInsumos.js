@@ -21,6 +21,17 @@ const pool = require('../config/db');
 const MODOS_VALIDOS = ['ultima_compra', 'promedio_30', 'precio_db'];
 const MODO_DEFAULT = 'ultima_compra';
 
+// Un mismo comprobante de MaxiRest puede entrar DOS veces a precios muy
+// distintos — por caja/bulto (ej. 8 cajas a $4.982/caja) y por unidad suelta
+// (ej. 120 botellas a $1.055/botella) — y la versión "por unidad" suele
+// cargarse en el origen más tarde que la de "por caja". "Última compra" no
+// puede confiar ciegamente en la fecha más reciente: mientras no llegue la
+// gemela por unidad, el precio por caja (10-15x más alto) queda vigente. Un
+// salto de esta magnitud contra lo que ya se pagaba ANTES de esa fecha nunca
+// es una suba de precio real — se seguís mirando hacia atrás en el tiempo
+// hasta encontrar un precio consistente con su propia historia.
+const RATIO_PRECIO_SOSPECHOSO = 15;
+
 // Lee el modo configurado para el negocio (app_businesses.props.precio_costeo_insumos).
 // `runner` puede ser el pool o un client de una transacción en curso.
 async function getModoCosteo(businessId, runner = pool) {
@@ -94,15 +105,38 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
           )
         GROUP BY pi.insumo_id, p.factura_key, p.proveedor_id
      ),
-     ultimo AS (
-       SELECT DISTINCT ON (insumo_id) insumo_id, importe, unidades
+     valido AS (
+       SELECT insumo_id, fecha, pid, (importe / unidades) AS precio
          FROM comp
-        WHERE unidades > 0
-        ORDER BY insumo_id, fecha DESC, pid DESC
+        WHERE unidades > 0 AND importe > 0
+     ),
+     -- Mediana de TODO lo pagado antes de esta compra (nunca incluye la
+     -- compra en sí ni nada posterior) — la vara contra la que se mide cada
+     -- una, en el orden en que de verdad fueron pagadas.
+     con_mediana_previa AS (
+       SELECT *,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY precio) OVER (
+                PARTITION BY insumo_id ORDER BY fecha, pid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+              ) AS mediana_previa
+         FROM valido
+     ),
+     evaluado AS (
+       SELECT *,
+              (mediana_previa IS NOT NULL
+               AND GREATEST(precio / mediana_previa, mediana_previa / precio) >= ${RATIO_PRECIO_SOSPECHOSO}
+              ) AS es_outlier
+         FROM con_mediana_previa
+     ),
+     rankeado AS (
+       SELECT *, ROW_NUMBER() OVER (
+                   PARTITION BY insumo_id ORDER BY es_outlier ASC, fecha DESC, pid DESC
+                 ) AS rn
+         FROM evaluado
      )
-     SELECT insumo_id, ROUND((importe / unidades)::numeric, 4) AS precio
-       FROM ultimo
-      WHERE importe > 0`,
+     SELECT insumo_id, ROUND(precio::numeric, 4) AS precio
+       FROM rankeado
+      WHERE rn = 1`,
     [businessId, insumoIds]
   );
   return new Map(rows.map((r) => [Number(r.insumo_id), Number(r.precio)]));
@@ -128,4 +162,7 @@ async function aplicarPreciosCosteo(client, businessId, precios) {
   return rows.map((r) => Number(r.id));
 }
 
-module.exports = { MODOS_VALIDOS, MODO_DEFAULT, getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo };
+module.exports = {
+  MODOS_VALIDOS, MODO_DEFAULT, getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo,
+  RATIO_PRECIO_SOSPECHOSO,
+};

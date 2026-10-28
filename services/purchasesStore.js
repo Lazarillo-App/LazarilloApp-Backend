@@ -3,7 +3,7 @@
 
 const pool = require('../config/db');
 const { propagarCostoInsumo } = require('./costoRecetaService');
-const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo } = require('./precioCosteoInsumos');
+const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo, RATIO_PRECIO_SOSPECHOSO } = require('./precioCosteoInsumos');
 
 // Un código de MaxiRest puede coincidir por pura casualidad numérica con el
 // codigo_maxi de un insumo real (confirmado con decenas de casos: gastos
@@ -13,11 +13,12 @@ const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo } = require(
 // rubro de origen (cod_cga) NO alcanzan como filtro: hay demasiadas
 // variantes y crecen con cada negocio nuevo. En cambio, el precio real
 // pagado por un insumo cambia poco de una compra a otra (como mucho unas
-// pocas veces por inflación) — un salto de 15x o más contra la mediana de
-// lo ya comprado es, en la práctica, siempre un code mismatch, nunca una
-// suba de precio real. Protege cualquier vía de ingreso de compras (no solo
-// MaxiRest), ya que vive en el punto compartido donde se resuelve insumo_id.
-const RATIO_PRECIO_SOSPECHOSO = 15;
+// pocas veces por inflación) — un salto de RATIO_PRECIO_SOSPECHOSO veces o
+// más contra la mediana de lo ya comprado es, en la práctica, siempre un
+// code mismatch, nunca una suba de precio real. Protege cualquier vía de
+// ingreso de compras (no solo MaxiRest), ya que vive en el punto compartido
+// donde se resuelve insumo_id. Mismo umbral que usa calcularPreciosPorModo
+// para el filtro de "última compra razonable" (precioCosteoInsumos.js).
 
 // Mediana de precio unitario ya pagado por cada insumo (sobre lo ya
 // cargado en purchase_items) — la vara contra la que se mide cada línea
