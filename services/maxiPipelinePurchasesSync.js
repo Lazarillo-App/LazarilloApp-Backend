@@ -73,6 +73,42 @@ function resolverPdv(businessId) {
   return entry ? { pdv: entry[0], schema: entry[1].schema } : null;
 }
 
+// i25 trae `cantidad` en la unidad de EMBALAJE con que se cargó la línea
+// (ej. "8.000 X6" = 8 packs de 6, no 8 unidades) — confirmado por Diego
+// (MaxiRest) cruzando el informe impreso: la factura real de Coca 600 dice
+// "8.000 X6" a $4.982,17 (precio POR PACK), no por unidad. El factor real
+// ya llega automático en m0_listado_de_insumos_con_discontinuados
+// (envase1/2/3 + neto1/2/3 por código, ej. X6→6) junto con i25/i80 — no
+// hace falta pedirle nada nuevo, se cruza acá mismo.
+// Devuelve Map<codigo, Map<envase, factor>>.
+async function construirFactoresEnvase(schema) {
+  const { rows } = await pool.query(
+    `SELECT codigo, envase1, neto1, envase2, neto2, envase3, neto3
+       FROM "${schema}".m0_listado_de_insumos_con_discontinuados`
+  );
+  const porCodigo = new Map();
+  for (const r of rows) {
+    const envases = new Map();
+    for (const [envase, neto] of [[r.envase1, r.neto1], [r.envase2, r.neto2], [r.envase3, r.neto3]]) {
+      const label = String(envase ?? '').trim();
+      const factor = Number(neto);
+      if (label && Number.isFinite(factor) && factor > 0) envases.set(label, factor);
+    }
+    if (envases.size) porCodigo.set(Number(r.codigo), envases);
+  }
+  return porCodigo;
+}
+
+// Factor real para una línea puntual — 1 si no hay envase cargado o no
+// matchea ninguno del maestro (ya viene en unidad base, o es un insumo sin
+// packs declarados).
+function factorDeLinea(factoresPorCodigo, codigo, medida) {
+  const envases = factoresPorCodigo.get(Number(codigo));
+  if (!envases) return 1;
+  const label = String(medida ?? '').trim();
+  return envases.get(label) ?? 1;
+}
+
 async function obtenerFilasI25(pdv, schema) {
   const tablas25 = await resolverTablasDelAnio(schema, 'i25_compras_detalle_de_compras');
   if (!tablas25.length) return [];
@@ -124,6 +160,8 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
     return { ok: true, facturas: 0, items: 0, sinInsumo: 0, pagos: 0, dryRun };
   }
 
+  const factoresPorCodigo = await construirFactoresEnvase(schema);
+
   // Agrupar en facturas — misma forma que ya espera upsertPurchasesBatch.
   const porFactura = new Map();
   for (const f of filas) {
@@ -132,13 +170,25 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
       porFactura.set(key, { numero: key, proveedor: f.cod_pro, items: [] });
     }
     const esGasto = TIPOS_GASTO.has(String(f.cod_cpb ?? '').trim().toUpperCase());
+
+    // cantidad/neto vienen en unidad de EMBALAJE (ver comentario de
+    // construirFactoresEnvase) — se convierten acá a unidad base ANTES de
+    // guardar. El importe total de la línea (totalins) no cambia, es lo
+    // que de verdad se pagó; solo se reparte entre más (o las mismas)
+    // unidades.
+    const factor = esGasto ? 1 : factorDeLinea(factoresPorCodigo, f.codigo, f.medida);
+    const cantidadBase = Number(f.cantidad ?? 0) * factor;
+    const netoBase = factor !== 1 && cantidadBase > 0
+      ? Number(f.totalins ?? 0) / cantidadBase
+      : f.neto;
+
     porFactura.get(key).items.push({
       insumo: esGasto ? null : f.codigo,
       fecha: f.fecha,
-      cantidad: f.cantidad,
-      neto: f.neto,           // precio unitario neto (confirmado: neto * cantidad = totalins)
-      precio: f.neto,         // no hay un "precio" separado en i25 — se reusa neto como mejor referencia
-      preciotot: f.totalins,
+      cantidad: cantidadBase,
+      neto: netoBase,          // precio unitario neto, ya en unidad base
+      precio: netoBase,        // no hay un "precio" separado en i25 — se reusa neto como mejor referencia
+      preciotot: f.totalins,   // el total pagado no cambia con la conversión
       iva_tasa: f.tasa,
       iva: f.iva,
       iva_total: f.ivatot,
