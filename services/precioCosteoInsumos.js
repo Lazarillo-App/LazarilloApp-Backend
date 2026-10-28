@@ -29,11 +29,13 @@ const MODO_DEFAULT = 'ultima_compra';
 // todas eran "por caja" sin gemela todavía). "Última compra" no puede
 // confiar ciegamente en la fecha más reciente mientras esa gemela no llegó.
 // La inflación real que se ve en los datos nunca pasa de ~1.8x interanual —
-// un salto de 5x o más contra lo ya pagado antes nunca es una suba de precio
-// real, así que se sigue mirando hacia atrás hasta encontrar un precio
+// Coca 600 es el caso más ajustado conocido (ratio real 4.8x); 3x deja
+// margen de sobra arriba de la inflación real y por debajo de este caso.
+// Un salto de esta magnitud contra lo ya pagado antes nunca es una suba de
+// precio real, así que se sigue mirando hacia atrás hasta encontrar un precio
 // consistente con la historia confirmada (no con otro precio igual de
 // sospechoso: ver nota en el loop de abajo).
-const RATIO_PRECIO_SOSPECHOSO = 5;
+const RATIO_PRECIO_SOSPECHOSO = 3;
 
 // Lee el modo configurado para el negocio (app_businesses.props.precio_costeo_insumos).
 // `runner` puede ser el pool o un client de una transacción en curso.
