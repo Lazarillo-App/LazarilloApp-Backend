@@ -119,16 +119,35 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
     if (!(unidades > 0) || !(importe > 0)) continue;
     const insumoId = Number(r.insumo_id);
     if (!porInsumo.has(insumoId)) porInsumo.set(insumoId, []);
-    porInsumo.get(insumoId).push({ fecha: r.fecha, pid: Number(r.pid), precio: importe / unidades });
+    porInsumo.get(insumoId).push({
+      fecha: r.fecha,
+      diaKey: `${r.proveedor_id ?? ''}|${new Date(r.fecha).toISOString().slice(0, 10)}`,
+      pid: Number(r.pid),
+      precio: importe / unidades,
+    });
   }
 
   const resultado = new Map();
-  for (const [insumoId, grupos] of porInsumo) {
+  for (const [insumoId, gruposCrudos] of porInsumo) {
+    // Mismo proveedor + mismo día a precios muy distintos = la misma factura
+    // de MaxiRest entrando dos veces (por caja y por unidad suelta) — nunca
+    // un proveedor cobra MÁS por unidad un día que compraste "al por mayor"
+    // que lo que termina costando por unidad suelta. Nos quedamos con la más
+    // barata de cada (proveedor, día) antes de elegir cuál es "la última
+    // compra" — estructural, no depende de ajustar ningún umbral.
+    const porDia = new Map();
+    for (const g of gruposCrudos) {
+      const actual = porDia.get(g.diaKey);
+      if (!actual || g.precio < actual.precio) porDia.set(g.diaKey, g);
+    }
+    const grupos = [...porDia.values()];
+
     // Orden cronológico real (fecha asc, desempate por id de compra).
     grupos.sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : a.pid - b.pid));
     // Caminando de más viejo a más nuevo: cada uno se mide contra la
     // mediana de SOLO lo que se pagó antes (nunca incluye la compra en sí
-    // ni nada posterior).
+    // ni nada posterior) — esto todavía protege contra un gasto administrativo
+    // mal matcheado que no comparte día con ninguna otra compra real.
     const previos = [];
     for (const g of grupos) {
       const medianaPrevia = previos.length ? mediana(previos) : null;
