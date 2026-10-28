@@ -24,13 +24,16 @@ const MODO_DEFAULT = 'ultima_compra';
 // Un mismo comprobante de MaxiRest puede entrar DOS veces a precios muy
 // distintos — por caja/bulto (ej. 8 cajas a $4.982/caja) y por unidad suelta
 // (ej. 120 botellas a $1.055/botella) — y la versión "por unidad" suele
-// cargarse en el origen más tarde que la de "por caja". "Última compra" no
-// puede confiar ciegamente en la fecha más reciente: mientras no llegue la
-// gemela por unidad, el precio por caja (10-15x más alto) queda vigente. Un
-// salto de esta magnitud contra lo que ya se pagaba ANTES de esa fecha nunca
-// es una suba de precio real — se seguís mirando hacia atrás en el tiempo
-// hasta encontrar un precio consistente con su propia historia.
-const RATIO_PRECIO_SOSPECHOSO = 15;
+// cargarse en el origen más tarde que la de "por caja", a veces varias
+// semanas después (confirmado con Coca 600: las 3 facturas más nuevas de
+// todas eran "por caja" sin gemela todavía). "Última compra" no puede
+// confiar ciegamente en la fecha más reciente mientras esa gemela no llegó.
+// La inflación real que se ve en los datos nunca pasa de ~1.8x interanual —
+// un salto de 5x o más contra lo ya pagado antes nunca es una suba de precio
+// real, así que se sigue mirando hacia atrás hasta encontrar un precio
+// consistente con la historia confirmada (no con otro precio igual de
+// sospechoso: ver nota en el loop de abajo).
+const RATIO_PRECIO_SOSPECHOSO = 5;
 
 // Lee el modo configurado para el negocio (app_businesses.props.precio_costeo_insumos).
 // `runner` puede ser el pool o un client de una transacción en curso.
@@ -144,16 +147,21 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
 
     // Orden cronológico real (fecha asc, desempate por id de compra).
     grupos.sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : a.pid - b.pid));
-    // Caminando de más viejo a más nuevo: cada uno se mide contra la
-    // mediana de SOLO lo que se pagó antes (nunca incluye la compra en sí
-    // ni nada posterior) — esto todavía protege contra un gasto administrativo
-    // mal matcheado que no comparte día con ninguna otra compra real.
+    // Caminando de más viejo a más nuevo: cada uno se mide contra la mediana
+    // de SOLO lo YA CONFIRMADO antes (nunca incluye la compra en sí ni nada
+    // posterior) — esto todavía protege contra un gasto administrativo mal
+    // matcheado que no comparte día con ninguna otra compra real, y contra
+    // una factura "por caja" recién llegada cuya gemela "por unidad" todavía
+    // no existe. Un sospechoso NO entra a `previos`: si contaminara la
+    // mediana, una segunda factura "por caja" sin gemela (ej. la semana
+    // siguiente) se compararía contra el precio inflado de la anterior en
+    // vez de contra el precio real, y dejaría de detectarse como sospechosa.
     const previos = [];
     for (const g of grupos) {
       const medianaPrevia = previos.length ? mediana(previos) : null;
       g.esOutlier = medianaPrevia != null
         && Math.max(g.precio / medianaPrevia, medianaPrevia / g.precio) >= RATIO_PRECIO_SOSPECHOSO;
-      previos.push(g.precio);
+      if (!g.esOutlier) previos.push(g.precio);
     }
     // El elegido: el más reciente que no haya quedado marcado como outlier.
     for (let i = grupos.length - 1; i >= 0; i--) {
