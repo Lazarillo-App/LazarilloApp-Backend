@@ -95,16 +95,27 @@ async function importarPasosDesdeZip({ businessId, zipPath, aplicar = false }) {
 
   // Agrupar por nombre base (sin extensión, sin carpeta).
   const grupos = new Map();
+  // Agrupar por CÓDIGO, no por nombre de archivo completo — la categoría
+  // (primera palabra) puede venir distinta entre el .txt y la imagen del
+  // mismo plato (ej. imagen "Bebidas_174_Baileys Frozen.jpg" vs texto
+  // "Coctelería_174_Baileys Frozen.txt", mismo código 174, visto en la
+  // primera prueba real) — si agrupáramos por nombre completo, ninguno de
+  // los dos lados encontraría pareja.
+  const sinParsear = [];
   for (const entry of entries) {
     const base = entry.entryName.split('/').pop();
     const puntoIdx = base.lastIndexOf('.');
     if (puntoIdx < 1) continue;
     const nombreSinExt = base.slice(0, puntoIdx);
     const ext = base.slice(puntoIdx).toLowerCase();
-    if (!grupos.has(nombreSinExt)) grupos.set(nombreSinExt, { txt: null, imagen: null });
-    const g = grupos.get(nombreSinExt);
-    if (ext === '.txt') g.txt = entry;
-    else if (EXTENSIONES_IMAGEN.has(ext)) g.imagen = entry;
+    const parsed = parseNombreArchivo(nombreSinExt);
+    if (!parsed) { sinParsear.push(nombreSinExt); continue; }
+
+    if (!grupos.has(parsed.codigo)) grupos.set(parsed.codigo, { txt: null, imagen: null, nombreTxt: null, nombreImagen: null, archivos: [] });
+    const g = grupos.get(parsed.codigo);
+    g.archivos.push(nombreSinExt);
+    if (ext === '.txt') { g.txt = entry; g.nombreTxt = parsed.nombre; }
+    else if (EXTENSIONES_IMAGEN.has(ext)) { g.imagen = entry; g.nombreImagen = parsed.nombre; }
   }
 
   // Maestro de artículos del negocio (para matchear código y, si falla, nombre).
@@ -117,23 +128,24 @@ async function importarPasosDesdeZip({ businessId, zipPath, aplicar = false }) {
 
   const reporte = { ok: [], sinReceta: [], codigoNoEncontrado: [], nombreSospechoso: [], sinTxt: [] };
 
-  for (const [nombreSinExt, g] of grupos) {
-    if (!g.txt) { reporte.sinTxt.push({ archivo: nombreSinExt }); continue; }
+  for (const archivo of sinParsear) {
+    reporte.codigoNoEncontrado.push({ archivo, motivo: 'nombre de archivo no tiene el formato <categoria>_<codigo>_<nombre>' });
+  }
 
-    const parsed = parseNombreArchivo(nombreSinExt);
-    if (!parsed) {
-      reporte.codigoNoEncontrado.push({ archivo: nombreSinExt, motivo: 'nombre de archivo no tiene el formato <categoria>_<codigo>_<nombre>' });
-      continue;
-    }
+  for (const [codigo, g] of grupos) {
+    const archivo = g.archivos.join(' + ');
+    if (!g.txt) { reporte.sinTxt.push({ archivo }); continue; }
 
-    let articuloId = porCodigo.has(parsed.codigo) ? parsed.codigo : null;
+    const nombreArchivo = g.nombreTxt; // el texto del .txt manda sobre el método, no la foto
+
+    let articuloId = porCodigo.has(codigo) ? codigo : null;
     let viaFallbackNombre = false;
     if (articuloId == null) {
-      const matchPorNombre = porNombreNorm.get(normalizar(parsed.nombre));
+      const matchPorNombre = porNombreNorm.get(normalizar(nombreArchivo));
       if (matchPorNombre != null) { articuloId = matchPorNombre; viaFallbackNombre = true; }
     }
     if (articuloId == null) {
-      reporte.codigoNoEncontrado.push({ archivo: nombreSinExt, codigo: parsed.codigo, nombreArchivo: parsed.nombre });
+      reporte.codigoNoEncontrado.push({ archivo, codigo, nombreArchivo });
       continue;
     }
 
@@ -143,26 +155,26 @@ async function importarPasosDesdeZip({ businessId, zipPath, aplicar = false }) {
       [businessId, articuloId]
     );
     if (!recetaRows.length) {
-      reporte.sinReceta.push({ archivo: nombreSinExt, articuloId, nombreMaxi: porCodigo.get(articuloId) });
+      reporte.sinReceta.push({ archivo, articuloId, nombreMaxi: porCodigo.get(articuloId) });
       continue;
     }
     const receta = recetaRows[0];
 
     const nombreMaxi = porCodigo.get(articuloId) || '';
     const sospechoso = !viaFallbackNombre
-      && normalizar(parsed.nombre) !== normalizar(nombreMaxi)
-      && !normalizar(nombreMaxi).includes(normalizar(parsed.nombre))
-      && !normalizar(parsed.nombre).includes(normalizar(nombreMaxi));
+      && normalizar(nombreArchivo) !== normalizar(nombreMaxi)
+      && !normalizar(nombreMaxi).includes(normalizar(nombreArchivo))
+      && !normalizar(nombreArchivo).includes(normalizar(nombreMaxi));
 
     const texto = decodeTxt(g.txt.getData());
     const pasos = parsePasos(texto);
 
     const item = {
-      archivo: nombreSinExt,
+      archivo,
       recetaId: receta.id,
       articuloId,
       nombreReceta: receta.nombre,
-      nombreArchivo: parsed.nombre,
+      nombreArchivo,
       pasosDetectados: pasos.length,
       tieneImagen: !!g.imagen,
       viaFallbackNombre,
@@ -174,7 +186,7 @@ async function importarPasosDesdeZip({ businessId, zipPath, aplicar = false }) {
       let fotoUrl = receta.foto;
       if (g.imagen) {
         try {
-          fotoUrl = await subirFotoACloudinary(g.imagen.getData(), businessId, parsed.codigo);
+          fotoUrl = await subirFotoACloudinary(g.imagen.getData(), businessId, codigo);
         } catch (e) {
           item.errorFoto = e.message;
         }
