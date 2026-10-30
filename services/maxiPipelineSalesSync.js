@@ -9,10 +9,18 @@
 //
 // Reemplaza al sync viejo (salesSyncPolicy.js / maxiSalesService.js, que
 // pega directo a la API de Maxi) — ese se cortó en octubre (6 días de 30
-// cargados). Este escribe en las MISMAS tablas que ya lee el frontend
-// (sales_daily / sales_daily_items), con el mismo `source='maxi'` que ya
-// usa el pipeline viejo, para que un ON CONFLICT actualice en vez de
-// duplicar si coexisten datos de ambos orígenes en algún día.
+// cargados). Confirmado contra el esquema REAL de producción (las
+// migraciones versionadas no alcanzan: sales_daily_items.pkey es sólo
+// `id`, sin UNIQUE sobre business_id/day/article_id/source, así que no
+// se puede usar ON CONFLICT ahí — se borra y se reinserta en su lugar).
+//
+// Hoy TODO lo que tiene el negocio 147 en sales_daily_items es
+// source='csv' (carga manual) — el pipeline viejo de la API nunca
+// escribió nada. Política acordada: para cada día que este pipeline
+// cubre, 'maxi' pisa a 'csv' (se borran ambos y se reinserta sólo
+// 'maxi'), porque el pipeline automático pasa a ser la fuente de
+// verdad. Los días que el pipeline NO cubre (fuera del rango de i12)
+// no se tocan.
 //
 // Match de artículo: i12.codigo == maxi_articles.articulo_id (confirmado
 // en salesSyncController.js:listDailyItems, el mismo campo que resuelve
@@ -22,6 +30,7 @@
 
 const pool = require('../config/db');
 const { PDV_MAP } = require('./maxiPipelinePurchasesSync');
+const { rebuildSalesDailyRange } = require('./salesDailyRebuildService');
 
 const SOURCE = 'maxi';
 
@@ -56,6 +65,24 @@ async function obtenerFilasI12(pdv, schema) {
   return filas;
 }
 
+function agruparPorDiaYArticulo(filas) {
+  const porDiaArticulo = new Map();
+  let sinArticulo = 0;
+  for (const f of filas) {
+    const dia = new Date(f.fecha).toISOString().slice(0, 10);
+    const codigo = Number(f.codigo) || 0;
+    if (codigo === 0) sinArticulo++;
+    const key = `${dia}__${codigo}`;
+    if (!porDiaArticulo.has(key)) {
+      porDiaArticulo.set(key, { dia, articleId: codigo, nombre: f.nombre || null, qty: 0, amount: 0 });
+    }
+    const g = porDiaArticulo.get(key);
+    g.qty += Number(f.unidades ?? 0);
+    g.amount += Number(f.importe ?? 0);
+  }
+  return { grupos: [...porDiaArticulo.values()], sinArticulo };
+}
+
 async function syncVentasDeNegocio(businessId, { dryRun = false } = {}) {
   const resuelto = resolverPdv(businessId);
   if (!resuelto) {
@@ -65,58 +92,69 @@ async function syncVentasDeNegocio(businessId, { dryRun = false } = {}) {
 
   const filas = await obtenerFilasI12(pdv, schema);
   if (!filas.length) {
-    return { ok: true, dias: 0, lineas: 0, sinArticulo: 0, dryRun };
+    return { ok: true, dias: 0, lineas: 0, sinArticulo: 0, csvAfectadas: 0, dryRun };
   }
 
-  // Agrupar por (día, codigo) — codigo=0 ("ARTICULOS INEXISTENTES" en el
-  // origen) queda como article_id=0, mismo convenio que ya usa el pipeline
-  // viejo (sales_daily_items.article_id NOT NULL, COALESCE a 0).
-  const porDiaArticulo = new Map();
-  let sinArticulo = 0;
-  for (const f of filas) {
-    const dia = new Date(f.fecha).toISOString().slice(0, 10);
-    const codigo = Number(f.codigo) || 0;
-    if (codigo === 0) sinArticulo++;
-    const key = `${dia}__${codigo}`;
-    if (!porDiaArticulo.has(key)) {
-      porDiaArticulo.set(key, { dia, articleId: codigo, qty: 0, amount: 0 });
-    }
-    const g = porDiaArticulo.get(key);
-    g.qty += Number(f.unidades ?? 0);
-    g.amount += Number(f.importe ?? 0);
-  }
-  const grupos = [...porDiaArticulo.values()];
+  const { grupos, sinArticulo } = agruparPorDiaYArticulo(filas);
+  const diasUnicos = [...new Set(grupos.map((g) => g.dia))].sort();
+  const desde = diasUnicos[0];
+  const hasta = diasUnicos[diasUnicos.length - 1];
+
+  // Cuántas filas 'csv' van a pisarse (para avisar el alcance antes de aplicar).
+  const { rows: csvRows } = await pool.query(
+    `SELECT COUNT(*)::int AS filas, COALESCE(SUM(amount), 0)::numeric AS total
+       FROM sales_daily_items
+      WHERE business_id = $1 AND source = 'csv' AND day = ANY($2::date[])`,
+    [businessId, diasUnicos]
+  );
+  const csvAfectadas = csvRows[0].filas;
+  const csvMontoAfectado = Number(csvRows[0].total);
 
   if (dryRun) {
-    const dias = new Set(grupos.map((g) => g.dia)).size;
-    return { ok: true, dias, lineas: grupos.length, sinArticulo, dryRun };
+    return {
+      ok: true,
+      dias: diasUnicos.length,
+      rango: { desde, hasta },
+      lineas: grupos.length,
+      sinArticulo,
+      csvAfectadas,
+      csvMontoAfectado,
+      dryRun,
+    };
   }
 
   const dias = grupos.map((g) => g.dia);
   const articleIds = grupos.map((g) => g.articleId);
+  const nombres = grupos.map((g) => g.nombre);
   const qtys = grupos.map((g) => g.qty);
   const amounts = grupos.map((g) => g.amount);
   const businessIds = grupos.map(() => businessId);
-  const sources = grupos.map(() => SOURCE);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // Maxi pisa a csv: se borran ambas fuentes para los días que este
+    // pipeline cubre, y se reinserta sólo 'maxi' (decisión explícita del
+    // negocio: el pipeline automático pasa a ser la fuente de verdad).
+    await client.query(
+      `DELETE FROM sales_daily_items
+        WHERE business_id = $1 AND source IN ('csv','maxi') AND day = ANY($2::date[])`,
+      [businessId, diasUnicos]
+    );
+
     await client.query(
       `WITH datos AS (
          SELECT * FROM UNNEST(
-           $1::int[], $2::date[], $3::int[], $4::numeric[], $5::numeric[], $6::text[]
-         ) AS t(business_id, day, article_id, qty, amount, source)
+           $1::int[], $2::date[], $3::int[], $4::text[], $5::numeric[], $6::numeric[]
+         ) AS t(business_id, day, article_id, article_name, qty, amount)
        )
-       INSERT INTO sales_daily_items (business_id, day, article_id, qty, amount, source)
-       SELECT business_id, day, article_id, qty, amount, source FROM datos
-       ON CONFLICT (business_id, day, article_id, source) DO UPDATE SET
-         qty = EXCLUDED.qty, amount = EXCLUDED.amount, updated_at = NOW()`,
-      [businessIds, dias, articleIds, qtys, amounts, sources]
+       INSERT INTO sales_daily_items (business_id, day, article_id, article_name, qty, amount, source)
+       SELECT business_id, day, article_id, article_name, qty, amount, '${SOURCE}' FROM datos`,
+      [businessIds, dias, articleIds, nombres, qtys, amounts]
     );
 
-    // Espejo 1:1, mismo criterio que upsertDailyAggregates (salesStore.js).
+    // Espejo 1:1 (mismo criterio que el pipeline viejo, salesStore.js).
     await client.query(
       `WITH datos AS (
          SELECT * FROM UNNEST(
@@ -130,31 +168,20 @@ async function syncVentasDeNegocio(businessId, { dryRun = false } = {}) {
       [businessIds, articleIds, dias, qtys, amounts]
     );
 
-    // sales_daily (total + tx_count por día) — tx_count no existe en i12
-    // (viene agregado por artículo, no por comprobante); se recalcula a
-    // partir de lo que ya quedó en sales_daily_items para no mentir un
-    // número, y tx_count se deja en el valor existente (no se toca) si ya
-    // había uno de otra fuente, o 0 si es la primera vez.
-    const diasUnicos = [...new Set(dias)];
-    await client.query(
-      `INSERT INTO sales_daily (business_id, day, total, tx_count)
-       SELECT $1, d::date, COALESCE(SUM(sdi.amount), 0), COALESCE(MAX(sd.tx_count), 0)
-         FROM UNNEST($2::date[]) AS d
-         LEFT JOIN sales_daily_items sdi
-           ON sdi.business_id = $1 AND sdi.day = d
-         LEFT JOIN sales_daily sd
-           ON sd.business_id = $1 AND sd.day = d
-        GROUP BY d
-       ON CONFLICT (business_id, day) DO UPDATE SET total = EXCLUDED.total`,
-      [businessId, diasUnicos]
-    );
+    // sales_daily: se reconstruye con la función ya existente (prefiere
+    // csv sobre maxi por día+artículo — acá da igual porque el csv de
+    // estos días ya se borró arriba, así que sólo va a quedar maxi).
+    await rebuildSalesDailyRange({ businessId, from: desde, to: hasta, client });
 
     await client.query('COMMIT');
     return {
       ok: true,
       dias: diasUnicos.length,
+      rango: { desde, hasta },
       lineas: grupos.length,
       sinArticulo,
+      csvAfectadas,
+      csvMontoAfectado,
       dryRun,
     };
   } catch (e) {
