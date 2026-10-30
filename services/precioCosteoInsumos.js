@@ -212,17 +212,19 @@ async function aplicarFallbackM0(runner, businessId, insumoIds, resultado) {
   );
   if (!insumosRows.length) return;
 
-  const codigos = insumosRows.map((r) => r.codigo_maxi);
+  // Sin WHERE sobre `codigo` acá: en m0 puede ser numérico o texto según el
+  // negocio/schema, y comparar mal tira "operator does not exist" — mismo
+  // motivo por el que construirFactoresEnvase (maxiPipelinePurchasesSync.js)
+  // trae todo el maestro y matchea en JS con Number(), no en SQL.
   const { rows: m0Rows } = await runner.query(
     `SELECT codigo, precio FROM "${schema}".m0_listado_de_insumos_con_discontinuados
-      WHERE codigo = ANY($1::text[]) AND precio IS NOT NULL AND precio > 0`,
-    [codigos]
+      WHERE precio IS NOT NULL AND precio > 0`
   );
   if (!m0Rows.length) return;
-  const precioM0PorCodigo = new Map(m0Rows.map((r) => [r.codigo, Number(r.precio)]));
+  const precioM0PorCodigo = new Map(m0Rows.map((r) => [Number(r.codigo), Number(r.precio)]));
 
   for (const { id, codigo_maxi } of insumosRows) {
-    const precioM0 = precioM0PorCodigo.get(codigo_maxi);
+    const precioM0 = precioM0PorCodigo.get(Number(codigo_maxi));
     if (precioM0 == null) continue;
     const insumoId = Number(id);
     const precioActual = resultado.get(insumoId);
