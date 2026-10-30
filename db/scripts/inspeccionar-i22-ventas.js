@@ -1,11 +1,11 @@
 // db/scripts/inspeccionar-i22-ventas.js
 //
-// Diagnóstico de SOLO LECTURA. Columnas de i22_ventas_detalladas (ambos
-// años) + una muestra de filas, para evaluar construir la ingesta de
-// ventas desde ahí (mismo patrón que compras/i25), en vez de depender del
-// sync viejo que se cortó.
+// Diagnóstico de SOLO LECTURA. Columnas de la tabla de ventas que se le
+// pase (i22 o i12) + una muestra de filas, para evaluar construir la
+// ingesta de ventas desde ahí (mismo patrón que compras/i25), en vez de
+// depender del sync viejo que se cortó.
 //
-// Uso: node db/scripts/inspeccionar-i22-ventas.js <schema> <pdv>
+// Uso: node db/scripts/inspeccionar-i22-ventas.js <schema> <pdv> [prefijo_tabla]
 'use strict';
 require('dotenv').config();
 const pool = require('../../config/db');
@@ -13,12 +13,13 @@ const pool = require('../../config/db');
 async function main() {
   const schema = process.argv[2] || 'container';
   const pdv = process.argv[3] || 'BAR';
+  const prefijo = process.argv[4] || 'i22_ventas_detalladas';
 
   const { rows: tablas } = await pool.query(
     `SELECT table_name FROM information_schema.tables
-      WHERE table_schema = $1 AND table_name LIKE 'i22_ventas_detalladas_%'
+      WHERE table_schema = $1 AND table_name LIKE $2
       ORDER BY table_name DESC`,
-    [schema]
+    [schema, `${prefijo}_%`]
   );
   console.log(`Tablas i22 en ${schema}:`, tablas.map(t => t.table_name));
   if (!tablas.length) { await pool.end(); return; }
