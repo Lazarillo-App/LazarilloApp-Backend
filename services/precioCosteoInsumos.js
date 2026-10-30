@@ -17,6 +17,7 @@
 'use strict';
 
 const pool = require('../config/db');
+const { schemaDeNegocio } = require('./maxiPdvMap');
 
 const MODOS_VALIDOS = ['ultima_compra', 'promedio_30', 'precio_db'];
 const MODO_DEFAULT = 'ultima_compra';
@@ -86,7 +87,9 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
         HAVING SUM(precio_total) > 0`,
       [businessId, insumoIds]
     );
-    return new Map(rows.map((r) => [Number(r.insumo_id), Number(r.precio)]));
+    const resultadoPromedio = new Map(rows.map((r) => [Number(r.insumo_id), Number(r.precio)]));
+    await aplicarFallbackM0(runner, businessId, insumoIds, resultadoPromedio);
+    return resultadoPromedio;
   }
 
   // 'ultima_compra' — costo real del último COMPROBANTE (factura_key +
@@ -173,7 +176,63 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
       }
     }
   }
+  await aplicarFallbackM0(runner, businessId, insumoIds, resultado);
   return resultado;
+}
+
+// Respaldo con el maestro de MaxiRest (m0_listado_de_insumos_con_discontinuados)
+// cuando no hay compra propia confiable: (a) el insumo no tiene NINGUNA compra
+// cargada (ej. "Lata Tónica" — precio_ref venía de un cálculo viejo, antes del
+// fix de factor de embalaje, nunca recalculado porque no entró compra nueva),
+// o (b) SÍ hay compras pero todas apuntan a la misma factura mal codificada en
+// origen (ej. "Lata Pomelo": 3 facturas de "Servicio de Aguas" con el código
+// del insumo por error de carga — mutuamente "consistentes" entre sí, así que
+// la detección de outliers de acá arriba no las agarra sola). m0 es un maestro
+// por SCHEMA (no por pdv — BAR y FCRAMOS comparten `container`), y su columna
+// `precio` ya viene por unidad base, igual que precio_ref (confirmado: "Lata
+// Pomelo" código 206 y "Lata Tónica" código 1143 dan $784,012 cada una, pese a
+// venderse en packs de 24 y 6/24 respectivamente — no hay que dividir por
+// envase). Modifica `resultado` in-place; no toca insumos sin codigo_maxi ni
+// negocios fuera de PDV_MAP (sin eso no hay forma de consultar m0).
+async function aplicarFallbackM0(runner, businessId, insumoIds, resultado) {
+  const schema = schemaDeNegocio(businessId);
+  if (!schema || !insumoIds?.length) return;
+
+  const { rows: insumosRows } = await runner.query(
+    `SELECT id, codigo_maxi FROM insumos i
+      WHERE business_id = $1 AND id = ANY($2::int[]) AND codigo_maxi IS NOT NULL
+        -- Mismo criterio que el resto de este archivo: un elaborado de verdad
+        -- nunca saca precio_ref de una fuente externa a su receta.
+        AND NOT EXISTS (
+          SELECT 1 FROM recetas r
+           WHERE r.insumo_id = i.id AND r.business_id = i.business_id AND r.active = TRUE
+             AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
+        )`,
+    [businessId, insumoIds]
+  );
+  if (!insumosRows.length) return;
+
+  const codigos = insumosRows.map((r) => r.codigo_maxi);
+  const { rows: m0Rows } = await runner.query(
+    `SELECT codigo, precio FROM "${schema}".m0_listado_de_insumos_con_discontinuados
+      WHERE codigo = ANY($1::text[]) AND precio IS NOT NULL AND precio > 0`,
+    [codigos]
+  );
+  if (!m0Rows.length) return;
+  const precioM0PorCodigo = new Map(m0Rows.map((r) => [r.codigo, Number(r.precio)]));
+
+  for (const { id, codigo_maxi } of insumosRows) {
+    const precioM0 = precioM0PorCodigo.get(codigo_maxi);
+    if (precioM0 == null) continue;
+    const insumoId = Number(id);
+    const precioActual = resultado.get(insumoId);
+    if (precioActual == null) {
+      resultado.set(insumoId, precioM0);
+    } else {
+      const ratio = Math.max(precioActual / precioM0, precioM0 / precioActual);
+      if (ratio >= RATIO_PRECIO_SOSPECHOSO) resultado.set(insumoId, precioM0);
+    }
+  }
 }
 
 function mediana(valores) {

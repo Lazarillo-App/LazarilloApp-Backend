@@ -25,15 +25,7 @@
 const pool = require('../config/db');
 const { buildInsumoMap, resolveCredsBizId } = require('../controllers/purchasesController');
 const { upsertPurchasesBatch } = require('./purchasesStore');
-
-// pdv (columna de texto en i25/i80) → en qué schema vive y qué negocio de
-// Lazarillo es. San Justo (FCSANJUSTO) todavía no sube datos — se agrega acá
-// en cuanto el colega confirme que esa PC está sincronizando.
-const PDV_MAP = {
-  BAR: { schema: 'container', businessId: 147 },
-  FCRAMOS: { schema: 'container', businessId: 204 },
-  COMERCIO: { schema: 'comercio', businessId: 210 },
-};
+const { PDV_MAP } = require('./maxiPdvMap');
 
 function facturaKeyDe(cod_cpb, numero1, numero2) {
   return `${String(cod_cpb ?? '').trim()}-${numero1}-${numero2}`;

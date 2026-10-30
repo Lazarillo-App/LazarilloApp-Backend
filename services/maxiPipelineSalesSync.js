@@ -29,7 +29,7 @@
 'use strict';
 
 const pool = require('../config/db');
-const { PDV_MAP } = require('./maxiPipelinePurchasesSync');
+const { PDV_MAP } = require('./maxiPdvMap');
 const { rebuildSalesDailyRange } = require('./salesDailyRebuildService');
 
 const SOURCE = 'maxi';
