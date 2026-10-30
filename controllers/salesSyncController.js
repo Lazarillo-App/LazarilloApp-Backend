@@ -659,7 +659,7 @@ exports.salesSummary = async (req, res, next) => {
     const {
       from,
       to,
-      source = 'csv',
+      source = null,
       articleIds = null,
       groupIds = null,
       branch_id: rawBranchId = null,   // ← NUEVO
@@ -674,10 +674,16 @@ exports.salesSummary = async (req, res, next) => {
 
     const { salesBizId, articleIds: subBizArticleIds } = await resolveSalesBusiness(biz);
 
-    const params = [salesBizId, from, to, source];
+    const params = [salesBizId, from, to];
     let articleFilter = '';
     let groupFilter = '';
     let branchFilter = '';    // ← NUEVO
+    let sourceFilter = '';
+    // Sin `source` explícito: suma todas las fuentes (igual que /sales/items).
+    if (source) {
+      params.push(source);
+      sourceFilter = `AND sdi.source = $${params.length}`;
+    }
 
     // ── Filtro de artículos ──
     if (subBizArticleIds) {
@@ -737,7 +743,7 @@ exports.salesSummary = async (req, res, next) => {
         FROM sales_daily_items sdi
         WHERE sdi.business_id = $1
           AND sdi.day BETWEEN $2::date AND $3::date
-          AND sdi.source = $4
+          ${sourceFilter}
           ${articleFilter}
           ${groupFilter}
           ${branchFilter}
@@ -840,7 +846,7 @@ exports.getFirstSaleDate = async (req, res, next) => {
 exports.salesMonthly = async (req, res, next) => {
   try {
     const biz = req.business;
-    const { from, to, source = 'csv', branch_id: rawBranchId = null } = req.query;
+    const { from, to, source = null, branch_id: rawBranchId = null } = req.query;
 
     if (!from || !to) {
       return res.status(400).json({
@@ -851,8 +857,15 @@ exports.salesMonthly = async (req, res, next) => {
 
     const { salesBizId } = await resolveSalesBusiness(biz);
 
-    const params = [salesBizId, from, to, source];
+    const params = [salesBizId, from, to];
     let branchFilter = '';
+    let sourceFilter = '';
+    // Sin `source` explícito: suma todas las fuentes (igual que /sales/items)
+    // — 'csv' y 'maxi' nunca se superponen a propósito (ver maxiPipelineSalesSync.js).
+    if (source) {
+      params.push(source);
+      sourceFilter = `AND sdi.source = $${params.length}`;
+    }
     // Mismo criterio que salesSummary: 'main' = sin sucursal, número = esa
     // sucursal, ausente/null = todas.
     if (rawBranchId === 'main') {
@@ -871,7 +884,7 @@ exports.salesMonthly = async (req, res, next) => {
          FROM sales_daily_items sdi
         WHERE sdi.business_id = $1
           AND sdi.day BETWEEN $2::date AND $3::date
-          AND sdi.source = $4
+          ${sourceFilter}
           ${branchFilter}
         GROUP BY 1
         ORDER BY 1`,
