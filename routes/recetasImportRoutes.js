@@ -19,6 +19,7 @@ const fs      = require('fs');
 
 const { syncRecetasFromMaxi }    = require('../services/maxiRecetasService');
 const { importRecetasFromFile }  = require('../services/csvRecetasImportService');
+const { importarPasosDesdeZip }  = require('../services/recetasPasosImportService');
 const { authRequired }           = require('../middleware/authMiddleware');
 const { requireBusinessAccess }  = require('../middleware/requireBusinessAccess');
 const { MAX_FILE_SIZE_MB }       = require('../config/features');
@@ -33,6 +34,18 @@ const upload = multer({
     const ext = path.extname(file.originalname).toLowerCase();
     if (['.csv', '.xls', '.xlsx'].includes(ext)) cb(null, true);
     else cb(new Error('Solo se permiten archivos CSV, XLS o XLSX'));
+  },
+});
+
+// Lote de fotos+paso-a-paso puede pesar bastante (200+ imágenes) — límite
+// propio, más generoso que el de CSV.
+const uploadZip = multer({
+  dest: uploadsDir,
+  limits: { fileSize: 300 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext === '.zip') cb(null, true);
+    else cb(new Error('Solo se permite un archivo .zip'));
   },
 });
 
@@ -116,6 +129,38 @@ router.post(
         return res.status(400).json({ ok: false, error: 'invalid_format', message: error.message });
       }
 
+      return next(error);
+    }
+  }
+);
+
+// ── POST /:businessId/recetas/import-pasos-zip?aplicar=true ──────────────────
+// ZIP con pares .txt (paso a paso) + imagen (foto), mismo nombre base,
+// formato "<categoria>_<codigo>_<NOMBRE>.ext". Sin ?aplicar=true es solo
+// preview (no escribe nada) — ver services/recetasPasosImportService.js.
+router.post(
+  '/:businessId/recetas/import-pasos-zip',
+  authRequired,
+  (req, res, next) => requireBusinessAccess(req, res, next),
+  uploadZip.single('file'),
+  async (req, res, next) => {
+    try {
+      const businessId = getBizId(req);
+      if (!Number.isFinite(businessId)) {
+        return res.status(400).json({ ok: false, error: 'invalid_business_id' });
+      }
+      if (!req.file) {
+        return res.status(400).json({ ok: false, error: 'file_required', message: 'Adjuntá un archivo .zip' });
+      }
+
+      const aplicar = String(req.query.aplicar || '') === 'true';
+      const result = await importarPasosDesdeZip({ businessId, zipPath: req.file.path, aplicar });
+
+      try { fs.unlinkSync(req.file.path); } catch {}
+      return res.json(result);
+
+    } catch (error) {
+      if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch {} }
       return next(error);
     }
   }
