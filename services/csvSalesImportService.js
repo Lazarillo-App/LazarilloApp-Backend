@@ -188,6 +188,21 @@ async function applyReplaceRange(client, { businessId, from, to, importId, branc
         AND day BETWEEN $2::date AND $3::date
         AND branch_id IS NULL
     `, [businessId, from, to]);
+
+    // Un CSV "principal" (sin sucursal) representa el mismo total consolidado
+    // de negocio que el pipeline automático (maxi, siempre branch_id IS NULL)
+    // — así que si se sube un CSV para un día que el agente ya cubrió, el CSV
+    // pisa al agente (mismo criterio que a la inversa en
+    // maxiPipelineSalesSync.js: quien escribe último para ese día gana, nunca
+    // coexisten ambas fuentes el mismo día — si no, listDailyItems las suma
+    // y duplica el total). Un CSV por sucursal (branchId seteado) es solo
+    // una porción del negocio, no se compara contra el consolidado de maxi.
+    await client.query(`
+      DELETE FROM sales_daily_items
+      WHERE business_id = $1
+        AND source = 'maxi'
+        AND day BETWEEN $2::date AND $3::date
+    `, [businessId, from, to]);
   }
 
   // INSERT: propaga branch_id desde staging
