@@ -25,7 +25,7 @@
 const pool = require('../config/db');
 const { buildInsumoMap, resolveCredsBizId } = require('../controllers/purchasesController');
 const { upsertPurchasesBatch } = require('./purchasesStore');
-const { PDV_MAP } = require('./maxiPdvMap');
+const { PDV_MAP, pdvsDeNegocio, verificarSucursales } = require('./maxiPdvMap');
 
 function facturaKeyDe(cod_cpb, numero1, numero2) {
   return `${String(cod_cpb ?? '').trim()}-${numero1}-${numero2}`;
@@ -58,11 +58,6 @@ async function resolverTablasDelAnio(schema, prefijo) {
   return rows
     .map((r) => r.table_name)
     .filter((t) => new RegExp(`^${prefijo}_\\d{4}$`).test(t));
-}
-
-function resolverPdv(businessId) {
-  const entry = Object.entries(PDV_MAP).find(([, v]) => v.businessId === Number(businessId));
-  return entry ? { pdv: entry[0], schema: entry[1].schema } : null;
 }
 
 // i25 trae `cantidad` en la unidad de EMBALAJE con que se cargó la línea
@@ -119,11 +114,11 @@ async function obtenerFilasI25(pdv, schema) {
 // de Lazarillo (insumos.codigo_maxi) — para revisar antes de aplicar si son
 // insumos que faltan crear, o un problema de datos (codigo_maxi mal cargado).
 async function listarCodigosSinInsumo(businessId) {
-  const resuelto = resolverPdv(businessId);
-  if (!resuelto) return { ok: false, error: `Negocio ${businessId} no está en PDV_MAP todavía` };
-  const { pdv, schema } = resuelto;
+  const pdvs = pdvsDeNegocio(businessId);
+  if (!pdvs.length) return { ok: false, error: `Negocio ${businessId} no está en PDV_MAP todavía` };
 
-  const filas = await obtenerFilasI25(pdv, schema);
+  let filas = [];
+  for (const { pdv, schema } of pdvs) filas = filas.concat(await obtenerFilasI25(pdv, schema));
   const credsBizId = await resolveCredsBizId(businessId);
   const insumoMap = await buildInsumoMap(credsBizId);
 
@@ -140,16 +135,30 @@ async function listarCodigosSinInsumo(businessId) {
   return { ok: true, codigos: [...porCodigo.values()].sort((a, b) => b.lineas - a.lineas) };
 }
 
+// Un negocio puede tener varios pdv (ej. 204: FCRAMOS principal + FCSANJUSTO
+// sucursal) — cada uno se sincroniza por separado con su branch_id.
 async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
-  const resuelto = resolverPdv(businessId);
-  if (!resuelto) {
+  const pdvs = pdvsDeNegocio(businessId);
+  if (!pdvs.length) {
     return { ok: false, error: `Negocio ${businessId} no está en PDV_MAP todavía` };
   }
-  const { pdv, schema } = resuelto;
+  await verificarSucursales(pool, businessId);
 
+  const credsBizId = await resolveCredsBizId(businessId);
+  const insumoMap = await buildInsumoMap(credsBizId);
+
+  const porPdv = [];
+  for (const destino of pdvs) {
+    porPdv.push(await syncComprasDePdv(businessId, destino, insumoMap, { dryRun }));
+  }
+  return { ok: true, porPdv, dryRun };
+}
+
+async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap, { dryRun }) {
   const filas = await obtenerFilasI25(pdv, schema);
+  const pagosResultado = await syncPagosDeNegocio(businessId, pdv, schema, branchId, { dryRun });
   if (!filas.length) {
-    return { ok: true, facturas: 0, items: 0, sinInsumo: 0, pagos: 0, dryRun };
+    return { pdv, branchId, facturas: 0, items: 0, sinInsumo: 0, pagos: pagosResultado };
   }
 
   const factoresPorCodigo = await construirFactoresEnvase(schema);
@@ -189,12 +198,10 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
       percep: f.percep,
       cptoCaja: f.cod_cga,
       referencia: f.nom_cga,
+      sucursal: branchId,      // purchasesStore lo guarda como purchase_items.branch_id
     });
   }
   const facturas = [...porFactura.values()];
-
-  const credsBizId = await resolveCredsBizId(businessId);
-  const insumoMap = await buildInsumoMap(credsBizId);
 
   let sinInsumo = 0;
   for (const f of facturas) {
@@ -203,26 +210,24 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
     }
   }
 
-  const pagosResultado = await syncPagosDeNegocio(businessId, pdv, schema, { dryRun });
-
   if (dryRun) {
-    return { ok: true, facturas: facturas.length, items: filas.length, sinInsumo, pagos: pagosResultado, dryRun };
+    return { pdv, branchId, facturas: facturas.length, items: filas.length, sinInsumo, pagos: pagosResultado };
   }
 
-  const resultadoCompras = await upsertPurchasesBatch(businessId, facturas, insumoMap, null);
+  const resultadoCompras = await upsertPurchasesBatch(businessId, facturas, insumoMap, branchId);
 
   return {
-    ok: true,
+    pdv,
+    branchId,
     facturas: facturas.length,
     items: filas.length,
     sinInsumo,
     compras: resultadoCompras,
     pagos: pagosResultado,
-    dryRun,
   };
 }
 
-async function syncPagosDeNegocio(businessId, pdv, schema, { dryRun = false } = {}) {
+async function syncPagosDeNegocio(businessId, pdv, schema, branchId, { dryRun = false } = {}) {
   const tablas80 = await resolverTablasDelAnio(schema, 'i80_compras_detalle_de_pagos');
   if (!tablas80.length) return { insertados: 0, dryRun };
 
@@ -305,7 +310,10 @@ async function syncPagosDeNegocio(businessId, pdv, schema, { dryRun = false } = 
          NOW()
        FROM datos d
        LEFT JOIN purchases p ON p.business_id = d.business_id AND p.factura_key = d.factura_key
-       ON CONFLICT (business_id, orden_maxi) DO UPDATE SET
+                            AND COALESCE(p.branch_id, -1) = COALESCE($19::bigint, -1)
+       -- orden_maxi es la numeración de cada PC de MaxiRest: entre sucursales
+       -- del mismo negocio se repite, por eso la clave incluye pdv.
+       ON CONFLICT (business_id, pdv, orden_maxi) DO UPDATE SET
          purchase_id      = EXCLUDED.purchase_id,
          factura_key      = EXCLUDED.factura_key,
          forma_pago       = EXCLUDED.forma_pago,
@@ -324,6 +332,7 @@ async function syncPagosDeNegocio(businessId, pdv, schema, { dryRun = false } = 
         businessIds, facturaKeys, pdvs, ordenes, formasPago,
         importes, fechasPago, chequeNumeros, chequeFechasVto, chequeImportes,
         bancoCodigos, bancoNombres, codCgas, nomCgas, codRgas, nomRgas, codCtgs, nomCtgs,
+        branchId,
       ]
     );
     insertados += r.rowCount;
