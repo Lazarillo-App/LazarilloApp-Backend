@@ -6,6 +6,7 @@ const { autoAssignNewArticles, applyArticuloGroupRules } = require('../services/
 const { notifyAutoAssign } = require('../services/notificationService');
 const { fetchMaxiInsumos, normalizarInsumosMaxi } = require('../services/maxiSuppliesService');
 const { reconcileManualsAfterSync } = require('../services/manualReconciliation');
+const { schemaDeNegocio } = require('../services/maxiPdvMap');
 
 // fetch nativo (Node 18+) o fallback a node-fetch
 const fetchNative =
@@ -715,7 +716,12 @@ exports.listArticlesTreeFromDB = async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT articulo_id, nombre, categoria, subrubro, precio, origen
+      // descripcion: MaxiRest la manda como "descripc" y el sync la guarda en
+      // raw (y en app_articles.props) pero el árbol no la devolvía, así que
+      // la app (Vista Diseño) nunca la veía.
+      `SELECT articulo_id, nombre, categoria, subrubro, precio, origen,
+              NULLIF(TRIM(raw->>'descripc'), '') AS descripcion_original,
+              NULLIF(TRIM(descripcion), '') AS descripcion_propia
          FROM public.maxi_articles
         WHERE business_id = $1
         ORDER BY subrubro, categoria, nombre`,
@@ -729,7 +735,9 @@ exports.listArticlesTreeFromDB = async (req, res) => {
     // subrubro de app_articles van invertidos a categoria/subrubro, mismo
     // criterio que la lista plana de listArticlesFromDB.
     const { rows: manualRows } = await pool.query(
-      `SELECT id AS articulo_id, name AS nombre, subrubro AS categoria, rubro AS subrubro, price AS precio
+      `SELECT id AS articulo_id, name AS nombre, subrubro AS categoria, rubro AS subrubro, price AS precio,
+              NULLIF(TRIM(props->>'descripc'), '') AS descripcion_original,
+              NULLIF(TRIM(props->>'descripcion'), '') AS descripcion_propia
          FROM public.app_articles
         WHERE business_id = $1 AND id < 0`,
       [principalId]
@@ -739,6 +747,30 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       porIdTree.set(Number(r.articulo_id), { ...r, origen: 'manual' });
     }
     const allRows = Array.from(porIdTree.values());
+
+    // La descripción que guarda el sync (raw.descripc) viene de la API de
+    // MaxiRest con los acentos perdidos ("cl?sicas", "promoci?n": 149 de 258
+    // en el Bar). La réplica de MaxiRest en este mismo Postgres (maestro 6,
+    // un schema por organización) la tiene bien escrita: si el negocio tiene
+    // réplica, manda esa; si no, queda la del sync. Si la réplica no está o
+    // falla, el árbol sale igual.
+    const schemaReplica = schemaDeNegocio(principalId);
+    if (schemaReplica && /^[a-z0-9_]+$/.test(schemaReplica)) {
+      try {
+        const { rows: descRows } = await pool.query(
+          `SELECT codigo::text AS codigo, TRIM(descripcion::text) AS descripcion
+             FROM "${schemaReplica}".m6_listado_de_articulos
+            WHERE NULLIF(TRIM(descripcion::text), '') IS NOT NULL`
+        );
+        const descPorCodigo = new Map(descRows.map((d) => [String(d.codigo).trim(), d.descripcion]));
+        for (const r of allRows) {
+          const d = descPorCodigo.get(String(r.articulo_id));
+          if (d) r.descripcion_original = d;
+        }
+      } catch (e) {
+        console.warn('[listArticlesTreeFromDB] sin descripciones de la réplica:', e.message);
+      }
+    }
 
     const sectorSet = await articleIdsPermitidos(req.user?.id, biz.id, principalId);
     const bySub = new Map();
@@ -753,7 +785,14 @@ exports.listArticlesTreeFromDB = async (req, res) => {
       if (!bySub.has(sub)) bySub.set(sub, new Map());
       const byCat = bySub.get(sub);
       if (!byCat.has(cat)) byCat.set(cat, []);
-      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null, origen: r.origen ?? null });
+      byCat.get(cat).push({ id: r.articulo_id, nombre: r.nombre, precio: r.precio ?? null, origen: r.origen ?? null,
+        // descripcion = la que se usa (la propia de Lazarillo si hay, si no la
+        // de MaxiRest); las otras dos van aparte para que la app sepa de dónde
+        // sale (Vista Diseño puede ocultar la de MaxiRest; el modal la edita).
+        descripcion: r.descripcion_propia ?? r.descripcion_original ?? null,
+        descripcion_original: r.descripcion_original ?? null,
+        descripcion_propia: r.descripcion_propia ?? null,
+      });
     }
 
     const tree = Array.from(bySub.entries()).map(([subrubro, byCat]) => ({
