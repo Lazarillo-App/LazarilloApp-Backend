@@ -394,6 +394,10 @@ exports.actualizarArticulo = async (req, res, next) => {
   }
 
   const { nombre, rubro, subrubro, precio, codigoExterno } = req.body || {};
+  // Descripción propia (Lazarillo). undefined = no se toca; '' o null = se
+  // borra y vuelve a usarse la de MaxiRest.
+  const tocaDescripcion = Object.prototype.hasOwnProperty.call(req.body || {}, 'descripcion');
+  const descripcionNueva = tocaDescripcion ? (String(req.body.descripcion ?? '').trim() || null) : undefined;
   const storageBizId = await resolveStorageBizId(bizId);
   const isManual = articleId < 0;
 
@@ -430,6 +434,9 @@ exports.actualizarArticulo = async (req, res, next) => {
       }
       if (subrubro?.trim() != null && subrubro.trim() !== art.categoria) {
         sets.push(`categoria = $${pi++}`); vals.push(subrubro.trim());
+      }
+      if (tocaDescripcion && descripcionNueva !== (art.descripcion ?? null)) {
+        sets.push(`descripcion = $${pi++}`); vals.push(descripcionNueva);
       }
 
       if (!sets.length) {
@@ -511,14 +518,27 @@ exports.actualizarArticulo = async (req, res, next) => {
       sets.push(`subrubro_id = $${pi++}`); vals.push(subrubroId);
     }
 
+    // Una sola copia de props para todo lo que la toca (sku y descripción).
+    let propsNuevas = null;
+    if (tocaDescripcion && descripcionNueva !== (art.props?.descripcion ?? null)) {
+      propsNuevas = { ...(art.props || {}) };
+      if (descripcionNueva) propsNuevas.descripcion = descripcionNueva;
+      else delete propsNuevas.descripcion;
+    }
+
     if (codigoExterno?.trim()) {
-      const props = art.props || {};
+      const props = propsNuevas || art.props || {};
+      propsNuevas = null; // ya va en este mismo SET
       const skuFinal = `L${codigoExterno.trim()}`;
       props.sku = skuFinal;
       props.codigo_externo = codigoExterno.trim();
       props.sin_equivalencia = false;
       sets.push(`props = $${pi++}`);
       vals.push(JSON.stringify(props));
+    }
+    if (propsNuevas) {
+      sets.push(`props = $${pi++}`);
+      vals.push(JSON.stringify(propsNuevas));
     }
 
     if (!sets.length) {
