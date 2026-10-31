@@ -48,7 +48,7 @@ async function resolverTablasDelAnio(schema, prefijo) {
   );
   return rows
     .map((r) => r.table_name)
-    .filter((t) => new RegExp(`^${prefijo}_\d{4}$`).test(t));
+    .filter((t) => new RegExp(`^${prefijo}_\\d{4}$`).test(t));
 }
 
 async function obtenerFilasI12(pdv, schema) {
