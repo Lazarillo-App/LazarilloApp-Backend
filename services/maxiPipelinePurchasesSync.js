@@ -162,20 +162,30 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
       porFactura.set(key, { numero: key, proveedor: f.cod_pro, items: [] });
     }
     const esGasto = TIPOS_GASTO.has(String(f.cod_cpb ?? '').trim().toUpperCase());
+    // Línea cargada POR CONCEPTO en MaxiRest (un gasto sin detalle de
+    // insumos: impuestos, servicios, contador, comisiones…): el 25 la trae
+    // con código = concepto de caja (cod_cga) y sin unidad de medida. Ese
+    // código NO es un insumo: si coincide con el codigo_maxi de uno, la
+    // línea se le pegaba (ej. "Servicio de Aguas" 206 → LATA PASO POMELO,
+    // "Contribuciones SS 351" 771 → FOLIOS OFICIO). En 2026 Bar/Canchas:
+    // 1.855 líneas con código = concepto, todas sin medida, y ninguna línea
+    // de insumo real con código = concepto.
+    const esConcepto = f.codigo != null && f.cod_cga != null
+      && String(f.codigo).trim() === String(f.cod_cga).trim();
 
     // cantidad/neto vienen en unidad de EMBALAJE (ver comentario de
     // construirFactoresEnvase) — se convierten acá a unidad base ANTES de
     // guardar. El importe total de la línea (totalins) no cambia, es lo
     // que de verdad se pagó; solo se reparte entre más (o las mismas)
     // unidades.
-    const factor = esGasto ? 1 : factorDeLinea(factoresPorCodigo, f.codigo, f.medida);
+    const factor = (esGasto || esConcepto) ? 1 : factorDeLinea(factoresPorCodigo, f.codigo, f.medida);
     const cantidadBase = Number(f.cantidad ?? 0) * factor;
     const netoBase = factor !== 1 && cantidadBase > 0
       ? Number(f.totalins ?? 0) / cantidadBase
       : f.neto;
 
     porFactura.get(key).items.push({
-      insumo: esGasto ? null : f.codigo,
+      insumo: (esGasto || esConcepto) ? null : f.codigo,
       fecha: f.fecha,
       cantidad: cantidadBase,
       neto: netoBase,          // precio unitario neto, ya en unidad base
