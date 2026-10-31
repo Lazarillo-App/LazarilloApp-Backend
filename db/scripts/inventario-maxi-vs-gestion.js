@@ -49,9 +49,11 @@ async function main() {
       console.log('columnas:', [...tiene].join(', '));
       console.log(faltan.length ? `FALTAN (vs gestion): ${faltan.join(', ')}` : 'OK: tiene todas las columnas que usa gestion');
 
+      // Los maestros (m*) se comparten entre los pdv de la organización: no traen columna pdv.
+      const pdv = tiene.has('pdv') ? 'pdv' : `'(todos)'`;
       const fecha = tiene.has('fecha') ? 'MIN(fecha)::text AS desde, MAX(fecha)::text AS hasta' : 'NULL AS desde, NULL AS hasta';
       const { rows } = await pool.query(
-        `SELECT pdv, COUNT(*)::int AS filas, ${fecha} FROM "${schema}"."${tabla}" GROUP BY pdv ORDER BY pdv`
+        `SELECT ${pdv} AS pdv, COUNT(*)::int AS filas, ${fecha} FROM "${schema}"."${tabla}" GROUP BY 1 ORDER BY 1`
       );
       console.table(rows);
     }
