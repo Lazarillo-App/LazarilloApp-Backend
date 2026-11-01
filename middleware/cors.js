@@ -11,6 +11,10 @@ const corsWithCache = cors({
     'http://lazarillo.com.ar',
     'https://www.lazarillo.com.ar',
     'https://lazarillo-app.github.io',
+    // Sitio de pruebas (rama testing publicada en Vercel)
+    'https://lazarillo-testing.vercel.app',
+    // Otros orígenes por variable, separados por coma (sin tocar código)
+    ...String(process.env.CORS_EXTRA_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
   ],
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
