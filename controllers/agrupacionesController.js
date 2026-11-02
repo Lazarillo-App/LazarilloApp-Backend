@@ -262,6 +262,29 @@ exports.obtenerAgrupaciones = async (req, res) => {
         }
       }
       orgAssignedIds = [...new Set(orgAssignedIds)];
+
+      // Rubro/subrubro de los artículos de las agrupaciones de otros negocios:
+      // el árbol de artículos de cada negocio no trae los que ya viven en otro
+      // subnegocio, así que el front no tenía cómo saber de qué rubro son.
+      // Se toman del catálogo del principal de la org (el que comparten todos).
+      const idsOtros = [...new Set(orgGroups.flatMap((g) => g.ids))].filter((n) => n > 0);
+      if (idsOtros.length) {
+        const { rows: rubroRows } = await pool.query(
+          `SELECT m.articulo_id, m.subrubro, m.categoria
+             FROM maxi_articles m
+            WHERE m.business_id = (
+                    SELECT id FROM app_businesses
+                     WHERE organization_id = $1
+                     ORDER BY created_at ASC LIMIT 1)
+              AND m.articulo_id = ANY($2::bigint[])`,
+          [organizationId, idsOtros]
+        );
+        const rubroDe = new Map(rubroRows.map((r) => [Number(r.articulo_id), { subrubro: r.subrubro, categoria: r.categoria }]));
+        for (const g of orgGroups) {
+          g.rubros = {};
+          for (const id of g.ids) { const r = rubroDe.get(Number(id)); if (r) g.rubros[id] = r; }
+        }
+      }
     }
     console.log('[obtenerAgrupaciones DEBUG]', {
       businessId,
