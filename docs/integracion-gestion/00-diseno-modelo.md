@@ -1,99 +1,140 @@
-# Integración de lazarillo_gestion — Fase 0: modelo de datos
+# Integración de lazarillo_gestion — diseño del modelo de datos
 
-> Estado: **BORRADOR para aprobar** (2026-10-30). Ninguna migración creada todavía.
+> Estado: **BORRADOR para aprobar** (2026-11-02). No hay nada creado en la base todavía.
+> Reemplaza al borrador del 2026-10-30 (tablas nuevas alimentadas por el pipeline), descartado.
 
-## Objetivo
+## Reglas que fija este diseño
 
-lazarillo_gestion (Next + Supabase, hecho por otro grupo) se da de baja. Su panel
-financiero pasa a ser parte de Lazarillo: datos en la base única de Render, API en
-este Backend y UI en agrupaciones-front (MUI). Acceso: owner/admin.
+1. **Una base (Render), un servicio (este Backend), un lenguaje (JavaScript).** Supabase y Vercel se eliminan al final.
+2. **La estructura de gestion se conserva:** mismas tablas, columnas, cálculos y reglas. Funciona bien; no se rediseña.
+3. **Multi-cliente con el modelo actual de Lazarillo:** organización → negocios/subnegocios → sucursales.
+   El dato pertenece al **negocio** (`business_id`); la **sucursal** (`branch_id`, NULL = principal) es un filtro
+   dentro del negocio. Cambiar de negocio activo cambia todo lo que se ve. Muy poco es general de la organización.
+4. **Aislamiento entre clientes en dos capas:** cada consulta filtra por el negocio activo (como hoy), y además
+   RLS en la base, que devuelve vacío si alguna consulta se olvida el filtro.
 
-## Principio
+## Qué cambia respecto de gestion (y nada más)
 
-| Tipo de dato | Ejemplos | Qué hacemos |
-|---|---|---|
-| **Derivado de Maxi** | compras/gastos, detalle, pagos, ventas, cta cte, nómina, maestros | **No se migra.** Se materializa desde `container`/`comercio` con el pipeline diario. |
-| **Historial viejo** | gastos/ventas 2016–2024 (Ramos), 2021–2024 (Comercio) | Del kit si los informes lo traen; si no, import único desde gestion (`origen='gestion'`). Mismas tablas. |
-| **Cargado a mano** | reglas de apertura, ajustes, pagos, ARCA, etc. | Se migra desde Supabase reenganchando por clave natural de Maxi. |
-| **Calculado** | distribuciones de apertura, aumentos de precio, compras huérfanas | Se recalcula con el motor, no se migra. |
+| En gestion | En Lazarillo |
+|---|---|
+| Una instalación por cliente | Un solo juego de tablas `gestion_*` para todos los clientes |
+| `locales` + `puntos_de_venta` | **Desaparecen.** Se usan `app_businesses` + `app_branches` |
+| `localId` / `puntoDeVentaId` / `pdvId` en cada tabla | `business_id` + `branch_id` |
+| Claves únicas globales (`codigo @unique`, etc.) | Las mismas claves, **por negocio** (`UNIQUE (business_id, codigo)`) |
+| `rowId` como PK | PK `(business_id, row_id)` — el hash de identidad no cambia |
+| Login de Supabase + allowlist de emails | Nuestro login + `requireBusinessAccess` + owner/admin |
+| Lectura nocturna de Render vía Vercel cron | Job del Backend, misma lógica |
+| Vista de "Local" (Ramos Mejía = Bar + Canchas) | No existe; filtros = negocio y sucursal |
 
-## Mapeo PDV → negocio / sucursal
+Nombres: snake_case con prefijo `gestion_` (no chocan con `purchases`, `suppliers`, `sales_*`). Las columnas
+conservan su significado; se pasan de camelCase a snake_case como el resto de la base.
 
-| gestion (instancia / local / pdv) | Maxi `pdv` | Lazarillo |
-|---|---|---|
-| Ramos / Ramos Mejía / Bar | `BAR` | business 147 |
-| Ramos / Ramos Mejía / Canchas | `FCRAMOS` | business 204, sucursal Ramos |
-| Ramos / San Justo / Canchas | `FCSANJUSTO` | business 204, sucursal San Justo |
-| Comercio / Nuñez / Comercio | `COMERCIO` | business 210 |
+## Tabla por tabla
 
-- Sucursales = `app_branches` (ya existe: mismos artículos/insumos, ventas y compras
-  separadas por `branch_id`). Hay que confirmar en prod que 204 tenga sus 2 branches.
-- `services/maxiPdvMap.js` pasa a `{ schema, businessId, branchId }` y suma `FCSANJUSTO`.
-  **Ojo:** hoy San Justo ya sube datos y los pipelines existentes (compras i25, ventas i12)
-  todavía lo ignoran.
+**Leyenda de tenencia:** **N** = `business_id` NOT NULL · **N+S** = `business_id` + `branch_id` ·
+**U** = por usuario · **G** = general de la organización (`organization_id`).
 
-Todas las tablas nuevas llevan `business_id` y, donde gestion usaba `puntoDeVentaId`,
-`branch_id` (NULL = negocio sin sucursales).
+### Maestros (se cargan de Maxi para cada negocio)
 
-## A. Tablas derivadas (pipeline diario)
+Hoy cada instancia de gestion tiene un solo juego de maestros, compartido por sus PDV. Siguiendo
+"todo por negocio", cada negocio tiene su copia, cargada desde el esquema del kit de su organización.
+Eso permite que cada negocio configure su propio Panel (visibilidad de rubros, conceptos editados).
 
-Cada una: `business_id`, `branch_id`, `row_key` (identidad estable), columnas del informe,
-`origen` (`'maxi'` | `'gestion'`), `synced_at`. Único `(business_id, row_key)`.
-
-| Tabla | Fuente | Notas |
-|---|---|---|
-| `gestion_gastos` | `i14_gastos_compras_detallado_YYYY` | Base del Panel. Incluye gastos que no son insumos (por eso no alcanza `purchases`). `row_key` = mismo algoritmo que `compra-identity.ts` de gestion, para reenganchar ajustes. |
-| `gestion_ventas_cobros` | `i22_ventas_detalladas_YYYY` | Ventas por comprobante y forma de cobro (distinto de `sales_daily_items`, que es por artículo/día). |
-| `gestion_pagos` | `i80_compras_detalle_de_pagos_YYYY` | Estado de pago de facturas (impagas, cta cte proveedor). |
-| `gestion_cta_cte_clientes` | `i71_cta_por_comprobante_YYYY` | |
-| detalle de compras | `i25` | **Reusar `purchases`/`purchase_items`**; validar que no excluyan líneas que el modal de gestion muestra. |
-| empleados | `i000_nomina` | Se lee directo (snapshot diario), sin tabla. |
-| proveedores / conceptos / artículos | `m00` / `m17` / `m6` | Se leen directo del schema; solo las ediciones locales van a tablas (sección B). |
-
-## B. Tablas manuales (se migran)
-
-| Tabla nueva | Desde gestion | Filas (Ramos / Comercio) | Clave de reenganche |
+| gestion | Lazarillo | Ten. | Único |
 |---|---|---|---|
-| `gestion_gastos_ajustes` | campos `*Manual`, `esBloqueado` de `compras` | ~1.300 / ~2.810 | `row_key` |
-| `gestion_conceptos_caja_ajustes` | `conceptos_caja` con `editadoEnLazarillo` | ? / ? | código de concepto |
-| `gestion_rubros_caja_config` | `rubros_concepto_caja` (visibilidad) + `sin_rubro_config` | 26 / 21 | código de rubro |
-| `gestion_proveedores_config` | `proveedores.pagoAutomatico` | ? | código proveedor |
-| `gestion_apertura_reglas` + `gestion_apertura_destinos` | `reglas_apertura`, `destinos_regla` | 559+755 / 0 | código concepto, pdv → branch |
-| `gestion_apertura_distribuciones` | — (se recalcula) | 22.544 / 0 | |
-| `gestion_impagas_forzadas` | `impagas_forzadas` | 6 / 0 | comprobante + cod_pro |
-| `gestion_pagos_proveedor` (+ `_aplicaciones`, `_eventos`) | `pagos_proveedor`… | 2 / 0 | comprobante + cod_pro |
-| `gestion_pagos_internos` (+ `_aplicaciones`, `_eventos`) | `pagos_internos`… | 5 (+13) / 0 | row_key |
-| `gestion_medios_pago` | `medios_pago` | 4 / 3 | nombre |
-| `gestion_flujo_caja_manual` | `flujo_caja_manual` | 21 / 0 | año/mes/branch |
-| `gestion_proyecciones_ingresos` | `proyecciones_ingresos` | 55 / 15 | ámbito → business/branch |
-| `gestion_equilibrio_variables` | `equilibrio_variables` | 4 / 3 | |
-| `gestion_arca_comprobantes` | `arca_comprobantes` | 4.676 / 0 | cuit emisor + tipo + pv + nro |
-| `gestion_sin_carga_descartes` | `sin_carga_descartes` | 74 / 2 | clave |
-| `gestion_facturas_movil` | `facturas_lazarillo` | 2 / 0 | comprobante + código |
-| `gestion_liquidaciones_empleado`, `gestion_reglas_concepto_empleado` | ídem | 0 / 2 | código empleado |
-| notas por usuario | `notas_usuario` | 1 / 0 | email → user_id |
-| actividad | `actividad` | 4 / 0 | → nuestro audit log existente |
+| `rubros_concepto_caja` | `gestion_rubros_concepto_caja` | N | (business_id, codigo) |
+| `sin_rubro_config` (fila única id=1) | `gestion_sin_rubro_config` | N | (business_id) |
+| `conceptos_caja` | `gestion_conceptos_caja` | N | (business_id, codigo) |
+| `rubros_articulo` | `gestion_rubros_articulo` | N | (business_id, codigo) |
+| `subrubros_articulo` | `gestion_subrubros_articulo` | N | (business_id, codigo) |
+| `articulos` (PK codigo) | `gestion_articulos` | N | PK (business_id, codigo) |
+| `proveedores` | `gestion_proveedores` | N | (business_id, codigo) |
+| `empleados` | `gestion_empleados` | N+S | (business_id, branch_id, codigo) |
 
-No se migran: `import_logs`, `render_*`, `user_drive_config` (se reconecta),
-`aumentos_precio` y `compras_huerfanas` (se recalculan), `_respaldo_*`, `_prisma_migrations`.
+### Movimientos (ingesta diaria + históricos)
 
-Prefijo `gestion_` para no chocar con tablas existentes (`purchases`, `suppliers`, `sales_*`).
+| gestion | Lazarillo | Ten. | Clave |
+|---|---|---|---|
+| `compras` | `gestion_compras` | N+S | PK (business_id, row_id) |
+| `detalle_compras` (solo `localId`) | `gestion_detalle_compras` | N+S | PK (business_id, row_id) — la sucursal se toma de la compra enlazada |
+| `pagos` | `gestion_pagos` | N+S | PK (business_id, row_id) |
+| `ventas` | `gestion_ventas` | N+S | PK (business_id, row_id) |
+| `compras_huerfanas` | `gestion_compras_huerfanas` | N+S | PK (business_id, row_id) |
 
-## C. Migración de lo manual
+### Cargado a mano
 
-Script re-ejecutable `db/scripts/migrar-gestion.js <ramos|comercio> [--aplicar]`
-(dry-run por defecto): lee Supabase en solo lectura, traduce local/pdv → business/branch,
-reengancha por clave natural, hace upsert, y reporta **cada fila que no matchea**
-(nada se descarta en silencio). Se corre hasta el corte final.
+| gestion | Lazarillo | Ten. | Notas |
+|---|---|---|---|
+| `impagas_forzadas` | `gestion_impagas_forzadas` | N+S | único (business_id, branch_id, comprobante, cod_pro) |
+| `medios_pago` | `gestion_medios_pago` | N | único (business_id, nombre) |
+| `pagos_proveedor` (+ `aplicaciones_`, `eventos_`) | `gestion_pagos_proveedor`… | N+S | sucursal que paga / sucursal de la factura |
+| `flujo_caja_manual` | `gestion_flujo_caja_manual` | N+S | único (business_id, branch_id, anio, mes) |
+| `proyecciones_ingresos` (ámbito `"local/pdv"`) | `gestion_proyecciones_ingresos` | N+S | ámbito → business/branch; `*` = todo el negocio |
+| `equilibrio_variables` | `gestion_equilibrio_variables` | N | PK (business_id, tipo, codigo) |
+| `aumentos_precio` | `gestion_aumentos_precio` | N+S | PK (business_id, branch_id, fecha) |
+| `sin_carga_descartes` | `gestion_sin_carga_descartes` | N+S | único (business_id, branch_id, clave) |
+| `arca_comprobantes` | `gestion_arca_comprobantes` | N | único (business_id, cuit_emisor, tipo, punto_venta, numero) |
+| `facturas_lazarillo` (solo `localId`) | `gestion_facturas_movil` | N+S | único (business_id, comprobante, codigo) |
+| `liquidaciones_empleado` | `gestion_liquidaciones_empleado` | N+S | |
+| `reglas_concepto_empleado` | `gestion_reglas_concepto_empleado` | N+S | |
 
-## D. Validación (antes del corte)
+### Lo que cruza negocios (lo poco que es general)
 
-Para cada mes cerrado y cada business/branch: total por rubro de caja en nuestro Panel
-== total en gestion. Pendiente explicar: en 2026 `i22` tiene exactamente 1.198 filas más
-que gestion en cada uno de los 3 pdv de container.
+Son las únicas tablas donde una fila involucra **más de un negocio de la misma organización**.
+Se guardan con `organization_id`, y cada negocio involucrado queda en su columna. Se validan en el
+servidor: todos los negocios tienen que ser de la misma organización y el usuario tiene que tener acceso.
+
+| gestion | Lazarillo | Ten. | Notas |
+|---|---|---|---|
+| `reglas_apertura` | `gestion_reglas_apertura` | G | origen = (business_id, branch_id) |
+| `destinos_regla` | `gestion_destinos_regla` | G | cada destino = (business_id, branch_id) — puede ser otro negocio de la org |
+| `distribuciones_apertura` | `gestion_distribuciones_apertura` | G | (compra_business_id, compra_row_id) + destino |
+| `pagos_internos` (+ `eventos_`, `aplicaciones_`) | `gestion_pagos_internos`… | G | cobra / paga = (business_id, branch_id) cada uno |
+
+Un usuario ve una de estas filas si tiene acceso a alguno de los negocios involucrados.
+
+### Por usuario
+
+| gestion | Lazarillo | Notas |
+|---|---|---|
+| `notas_usuario` (PK email) | `gestion_notas_usuario` | PK (user_id, business_id) |
+| `user_drive_config` | `gestion_drive_config` | (user_id, business_id); se reconecta, no se migra |
+
+### Lo que no pasa
+
+- `locales`, `puntos_de_venta` → reemplazados por `app_businesses` / `app_branches`.
+- `render_origenes` → se reemplaza por el mapa pdv → negocio/sucursal que ya usan los pipelines (`services/maxiPdvMap.js`).
+- `render_corridas`, `import_logs` → mecánica del import; el job del Backend registra sus corridas en su propia tabla.
+- `actividad` → nuestro historial de actividad existente.
+- `_prisma_migrations`, `_respaldo_*` → no son datos.
+
+## RLS (segunda capa)
+
+Cada request que toca tablas `gestion_*` corre en una transacción que fija los negocios a los que tiene
+acceso el usuario (`SET LOCAL app.business_ids = '147,204'`). Cada tabla tiene una política
+`business_id = ANY(current_setting('app.business_ids'))` (las tablas G, sobre las columnas de negocio
+involucradas). Si una consulta se olvida el `WHERE business_id = …`, devuelve solo lo permitido, nunca
+datos de otro cliente. El rol del Backend no es dueño de las tablas, así que RLS le aplica.
+
+## Migración de Ramos y Comercio
+
+Mapeo de PDV:
+
+| Instancia | Local / PDV (id) | business_id | branch_id |
+|---|---|---|---|
+| Ramos | Ramos Mejía / Bar (1) | 147 | NULL |
+| Ramos | Ramos Mejía / Canchas (2) | 204 | NULL |
+| Ramos | San Justo / Canchas (3) | 204 | 15 |
+| Comercio | Nuñez / Comercio (1) | 210 | NULL |
+
+- Los maestros de la instancia Ramos se copian a **147 y a 204**; los de Comercio a 210.
+- Las filas que hoy tienen `localId` sin `puntoDeVentaId` son ambiguas en Ramos Mejía (147 o 204). El
+  script las resuelve por la compra enlazada y **lista las que no puede resolver**; nada se descarta en silencio.
+- Script re-ejecutable, dry-run por defecto, con comparación de cantidades y sumas de importes por tabla,
+  negocio y mes contra Supabase. Se corre hasta el corte final.
 
 ## Pendientes
 
-1. Historial 2016–2024: ¿está en informes del kit todavía en revisión? Si no → import desde gestion.
-2. Conexión a Supabase para el script (contraseña de la base; no resetear mientras gestion esté en uso).
-3. Confirmar `app_branches` de 204 (Ramos / San Justo) en prod.
+1. Confirmar que maestros por negocio (copia para 147 y 204) es lo que se quiere, en lugar de compartidos por organización.
+2. Contar filas con `localId` sin `puntoDeVentaId` en Ramos (define cuánto hay que resolver a mano).
+3. Organizaciones de 147/204 y 210 en `organizations` (para las tablas G).
