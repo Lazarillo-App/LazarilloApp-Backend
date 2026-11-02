@@ -335,6 +335,25 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
       );
     }
 
+    // ── Anti-duplicado: MaxiRest manda ──
+    // Si MaxiRest ya trajo una factura de ese proveedor en esa fecha, la línea
+    // del CSV es la misma compra (el CSV suele traer el importe con IVA) y no
+    // se carga: antes quedaba sumada dos veces (Comercio, 31/10/2026: food
+    // cost 64% en vez de ~32%). Se informa en el resumen.
+    const { rows: yaDeMaxi } = await client.query(
+      `SELECT DISTINCT proveedor_id, fecha::date::text AS f
+         FROM purchases
+        WHERE business_id = $1
+          AND source IS DISTINCT FROM 'csv'
+          AND fecha::date BETWEEN $2::date AND $3::date
+          AND COALESCE(branch_id, -1) = COALESCE($4, -1)`,
+      [dataBizId, minDate, maxDate, branchId]
+    );
+    const claveDia = (prov, f) => `${prov ?? 'x'}|${String(f).slice(0, 10)}`;
+    const diasDeMaxi = new Set(yaDeMaxi.map(r => claveDia(r.proveedor_id, r.f)));
+    let omitidasPorMaxi = 0;
+    const facturasOmitidas = new Set();
+
     // ── INSERT — todos los registros con business_id = dataBizId ──
     const purchaseMap = new Map();
     const CHUNK = 500;
@@ -345,6 +364,13 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
 
       for (const item of chunk) {
         const comprobKey = item.comprob ?? `CSV-${item.fecha}-${item.codigo}`;
+
+        const provItem = Number.isFinite(item.cod_pro) ? item.cod_pro : null;
+        if (diasDeMaxi.has(claveDia(provItem, item.fecha))) {
+          omitidasPorMaxi++;
+          facturasOmitidas.add(comprobKey);
+          continue;
+        }
 
         if (!purchaseMap.has(comprobKey)) {
           const { rows: [ph] } = await client.query(
@@ -452,6 +478,9 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
         total_rows: rows.length,
         valid_rows: items.length,
         inserted: insertedCount,
+        // Líneas que no se cargaron porque MaxiRest ya trajo esa compra.
+        omitidas_ya_en_maxirest: omitidasPorMaxi,
+        facturas_ya_en_maxirest: facturasOmitidas.size,
         failed,
         has_errors: failed > 0,
         date_range: { from: minDate, to: maxDate },
