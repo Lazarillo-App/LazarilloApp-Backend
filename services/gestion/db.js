@@ -45,6 +45,11 @@ class Sql {
     });
   }
 
+  // Como Prisma.Sql#sql: el texto con "?" en lugar de los parámetros (lo usan los tests).
+  get sql() {
+    return this.strings.join('?');
+  }
+
   // { text, values } para pg
   toQuery() {
     let text = this.strings[0];
