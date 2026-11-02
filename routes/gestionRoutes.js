@@ -7,8 +7,9 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 const { requireBusinessRole } = require('../middleware/authMiddleware');
-const { parseDashboardParams } = require('../services/gestion/dashboard/params');
+const { parseDashboardParams, parseVentasParams } = require('../services/gestion/dashboard/params');
 const { obtenerPivot } = require('../services/gestion/dashboard/pivot');
+const { obtenerPivotVentas } = require('../services/gestion/dashboard/pivot-ventas');
 
 router.use(requireBusinessRole('admin'));
 
@@ -35,6 +36,16 @@ const paramsDe = (req) => new URL(req.originalUrl, 'http://local').searchParams;
 router.get('/dashboard/pivot', async (req, res, next) => {
   try {
     const data = await obtenerPivot({ ...req.gestion, params: parseDashboardParams(paramsDe(req)) });
+    res.json(data);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Pivot de Ventas (tipo → forma de cobro, por mes).
+router.get('/dashboard/pivot-ventas', async (req, res, next) => {
+  try {
+    const data = await obtenerPivotVentas({ businessId: req.gestion.businessId, params: parseVentasParams(paramsDe(req)) });
     res.json(data);
   } catch (e) {
     next(e);
