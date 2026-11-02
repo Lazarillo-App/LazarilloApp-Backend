@@ -34,22 +34,31 @@ conservan su significado; se pasan de camelCase a snake_case como el resto de la
 **Leyenda de tenencia:** **N** = `business_id` NOT NULL · **N+S** = `business_id` + `branch_id` ·
 **U** = por usuario · **G** = general de la organización (`organization_id`).
 
-### Maestros (se cargan de Maxi para cada negocio)
+### Maestros: una sola lista por organización (decidido 2026-11-02)
 
-Hoy cada instancia de gestion tiene un solo juego de maestros, compartido por sus PDV. Siguiendo
-"todo por negocio", cada negocio tiene su copia, cargada desde el esquema del kit de su organización.
-Eso permite que cada negocio configure su propio Panel (visibilidad de rubros, conceptos editados).
+Una organización nace de subdividir un negocio, así que comparte **una sola lista** de Maxi
+(proveedores, conceptos, rubros, artículos): la del kit de esa organización. No se duplica por negocio.
+Lo que se divide son los **datos** (compras, ventas, pagos…), que siempre se filtran por negocio y
+sucursal: lo de Ramos no se ve en Canchas.
+
+La lista es compartida, pero **cómo la ve cada negocio** sí es por negocio: qué rubros muestra el Panel
+(hoy `visibleEnDashboard` / `visibleEnResultados` dentro del maestro) pasa a una tabla de visibilidad por
+negocio, para que ocultar un rubro en el Bar no lo oculte en Canchas.
 
 | gestion | Lazarillo | Ten. | Único |
 |---|---|---|---|
-| `rubros_concepto_caja` | `gestion_rubros_concepto_caja` | N | (business_id, codigo) |
+| `rubros_concepto_caja` | `gestion_rubros_concepto_caja` | G | (organization_id, codigo) |
+| ↳ columnas de visibilidad | `gestion_rubros_visibilidad` | N | (business_id, codigo) |
 | `sin_rubro_config` (fila única id=1) | `gestion_sin_rubro_config` | N | (business_id) |
-| `conceptos_caja` | `gestion_conceptos_caja` | N | (business_id, codigo) |
-| `rubros_articulo` | `gestion_rubros_articulo` | N | (business_id, codigo) |
-| `subrubros_articulo` | `gestion_subrubros_articulo` | N | (business_id, codigo) |
-| `articulos` (PK codigo) | `gestion_articulos` | N | PK (business_id, codigo) |
-| `proveedores` | `gestion_proveedores` | N | (business_id, codigo) |
+| `conceptos_caja` | `gestion_conceptos_caja` | G | (organization_id, codigo) |
+| `rubros_articulo` | `gestion_rubros_articulo` | G | (organization_id, codigo) |
+| `subrubros_articulo` | `gestion_subrubros_articulo` | G | (organization_id, codigo) |
+| `articulos` (PK codigo) | `gestion_articulos` | G | PK (organization_id, codigo) |
+| `proveedores` | `gestion_proveedores` | G | (organization_id, codigo) |
 | `empleados` | `gestion_empleados` | N+S | (business_id, branch_id, codigo) |
+
+Un negocio sin organización (los que no se subdividieron) usa su propia lista: el job de ingesta la carga
+con la organización que le corresponda, o se le crea una al activarle el Panel (a definir en la fase de ingesta).
 
 ### Movimientos (ingesta diaria + históricos)
 
@@ -133,8 +142,19 @@ Mapeo de PDV:
 - Script re-ejecutable, dry-run por defecto, con comparación de cantidades y sumas de importes por tabla,
   negocio y mes contra Supabase. Se corre hasta el corte final.
 
+## Datos revisados (2026-11-02, instancia Ramos)
+
+- `compras`, `pagos`, `ventas`: todas tienen PDV → negocio/sucursal directo, nada ambiguo.
+- `detalle_compras`: 89.074 filas solo con `localId = 1` (Ramos Mejía). Se resuelven por `compraId`
+  (enlace a su compra); el script lista las que no tengan enlace.
+- `proyecciones_ingresos`: 17 de 64 son combinadas (`*/*` = toda la instancia, `1/*` = Bar + Canchas).
+  No existe una vista que mezcle negocios → no se migran (son fotos que se recalculan). Las 47 por PDV sí.
+
 ## Pendientes
 
-1. Confirmar que maestros por negocio (copia para 147 y 204) es lo que se quiere, en lugar de compartidos por organización.
-2. Contar filas con `localId` sin `puntoDeVentaId` en Ramos (define cuánto hay que resolver a mano).
-3. Organizaciones de 147/204 y 210 en `organizations` (para las tablas G).
+1. Organizaciones de 147/204 y 210 en `organizations` (para las tablas G).
+2. Subnegocios por agrupación de artículos (ej. "agua cancha" movida a un subnegocio): las ventas de
+   gestion (i22) son por comprobante/forma de cobro, sin artículo, así que no se pueden repartir así.
+   Ramos/Canchas no tiene el problema (Canchas es su propio pdv en Maxi). Para clientes futuros con
+   subnegocios dentro del mismo pdv, el Panel tendría que tomar ventas por artículo (i12). Definir antes
+   de sumar ese tipo de cliente.
