@@ -22,16 +22,18 @@ async function rebuildSalesDailyRange({ businessId, from, to, client = null }) {
 
   // 2) recalcular desde items prefiriendo CSV sobre Maxi
   // Nota: tx_count acá NO son tickets reales; es conteo de filas "day+article" en el set preferido.
+  // La preferencia es por sucursal: el mismo artículo vendido el mismo día en
+  // dos sucursales son dos ventas distintas y se suman las dos.
   const ins = await q(
     `
     WITH preferred AS (
-      SELECT DISTINCT ON (business_id, day, article_id)
+      SELECT DISTINCT ON (business_id, day, article_id, COALESCE(branch_id, 0))
         business_id, day, article_id, amount
       FROM sales_daily_items
       WHERE business_id = $1
         AND day BETWEEN $2::date AND $3::date
         AND source IN ('csv','maxi')
-      ORDER BY business_id, day, article_id,
+      ORDER BY business_id, day, article_id, COALESCE(branch_id, 0),
                CASE WHEN source='csv' THEN 0 ELSE 1 END
     )
     INSERT INTO sales_daily (business_id, day, total, tx_count)

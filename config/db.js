@@ -69,14 +69,18 @@ const origQuery = pool.query.bind(pool);
 
 pool.query = async (text, params) => {
   const start = process.hrtime.bigint();
+  // pg también acepta un objeto { text, values } (lo usa services/gestion/db.js)
+  const sqlText = text && typeof text === 'object' ? text.text : text;
+  const sqlParams = params ?? (text && typeof text === 'object' ? text.values : undefined);
   try {
     const res = await origQuery(text, params);
     const durMs = Number((process.hrtime.bigint() - start) / 1_000_000n);
     if (durMs >= SLOW_MS) {
       const preview =
-        Array.isArray(params) ? params.map((p) => (typeof p === 'string' && p.length > 200 ? p.slice(0, 200) + '…' : p)) : params;
+        Array.isArray(sqlParams) ? sqlParams.map((p) => (typeof p === 'string' && p.length > 200 ? p.slice(0, 200) + '…'
+          : Array.isArray(p) && p.length > 20 ? `[${p.length} valores]` : p)) : sqlParams;
       console.warn(`🐢 [db] slow query (${durMs}ms):`, {
-        text: String(text).slice(0, 300),
+        text: String(sqlText).slice(0, 300),
         params: preview,
       });
     }
@@ -85,7 +89,7 @@ pool.query = async (text, params) => {
     console.error('❌ [db] query error:', {
       code: err.code,
       message: err.message,
-      text: String(text).slice(0, 300),
+      text: String(sqlText).slice(0, 300),
     });
     throw err;
   }

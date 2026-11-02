@@ -15,7 +15,8 @@
     "cache:show": "node scripts/show_maxi_cache.js 7",
     "enrich:map": "node scripts/enrich_from_map.js 7",
     "cron": "node scripts/cron.js",
-    "cron:now": "node scripts/cron.js run-now"
+    "cron:now": "node scripts/cron.js run-now",
+    "test:gestion": "node --test \"services/gestion/**/*.test.js\""
   },
   "keywords": [],
   "author": "",
@@ -46,7 +47,8 @@
     "sequelize": "^6.37.7",
     "sequelize-cli": "^6.6.3",
     "twilio": "^6.1.1",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

@@ -2,6 +2,7 @@
 const cron = require('node-cron');
 const pool = require('../config/db');
 const { runDailyAuto, ensureInitialBackfillOnce } = require('./salesSyncPolicy');
+const { abrirCorrida, ejecutarCorrida } = require('./gestion/render/sync');
 
 let started = false;
 
@@ -70,6 +71,8 @@ async function ensureBackfillAll() {
  * - CRON_ENABLED=1 para habilitar
  * - CRON_TZ=America/Argentina/Buenos_Aires
  * - CRON_SALES_SCHEDULE (CRON): ej "15 4 * * *" → 04:15 todos los días
+ * - CRON_GESTION_SCHEDULE (CRON): ingesta de gestion desde el kit, default "40 9 * * *"
+ *   (09:40, después de la carga diaria del kit; misma hora que tenía gestion en Vercel)
  */
 function startCron() {
   if (started) return;
@@ -84,7 +87,25 @@ function startCron() {
   const tz = process.env.CRON_TZ || 'America/Argentina/Buenos_Aires';
   const salesExpr = process.env.CRON_SALES_SCHEDULE || '15 4 * * *'; // 04:15 AM
 
-  console.log(`[cron] habilitado. TZ=${tz} sales=${salesExpr}`);
+  const gestionExpr = process.env.CRON_GESTION_SCHEDULE || '40 9 * * *'; // 09:40 AM
+
+  console.log(`[cron] habilitado. TZ=${tz} sales=${salesExpr} gestion=${gestionExpr}`);
+
+  // Ingesta de gestion (port de lazarillo_gestion). El candado de la corrida evita
+  // duplicarla si además la dispara POST /api/cron/gestion-ingesta.
+  cron.schedule(gestionExpr, async () => {
+    console.log('[cron] ⏰ Ejecutando ingesta de gestion…');
+    try {
+      const id = await abrirCorrida('cron');
+      if (id == null) {
+        console.log('[cron] ingesta de gestion ya en curso, se saltea');
+        return;
+      }
+      await ejecutarCorrida(id, 'cron');
+    } catch (e) {
+      console.error('[cron] ❌ error en ingesta de gestion:', e.message);
+    }
+  }, { timezone: tz });
 
   // Ventas diarias
   cron.schedule(salesExpr, async () => {

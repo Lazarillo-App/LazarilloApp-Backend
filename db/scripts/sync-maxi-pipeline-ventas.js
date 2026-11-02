@@ -21,12 +21,14 @@ async function main() {
   const resultado = await syncVentasDeNegocio(businessId, { dryRun: !aplicar });
   console.log(JSON.stringify(resultado, null, 2));
 
-  if (!aplicar && resultado.ok && resultado.lineas > 0) {
+  if (!aplicar && resultado.ok && resultado.porPdv.some((p) => p.lineas > 0)) {
     console.log('\n(DRY-RUN — nada se escribió. Agregá --aplicar para escribir de verdad.)');
-    if (resultado.csvAfectadas > 0) {
-      console.log(`Atención: esto va a BORRAR ${resultado.csvAfectadas} filas 'csv' existentes ` +
-        `(suman $${resultado.csvMontoAfectado.toFixed(2)}) en los días ${resultado.rango.desde} a ${resultado.rango.hasta}, ` +
-        `y reemplazarlas por los datos de 'maxi'.`);
+    for (const p of resultado.porPdv) {
+      if (p.csvAfectadas > 0) {
+        console.log(`Atención [${p.pdv}, branch_id=${p.branchId ?? 'principal'}]: esto va a BORRAR ${p.csvAfectadas} filas 'csv' ` +
+          `(suman $${p.csvMontoAfectado.toFixed(2)}) en los días ${p.rango.desde} a ${p.rango.hasta}, ` +
+          `y reemplazarlas por los datos de 'maxi'.`);
+      }
     }
   }
 
