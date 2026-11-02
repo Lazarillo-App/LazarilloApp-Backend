@@ -89,6 +89,8 @@ router.post('/dashboard/canasta/aumentos', responder((req) =>
   api.anotarAumento({ ...ambito(req), body: req.body })));
 router.delete('/dashboard/canasta/aumentos', responder((req) =>
   api.borrarAumento({ ...ambito(req), body: req.body })));
+router.get('/m/anual', responder((req) =>
+  api.obtenerAnual({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
 router.get('/dashboard/actualizado', responder((req) => api.obtenerActualizado(ambito(req))));
 router.get('/dashboard/rango-anios', responder((req) => api.obtenerRangoAnios(ambito(req))));
 

@@ -523,8 +523,36 @@ async function obtenerRangoAnios({ businessId, sucursal }) {
   return resolveAnioRange(row?.minYear ?? null, row?.maxYear ?? null, new Date().getFullYear());
 }
 
+// ---------------------------------------------------------------- año mes a mes (/m/anual)
+// Port de app/api/m/anual: el año mes a mes (ventas y gastos por rubro de cada mes), con los
+// filtros de la fila Egresos (Económica, rubros visibles). Lo usan las tarjetas KPI y la
+// proyección de egresos.
+async function obtenerAnual({ organizationId, businessId, anio, sucursal }) {
+  if (!anio) throw new ErrorDatos("Datos inválidos");
+  const condV = sql.join(buildPivotConditions({ year: anio, tableAlias: "v", hasFechaManual: false, businessId, sucursal }), " AND ");
+  const condC = sql.join(buildPivotConditions({ year: anio, tableAlias: "c", businessId, sucursal, filterRubrosOcultos: true }), " AND ");
+  const [ventas, rubros] = await Promise.all([
+    db.many(sql`
+      SELECT EXTRACT(MONTH FROM v.fecha)::int AS mes, SUM(COALESCE(v."importeManual", v.importe))::float8 AS total
+      FROM gestion_ventas v WHERE ${condV} GROUP BY 1`),
+    db.many(sql`
+      SELECT EXTRACT(MONTH FROM COALESCE(c."fechaManual", c.fecha))::int AS mes,
+             COALESCE(rc.nombre, 'Sin Rubro') AS rubro, SUM(COALESCE(c."importeManual", c.importe))::float8 AS total
+      FROM ${fuenteCompras(undefined)} c
+      ${joinsConcepto({ organizationId, businessId })}
+      WHERE ${condC}
+      GROUP BY 1, 2`),
+  ]);
+  const meses = Array.from({ length: 12 }, (_, i) => {
+    const lista = rubros.filter((r) => r.mes === i + 1).map((r) => ({ rubro: r.rubro.trim(), total: Number(r.total) })).filter((r) => Math.abs(r.total) > 0.5);
+    return { mes: i + 1, ventas: Number(ventas.find((v) => v.mes === i + 1)?.total ?? 0), gastos: lista.reduce((s, r) => s + r.total, 0), rubros: lista };
+  });
+  return { anio, meses };
+}
+
 module.exports = {
   ErrorDatos,
+  obtenerAnual,
   obtenerProyeccion,
   obtenerEquilibrio,
   obtenerEquilibrioVariables,
