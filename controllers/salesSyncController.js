@@ -314,7 +314,12 @@ exports.listDailyItems = async (req, res, next) => {
       limit = 500000,
       offset = 0,
       source = null,
+      por = null,
     } = req.query;
+    // por=mes: agrupa por mes × artículo (el gráfico mensual del KPI de food
+    // cost bajaba ~48 mil filas día × artículo para después sumarlas por mes).
+    const porMes = String(por || '').toLowerCase() === 'mes';
+    const diaExpr = porMes ? `date_trunc('month', sdi.day)::date` : `sdi.day::date`;
 
     if (!from || !to) {
       return res.status(400).json({
@@ -365,7 +370,7 @@ exports.listDailyItems = async (req, res, next) => {
     const sql = `
       WITH agg AS (
         SELECT
-          sdi.day::date AS day,
+          ${diaExpr} AS day,
           sdi.article_id,
           SUM(sdi.qty)::numeric    AS qty,
           SUM(sdi.amount)::numeric AS amount
@@ -375,7 +380,7 @@ exports.listDailyItems = async (req, res, next) => {
           ${whereClause}
           ${sourceFilter}
           ${groupFilter}
-        GROUP BY sdi.day::date, sdi.article_id
+        GROUP BY ${diaExpr}, sdi.article_id
       )
       SELECT
         agg.day,
