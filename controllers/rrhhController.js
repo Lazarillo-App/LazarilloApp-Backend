@@ -35,6 +35,9 @@ function titulo(s) {
 }
 
 const asInt = (v) => {
+  // null/undefined/'' son "sin valor", nunca 0: Number(null) da 0 y eso
+  // metía owner_empleado_id=0 en filas sin dueño, rompiendo la FK.
+  if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : null;
 };
@@ -649,7 +652,7 @@ async function putSemana(req, res) {
         const f = await client.query(
           `INSERT INTO rrhh_filas (semana_id, turno_id, orden, owner_empleado_id)
            VALUES ($1,$2,$3,$4) RETURNING id`,
-          [semanaId, turnoId, i, asInt(fila.ownerEmpleadoId)]
+          [semanaId, turnoId, i, asInt(fila.ownerEmpleadoId) || null]
         );
         const filaId = f.rows[0].id;
         for (const c of (Array.isArray(fila.celdas) ? fila.celdas : [])) {
