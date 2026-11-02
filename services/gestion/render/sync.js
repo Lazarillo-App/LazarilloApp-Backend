@@ -202,6 +202,16 @@ async function sincronizarItem(item, opts) {
     driveFileId: claveLog(item.id),
     driveHuella: huella,
   };
+  // Estadísticas al día antes de compras/detalle: esos normalizadores terminan enlazando
+  // detalle→compra con un UPDATE … FROM. Tras una carga grande (la primera de un negocio)
+  // sin ANALYZE Postgres lo planifica como si las tablas estuvieran vacías y pasa el
+  // statement_timeout (1ª corrida en prod, detalle de Comercio, 02/11/2026).
+  if (item.fileType === "compras" || item.fileType === "detalleCompras") {
+    for (const t of ["gestion_compras", "gestion_detalle_compras"]) {
+      await db.execute(sql`ANALYZE ${sql.raw(t)}`).catch((e) => console.error("[render] analyze", t, e));
+    }
+  }
+
   let report;
   try {
     const { filas, tipos } = await leerTabla(item.esquema, item.tabla, item.pdv, item.fileType === "ventas");
