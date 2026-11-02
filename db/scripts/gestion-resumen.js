@@ -32,7 +32,7 @@ async function main() {
     SELECT ${pdv} AS pdv, count(*)::int AS lineas,
            count(*) FILTER (WHERE "compraId" IS NOT NULL)::int AS enlazadas,
            round(100.0 * count(*) FILTER (WHERE "compraId" IS NOT NULL) / NULLIF(count(*), 0), 1)::text AS pct
-      FROM gestion_detalle_compras GROUP BY 1 ORDER BY 1`);
+      FROM gestion_detalle_compras WHERE $1::date IS NOT NULL GROUP BY 1 ORDER BY 1`);
   await pool.end();
 }
 
