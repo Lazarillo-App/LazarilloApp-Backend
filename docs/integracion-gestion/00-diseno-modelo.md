@@ -26,8 +26,13 @@
 | Lectura nocturna de Render vía Vercel cron | Job del Backend, misma lógica |
 | Vista de "Local" (Ramos Mejía = Bar + Canchas) | No existe; filtros = negocio y sucursal |
 
-Nombres: snake_case con prefijo `gestion_` (no chocan con `purchases`, `suppliers`, `sales_*`). Las columnas
-conservan su significado; se pasan de camelCase a snake_case como el resto de la base.
+Nombres: tablas con prefijo `gestion_` (no chocan con `purchases`, `suppliers`, `sales_*`). Las columnas
+propias de gestion **conservan su nombre exacto** (camelCase entre comillas: `"rowId"`, `"importeManual"`):
+así sus ~160 consultas SQL se trasladan casi sin cambios, que es donde está el riesgo de la traducción.
+Solo las columnas de tenencia nuevas (`organization_id`, `business_id`, `branch_id`) usan snake_case.
+
+DDL: `db/migrations/gestion/001_estructura.sql` (sale de la estructura real de la base de gestion, no de
+sus migraciones). Se aplica con `db/scripts/crear-tablas-gestion.js` (dry-run = crea todo y hace ROLLBACK).
 
 ## Tabla por tabla
 
@@ -112,10 +117,12 @@ Un usuario ve una de estas filas si tiene acceso a alguno de los negocios involu
 ### Lo que no pasa
 
 - `locales`, `puntos_de_venta` → reemplazados por `app_businesses` / `app_branches`.
-- `render_origenes` → se reemplaza por el mapa pdv → negocio/sucursal que ya usan los pipelines (`services/maxiPdvMap.js`).
-- `render_corridas`, `import_logs` → mecánica del import; el job del Backend registra sus corridas en su propia tabla.
-- `actividad` → nuestro historial de actividad existente.
 - `_prisma_migrations`, `_respaldo_*` → no son datos.
+
+Se conservan (cambio respecto del primer borrador) porque el código de gestion depende de ellas:
+`gestion_actividad` (su historial tiene "restaurar", que nuestro historial no tiene),
+`gestion_import_logs`, `gestion_render_corridas`, y `gestion_render_origenes`, que pasa a ser la versión
+en tabla de `services/maxiPdvMap.js`: un cliente nuevo se suma cargando filas, sin tocar código.
 
 ## RLS (segunda capa)
 
