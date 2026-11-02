@@ -56,6 +56,7 @@ const accessRoutes         = require('./routes/accessRoutes');
 const requireActiveAccount = require('./middleware/requireActiveAccount');
 const syncRoutes = require('./routes/syncRoutes');
 const dashboardStoreRoutes = require('./routes/dashboardStore');
+const rrhhRoutes = require('./routes/rrhhRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
 const sectoresRoutes = require('./routes/sectoresRoutes');
 const sectoresByIdRoutes = require('./routes/sectoresByIdRoutes');
@@ -210,6 +211,7 @@ app.use('/api/businesses', metodosCoccionRoutes);
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
 app.use('/api/businesses/:businessId/sync', syncRoutes);
 app.use('/api/businesses/:businessId/dashboard-store', dashboardStoreRoutes);
+app.use('/api/businesses/:businessId/rrhh', rrhhRoutes);
 
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
