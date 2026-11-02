@@ -127,6 +127,11 @@ function parseVentasParams(sp) {
   });
 }
 
+// Solo la sucursal (endpoints de Resultados / tarjetas que no usan el resto de los filtros).
+function parseSucursal(sp) {
+  return sucursalParam.parse(sp.get("sucursal"));
+}
+
 function buildDashboardUrl(base, params) {
   const sp = new URLSearchParams({ year: String(params.year) });
   if (params.localId != null) sp.set("localId", String(params.localId));
@@ -208,4 +213,4 @@ function buildVentasDetalleUrl(filter) {
   return `/api/dashboard/detalle-ventas?${params}`;
 }
 
-module.exports = { monthsParam, parseObservacionQuery, parseImporteQuery, parseDashboardParams, parseVentasParams, buildDashboardUrl, buildVentasPivotUrl, buildComprasDetalleUrl, buildFlujoCajaUrl, buildDiferenciaCajaUrl, buildRangoAniosUrl, buildVentasDetalleUrl };
+module.exports = { monthsParam, parseSucursal, parseObservacionQuery, parseImporteQuery, parseDashboardParams, parseVentasParams, buildDashboardUrl, buildVentasPivotUrl, buildComprasDetalleUrl, buildFlujoCajaUrl, buildDiferenciaCajaUrl, buildRangoAniosUrl, buildVentasDetalleUrl };

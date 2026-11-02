@@ -7,9 +7,10 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 const { requireBusinessRole } = require('../middleware/authMiddleware');
-const { parseDashboardParams, parseVentasParams } = require('../services/gestion/dashboard/params');
+const { parseDashboardParams, parseVentasParams, parseSucursal } = require('../services/gestion/dashboard/params');
 const { obtenerPivot } = require('../services/gestion/dashboard/pivot');
 const { obtenerPivotVentas } = require('../services/gestion/dashboard/pivot-ventas');
+const api = require('../services/gestion/dashboard/resultados-api');
 
 router.use(requireBusinessRole('admin'));
 
@@ -51,5 +52,44 @@ router.get('/dashboard/pivot-ventas', async (req, res, next) => {
     next(e);
   }
 });
+
+// ── Resultados, tarjetas KPI y bloque Operación (paso 3) ──────────────────────
+// Enteros positivos del query string (en gestion: n(k)); undefined si falta o es inválido.
+const entero = (sp, k) => { const v = Number(sp.get(k)); return Number.isInteger(v) && v > 0 ? v : undefined; };
+// ?sucursal y lo del negocio, para los endpoints que solo filtran por sucursal.
+const ambito = (req) => ({ ...req.gestion, sucursal: parseSucursal(paramsDe(req)) });
+
+// Envuelve un handler: los datos inválidos responden 400 con su mensaje (como en gestion).
+const responder = (fn) => async (req, res, next) => {
+  try {
+    res.json(await fn(req));
+  } catch (e) {
+    if (e instanceof api.ErrorDatos) return res.status(400).json({ error: e.message });
+    next(e);
+  }
+};
+
+router.get('/dashboard/proyeccion', responder((req) =>
+  api.obtenerProyeccion({ businessId: req.gestion.businessId, params: parseVentasParams(paramsDe(req)) })));
+router.get('/dashboard/equilibrio', responder((req) =>
+  api.obtenerEquilibrio({ ...ambito(req), year: entero(paramsDe(req), 'year') })));
+router.get('/dashboard/equilibrio/variables', responder((req) =>
+  api.obtenerEquilibrioVariables({ ...ambito(req), anio: entero(paramsDe(req), 'anio'), mes: entero(paramsDe(req), 'mes') })));
+router.put('/dashboard/equilibrio/variables', responder((req) =>
+  api.guardarEquilibrioVariables({ ...req.gestion, body: req.body })));
+router.get('/dashboard/flujo-caja', responder((req) =>
+  api.obtenerFlujoCaja({ ...ambito(req), anio: Number.parseInt(paramsDe(req).get('anio'), 10) })));
+router.put('/dashboard/flujo-caja', responder((req) =>
+  api.guardarFlujoCaja({ ...ambito(req), body: req.body })));
+router.get('/dashboard/diferencia-caja', responder((req) =>
+  api.obtenerDiferenciaCaja({ ...ambito(req), year: Number.parseInt(paramsDe(req).get('year'), 10) })));
+router.get('/dashboard/canasta', responder((req) =>
+  api.obtenerCanasta({ ...ambito(req), anio: entero(paramsDe(req), 'anio'), mes: entero(paramsDe(req), 'mes') })));
+router.post('/dashboard/canasta/aumentos', responder((req) =>
+  api.anotarAumento({ ...ambito(req), body: req.body })));
+router.delete('/dashboard/canasta/aumentos', responder((req) =>
+  api.borrarAumento({ ...ambito(req), body: req.body })));
+router.get('/dashboard/actualizado', responder((req) => api.obtenerActualizado(ambito(req))));
+router.get('/dashboard/rango-anios', responder((req) => api.obtenerRangoAnios(ambito(req))));
 
 module.exports = router;
