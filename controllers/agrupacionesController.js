@@ -222,9 +222,14 @@ exports.obtenerAgrupaciones = async (req, res) => {
     // El frontend lo usa para calcular Sin Agrupación global correctamente.
     // "Real" = no es Sin Agrupación ni Discontinuados (esos son el contenedor del resto).
     let orgAssignedIds = null;
+    // orgGroups: agrupaciones reales de los OTROS negocios de la org (id, nombre,
+    // negocio e IDs). Lo usa "Mover a su rubro" en Sin Agrupación para encontrar
+    // el destino aunque el rubro viva en otro subnegocio.
+    let orgGroups = null;
     if (organizationId) {
       const { rows: orgAgRows } = await pool.query(
-        `SELECT ag.articulos, ag.app_articles_ids
+        `SELECT ag.id, ag.nombre, ag.business_id, b.name AS business_name,
+                ag.articulos, ag.app_articles_ids
            FROM agrupaciones ag
            JOIN app_businesses b ON b.id = ag.business_id
           WHERE b.organization_id = $1
@@ -236,7 +241,9 @@ exports.obtenerAgrupaciones = async (req, res) => {
         [organizationId]
       );
       orgAssignedIds = [];
+      orgGroups = [];
       for (const ag of orgAgRows) {
+        const idsGrupo = [];
         const arts = Array.isArray(ag.articulos) ? ag.articulos
           : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
         const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
@@ -244,9 +251,15 @@ exports.obtenerAgrupaciones = async (req, res) => {
         for (const a of arts) {
           const id = Number(a?.id ?? a?.articulo_id ?? a);
           // id !== 0 — acepta negativos (artículos manuales)
-          if (Number.isFinite(id) && id !== 0) orgAssignedIds.push(id);
+          if (Number.isFinite(id) && id !== 0) { orgAssignedIds.push(id); idsGrupo.push(id); }
         }
-        for (const id of appIds) { const n = Number(id); if (Number.isFinite(n) && n !== 0) orgAssignedIds.push(n); }
+        for (const id of appIds) { const n = Number(id); if (Number.isFinite(n) && n !== 0) { orgAssignedIds.push(n); idsGrupo.push(n); } }
+        if (Number(ag.business_id) !== Number(businessId) && idsGrupo.length) {
+          orgGroups.push({
+            id: ag.id, nombre: ag.nombre, business_id: ag.business_id,
+            business_name: ag.business_name, ids: [...new Set(idsGrupo)],
+          });
+        }
       }
       orgAssignedIds = [...new Set(orgAssignedIds)];
     }
@@ -272,9 +285,9 @@ exports.obtenerAgrupaciones = async (req, res) => {
         const apps = (Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids : []).filter((x) => visibles.has(Number(x)));
         if (arts.length || apps.length) filtradas.push({ ...ag, articulos: arts, app_articles_ids: apps });
       }
-      return res.json({ ok: true, agrupaciones: filtradas, orgAssignedIds });
+      return res.json({ ok: true, agrupaciones: filtradas, orgAssignedIds, orgGroups: null });
     }
-    return res.json({ ok: true, agrupaciones, orgAssignedIds });
+    return res.json({ ok: true, agrupaciones, orgAssignedIds, orgGroups });
   } catch (e) {
     console.error('obtenerAgrupaciones error', e);
     return res.status(500).json({ ok: false, error: 'Error obteniendo agrupaciones', detail: e.message });
