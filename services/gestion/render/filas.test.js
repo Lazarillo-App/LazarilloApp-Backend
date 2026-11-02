@@ -36,7 +36,10 @@ describe("informeDeTabla", () => {
     expect(informeDeTabla("i22_ventas_detalladas_2025")).toMatchObject({ informe: { fileType: "ventas", requiereOrden: true } });
     expect(informeDeTabla("i12_ventas_por_articulo_ranking_detallado_por_dia_2026")).toBeNull();
     expect(informeDeTabla("m17_conceptos_de_caja")).toMatchObject({ anio: null, informe: { fileType: "conceptosCaja", maestro: true } });
-    expect(informeDeTabla("m6_listado_de_articulos")).toBeNull();
+    // En Lazarillo los maestros de artículos y proveedores salen del kit (gestion los traía de Drive).
+    expect(informeDeTabla("m6_listado_de_articulos")).toMatchObject({ anio: null, informe: { fileType: "articulos", maestro: true } });
+    expect(informeDeTabla("m00_listado_de_proovedores")).toMatchObject({ anio: null, informe: { fileType: "proveedores", maestro: true } });
+    expect(informeDeTabla("m0_listado_de_insumos_con_discontinuados")).toBeNull();
   });
 });
 

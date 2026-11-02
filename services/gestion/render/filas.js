@@ -107,7 +107,12 @@ function filaDeRender(fila, tipos) {
 // orden. Desde el 26/10/2026 el kit sube la columna `fila`; cada PDV se lee recién
 // cuando TODAS sus filas la tienen (ver leerCargas).
 // `maestro`: tabla de la organización (sin columna pdv, ej. m17); se lee entera.
+// En Lazarillo se suman los maestros de proveedores (m00) y artículos (m6): gestion
+// los cargaba desde los Excel de Drive y la lectura de Render los exigía ya cargados;
+// el kit los sube igual que el m17, así que salen de acá (mismas columnas que el Excel).
 const INFORMES_RENDER = [
+  { prefijo: "m00_listado_de_proovedores", fileType: "proveedores", nombre: "Proveedores (maestro 00)", maestro: true },
+  { prefijo: "m6_listado_de_articulos", fileType: "articulos", nombre: "Artículos (maestro 6)", maestro: true },
   { prefijo: "m17_conceptos_de_caja", fileType: "conceptosCaja", nombre: "Conceptos de caja (maestro 17)", maestro: true },
   { prefijo: "i14_gastos_compras_detallado", fileType: "compras", nombre: "14 · gastos y compras" },
   { prefijo: "i25_compras_detalle_de_compras", fileType: "detalleCompras", nombre: "25 · detalle de compras" },
