@@ -117,6 +117,22 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
       const isInsert   = upsertRes.rows[0].is_insert;
       if (isInsert) inserted++; else updated++;
 
+      // Anti-duplicado: MaxiRest manda. Si esa compra ya se había cargado a
+      // mano por CSV (mismo proveedor y fecha), se quita la del CSV para que
+      // no quede sumada dos veces (Comercio, 31/10/2026). Los ítems se borran
+      // en cascada.
+      if (fecha) {
+        await client.query(
+          `DELETE FROM purchases
+            WHERE business_id = $1
+              AND source = 'csv'
+              AND proveedor_id IS NOT DISTINCT FROM $2
+              AND fecha::date = $3::date
+              AND COALESCE(branch_id, -1) = COALESCE($4, -1)`,
+          [businessId, proveedorId, fecha, branchId ?? null]
+        );
+      }
+
       await client.query('DELETE FROM purchase_items WHERE purchase_id = $1', [purchaseId]);
 
       for (const it of items) {
