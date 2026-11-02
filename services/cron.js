@@ -71,8 +71,6 @@ async function ensureBackfillAll() {
  * - CRON_ENABLED=1 para habilitar
  * - CRON_TZ=America/Argentina/Buenos_Aires
  * - CRON_SALES_SCHEDULE (CRON): ej "15 4 * * *" → 04:15 todos los días
- * - CRON_GESTION_SCHEDULE (CRON): ingesta de gestion desde el kit, default "40 9 * * *"
- *   (09:40, después de la carga diaria del kit; misma hora que tenía gestion en Vercel)
  */
 function startCron() {
   if (started) return;
@@ -87,25 +85,7 @@ function startCron() {
   const tz = process.env.CRON_TZ || 'America/Argentina/Buenos_Aires';
   const salesExpr = process.env.CRON_SALES_SCHEDULE || '15 4 * * *'; // 04:15 AM
 
-  const gestionExpr = process.env.CRON_GESTION_SCHEDULE || '40 9 * * *'; // 09:40 AM
-
-  console.log(`[cron] habilitado. TZ=${tz} sales=${salesExpr} gestion=${gestionExpr}`);
-
-  // Ingesta de gestion (port de lazarillo_gestion). El candado de la corrida evita
-  // duplicarla si además la dispara POST /api/cron/gestion-ingesta.
-  cron.schedule(gestionExpr, async () => {
-    console.log('[cron] ⏰ Ejecutando ingesta de gestion…');
-    try {
-      const id = await abrirCorrida('cron');
-      if (id == null) {
-        console.log('[cron] ingesta de gestion ya en curso, se saltea');
-        return;
-      }
-      await ejecutarCorrida(id, 'cron');
-    } catch (e) {
-      console.error('[cron] ❌ error en ingesta de gestion:', e.message);
-    }
-  }, { timezone: tz });
+  console.log(`[cron] habilitado. TZ=${tz} sales=${salesExpr}`);
 
   // Ventas diarias
   cron.schedule(salesExpr, async () => {
@@ -130,4 +110,55 @@ function startCron() {
   }
 }
 
-module.exports = { startCron, syncAllBusinessesDaily, ensureBackfillAll };
+/**
+ * Ingesta de gestion desde el kit (port de lazarillo_gestion), cada hora.
+ *
+ * No depende de CRON_ENABLED: en prod está en 0 (los crons de ventas/insumos los
+ * dispara el Cron Job de Render por HTTP) y el back de pruebas usa la MISMA base,
+ * así que tiene que correr en un solo servicio. Por defecto corre solo en el back
+ * de producción (RENDER_SERVICE_NAME lo pone Render en cada servicio).
+ * - GESTION_CRON=1 / 0 → fuerza encenderla / apagarla en cualquier servicio
+ * - GESTION_CRON_SERVICE → nombre del servicio donde corre (default LazarilloApp-Backend)
+ * - CRON_GESTION_SCHEDULE (CRON) → default "5 * * * *": minuto 5 de cada hora, para no
+ *   coincidir con el Cron Job de insumos (minuto 0). Sin novedades en el kit tarda segundos.
+ * El candado de gestion_render_corridas evita duplicarla si además se dispara
+ * POST /api/cron/gestion-ingesta.
+ */
+let gestionStarted = false;
+
+function gestionCronHabilitado() {
+  const forzado = process.env.GESTION_CRON;
+  if (forzado === '1' || forzado === '0') return forzado === '1';
+  const servicio = process.env.GESTION_CRON_SERVICE || 'LazarilloApp-Backend';
+  return process.env.RENDER_SERVICE_NAME === servicio;
+}
+
+function startGestionCron() {
+  if (gestionStarted) return;
+  gestionStarted = true;
+
+  if (!gestionCronHabilitado()) {
+    console.log(`[cron] ingesta de gestion deshabilitada en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
+    return;
+  }
+
+  const tz = process.env.CRON_TZ || 'America/Argentina/Buenos_Aires';
+  const expr = process.env.CRON_GESTION_SCHEDULE || '5 * * * *';
+  console.log(`[cron] ingesta de gestion habilitada. TZ=${tz} schedule=${expr}`);
+
+  cron.schedule(expr, async () => {
+    console.log('[cron] ⏰ Ejecutando ingesta de gestion…');
+    try {
+      const id = await abrirCorrida('cron');
+      if (id == null) {
+        console.log('[cron] ingesta de gestion ya en curso, se saltea');
+        return;
+      }
+      await ejecutarCorrida(id, 'cron');
+    } catch (e) {
+      console.error('[cron] ❌ error en ingesta de gestion:', e.message);
+    }
+  }, { timezone: tz });
+}
+
+module.exports = { startCron, startGestionCron, syncAllBusinessesDaily, ensureBackfillAll };

@@ -8,7 +8,7 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
-const { startCron } = require('./services/cron');
+const { startCron, startGestionCron } = require('./services/cron');
 const { runMigrations } = require('./db/migrations');
 
 // Auth middlewares
@@ -260,6 +260,8 @@ app.use((err, req, res, _next) => {
 if (process.env.CRON_ENABLED === '1') {
   startCron();
 }
+// Ingesta de gestion: decide sola si corre en este servicio (ver services/cron.js).
+startGestionCron();
 
 console.log('📂 Usando base de datos PG:', process.env.PGDATABASE);
 
