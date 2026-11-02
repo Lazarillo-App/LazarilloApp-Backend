@@ -28,6 +28,9 @@ const { runDailyAuto, ensureInitialBackfillOnce } = require('../services/salesSy
 // Ingesta directa desde staging (agente Python → mxitc, ver plan de ingesta Maxi)
 const { syncPurchasesFromStaging } = require('../services/purchasesStagingSync');
 
+// Ingesta de gestion desde el kit (services/gestion)
+const { abrirCorrida, ejecutarCorrida, ultimaCorrida } = require('../services/gestion/render/sync');
+
 /* ==================== MIDDLEWARE DE AUTENTICACIÓN ==================== */
 
 function verifyCronSecret(req, res, next) {
@@ -293,6 +296,40 @@ router.post('/sync-purchases-staging', async (req, res) => {
   }
 });
 
+/* ==================== ENDPOINTS: GESTION (port de lazarillo_gestion) ==================== */
+
+/**
+ * POST /api/cron/gestion-ingesta
+ * Lee del kit (container/comercio) lo que cambió y actualiza las tablas gestion_*.
+ * Responde enseguida (la corrida tarda minutos) y sigue en segundo plano; el candado
+ * de gestion_render_corridas evita dos corridas a la vez. ?forzar=1 relee todo.
+ */
+router.post('/gestion-ingesta', async (req, res) => {
+  console.log('🤖 [cron] Ejecutando: gestion-ingesta');
+  try {
+    const id = await abrirCorrida('cron');
+    if (id == null) return res.json({ ok: true, yaCorriendo: true });
+    const forzar = req.query.forzar === '1';
+    setImmediate(() => {
+      ejecutarCorrida(id, 'cron', { forzar })
+        .catch((err) => console.error('❌ [cron] Error en gestion-ingesta:', err));
+    });
+    return res.status(202).json({ ok: true, corridaId: id });
+  } catch (err) {
+    console.error('❌ [cron] Error en gestion-ingesta:', err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/** GET /api/cron/gestion-ingesta → estado de la última corrida */
+router.get('/gestion-ingesta', async (req, res) => {
+  try {
+    return res.json({ ok: true, corrida: await ultimaCorrida() });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 /* ==================== ENDPOINT DE SALUD ==================== */
 
 router.get('/health', (req, res) => {
@@ -306,7 +343,9 @@ router.get('/health', (req, res) => {
       'POST /api/cron/sync-sales-daily',
       'POST /api/cron/backfill-30d',
       'POST /api/cron/backfill-7d',
-      'POST /api/cron/sync-one/:businessId'
+      'POST /api/cron/sync-one/:businessId',
+      'POST /api/cron/gestion-ingesta',
+      'GET  /api/cron/gestion-ingesta'
     ]
   });
 });
