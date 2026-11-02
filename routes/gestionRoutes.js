@@ -11,6 +11,7 @@ const { parseDashboardParams, parseVentasParams, parseSucursal } = require('../s
 const { obtenerPivot } = require('../services/gestion/dashboard/pivot');
 const { obtenerPivotVentas } = require('../services/gestion/dashboard/pivot-ventas');
 const api = require('../services/gestion/dashboard/resultados-api');
+const busqueda = require('../services/gestion/dashboard/busqueda-api');
 
 router.use(requireBusinessRole('admin'));
 
@@ -64,7 +65,7 @@ const responder = (fn) => async (req, res, next) => {
   try {
     res.json(await fn(req));
   } catch (e) {
-    if (e instanceof api.ErrorDatos) return res.status(400).json({ error: e.message });
+    if (e instanceof api.ErrorDatos) return res.status(e.status || 400).json({ error: e.message });
     next(e);
   }
 };
@@ -93,5 +94,17 @@ router.get('/m/anual', responder((req) =>
   api.obtenerAnual({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
 router.get('/dashboard/actualizado', responder((req) => api.obtenerActualizado(ambito(req))));
 router.get('/dashboard/rango-anios', responder((req) => api.obtenerRangoAnios(ambito(req))));
+
+// ── Buscador (⌘K) y rubros visibles ────────────────────────────────────────────
+router.get('/search/suggestions', responder((req) =>
+  busqueda.obtenerSugerencias({ ...ambito(req), q: paramsDe(req).get('q') })));
+router.get('/search/observaciones', responder((req) =>
+  busqueda.obtenerObservaciones({ ...req.gestion, q: paramsDe(req).get('q') })));
+router.get('/search/importe', responder((req) =>
+  busqueda.obtenerImportes({ ...req.gestion, q: paramsDe(req).get('q') })));
+router.get('/config/rubros-dashboard', responder((req) =>
+  busqueda.obtenerRubrosVisibles({ ...req.gestion, field: paramsDe(req).get('field') })));
+router.patch('/config/rubros-dashboard', responder((req) =>
+  busqueda.guardarRubroVisible({ ...req.gestion, body: req.body })));
 
 module.exports = router;
