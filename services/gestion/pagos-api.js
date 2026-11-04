@@ -208,7 +208,7 @@ async function obtenerSinCarga({ organizationId, businessId, sucursal }) {
     db.many(sinCargaSql({ organizationId, businessId, sucursal, meses: objetivo })),
     db.many(sql`
       SELECT id, clave, nombre, "creadoEn" FROM gestion_sin_carga_descartes d
-      WHERE ${enLugar('d', businessId, sucursal)} ORDER BY "creadoEn" DESC`),
+      WHERE ${enLugar('d', businessId, sucursal)} AND clave ~ '^[pc]:' ORDER BY "creadoEn" DESC`),
   ]);
   const mesActual = objetivo[0].slice(0, 7);
   const vivas = filas.filter((f) => esperadoEnMesCerrado(f.rubro ?? '', f.mes, mesActual, f.meses_con_gasto, f.meses_con_datos)
@@ -248,7 +248,20 @@ const descarteSchema = z.object({
   nombre: z.string().max(200).optional().nullable(),
 });
 
-async function crearDescarte({ businessId, sucursal, usuario, body }) {
+// "a:" = de ARCA, no se carga; "k:" = revisado, está bien. Son de la empresa, no de un lugar.
+const descarteArcaSchema = z.object({ clave: z.string().regex(/^[ak]:\d{11}-\d{1,3}-\d{1,5}-\d{1,8}$/), nombre: z.string().max(200).optional().nullable() });
+
+async function crearDescarte({ organizationId, businessId, sucursal, usuario, body }) {
+  const deArca = descarteArcaSchema.safeParse(body);
+  if (deArca.success) {
+    const negocio = await db.one(sql`SELECT MIN(id) AS id FROM app_businesses WHERE organization_id = ${organizationId}`);
+    const d = await db.one(sql`
+      INSERT INTO gestion_sin_carga_descartes (business_id, branch_id, clave, nombre, "creadoPor")
+      VALUES (${negocio.id}::bigint, NULL, ${deArca.data.clave}, ${deArca.data.nombre ?? null}, ${usuario})
+      ON CONFLICT (business_id, branch_id, clave) DO UPDATE SET clave = EXCLUDED.clave
+      RETURNING id`);
+    return { ok: true, id: d.id };
+  }
   exigirSucursal(sucursal);
   const b = descarteSchema.safeParse(body);
   if (!b.success) throw rechazo('Datos inválidos');
@@ -260,9 +273,11 @@ async function crearDescarte({ businessId, sucursal, usuario, body }) {
   return { ok: true, id: d.id };
 }
 
-async function borrarDescarte({ businessId, id }) {
+async function borrarDescarte({ organizationId, businessId, id }) {
   if (!Number.isInteger(id) || id <= 0) throw rechazo('Datos inválidos');
-  await db.execute(sql`DELETE FROM gestion_sin_carga_descartes WHERE id = ${id} AND business_id = ${businessId}`);
+  await db.execute(sql`
+    DELETE FROM gestion_sin_carga_descartes WHERE id = ${id}
+      AND (business_id = ${businessId} OR (clave ~ '^[ak]:' AND business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})))`);
   return { ok: true };
 }
 

@@ -383,6 +383,35 @@ async function borrarFactura({ organizationId, businessId, usuario, rowId, conPa
   });
 }
 
+// Restaurar una factura eliminada: se vuelve a cargar tal cual estaba (lo guardado en la actividad).
+// Nunca duplica: si ese comprobante ya volvió a estar, no se restaura.
+async function restaurarFacturaEliminada({ organizationId, businessId, usuario, id }) {
+  if (!Number.isInteger(id) || id <= 0) throw rechazo('Datos inválidos');
+  const ctx = { organizationId, businessId };
+  return conReparto(ctx, async (tx, ids) => {
+    const act = await tx.one(sql`
+      SELECT tipo, accion, datos FROM gestion_actividad WHERE id = ${id} AND organization_id = ${organizationId} AND business_id = ${businessId} FOR UPDATE`);
+    if (!act || act.tipo !== 'factura' || act.accion !== 'eliminada' || !act.datos?.payload) throw rechazo('No hay nada para restaurar', 404);
+    if (act.datos.restauradaEn) throw rechazo('Ya se restauró', 409);
+    const p = await prepararFactura(tx, ctx, act.datos.payload);
+    const comprobante = p.armado.filas[0].comprobante;
+    await bloquearComprobante(tx, businessId, comprobante, p.proveedorCodigo);
+    if (await yaExiste(tx, businessId, comprobante, p.proveedorCodigo, p.f.fecha)) {
+      throw rechazo('Ese comprobante ya está cargado otra vez: no se restaura para no duplicarlo', 409);
+    }
+    await insertarArmado(tx, businessId, p);
+    await guardarCarga(tx, businessId, p, usuario);
+    await tx.execute(sql`UPDATE gestion_actividad SET datos = ${JSON.stringify({ ...act.datos, restauradaEn: new Date().toISOString() })}::jsonb WHERE id = ${id}`);
+    const lugar = p.lugares.find((l) => l.id === p.armado.filas[0].puntoDeVentaId)?.nombre ?? null;
+    await registrarActividad(tx, {
+      organizationId, businessId, tipo: 'factura', accion: 'restaurada', usuario, refId: p.armado.filas[0].rowId,
+      descripcion: descripcionFactura({ ...p, total: p.armado.total, lugar }),
+    });
+    ids.push(...p.armado.filas.map((x) => x.rowId));
+    return { ok: true, rowId: p.armado.filas[0].rowId, comprobante, total: p.armado.total };
+  });
+}
+
 // Detección de factura ya cargada en el modal.
 async function facturaExiste({ organizationId, businessId, sp }) {
   const proveedorId = Number(sp.get('proveedorId'));
@@ -789,7 +818,7 @@ async function borrarMedio({ businessId, id }) {
 }
 
 module.exports = {
-  idLugar, obtenerLugares, combinarPagos, registrarActividad,
+  idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada,
   crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor,
   crearGastoVario, obtenerVentasManuales, crearVentasManuales, borrarVentasManuales,
   obtenerConceptos, crearConcepto, editarConcepto, borrarConcepto,

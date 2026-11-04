@@ -17,6 +17,8 @@ const carga = require('../services/gestion/carga-api');
 const pagos = require('../services/gestion/pagos-api');
 const apertura = require('../services/gestion/apertura/api');
 const empleados = require('../services/gestion/empleados/api');
+const arca = require('../services/gestion/arca/api');
+const actividad = require('../services/gestion/actividad-api');
 const { db: gestionDb } = require('../services/gestion/db');
 
 router.use(requireBusinessRole('admin'));
@@ -154,6 +156,15 @@ router.get('/locales', responder(async (req) => {
 }));
 router.get('/cta-cte', responder((req) => pagos.obtenerCtaCte({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/cta-cte/proveedores', responder((req) => pagos.buscarProveedoresCtaCte({ ...req.gestion, sp: paramsDe(req) })));
+
+// ── ARCA, actividad y notas ──
+router.post('/arca/importar', responder((req) => arca.importarArca({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.get('/arca/cruce', responder((req) => arca.cruceArca(req.gestion)));
+router.post('/arca/corregir', responder((req) => arca.corregirArca({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.get('/actividad', responder((req) => actividad.listarActividad({ ...req.gestion, usuario: usuarioDe(req), sp: paramsDe(req) })));
+router.post('/actividad/:id/restaurar', responder((req) => actividad.restaurarFacturaEliminada({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
+router.get('/notas', responder((req) => actividad.leerNota({ ...req.gestion, userId: req.user?.id })));
+router.put('/notas', responder((req) => actividad.guardarNota({ ...req.gestion, userId: req.user?.id, body: req.body })));
 
 // ── Empleados y concepto fijo ──
 router.get('/empleados', responder((req) => empleados.obtenerNomina({ ...req.gestion, sp: paramsDe(req) })));
