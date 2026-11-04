@@ -13,6 +13,7 @@ const { obtenerPivotVentas } = require('../services/gestion/dashboard/pivot-vent
 const api = require('../services/gestion/dashboard/resultados-api');
 const busqueda = require('../services/gestion/dashboard/busqueda-api');
 const detalle = require('../services/gestion/dashboard/detalle-api');
+const carga = require('../services/gestion/carga-api');
 
 router.use(requireBusinessRole('admin'));
 
@@ -66,7 +67,7 @@ const responder = (fn) => async (req, res, next) => {
   try {
     res.json(await fn(req));
   } catch (e) {
-    if (e instanceof api.ErrorDatos) return res.status(e.status || 400).json({ error: e.message });
+    if (e instanceof api.ErrorDatos) return res.status(e.status || 400).json({ error: e.message, ...e.extra });
     next(e);
   }
 };
@@ -120,5 +121,29 @@ router.patch('/dashboard/compras/:rowId', responder((req) =>
   detalle.editarCompra({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 router.patch('/dashboard/ventas/:rowId', responder((req) =>
   detalle.editarVenta({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
+
+// ── Carga manual: facturas, gastos varios, ventas, conceptos y medios de pago ──
+const conUsuario = (req) => ({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? '') });
+router.get('/facturas/maestros', responder((req) => carga.obtenerMaestrosFactura(req.gestion)));
+router.post('/facturas/proveedores', responder((req) => carga.crearProveedor({ ...req.gestion, body: req.body })));
+router.get('/facturas/existe', responder((req) => carga.facturaExiste({ ...req.gestion, sp: paramsDe(req) })));
+router.get('/facturas/ultima', responder((req) => carga.ultimaFactura({ ...req.gestion, sp: paramsDe(req) })));
+router.post('/facturas', responder((req) => carga.crearFactura({ ...conUsuario(req), body: req.body })));
+router.get('/facturas/:rowId', responder((req) => carga.obtenerFactura({ ...req.gestion, rowId: req.params.rowId })));
+router.put('/facturas/:rowId', responder((req) => carga.editarFactura({ ...conUsuario(req), rowId: req.params.rowId, body: req.body })));
+router.delete('/facturas/:rowId', responder((req) =>
+  carga.borrarFactura({ ...conUsuario(req), rowId: req.params.rowId, conPagos: paramsDe(req).get('conPagos') === '1' })));
+router.post('/gastos-varios', responder((req) => carga.crearGastoVario({ ...conUsuario(req), body: req.body })));
+router.get('/ventas-manuales', responder((req) => carga.obtenerVentasManuales(ambito(req))));
+router.post('/ventas-manuales', responder((req) => carga.crearVentasManuales({ ...ambito(req), body: req.body })));
+router.delete('/ventas-manuales', responder((req) => carga.borrarVentasManuales({ ...req.gestion, ids: paramsDe(req).get('ids') })));
+router.get('/conceptos', responder((req) => carga.obtenerConceptos(req.gestion)));
+router.post('/conceptos', responder((req) => carga.crearConcepto({ ...req.gestion, body: req.body })));
+router.patch('/conceptos/:codigo', responder((req) => carga.editarConcepto({ ...req.gestion, codigo: req.params.codigo, body: req.body })));
+router.delete('/conceptos/:codigo', responder((req) => carga.borrarConcepto({ ...req.gestion, codigo: req.params.codigo })));
+router.get('/medios-pago', responder((req) => carga.obtenerMedios(req.gestion)));
+router.post('/medios-pago', responder((req) => carga.crearMedio({ ...req.gestion, body: req.body })));
+router.put('/medios-pago/:id', responder((req) => carga.editarMedio({ ...req.gestion, id: Number(req.params.id), body: req.body })));
+router.delete('/medios-pago/:id', responder((req) => carga.borrarMedio({ ...req.gestion, id: Number(req.params.id) })));
 
 module.exports = router;

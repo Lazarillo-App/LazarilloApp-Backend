@@ -109,6 +109,7 @@ function expect(real) {
   base.not = matchers(real, true);
   return base;
 }
+expect.objectContaining = (esp) => new Asimetrico(`objectContaining(${inspeccionar(esp)})`, (real) => contiene(real, esp));
 expect.arrayContaining = (items) =>
   new Asimetrico(`arrayContaining(${inspeccionar(items)})`, (r) => Array.isArray(r) && items.every((e) => r.some((x) => igual(x, e))));
 expect.closeTo = (n, digitos = 2) =>
