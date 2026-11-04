@@ -109,6 +109,7 @@ router.patch('/config/rubros-dashboard', responder((req) =>
   busqueda.guardarRubroVisible({ ...req.gestion, body: req.body })));
 
 // ── Detalle y edición (click en una celda del Panel) ──────────────────────────
+router.get('/config/conceptos', responder((req) => detalle.obtenerConceptosEdicion(req.gestion)));
 router.get('/dashboard/detalle', responder((req) =>
   detalle.obtenerDetalleCompras({ ...ambito(req), sp: paramsDe(req) })));
 router.get('/dashboard/detalle-ventas', responder((req) =>

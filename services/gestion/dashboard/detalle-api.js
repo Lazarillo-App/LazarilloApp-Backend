@@ -430,4 +430,19 @@ async function editarVenta({ businessId, rowId, body }) {
   return updated;
 }
 
-module.exports = { buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarVenta };
+// Rubros y conceptos de la organización, para reasignar el concepto de un gasto (el selector
+// muestra todo el maestro, aunque el negocio todavía no haya usado ese concepto).
+async function obtenerConceptosEdicion({ organizationId }) {
+  const [rubros, conceptos] = await Promise.all([
+    db.many(sql`SELECT codigo, nombre FROM gestion_rubros_concepto_caja WHERE organization_id = ${organizationId} ORDER BY nombre`),
+    db.many(sql`
+      SELECT cc.codigo, cc.nombre, rc.codigo AS "rubroCodigo", rc.nombre AS "rubroNombre"
+      FROM gestion_conceptos_caja cc
+      LEFT JOIN gestion_rubros_concepto_caja rc ON rc.organization_id = ${organizationId} AND rc.codigo = cc."codRga"
+      WHERE cc.organization_id = ${organizationId}
+      ORDER BY cc.nombre`),
+  ]);
+  return { rubros, conceptos };
+}
+
+module.exports = { obtenerConceptosEdicion, buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarVenta };
