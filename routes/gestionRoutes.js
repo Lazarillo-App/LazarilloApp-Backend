@@ -15,6 +15,7 @@ const busqueda = require('../services/gestion/dashboard/busqueda-api');
 const detalle = require('../services/gestion/dashboard/detalle-api');
 const carga = require('../services/gestion/carga-api');
 const pagos = require('../services/gestion/pagos-api');
+const { db: gestionDb } = require('../services/gestion/db');
 
 router.use(requireBusinessRole('admin'));
 
@@ -144,6 +145,11 @@ router.post('/pagos-proveedor', responder((req) => pagos.registrarPago({ ...req.
 router.patch('/pagos-proveedor/:id', responder((req) => pagos.editarPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
 router.delete('/pagos-proveedor/:id', responder((req) => pagos.anularPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
 router.delete('/pagos-proveedor/:id/aplicaciones', responder((req) => pagos.quitarAplicacion({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), sp: paramsDe(req) })));
+// Lugares del negocio con la forma de gestion (un "local" con sus "puntos de venta").
+router.get('/locales', responder(async (req) => {
+  const lugares = await carga.obtenerLugares(gestionDb, req.gestion.businessId);
+  return [{ id: req.gestion.businessId, nombre: req.business?.name ?? lugares[0]?.nombre ?? '', puntosDeVenta: lugares }];
+}));
 router.get('/cta-cte', responder((req) => pagos.obtenerCtaCte({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/cta-cte/proveedores', responder((req) => pagos.buscarProveedoresCtaCte({ ...req.gestion, sp: paramsDe(req) })));
 
