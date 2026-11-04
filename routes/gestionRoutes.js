@@ -12,6 +12,7 @@ const { obtenerPivot } = require('../services/gestion/dashboard/pivot');
 const { obtenerPivotVentas } = require('../services/gestion/dashboard/pivot-ventas');
 const api = require('../services/gestion/dashboard/resultados-api');
 const busqueda = require('../services/gestion/dashboard/busqueda-api');
+const detalle = require('../services/gestion/dashboard/detalle-api');
 
 router.use(requireBusinessRole('admin'));
 
@@ -106,5 +107,17 @@ router.get('/config/rubros-dashboard', responder((req) =>
   busqueda.obtenerRubrosVisibles({ ...req.gestion, field: paramsDe(req).get('field') })));
 router.patch('/config/rubros-dashboard', responder((req) =>
   busqueda.guardarRubroVisible({ ...req.gestion, body: req.body })));
+
+// ── Detalle y edición (click en una celda del Panel) ──────────────────────────
+router.get('/dashboard/detalle', responder((req) =>
+  detalle.obtenerDetalleCompras({ ...ambito(req), sp: paramsDe(req) })));
+router.get('/dashboard/detalle-ventas', responder((req) =>
+  detalle.obtenerDetalleVentas({ ...ambito(req), sp: paramsDe(req) })));
+router.get('/dashboard/compra-lineas/:compraId', responder((req) =>
+  detalle.obtenerCompraLineas({ ...req.gestion, compraId: req.params.compraId })));
+router.patch('/dashboard/compras/:rowId', responder((req) =>
+  detalle.editarCompra({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
+router.patch('/dashboard/ventas/:rowId', responder((req) =>
+  detalle.editarVenta({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 
 module.exports = router;
