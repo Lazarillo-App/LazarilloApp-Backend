@@ -14,6 +14,7 @@ const api = require('../services/gestion/dashboard/resultados-api');
 const busqueda = require('../services/gestion/dashboard/busqueda-api');
 const detalle = require('../services/gestion/dashboard/detalle-api');
 const carga = require('../services/gestion/carga-api');
+const pagos = require('../services/gestion/pagos-api');
 
 router.use(requireBusinessRole('admin'));
 
@@ -121,6 +122,30 @@ router.patch('/dashboard/compras/:rowId', responder((req) =>
   detalle.editarCompra({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 router.patch('/dashboard/ventas/:rowId', responder((req) =>
   detalle.editarVenta({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
+
+// ── Sin carga, Impagas, pagos y cuenta corriente ──
+const usuarioDe = (req) => req.user?.email ?? String(req.user?.id ?? '');
+const idDe = (req) => Number(req.params.id);
+router.get('/sin-carga', responder((req) => pagos.obtenerSinCarga(ambito(req))));
+router.post('/sin-carga/descartes', responder((req) => pagos.crearDescarte({ ...ambito(req), usuario: usuarioDe(req), body: req.body })));
+router.delete('/sin-carga/descartes/:id', responder((req) => pagos.borrarDescarte({ ...req.gestion, id: idDe(req) })));
+router.get('/impagas', responder((req) => pagos.obtenerImpagas({ ...ambito(req), sp: paramsDe(req) })));
+router.post('/impagas/forzadas', responder((req) => pagos.crearForzadas({ ...req.gestion, body: req.body })));
+router.delete('/impagas/forzadas', responder((req) => pagos.borrarForzadas({ ...req.gestion, body: req.body })));
+router.patch('/impagas/pago-automatico', responder((req) => pagos.cambiarPagoAutomatico({ ...req.gestion, body: req.body })));
+router.get('/impagas/op-maxirest', responder((req) => pagos.obtenerOpMaxirest({ ...ambito(req), sp: paramsDe(req) })));
+router.post('/impagas/pagos-internos', responder((req) => pagos.crearOp({ ...ambito(req), usuario: usuarioDe(req), body: req.body })));
+router.get('/impagas/pagos-internos/historial', responder((req) => pagos.historialOp({ ...ambito(req), sp: paramsDe(req) })));
+router.get('/impagas/pagos-internos/:id', responder((req) => pagos.obtenerOp({ ...req.gestion, id: idDe(req) })));
+router.patch('/impagas/pagos-internos/:id', responder((req) => pagos.editarOp({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
+router.delete('/impagas/pagos-internos/:id', responder((req) => pagos.anularOp({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
+router.post('/impagas/pagos-internos/:id/desimputar', responder((req) => pagos.desimputarOp({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
+router.post('/pagos-proveedor', responder((req) => pagos.registrarPago({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.patch('/pagos-proveedor/:id', responder((req) => pagos.editarPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
+router.delete('/pagos-proveedor/:id', responder((req) => pagos.anularPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
+router.delete('/pagos-proveedor/:id/aplicaciones', responder((req) => pagos.quitarAplicacion({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), sp: paramsDe(req) })));
+router.get('/cta-cte', responder((req) => pagos.obtenerCtaCte({ ...req.gestion, sp: paramsDe(req) })));
+router.get('/cta-cte/proveedores', responder((req) => pagos.buscarProveedoresCtaCte({ ...req.gestion, sp: paramsDe(req) })));
 
 // ── Carga manual: facturas, gastos varios, ventas, conceptos y medios de pago ──
 const conUsuario = (req) => ({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? '') });
