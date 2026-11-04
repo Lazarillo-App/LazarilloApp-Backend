@@ -16,6 +16,7 @@ const detalle = require('../services/gestion/dashboard/detalle-api');
 const carga = require('../services/gestion/carga-api');
 const pagos = require('../services/gestion/pagos-api');
 const apertura = require('../services/gestion/apertura/api');
+const empleados = require('../services/gestion/empleados/api');
 const { db: gestionDb } = require('../services/gestion/db');
 
 router.use(requireBusinessRole('admin'));
@@ -153,6 +154,15 @@ router.get('/locales', responder(async (req) => {
 }));
 router.get('/cta-cte', responder((req) => pagos.obtenerCtaCte({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/cta-cte/proveedores', responder((req) => pagos.buscarProveedoresCtaCte({ ...req.gestion, sp: paramsDe(req) })));
+
+// ── Empleados y concepto fijo ──
+router.get('/empleados', responder((req) => empleados.obtenerNomina({ ...req.gestion, sp: paramsDe(req) })));
+router.post('/empleados', responder((req) => empleados.crearCarga({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.get('/empleados/cuenta', responder((req) => empleados.obtenerCuenta({ ...req.gestion, sp: paramsDe(req) })));
+router.delete('/empleados/:id', responder((req) => empleados.anularCarga({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
+router.get('/conceptos-empleado', responder((req) => empleados.listarConceptosFijos({ ...req.gestion, sp: paramsDe(req) })));
+router.post('/conceptos-empleado', responder((req) => empleados.guardarConceptoFijo({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.delete('/conceptos-empleado', responder((req) => empleados.quitarConceptoFijo({ ...req.gestion, sp: paramsDe(req) })));
 
 // ── Apertura de gastos ──
 const conUsuarioId = (req) => ({ ...req.gestion, userId: req.user?.id, usuario: usuarioDe(req) });

@@ -789,7 +789,7 @@ async function borrarMedio({ businessId, id }) {
 }
 
 module.exports = {
-  idLugar, obtenerLugares, combinarPagos,
+  idLugar, obtenerLugares, combinarPagos, registrarActividad,
   crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor,
   crearGastoVario, obtenerVentasManuales, crearVentasManuales, borrarVentasManuales,
   obtenerConceptos, crearConcepto, editarConcepto, borrarConcepto,

@@ -245,8 +245,11 @@ async function finalizarPdv(pdv, reports) {
   await linkDetalleCompras(db, pdv);
   const { huboComprasTocadas, comprasModificadas } = accumulateAperturaInputs(reports);
   if (huboComprasTocadas) {
-    // Concepto fijo por empleado: pendiente de portar. Se deja constancia en vez de saltearlo en silencio.
-    console.warn("[render] compras tocadas en", pdv, "— concepto fijo por empleado todavía no portado");
+    // Primero el concepto fijo por empleado: la apertura por concepto mira el concepto ya corregido.
+    const { aplicarConceptosEmpleado } = require('../empleados/api'); // acá: empleados/api requiere carga-api
+    const cf = await aplicarConceptosEmpleado({ organizationId: pdv.organizationId, businessId: pdv.businessId }, { branchId: pdv.branchId ?? null })
+      .catch((e) => ({ errores: [String(e)] }));
+    if (cf.errores.length) console.error("[render] concepto fijo tras importar", pdv, cf.errores);
     const r = await sincronizarTrasImport({ organizationId: pdv.organizationId, businessId: pdv.businessId }, comprasModificadas);
     if (r.errores.length) console.error("[render] apertura tras importar", pdv, r.errores);
   }
