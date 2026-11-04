@@ -550,9 +550,31 @@ async function obtenerAnual({ organizationId, businessId, anio, sucursal }) {
   return { anio, meses };
 }
 
+// El mes de un vistazo para el celular: ventas, gastos por rubro y resultado, con los mismos filtros
+// que el Panel (Económica, rubros visibles). Liviano: solo sumas.
+async function obtenerResumenMes({ organizationId, businessId, anio, mes, sucursal }) {
+  if (!anio || !mes || mes > 12) throw new ErrorDatos("Datos inválidos");
+  const condV = sql.join(buildPivotConditions({ year: anio, tableAlias: "v", hasFechaManual: false, businessId, sucursal, months: [mes] }), " AND ");
+  const condC = sql.join(buildPivotConditions({ year: anio, tableAlias: "c", businessId, sucursal, months: [mes], filterRubrosOcultos: true }), " AND ");
+  const [ventas, rubros] = await Promise.all([
+    db.one(sql`SELECT SUM(COALESCE(v."importeManual", v.importe))::float8 AS total FROM gestion_ventas v WHERE ${condV}`),
+    db.many(sql`
+      SELECT COALESCE(rc.nombre, 'Sin Rubro') AS rubro, SUM(COALESCE(c."importeManual", c.importe))::float8 AS total
+      FROM ${fuenteCompras(undefined)} c
+      ${joinsConcepto({ organizationId, businessId })}
+      WHERE ${condC}
+      GROUP BY 1 ORDER BY 2 DESC`),
+  ]);
+  const v = Number(ventas?.total ?? 0);
+  const lista = rubros.map((r) => ({ rubro: r.rubro.trim(), total: Number(r.total) })).filter((r) => Math.abs(r.total) > 0.5);
+  const gastos = lista.reduce((s, r) => s + r.total, 0);
+  return { ventas: v, gastos, resultado: v - gastos, rubros: lista };
+}
+
 module.exports = {
   ErrorDatos,
   obtenerAnual,
+  obtenerResumenMes,
   obtenerProyeccion,
   obtenerEquilibrio,
   obtenerEquilibrioVariables,

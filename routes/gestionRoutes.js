@@ -98,6 +98,8 @@ router.post('/dashboard/canasta/aumentos', responder((req) =>
   api.anotarAumento({ ...ambito(req), body: req.body })));
 router.delete('/dashboard/canasta/aumentos', responder((req) =>
   api.borrarAumento({ ...ambito(req), body: req.body })));
+router.get('/m/resumen', responder((req) =>
+  api.obtenerResumenMes({ ...ambito(req), anio: entero(paramsDe(req), 'anio'), mes: entero(paramsDe(req), 'mes') })));
 router.get('/m/anual', responder((req) =>
   api.obtenerAnual({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
 router.get('/dashboard/actualizado', responder((req) => api.obtenerActualizado(ambito(req))));
@@ -188,6 +190,7 @@ router.delete('/apertura/reglas/:id', responder((req) => apertura.borrarRegla({ 
 const conUsuario = (req) => ({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? '') });
 router.get('/facturas/maestros', responder((req) => carga.obtenerMaestrosFactura(req.gestion)));
 router.post('/facturas/proveedores', responder((req) => carga.crearProveedor({ ...req.gestion, body: req.body })));
+router.get('/facturas/buscar', responder((req) => carga.buscarFilaFactura({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/facturas/existe', responder((req) => carga.facturaExiste({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/facturas/ultima', responder((req) => carga.ultimaFactura({ ...req.gestion, sp: paramsDe(req) })));
 router.post('/facturas', responder((req) => carga.crearFactura({ ...conUsuario(req), body: req.body })));

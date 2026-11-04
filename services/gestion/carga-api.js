@@ -412,6 +412,22 @@ async function restaurarFacturaEliminada({ organizationId, businessId, usuario, 
   });
 }
 
+// Una fila de esa factura, para abrirla desde Impagas en el celular.
+async function buscarFilaFactura({ businessId, sp }) {
+  const pdvId = Number(sp.get('pdvId'));
+  const comprobante = sp.get('comprobante')?.trim();
+  const codPro = sp.get('codPro')?.trim();
+  if (!Number.isInteger(pdvId) || !comprobante || !codPro) throw rechazo('Datos inválidos');
+  const lugar = (await obtenerLugares(db, businessId)).find((l) => l.id === pdvId);
+  if (!lugar) throw rechazo('Datos inválidos');
+  const c = await db.one(sql`
+    SELECT "rowId" FROM gestion_compras
+    WHERE business_id = ${businessId} AND branch_id IS NOT DISTINCT FROM ${lugar.branchId}::bigint AND comprobante = ${comprobante} AND codigo = ${codPro}
+    ORDER BY "rowId" LIMIT 1`);
+  if (!c) throw rechazo('No encontré la factura', 404);
+  return { rowId: c.rowId };
+}
+
 // Detección de factura ya cargada en el modal.
 async function facturaExiste({ organizationId, businessId, sp }) {
   const proveedorId = Number(sp.get('proveedorId'));
@@ -818,7 +834,7 @@ async function borrarMedio({ businessId, id }) {
 }
 
 module.exports = {
-  idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada,
+  idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
   crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor,
   crearGastoVario, obtenerVentasManuales, crearVentasManuales, borrarVentasManuales,
   obtenerConceptos, crearConcepto, editarConcepto, borrarConcepto,
