@@ -84,6 +84,12 @@ function matchers(real, negado) {
     toBeLessThan: (n) => chequear(real < n, `${real} toBeLessThan ${n}`),
     toBeLessThanOrEqual: (n) => chequear(real <= n, `${real} toBeLessThanOrEqual ${n}`),
     toBeNull: () => chequear(real === null, `${inspeccionar(real)} toBeNull`),
+    toThrow: (msg) => {
+      let error = null;
+      try { real(); } catch (e) { error = e; }
+      chequear(error !== null, 'se esperaba que lanzara un error');
+      if (msg !== undefined && error) chequear(msg instanceof RegExp ? msg.test(error.message) : error.message.includes(msg), `mensaje inesperado: ${error.message}`);
+    },
     toBeUndefined: () => chequear(real === undefined, `${inspeccionar(real)} toBeUndefined`),
     toBeInstanceOf: (clase) => chequear(real instanceof clase, `${inspeccionar(real)} toBeInstanceOf ${clase.name}`),
     toHaveLength: (n) => chequear(real != null && real.length === n, `largo ${real?.length} toHaveLength ${n}`),

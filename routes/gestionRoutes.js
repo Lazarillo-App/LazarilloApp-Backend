@@ -15,6 +15,7 @@ const busqueda = require('../services/gestion/dashboard/busqueda-api');
 const detalle = require('../services/gestion/dashboard/detalle-api');
 const carga = require('../services/gestion/carga-api');
 const pagos = require('../services/gestion/pagos-api');
+const apertura = require('../services/gestion/apertura/api');
 const { db: gestionDb } = require('../services/gestion/db');
 
 router.use(requireBusinessRole('admin'));
@@ -152,6 +153,15 @@ router.get('/locales', responder(async (req) => {
 }));
 router.get('/cta-cte', responder((req) => pagos.obtenerCtaCte({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/cta-cte/proveedores', responder((req) => pagos.buscarProveedoresCtaCte({ ...req.gestion, sp: paramsDe(req) })));
+
+// ── Apertura de gastos ──
+const conUsuarioId = (req) => ({ ...req.gestion, userId: req.user?.id, usuario: usuarioDe(req) });
+router.get('/apertura/locales', responder((req) => apertura.obtenerLocalesApertura(conUsuarioId(req))));
+router.get('/apertura/reglas', responder((req) => apertura.listarReglas(req.gestion)));
+router.get('/apertura/reglas/preview-total', responder((req) => apertura.previewTotal({ ...conUsuarioId(req), sp: paramsDe(req) })));
+router.post('/apertura/reglas', responder((req) => apertura.crearRegla({ ...conUsuarioId(req), body: req.body })));
+router.patch('/apertura/reglas/:id', responder((req) => apertura.editarRegla({ ...conUsuarioId(req), id: idDe(req), body: req.body })));
+router.delete('/apertura/reglas/:id', responder((req) => apertura.borrarRegla({ ...conUsuarioId(req), id: idDe(req) })));
 
 // ── Carga manual: facturas, gastos varios, ventas, conceptos y medios de pago ──
 const conUsuario = (req) => ({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? '') });

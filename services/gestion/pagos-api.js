@@ -475,7 +475,7 @@ async function crearForzadas({ businessId, body }) {
   const items = await leerForzadas(businessId, body);
   const count = await db.execute(sql`
     INSERT INTO gestion_impagas_forzadas (business_id, branch_id, comprobante, "codPro")
-    VALUES ${sql.join(items.map((i) => sql`(${businessId}, ${i.branchId}::bigint, ${i.comprobante}, ${i.codPro})`), sql`, `)}
+    VALUES ${sql.join(items.map((i) => sql`(${businessId}, ${i.branchId}::bigint, ${i.comprobante}, ${i.codPro})`), ", ")}
     ON CONFLICT (business_id, branch_id, comprobante, "codPro") DO NOTHING`);
   return { ok: true, count };
 }
@@ -574,7 +574,7 @@ async function insertarAplicacionesOp(tx, pagoId, compraBusinessId, aplicaciones
   if (!aplicaciones.length) return;
   await tx.execute(sql`
     INSERT INTO gestion_aplicaciones_pago_interno ("pagoId", compra_business_id, "compraRowId", importe)
-    VALUES ${sql.join(aplicaciones.map((a) => sql`(${pagoId}, ${compraBusinessId}, ${a.key}, ${a.importe}::numeric)`), sql`, `)}`);
+    VALUES ${sql.join(aplicaciones.map((a) => sql`(${pagoId}, ${compraBusinessId}, ${a.key}, ${a.importe}::numeric)`), ", ")}`);
 }
 
 // Una orden de pago en la que este lugar es el que paga.
@@ -892,7 +892,7 @@ async function crearAplicaciones(tx, pagoId, businessId, lugares, codPro, aplica
       const i = a.key.indexOf('|');
       const lugar = lugares.get(Number(a.key.slice(0, i)));
       return sql`(${pagoId}, ${businessId}, ${lugar.branchId}::bigint, ${a.key.slice(i + 1)}, ${codPro}, ${a.importe}::numeric)`;
-    }), sql`, `)}`);
+    }), ", ")}`);
 }
 
 const pagoSchema = z.object({

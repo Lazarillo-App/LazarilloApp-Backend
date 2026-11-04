@@ -6,8 +6,8 @@
 // positivo = esa sucursal (branch_id). El reparto entre negocios todavía no se ofrece: pide permisos
 // sobre los dos y el motor de apertura.
 //
-// Pendiente del bloque de apertura: en gestion, después de guardar se reaplican las reglas activas
-// (reaplicarReglasActivas). Hoy no hay reglas cargadas; cuando se porte el motor va acá.
+// Después de guardar una factura o un gasto se reaplican las reglas activas sobre esas filas. Va fuera
+// de la transacción: la carga ya quedó guardada y un fallo del reparto no la tiene que deshacer.
 'use strict';
 
 const { randomUUID } = require('crypto');
@@ -24,6 +24,26 @@ const { medioSchema, mismoNombre } = require('./medios-pago/abm');
 const { claveFactura, imputarFacturas, combinarPagos, numeroPago } = require('./pagos-proveedor/imputar');
 const { leerInsumos, renderConfigurado } = require('./render/db');
 const { ErrorDatos } = require('./dashboard/resultados-api');
+const { reaplicarReglasActivas } = require('./apertura/motor');
+
+// Transacción de una carga + reparto de las filas que dejó (el trabajo las anota en `ids`).
+async function conReparto(ctx, trabajo) {
+  const ids = [];
+  const r = await db.transaction((tx) => trabajo(tx, ids));
+  await repartirFilas(ctx, ids);
+  return r;
+}
+
+async function repartirFilas(ctx, rowIds) {
+  try {
+    const { errores } = await reaplicarReglasActivas(ctx, { rowIds });
+    if (errores.length) console.error('[gestion/carga] reparto tras guardar', errores);
+    return errores;
+  } catch (err) {
+    console.error('[gestion/carga] reparto tras guardar', err);
+    return [String(err?.message ?? err)];
+  }
+}
 
 const rechazo = (mensaje, status = 400, extra) => {
   const e = new ErrorDatos(mensaje);
@@ -281,11 +301,12 @@ async function crearFactura({ organizationId, businessId, usuario, body }) {
   const pagoAhora = body?.pago != null ? pagoAhoraSchema.safeParse(body.pago) : null;
   if (pagoAhora && !pagoAhora.success) throw rechazo('Datos del pago inválidos');
   const ctx = { organizationId, businessId };
-  return db.transaction(async (tx) => {
+  return conReparto(ctx, async (tx, ids) => {
     const p = await prepararFactura(tx, ctx, body);
     const pago = await altaEnTx(tx, ctx, p, pagoAhora?.success ? pagoAhora.data : null, usuario,
       (lugar) => descripcionFactura({ ...p, total: p.armado.total, lugar }));
     const { armado } = p;
+    ids.push(...armado.filas.map((x) => x.rowId));
     return { ok: true, comprobante: armado.filas[0].comprobante, total: armado.total, filas: armado.filas.length, lineas: armado.lineas.length, rowId: armado.filas[0].rowId, pago };
   });
 }
@@ -295,7 +316,7 @@ const obtenerFactura = async ({ businessId, rowId }) => (await leerFactura(db, b
 // PUT: se rearman sus filas (nunca se duplica); las correcciones a mano siguen en las filas que quedan.
 async function editarFactura({ organizationId, businessId, usuario, rowId, body }) {
   const ctx = { organizationId, businessId };
-  return db.transaction(async (tx) => {
+  return conReparto(ctx, async (tx, ids) => {
     const fa = await facturaDeFila(tx, businessId, rowId);
     if (!fa) throw rechazo('No existe la factura', 404);
     if (!fa.esLz) throw rechazo('Es de MaxiRest: se modifica en MaxiRest', 403);
@@ -319,6 +340,7 @@ async function editarFactura({ organizationId, businessId, usuario, rowId, body 
         AND ("importeManual" IS NOT NULL OR "fechaManual" IS NOT NULL OR "observacManual" IS NOT NULL OR "conceptoCodigoManual" IS NOT NULL)`);
     await borrarFilas(tx, businessId, antes.comprobante, antes.codigo);
     await insertarArmado(tx, businessId, p);
+    ids.push(...p.armado.filas.map((x) => x.rowId));
     let perdidas = 0;
     for (const c of correcciones) {
       if (!nuevos.has(c.rowId)) { perdidas += 1; continue; }
@@ -501,7 +523,7 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
     if (parecido) throw rechazo('Ya hay un gasto parecido', 409, { parecido });
   }
 
-  return db.transaction(async (tx) => {
+  return conReparto({ organizationId, businessId }, async (tx, ids) => {
     // El proveedor "Gastos Varios" se crea la primera vez.
     await tx.execute(sql`
       INSERT INTO gestion_proveedores (organization_id, codigo, nombre, razon) VALUES (${organizationId}, ${GV_CODIGO}, ${GV_NOMBRE}, ${GV_NOMBRE})
@@ -523,6 +545,7 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
     const total = p.armado.total;
     const pago = await altaEnTx(tx, ctx, p, g.pago ?? null, usuario, (nombre) =>
       `${GV_NOMBRE}\n${[concepto.nombre.trim(), g.detalle?.trim(), nombre, pesos(total)].filter(Boolean).join(' · ')}`);
+    ids.push(...p.armado.filas.map((x) => x.rowId));
     return { ok: true, comprobante: p.armado.filas[0].comprobante, numero: `${GV_PREFIJO}-${numero}`, total, rowId: p.armado.filas[0].rowId, pago };
   });
 }

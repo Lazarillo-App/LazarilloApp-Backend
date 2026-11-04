@@ -6,10 +6,11 @@
 // organización. Donde gestion usaba local/PDV: negocio + sucursal. En las respuestas se
 // conservan los nombres de gestion (local = negocio, puntoDeVenta = sucursal).
 //
-// Pendiente del bloque de apertura: en gestion, editar una compra reevalúa sus reglas de apertura
-// (reevaluarCompra). Acá el motor todavía no está, así que una compra ya repartida no se deja
-// cambiar en importe, fecha ni concepto (409): quedaría repartida con los números viejos.
+// Editar el importe, la fecha o el concepto de una compra reevalúa sus reglas de apertura, en la misma
+// transacción: si el motor falla, la edición también se revierte.
 'use strict';
+
+const { reevaluarCompra } = require('../apertura/motor');
 
 const { z } = require('zod');
 const { sql, db } = require('../db');
@@ -384,16 +385,11 @@ async function editarCompra({ organizationId, businessId, rowId, body }) {
 
   return db.transaction(async (tx) => {
     const compra = await tx.one(sql`
-      SELECT "rowId", "conceptoCodigoManual", "esDistribuido" FROM gestion_compras
+      SELECT "rowId", "conceptoCodigoManual" FROM gestion_compras
       WHERE business_id = ${businessId} AND "rowId" = ${rowId} FOR UPDATE`);
     if (!compra) { const e = new ErrorDatos("Registro no encontrado"); e.status = 404; throw e; }
 
     const afectaReparto = importeManual !== undefined || fechaManual !== undefined || conceptoCodigoManual !== undefined;
-    if (afectaReparto && compra.esDistribuido) {
-      const e = new ErrorDatos("Esta compra está repartida entre negocios: por ahora solo se puede cambiar su observación.");
-      e.status = 409;
-      throw e;
-    }
     if (conceptoCodigoManual) {
       const existe = await tx.one(sql`SELECT 1 AS ok FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${conceptoCodigoManual}`);
       if (!existe) { const e = new ErrorDatos("Concepto no encontrado"); e.status = 404; throw e; }
@@ -412,7 +408,10 @@ async function editarCompra({ organizationId, businessId, rowId, body }) {
       UPDATE gestion_compras SET ${sql.join(sets, ", ")}
       WHERE business_id = ${businessId} AND "rowId" = ${rowId}
       RETURNING "rowId", "importeManual", "fechaManual", "conceptoCodigoManual", "observacManual"`);
-    return { ...updated, reevaluada: false, distribuidaAhora: false };
+    const reeval = afectaReparto
+      ? await reevaluarCompra(tx, { organizationId, businessId }, rowId)
+      : { reevaluada: false, distribuidaAhora: false };
+    return { ...updated, ...reeval };
   });
 }
 
