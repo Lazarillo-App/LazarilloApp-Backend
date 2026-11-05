@@ -12,10 +12,13 @@
 //                            Bar y Canchas). Sin esta opción no se migran y se informa.
 //
 // Reglas de lo que entra:
-// - Compras, detalle, pagos y ventas: por lugar y tabla, solo lo ANTERIOR al primer dato que ya había
-//   en destino, porque de ahí en adelante manda la lectura del kit. Copiar todo traería errores que
-//   gestion arregló solo hacia adelante (ventas de San Justo jun-oct 2025 duplicadas) y filas con otro
-//   rowId. La fecha de corte se guarda en la primera corrida para que reanudar no la mueva.
+// - Compras, detalle, pagos y ventas: por lugar y tabla, solo lo ANTERIOR al corte, porque de ahí en
+//   adelante manda la lectura del kit. Copiar todo traería errores que gestion arregló solo hacia
+//   adelante (ventas de San Justo jun-oct 2025 duplicadas) y filas con otro rowId. El corte es la primera
+//   fecha del primer mes en que el kit ya trae datos de verdad (ver elegirCorte): el kit tiene filas
+//   sueltas con fechas viejas (una compra de 2006 en Comercio) que no marcan su comienzo. Esas filas
+//   sueltas tienen el mismo rowId que en gestion, así que no se duplican.
+//   La fecha de corte se guarda en la primera corrida para que reanudar no la mueva.
 // - De lo posterior al corte solo se traen las correcciones a mano sobre filas que ya existen. Lo que
 //   no encuentre su fila se informa, no se inventa.
 // - Lo cargado en gestion (origen lazarillo o arca) entra siempre: el kit no lo tiene.
@@ -71,7 +74,7 @@ const tiposCrudos = { getTypeParser: () => (v) => v };
 function conectarFuente(url) {
   let cliente = null;
   const abrir = async () => {
-    const c = new Client({ connectionString: url, ssl: { rejectUnauthorized: false }, types: tiposCrudos });
+    const c = new Client({ connectionString: url, ssl: { rejectUnauthorized: false }, types: tiposCrudos, connectionTimeoutMillis: 30000, query_timeout: 180000 });
     c.on('error', () => { if (cliente === c) cliente = null; }); // se reabre en la próxima lectura
     await c.connect();
     await c.query('SET default_transaction_read_only = on');
@@ -84,12 +87,14 @@ function conectarFuente(url) {
         try {
           return await (cliente ?? await abrir()).query(texto, params);
         } catch (e) {
-          // Un error de la consulta (tiene código de Postgres) no se arregla reintentando.
-          if (e.code && !/^(08|57P)/.test(e.code)) throw e;
+          // Un error de la consulta (código de Postgres) no se arregla reintentando; uno de red o de tiempo, sí.
+          const deRed = !e.code || /^(08|57P|E[A-Z]+)/.test(e.code);
+          if (!deRed) throw e;
+          cliente?.end().catch(() => {});
           cliente = null;
-          if (intento >= 5) throw e;
+          if (intento >= 8) throw e;
           console.log(`    (lectura cortada: reintento ${intento})`);
-          await dormir(2000 * intento);
+          await dormir(5000 * intento);
         }
       }
     },
@@ -157,17 +162,48 @@ const guardarId = (fuente, tabla, origen, destino) => pool.query(
    ON CONFLICT (fuente, tabla, id_origen) DO UPDATE SET id_destino = EXCLUDED.id_destino`, [fuente, tabla, String(origen), destino]);
 
 // Por lugar: la fecha desde la que manda el kit. Se fija en la primera corrida.
-async function cortes(f, tabla, destino) {
+// El kit "empezó" en el primer mes con al menos estas filas y esta parte de lo que tiene gestion.
+const KIT_MIN_FILAS = 20;
+const KIT_MIN_PROPORCION = 0.25;
+// destino: [{ mes, n, primera }] · origen: Map mes → filas. Devuelve la fecha de corte, o null si el kit
+// todavía no trajo un mes completo (entonces todo es historia; lo que ya esté no se duplica por rowId).
+function elegirCorte(destino, origen) {
+  const orden = [...destino].sort((a, b) => a.mes.localeCompare(b.mes));
+  const mes = orden.find((m) => m.n >= KIT_MIN_FILAS && m.n >= KIT_MIN_PROPORCION * (origen.get(m.mes) ?? 0));
+  return mes ? mes.primera : null;
+}
+
+// Filas por lugar y mes en gestion. El detalle sin compra va al lugar que se decidió para esos renglones.
+async function mesesOrigen(f, src, tabla) {
+  const consulta = tabla === 'detalle_compras'
+    ? `SELECT COALESCE(c."puntoDeVentaId", ${Number(f.pdvDetalleSinCompra)})::text AS pdv, to_char(d.fecha, 'YYYY-MM') AS mes, COUNT(*)::int AS n
+         FROM detalle_compras d LEFT JOIN compras c ON c."rowId" = d."compraId" WHERE d.fecha IS NOT NULL GROUP BY 1, 2`
+    : `SELECT "puntoDeVentaId"::text AS pdv, to_char(fecha, 'YYYY-MM') AS mes, COUNT(*)::int AS n FROM ${tabla} WHERE fecha IS NOT NULL GROUP BY 1, 2`;
+  const { rows } = await src.query(consulta);
+  const out = new Map();
+  for (const r of rows) {
+    const l = f.pdv[r.pdv];
+    if (!l) continue;
+    const k = String(idLugar(l));
+    if (!out.has(k)) out.set(k, new Map());
+    out.get(k).set(r.mes, (out.get(k).get(r.mes) ?? 0) + Number(r.n));
+  }
+  return out;
+}
+
+async function cortes(f, tabla, destino, src, tablaOrigen = tabla) {
   const out = new Map();
   const guardados = (await existeTabla('gestion_migracion_cortes'))
     ? (await pool.query('SELECT lugar, corte::text AS corte FROM gestion_migracion_cortes WHERE fuente = $1 AND tabla = $2', [f.nombre, tabla])).rows : [];
   for (const g of guardados) out.set(g.lugar, g.corte);
+  const origen = await mesesOrigen(f, src, tablaOrigen);
   for (const l of Object.values(f.pdv)) {
     const k = String(idLugar(l));
     if (out.has(k)) continue;
     const { rows } = await pool.query(
-      `SELECT MIN(fecha)::date::text AS corte FROM ${destino} WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $2::bigint`, [l.businessId, l.branchId]);
-    const corte = rows[0].corte;
+      `SELECT to_char(fecha, 'YYYY-MM') AS mes, COUNT(*)::int AS n, MIN(fecha)::date::text AS primera FROM ${destino}
+        WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $2::bigint AND fecha IS NOT NULL GROUP BY 1`, [l.businessId, l.branchId]);
+    const corte = elegirCorte(rows, origen.get(k) ?? new Map());
     out.set(k, corte);
     if (APLICAR) {
       await pool.query(`INSERT INTO gestion_migracion_cortes (fuente, tabla, lugar, corte) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, [f.nombre, tabla, k, corte]);
@@ -279,14 +315,17 @@ async function migrarCompras(f, src, ctx) {
   const cd = await columnas(pool, 'gestion_compras');
   const cs = await columnas(src, 'compras');
   const cols = ['business_id', 'branch_id', ...cs.filter((c) => cd.includes(c))];
-  const corte = await cortes(f, 'compras', 'gestion_compras');
+  const corte = await cortes(f, 'compras', 'gestion_compras', src);
   console.log(`  cortes de compras:`, Object.fromEntries(corte));
   const setManual = CAMPOS_MANUALES.map((c) => `${q(c)} = EXCLUDED.${q(c)}`).join(', ');
   const cuenta = { leidas: 0, historia: 0, propias: 0, correcciones: 0, correccionesSinFila: 0, salteadas: 0, sinLugar: 0 };
   const huerfanasCorreccion = [];
+  const faltantes = nuevoFaltantes();
+  ctx.comprasQueEntran = new Map();
   for await (const filas of tandas(src, 'compras', 'rowId')) {
     cuenta.leidas += filas.length;
     const entran = [];
+    const salteadas = [];
     const porNegocio = new Map();
     for (const r of filas) {
       const l = f.pdv[r.puntoDeVentaId];
@@ -298,14 +337,20 @@ async function migrarCompras(f, src, ctx) {
         // Lo reparte quien corresponda más abajo: una fila solo queda "repartida" si tiene distribuciones.
         esDistribuido: false, distribuidoEn: null,
       };
+      const marcar = () => {
+        if (!ctx.comprasQueEntran.has(l.businessId)) ctx.comprasQueEntran.set(l.businessId, new Set());
+        ctx.comprasQueEntran.get(l.businessId).add(r.rowId);
+      };
       const propia = ['lazarillo', 'arca'].includes(r.origen);
-      if (propia) { entran.push(fila); cuenta.propias += 1; continue; }
-      if (esHistoria(corte.get(String(idLugar(l))), r.fecha)) { entran.push(fila); cuenta.historia += 1; continue; }
+      if (propia) { entran.push(fila); marcar(); cuenta.propias += 1; continue; }
+      if (esHistoria(corte.get(String(idLugar(l))), r.fecha)) { entran.push(fila); marcar(); cuenta.historia += 1; continue; }
       const manual = r.importeManual != null || r.fechaManual != null || r.observacManual != null || r.conceptoCodigoManual != null || r.esBloqueado === 't';
+      salteadas.push({ biz: l.businessId, branch: l.branchId, r });
       if (!manual) { cuenta.salteadas += 1; continue; }
       if (!porNegocio.has(l.businessId)) porNegocio.set(l.businessId, []);
       porNegocio.get(l.businessId).push(fila);
     }
+    await anotarFaltantes(faltantes, 'gestion_compras', salteadas);
     await insertar('gestion_compras', cols, entran, `ON CONFLICT (business_id, "rowId") DO UPDATE SET ${setManual}`);
     // Correcciones a mano sobre lo que ya trajo el kit.
     for (const [biz, corr] of porNegocio) {
@@ -319,6 +364,46 @@ async function migrarCompras(f, src, ctx) {
   }
   anotar(f.nombre, 'compras', cuenta);
   if (huerfanasCorreccion.length) console.log(`    correcciones sin fila en destino (primeras): ${huerfanasCorreccion.slice(0, 8).join(' ')}`);
+  informarFaltantes(faltantes, 'compras');
+}
+
+// Filas de gestion posteriores al corte que no están en destino. NO se migran: se informan, por lugar y
+// mes, para ver si el kit se está perdiendo algo.
+function nuevoFaltantes() {
+  return { porMes: new Map(), muestra: [] };
+}
+async function anotarFaltantes(faltantes, tabla, filas) {
+  // filas: [{ biz, branch, r }]
+  const porNegocio = new Map();
+  for (const x of filas) {
+    if (!porNegocio.has(x.biz)) porNegocio.set(x.biz, []);
+    porNegocio.get(x.biz).push(x);
+  }
+  for (const [biz, lista] of porNegocio) {
+    const hay = await yaExisten(tabla, biz, lista.map((x) => x.r.rowId));
+    for (const x of lista) {
+      if (hay.has(x.r.rowId)) continue;
+      const k = `${biz}/${x.branch ?? ''} ${String(x.r.fecha).slice(0, 7)}`;
+      const a = faltantes.porMes.get(k) ?? { n: 0, total: 0 };
+      a.n += 1;
+      a.total += Number(x.r.importeManual ?? x.r.importe) || 0;
+      faltantes.porMes.set(k, a);
+      faltantes.muestra.push(x.r);
+    }
+  }
+}
+function informarFaltantes(faltantes, titulo) {
+  if (!faltantes.porMes.size) return;
+  const total = [...faltantes.porMes.values()].reduce((t, a) => t + a.n, 0);
+  console.log(`    ${titulo}: ${total} filas de gestion posteriores al corte que no están acá (no se migran)`);
+  for (const k of [...faltantes.porMes.keys()].sort()) {
+    const a = faltantes.porMes.get(k);
+    console.log(`      ${k}: ${a.n} filas, ${(a.total / 1e6).toFixed(1)} millones`);
+  }
+  const grandes = [...faltantes.muestra].sort((a, b) => Math.abs(Number(b.importe) || 0) - Math.abs(Number(a.importe) || 0)).slice(0, 25);
+  for (const r of grandes) {
+    console.log(`      · ${String(r.fecha).slice(0, 10)} ${Number(r.importe) || 0} origen=${r.origen ?? '-'} concepto=${r.concepto ?? r.conceptoCodigo ?? '-'} comp=${r.comprobante ?? '-'} prov=${r.proveedor ?? '-'}`.slice(0, 170));
+  }
 }
 
 // ── Detalle, pagos y ventas ──
@@ -326,7 +411,8 @@ async function migrarDetalle(f, src, ctx) {
   const cd = await columnas(pool, 'gestion_detalle_compras');
   const cs = await columnas(src, 'detalle_compras');
   const cols = ['business_id', 'branch_id', ...cs.filter((c) => cd.includes(c))];
-  const corte = await cortes(f, 'detalle', 'gestion_detalle_compras');
+  const corte = await cortes(f, 'detalle', 'gestion_detalle_compras', src, 'detalle_compras');
+  console.log(`  cortes de detalle:`, Object.fromEntries(corte));
   const cuenta = { leidas: 0, entran: 0, salteadas: 0, sinCompra: 0, sinLugar: 0 };
   for await (const crudas of tandas(src, 'detalle_compras', 'rowId')) {
     cuenta.leidas += crudas.length;
@@ -357,24 +443,32 @@ async function migrarPorFecha(f, src, ctx, tablaOrigen, tablaDestino, siempre) {
   const cd = await columnas(pool, tablaDestino);
   const cs = await columnas(src, tablaOrigen);
   const cols = ['business_id', 'branch_id', ...cs.filter((c) => cd.includes(c))];
-  const corte = await cortes(f, tablaOrigen, tablaDestino);
+  const corte = await cortes(f, tablaOrigen, tablaDestino, src);
   console.log(`  cortes de ${tablaOrigen}:`, Object.fromEntries(corte));
   const cuenta = { leidas: 0, entran: 0, salteadas: 0, sinLugar: 0 };
+  const faltantes = nuevoFaltantes();
   for await (const filas of tandas(src, tablaOrigen, 'rowId')) {
     cuenta.leidas += filas.length;
     const entran = [];
+    const salteadas = [];
     for (const r of filas) {
       const l = f.pdv[r.puntoDeVentaId];
       if (!l) { cuenta.sinLugar += 1; continue; }
-      if (!(siempre?.(r)) && !esHistoria(corte.get(String(idLugar(l))), r.fecha)) { cuenta.salteadas += 1; continue; }
+      if (!(siempre?.(r)) && !esHistoria(corte.get(String(idLugar(l))), r.fecha)) {
+        cuenta.salteadas += 1;
+        if (r.fecha != null) salteadas.push({ biz: l.businessId, branch: l.branchId, r });
+        continue;
+      }
       entran.push({
         ...sin(r, 'localId', 'puntoDeVentaId'), ...mapaLugar(l),
         ...('proveedorId' in r ? { proveedorId: r.proveedorId != null ? (ctx.proveedor.get(String(r.proveedorId)) ?? null) : null } : {}),
       });
     }
+    await anotarFaltantes(faltantes, tablaDestino, salteadas);
     cuenta.entran += await insertar(tablaDestino, cols, entran, 'ON CONFLICT (business_id, "rowId") DO NOTHING');
   }
   anotar(f.nombre, tablaOrigen, cuenta);
+  informarFaltantes(faltantes, tablaOrigen);
 }
 
 // ── Tablas chicas por lugar ──
@@ -585,7 +679,7 @@ async function migrarAperturas(f, src, ctx) {
       const hay = await yaExisten('gestion_compras', biz, [...new Set(lista.map((d) => d.compraRowId))]);
       const entran = [];
       for (const d of lista) {
-        if (!hay.has(d.compraRowId)) { cuenta.compraSinFila += 1; continue; }
+        if (!hay.has(d.compraRowId) && !ctx.comprasQueEntran?.get(biz)?.has(d.compraRowId)) { cuenta.compraSinFila += 1; continue; }
         const reglaId = mapaR.get(String(d.reglaId));
         const destinoId = mapaD.get(String(d.destinoId));
         if (APLICAR && (!reglaId || !destinoId)) { cuenta.sinRegla += 1; continue; }
