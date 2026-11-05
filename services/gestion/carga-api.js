@@ -539,16 +539,54 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
 
 // Alta de un proveedor propio (negocios sin MaxiRest, o uno nuevo que todavía no está en el maestro).
 // Código "L" + número: no choca con los de MaxiRest, que son numéricos.
+const opc = (n) => z.string().trim().max(n).optional().nullable().transform((v) => (v ? v : null));
 const proveedorSchema = z.object({
   nombre: z.string().trim().min(1, 'Poné un nombre').max(120),
-  razon: z.string().trim().max(120).optional().nullable(),
-  cuit: z.string().trim().max(20).optional().nullable(),
+  razon: opc(120),
+  cuit: opc(20),
+  telefono: opc(60),
+  direccion: opc(160),
 });
+// Ficha del proveedor (Diego 05/11/2026: desde la factura se abre y se modifica). Los de MaxiRest
+// quedan marcados "editadoEnLazarillo": la reimportación ya no pisa estos campos.
+const fichaSchema = z.object({
+  nombre: z.string().trim().min(1, 'Poné un nombre').max(120),
+  razon: opc(120), cuit: opc(20), telefono: opc(60), celular: opc(60), email: opc(120),
+  direccion: opc(160), localidad: opc(80), contacto: opc(120), cbu: opc(40), aliasCbu: opc(60),
+});
+const CAMPOS_FICHA = ['nombre', 'razon', 'cuit', 'telefono', 'celular', 'email', 'direccion', 'localidad', 'contacto', 'cbu', 'aliasCbu'];
+
+async function obtenerProveedor({ organizationId, id }) {
+  const p = await db.one(sql`
+    SELECT id, codigo, nombre, razon, cuit, telefono, celular, email, direccion, localidad, contacto, cbu, "aliasCbu",
+           "editadoEnLazarillo", (codigo !~ '^L[0-9]+$') AS "deMaxirest"
+    FROM gestion_proveedores WHERE organization_id = ${organizationId} AND id = ${id}`);
+  if (!p) throw rechazo('Proveedor no encontrado', 404);
+  return p;
+}
+
+async function editarProveedor({ organizationId, id, body }) {
+  const parsed = fichaSchema.safeParse(body);
+  if (!parsed.success) throw rechazo(parsed.error.issues[0]?.message ?? 'Datos inválidos', 422);
+  const d = parsed.data;
+  return db.transaction(async (tx) => {
+    const igual = await tx.one(sql`SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND id <> ${id} AND LOWER(TRIM(nombre)) = LOWER(${d.nombre})`);
+    if (igual) throw rechazo(`Ya existe otro proveedor "${d.nombre}".`, 409);
+    const sets = CAMPOS_FICHA.map((c) => sql`${sql.raw(`"${c}"`)} = ${d[c] ?? null}`);
+    const r = await tx.one(sql`
+      UPDATE gestion_proveedores SET ${sql.join(sets, ', ')},
+        "editadoEnLazarillo" = (codigo !~ '^L[0-9]+$')
+      WHERE organization_id = ${organizationId} AND id = ${id}
+      RETURNING id, codigo, nombre, razon, cuit`);
+    if (!r) throw rechazo('Proveedor no encontrado', 404);
+    return r;
+  });
+}
 
 async function crearProveedor({ organizationId, body }) {
   const parsed = proveedorSchema.safeParse(body);
   if (!parsed.success) throw rechazo(parsed.error.issues[0]?.message ?? 'Datos inválidos', 422);
-  const { nombre, razon, cuit } = parsed.data;
+  const { nombre, razon, cuit, telefono, direccion } = parsed.data;
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`proveedores:${organizationId}`}))`);
     const igual = await tx.one(sql`SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND LOWER(TRIM(nombre)) = LOWER(${nombre})`);
@@ -556,8 +594,8 @@ async function crearProveedor({ organizationId, body }) {
     const mayor = await tx.one(sql`SELECT MAX(SUBSTRING(codigo FROM 2)::int) AS n FROM gestion_proveedores WHERE organization_id = ${organizationId} AND codigo ~ '^L[0-9]+$'`);
     const codigo = `L${(mayor?.n ?? 0) + 1}`;
     return tx.one(sql`
-      INSERT INTO gestion_proveedores (organization_id, codigo, nombre, razon, cuit)
-      VALUES (${organizationId}, ${codigo}, ${nombre}, ${razon || nombre}, ${cuit || null})
+      INSERT INTO gestion_proveedores (organization_id, codigo, nombre, razon, cuit, telefono, direccion)
+      VALUES (${organizationId}, ${codigo}, ${nombre}, ${razon || nombre}, ${cuit || null}, ${telefono || null}, ${direccion || null})
       RETURNING id, codigo, nombre, razon, cuit`);
   });
 }
@@ -867,7 +905,7 @@ async function borrarMedio({ businessId, id }) {
 
 module.exports = {
   idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
-  crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor,
+  crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor, obtenerProveedor, editarProveedor,
   crearGastoVario, obtenerVentasManuales, crearVentasManuales, borrarVentasManuales,
   obtenerConceptos, crearConcepto, editarConcepto, borrarConcepto,
   obtenerMedios, crearMedio, editarMedio, borrarMedio,
