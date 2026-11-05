@@ -26,6 +26,7 @@ function reshapeDetalle(r) {
     pagoRef: r.pagoRef,
     fechaGasto: r.fechaGasto,
     fechaPago: r.fechaPago,
+    fechaPagoManual: r.fechaPagoManual ?? null,
     cajaPago: r.cajaPago,
     conceptoCodigoManual: r.conceptoCodigoManual,
     concepto: r.concepto,

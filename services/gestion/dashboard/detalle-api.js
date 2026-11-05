@@ -55,7 +55,8 @@ const detalleSelectJoin = (fuente, organizationId) => sql`
     COALESCE(c."importeManual", c.importe) AS "importeVista",
     c."pagoRef",
     COALESCE(cb."fechaManual", cb.periodo, cb.fecha) AS "fechaGasto",
-    COALESCE(CASE WHEN c."pagoRef" IS NOT NULL THEN c.fecha END, cb."fechaPago") AS "fechaPago",
+    COALESCE(CASE WHEN c."pagoRef" IS NOT NULL THEN c.fecha END, cb."fechaPagoManual", cb."fechaPago") AS "fechaPago",
+    cb."fechaPagoManual",
     cb."cajaPago",
     c."conceptoCodigoManual",
     c.concepto,
@@ -175,7 +176,10 @@ async function estadosDePago(organizationId, filas) {
         WHERE c.business_id = k.biz AND c.branch_id IS NOT DISTINCT FROM k.suc AND c.comprobante = k.cpb AND c.codigo = k.cod) AS total14,
       (SELECT MAX(p.total)::float8 FROM gestion_pagos p
         WHERE p.business_id = k.biz AND p.branch_id IS NOT DISTINCT FROM k.suc AND p.comprobante = k.cpb AND p."codPro" = k.cod) AS total80,
-      (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(p."fechaPago", 'YYYY-MM-DD'), 'importe', p.importe::float8)) FROM gestion_pagos p
+      -- rowId / original / manual: para corregir la fecha de cada pago desde el detalle.
+      (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(COALESCE(p."fechaPagoManual", p."fechaPago"), 'YYYY-MM-DD'), 'importe', p.importe::float8,
+          'rowId', p."rowId", 'negocio', p.business_id, 'original', TO_CHAR(p."fechaPago", 'YYYY-MM-DD'), 'manual', p."fechaPagoManual" IS NOT NULL)
+          ORDER BY COALESCE(p."fechaPagoManual", p."fechaPago"), p.secuencia) FROM gestion_pagos p
         WHERE p.business_id = k.biz AND p.branch_id IS NOT DISTINCT FROM k.suc AND p.comprobante = k.cpb AND p."codPro" = k.cod AND p.importe IS NOT NULL) AS p80,
       (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(pp.fecha, 'YYYY-MM-DD'), 'importe', a.importe::float8))
         FROM gestion_aplicaciones_pago_proveedor a JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
@@ -196,7 +200,7 @@ async function estadosDePago(organizationId, filas) {
     const iso = unicas.get(k);
     const fecha = (iso?.fechaManual ?? iso?.fecha)?.toISOString?.().slice(0, 10) ?? null;
     const e = estadoPago({ comprobante: r.cpb, fecha, total, pagado: comb.pagado, pagoAutomatico: !!r.auto }, desde);
-    if (e) res.set(k, { estado: e, total, pagado: comb.pagado, ultimoPago: ultimo, pagos: vigentes.length });
+    if (e) res.set(k, { estado: e, total, pagado: comb.pagado, ultimoPago: ultimo, pagos: vigentes.length, pagos80: p80 });
   }
   return res;
 }
@@ -245,7 +249,7 @@ async function obtenerDetalleCompras({ organizationId, businessId, sucursal, sp 
         COALESCE(c."importeManual", c.importe) AS "importeVista",
         NULL::text AS "pagoRef",
         COALESCE(c."fechaManual", c.fecha) AS "fechaGasto",
-        c."fechaPago", c."cajaPago", c."conceptoCodigoManual", c.concepto, c.detalle, c.observac, c."observacManual",
+        COALESCE(c."fechaPagoManual", c."fechaPago") AS "fechaPago", c."fechaPagoManual", c."cajaPago", c."conceptoCodigoManual", c.concepto, c.detalle, c.observac, c."observacManual",
         c.proveedor AS "proveedorTexto",
         p.id AS "proveedorId", p.nombre AS "proveedorNombre", p.razon AS "proveedorRazon",
         neg.name AS "localNombre", COALESCE(br.name, 'Principal') AS "pdvNombre",
@@ -372,6 +376,8 @@ async function obtenerCompraLineas({ businessId, compraId }) {
 
 const patchCompra = z.object({
   importeManual: z.number().nullable().optional(),
+  // Fecha de pago corregida a mano (gastos varios / sueldos). null = volver a la del informe.
+  fechaPagoManual: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   fechaManual: z.string().datetime({ offset: true }).nullable().optional(),
   conceptoCodigoManual: z.string().max(50).nullable().optional(),
   observacManual: z.string().max(500).nullable().optional().transform((v) => (v === "" ? null : v)),
@@ -381,7 +387,7 @@ const patchCompra = z.object({
 async function editarCompra({ organizationId, businessId, rowId, body }) {
   const parsed = patchCompra.safeParse(body);
   if (!parsed.success) { const e = new ErrorDatos("Datos inválidos"); e.status = 422; throw e; }
-  const { importeManual, fechaManual, conceptoCodigoManual, observacManual } = parsed.data;
+  const { importeManual, fechaManual, conceptoCodigoManual, observacManual, fechaPagoManual } = parsed.data;
 
   return db.transaction(async (tx) => {
     const compra = await tx.one(sql`
@@ -400,6 +406,7 @@ async function editarCompra({ organizationId, businessId, rowId, body }) {
     if (fechaManual !== undefined) sets.push(sql`"fechaManual" = ${fechaManual}::timestamptz AT TIME ZONE 'UTC'`);
     if (conceptoCodigoManual !== undefined) sets.push(sql`"conceptoCodigoManual" = ${conceptoCodigoManual}`);
     if (observacManual !== undefined) sets.push(sql`"observacManual" = ${observacManual}`);
+    if (fechaPagoManual !== undefined) sets.push(sql`"fechaPagoManual" = ${fechaPagoManual}::timestamp(3)`);
     // Si una persona cambia el concepto, deja de ser el "concepto fijo del empleado".
     if (conceptoCodigoManual !== undefined && conceptoCodigoManual !== compra.conceptoCodigoManual) sets.push(sql`"conceptoPorRegla" = NULL`);
     if (!sets.length) return { rowId, reevaluada: false, distribuidaAhora: false };
@@ -407,12 +414,32 @@ async function editarCompra({ organizationId, businessId, rowId, body }) {
     const updated = await tx.one(sql`
       UPDATE gestion_compras SET ${sql.join(sets, ", ")}
       WHERE business_id = ${businessId} AND "rowId" = ${rowId}
-      RETURNING "rowId", "importeManual", "fechaManual", "conceptoCodigoManual", "observacManual"`);
+      RETURNING "rowId", "importeManual", "fechaManual", "conceptoCodigoManual", "observacManual", "fechaPagoManual"`);
     const reeval = afectaReparto
       ? await reevaluarCompra(tx, { organizationId, businessId }, rowId)
       : { reevaluada: false, distribuidaAhora: false };
     return { ...updated, ...reeval };
   });
+}
+
+// PATCH de un pago del informe 80 (Diego 05/11/2026): corrige su fecha de pago aunque venga
+// de MaxiRest. Se guarda aparte ("fechaPagoManual"): la reimportación no la pisa y con null
+// vuelve la del informe. Solo pagos del negocio activo o de un negocio de su organización.
+const patchPago = z.object({
+  fechaPagoManual: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+});
+async function editarPago({ organizationId, businessId, rowId, body }) {
+  const parsed = patchPago.safeParse(body);
+  const negocio = Number(body?.negocio ?? businessId);
+  if (!parsed.success || !Number.isInteger(negocio)) { const e = new ErrorDatos("Datos inválidos"); e.status = 422; throw e; }
+  const updated = await db.one(sql`
+    UPDATE gestion_pagos g SET "fechaPagoManual" = ${parsed.data.fechaPagoManual}::timestamp(3)
+    FROM app_businesses b
+    WHERE g.business_id = ${negocio} AND g."rowId" = ${rowId}
+      AND b.id = g.business_id AND (b.id = ${businessId} OR b.organization_id = ${organizationId})
+    RETURNING g."rowId", g."fechaPagoManual"`);
+  if (!updated) { const e = new ErrorDatos("Pago no encontrado"); e.status = 404; throw e; }
+  return updated;
 }
 
 // PATCH de una venta del negocio activo: solo el importe manual.
@@ -444,4 +471,4 @@ async function obtenerConceptosEdicion({ organizationId }) {
   return { rubros, conceptos };
 }
 
-module.exports = { obtenerConceptosEdicion, buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarVenta };
+module.exports = { obtenerConceptosEdicion, buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarPago, editarVenta };
