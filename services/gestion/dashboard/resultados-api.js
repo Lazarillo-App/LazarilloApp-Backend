@@ -373,7 +373,10 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
       WITH comp AS (SELECT DISTINCT v."rowId" FROM gestion_v_compras_distribuidas v WHERE ${lugar} AND ${rango}),
       l AS (
         SELECT ${mesDe(fFactura)} AS m, d.codigo || '|' || COALESCE(UPPER(TRIM(d.medida)), '') AS k,
-               SUM(d.cantidad) AS q, SUM(d.neto) AS val
+               -- "neto" del 25 es el precio UNITARIO: el valor del renglón es totalIns (o neto × cantidad).
+               -- Antes se sumaba neto como si fuera el total: el "precio" bajaba cuando se compraba más
+               -- cantidad (Comercio oct-26: -11,6% a 3 meses en vez de +2,1%). Diego 05/11/2026.
+               SUM(d.cantidad) AS q, SUM(COALESCE(d."totalIns", d.neto * d.cantidad)) AS val
         FROM gestion_detalle_compras d
         JOIN gestion_compras c ON c."rowId" = d."compraId"
         JOIN comp ON comp."rowId" = c."rowId"
