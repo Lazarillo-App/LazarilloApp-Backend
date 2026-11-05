@@ -89,23 +89,24 @@ async function normalizeProveedores(
             "diasVenc", iva, "ivaDif", email, observac, "detPerc"
           )
           VALUES ${sql.join(values)}
+          -- Lo editado en la ficha desde Lazarillo ("editadoEnLazarillo") no lo pisa MaxiRest (Diego 05/11/2026).
           ON CONFLICT (organization_id, codigo) DO UPDATE SET
-            nombre     = EXCLUDED.nombre,
-            razon      = EXCLUDED.razon,
-            direccion  = EXCLUDED.direccion,
-            localidad  = EXCLUDED.localidad,
-            contacto   = EXCLUDED.contacto,
-            telefono   = EXCLUDED.telefono,
+            nombre     = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.nombre ELSE EXCLUDED.nombre END,
+            razon      = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.razon ELSE EXCLUDED.razon END,
+            direccion  = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.direccion ELSE EXCLUDED.direccion END,
+            localidad  = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.localidad ELSE EXCLUDED.localidad END,
+            contacto   = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.contacto ELSE EXCLUDED.contacto END,
+            telefono   = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.telefono ELSE EXCLUDED.telefono END,
             fax        = EXCLUDED.fax,
-            celular    = EXCLUDED.celular,
+            celular    = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.celular ELSE EXCLUDED.celular END,
             "tipoIva"  = EXCLUDED."tipoIva",
-            cuit       = EXCLUDED.cuit,
-            cbu        = EXCLUDED.cbu,
-            "aliasCbu" = EXCLUDED."aliasCbu",
+            cuit       = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.cuit ELSE EXCLUDED.cuit END,
+            cbu        = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.cbu ELSE EXCLUDED.cbu END,
+            "aliasCbu" = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores."aliasCbu" ELSE EXCLUDED."aliasCbu" END,
             "diasVenc" = EXCLUDED."diasVenc",
             iva        = EXCLUDED.iva,
             "ivaDif"   = EXCLUDED."ivaDif",
-            email      = EXCLUDED.email,
+            email      = CASE WHEN gestion_proveedores."editadoEnLazarillo" THEN gestion_proveedores.email ELSE EXCLUDED.email END,
             observac   = EXCLUDED.observac,
             "detPerc"  = EXCLUDED."detPerc"
         `;
