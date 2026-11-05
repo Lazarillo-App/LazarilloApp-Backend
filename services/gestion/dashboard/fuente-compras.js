@@ -6,6 +6,10 @@ const { impagasDesde } = require('../impagas/query');
 
 // Switch Económica / Financiera del panel (punto 4 de Etapa 3, Diego 26/10/2026).
 //
+// Fecha de pago corregida a mano (Diego 05/11/2026): "fechaPagoManual" de gestion_pagos
+// (pagos del 80) manda sobre la del informe; la de gestion_compras (gastos varios y
+// sueldos) ya viene resuelta en la vista. La reimportación no la pisa.
+//
 // Las consultas del panel leen las compras de `v_compras_distribuidas` y ubican
 // cada fila en el mes de COALESCE(fechaManual, fecha). Esta función devuelve la
 // fuente a usar en lugar de la vista, con las MISMAS columnas (+ "pagoRef"), y
@@ -79,11 +83,11 @@ function fuenteCompras(modo, desde = impagasDesde(null, process.env.IMPAGAS_DESD
             WHERE x.business_id = b.biz_compra AND x.branch_id IS NOT DISTINCT FROM b.suc_compra AND x.comprobante = b.comp AND x.codigo = b.codigo
           ), 0))  AS importe,
       NULL::numeric AS "importeManual",
-      pg."fechaPago" AS fecha, NULL::timestamp(3) AS "fechaManual",
+      COALESCE(pg."fechaPagoManual", pg."fechaPago")::timestamp(3) AS fecha, NULL::timestamp(3) AS "fechaManual",
       pg."rowId" AS "pagoRef"
     FROM base b
     JOIN gestion_pagos pg ON pg.business_id = b.biz_compra AND pg.branch_id IS NOT DISTINCT FROM b.suc_compra AND pg.comprobante = b.comp AND pg."codPro" = b.codigo
-      AND pg."fechaPago" IS NOT NULL AND pg.importe IS NOT NULL
+      AND COALESCE(pg."fechaPagoManual", pg."fechaPago") IS NOT NULL AND pg.importe IS NOT NULL
     WHERE NOT b.es_gv
     UNION ALL
     -- Pagos cargados en Lazarillo (Etapa 4): una fila por imputación, por la parte que
@@ -107,7 +111,7 @@ function fuenteCompras(modo, desde = impagasDesde(null, process.env.IMPAGAS_DESD
       AND NOT EXISTS (
         SELECT 1 FROM gestion_pagos pg
         WHERE pg.business_id = b.biz_compra AND pg.branch_id IS NOT DISTINCT FROM b.suc_compra AND pg.comprobante = b.comp AND pg."codPro" = b.codigo
-          AND pg."fechaPago" IS NOT NULL AND ABS(pg.importe - a.importe) <= 1 AND ABS(pg."fechaPago"::date - pp.fecha) <= 10
+          AND COALESCE(pg."fechaPagoManual", pg."fechaPago") IS NOT NULL AND ABS(pg.importe - a.importe) <= 1 AND ABS(COALESCE(pg."fechaPagoManual", pg."fechaPago")::date - pp.fecha) <= 10
       )
     UNION ALL
     -- Sin pagos en el 80 ni en Lazarillo pero cuentan en su fecha (NC, pago automático, antes de la cobertura).
@@ -120,7 +124,7 @@ function fuenteCompras(modo, desde = impagasDesde(null, process.env.IMPAGAS_DESD
       AND NOT EXISTS (
         SELECT 1 FROM gestion_pagos pg
         WHERE pg.business_id = b.biz_compra AND pg.branch_id IS NOT DISTINCT FROM b.suc_compra AND pg.comprobante = b.comp AND pg."codPro" = b.codigo
-          AND pg."fechaPago" IS NOT NULL AND pg.importe IS NOT NULL
+          AND COALESCE(pg."fechaPagoManual", pg."fechaPago") IS NOT NULL AND pg.importe IS NOT NULL
       )
       AND NOT EXISTS (
         SELECT 1 FROM gestion_aplicaciones_pago_proveedor a JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL

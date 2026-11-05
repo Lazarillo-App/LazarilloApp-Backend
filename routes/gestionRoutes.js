@@ -127,6 +127,8 @@ router.get('/dashboard/compra-lineas/:compraId', responder((req) =>
   detalle.obtenerCompraLineas({ ...req.gestion, compraId: req.params.compraId })));
 router.patch('/dashboard/compras/:rowId', responder((req) =>
   detalle.editarCompra({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
+router.patch('/dashboard/pagos/:rowId', responder((req) =>
+  detalle.editarPago({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 router.patch('/dashboard/ventas/:rowId', responder((req) =>
   detalle.editarVenta({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 

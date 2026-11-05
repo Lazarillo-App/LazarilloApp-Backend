@@ -16,7 +16,7 @@ describe("switch Económica / Financiera", () => {
   it("Financiera: gastos varios por fecha de pago, facturas una fila por pago del 80", () => {
     const q = fuenteCompras("financiera", "2025-09-01");
     expect(q.sql).toContain('COALESCE(b.fpago, b."fechaManual", b.fecha) AS fecha');
-    expect(q.sql).toContain('pg."fechaPago" AS fecha');
+    expect(q.sql).toContain('COALESCE(pg."fechaPagoManual", pg."fechaPago")::timestamp(3) AS fecha');
     expect(q.sql).toContain("JOIN gestion_pagos pg");
     expect(q.sql).toContain("NOT MATERIALIZED");
     expect(q.values).toContain("2025-09-01");

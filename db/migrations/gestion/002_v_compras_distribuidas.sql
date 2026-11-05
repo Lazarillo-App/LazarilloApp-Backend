@@ -8,6 +8,8 @@
 --
 -- En gestion: localId/puntoDeVentaId = destino, localIdOrigen/puntoDeVentaIdOrigen = origen.
 -- Se aplica con: node db/scripts/aplicar-sql-gestion.js 002_v_compras_distribuidas.sql [--aplicar]
+-- fechaPago: la corregida a mano ("fechaPagoManual", Diego 05/11/2026) manda sobre la del informe.
+-- La columna la agrega db/migrations/live/067_gestion_fecha_pago_manual.sql (que también reaplica esta vista).
 
 CREATE OR REPLACE VIEW gestion_v_compras_distribuidas AS
 SELECT c."rowId",
@@ -31,7 +33,7 @@ SELECT c."rowId",
        c.codigo,
        c.periodo,
        c.comprobante,
-       c."fechaPago"
+       COALESCE(c."fechaPagoManual", c."fechaPago")::timestamp(3) AS "fechaPago"
   FROM gestion_compras c
  WHERE c."esDistribuido" = false
 UNION ALL
@@ -56,7 +58,7 @@ SELECT c."rowId",
        c.codigo,
        c.periodo,
        c.comprobante,
-       c."fechaPago"
+       COALESCE(c."fechaPagoManual", c."fechaPago")::timestamp(3) AS "fechaPago"
   FROM gestion_distribuciones_apertura d
   JOIN gestion_compras c ON c.business_id = d.compra_business_id AND c."rowId" = d."compraRowId"
   JOIN gestion_destinos_regla dr ON dr.id = d."destinoId"
