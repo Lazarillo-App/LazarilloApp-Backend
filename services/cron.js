@@ -130,7 +130,9 @@ function gestionCronHabilitado() {
   const forzado = process.env.GESTION_CRON;
   if (forzado === '1' || forzado === '0') return forzado === '1';
   const servicio = process.env.GESTION_CRON_SERVICE || 'LazarilloApp-Backend';
-  return process.env.RENDER_SERVICE_NAME === servicio;
+  // Render puede tener el nombre con otras mayúsculas: no apagar la ingesta por eso.
+  const nombre = (process.env.RENDER_SERVICE_NAME || '').trim().toLowerCase();
+  return nombre === servicio.trim().toLowerCase();
 }
 
 function startGestionCron() {

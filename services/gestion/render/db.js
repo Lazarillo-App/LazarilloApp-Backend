@@ -29,6 +29,8 @@ function ident(nombre) {
 
 async function conRender (fn) {
   const cliente = await pool.connect();
+  const alCaer = (err) => console.error('[render/db] se cayó la conexión', err.message);
+  cliente.on('error', alCaer);
   // Mismo cliente, pero cada consulta con los parsers de arriba (sin tocar los
   // globales de pg que usa el resto del Backend).
   const c = { query: (text, values) => cliente.query({ text, values, types: parsers }) };
@@ -42,6 +44,7 @@ async function conRender (fn) {
     await cliente.query("ROLLBACK").catch((err) => console.error("[render] rollback", err));
     throw e;
   } finally {
+    cliente.removeListener('error', alCaer);
     cliente.release();
   }
 }

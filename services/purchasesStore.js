@@ -46,15 +46,53 @@ function generateBatchId() {
   return `${date}-${time}-${rand}`;
 }
 
-async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = null) {
-  const effectiveBatchId = generateBatchId();
+// Clave de una factura cargada en el Panel: "A-2-69930~<proveedor>", y "~<fecha>" en tickets, cuyo
+// número se repite. purchases es único por negocio + clave, sin proveedor: con la clave pelada, la
+// factura de otro proveedor con el mismo número pisaría a esta. Las lecturas muestran hasta el "~".
+function facturaKeyPanel({ letra, prefijo, numero, codigo, fecha }) {
+  const tipo = String(letra).toUpperCase().replace(/^NC[ABC]?$/, 'NC');
+  const base = `${tipo}-${Number(prefijo)}-${Number(numero)}~${codigo}`;
+  return tipo === 'Z' ? `${base}~${String(fecha).slice(0, 10)}` : base;
+}
 
-  if (!facturas?.length) return { inserted: 0, updated: 0, items: 0, batch_id: effectiveBatchId };
+// Recalcula precio_ref según el modo de costeo y propaga a las recetas. Las compras se leen de
+// businessId; los insumos pueden vivir en otro negocio (insumosBizId, el principal de la org).
+async function actualizarPreciosDeInsumos(client, { businessId, insumosBizId = businessId, insumoIds }) {
+  const modoCosteo = await getModoCosteo(insumosBizId, client);
+  const precios = await calcularPreciosPorModo(client, businessId, insumoIds, modoCosteo);
+  if (!precios) return 0;
+  const idsActualizados = await aplicarPreciosCosteo(client, insumosBizId, precios);
+  // El precio del insumo cambió: propagar en cascada a las recetas que lo usan
+  // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total quedaba
+  // congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
+  for (const insumoId of idsActualizados) {
+    await propagarCostoInsumo(insumoId, insumosBizId, client);
+    if (Number(insumosBizId) !== Number(businessId)) await propagarCostoInsumo(insumoId, businessId, client);
+  }
+  return idsActualizados.length;
+}
+
+async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = null) {
+  if (!facturas?.length) return { inserted: 0, updated: 0, items: 0, batch_id: generateBatchId() };
   const client = await pool.connect();
-  let inserted = 0, updated = 0, totalItems = 0;
   try {
     await client.query('BEGIN');
+    const r = await upsertPurchasesEnCliente(client, businessId, facturas, insumoMap, branchId);
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
 
+// Lo mismo dentro de una transacción ajena. source e insumosBizId solo los pasa la carga del Panel.
+async function upsertPurchasesEnCliente(client, businessId, facturas, insumoMap, branchId = null, { source = null, insumosBizId = businessId } = {}) {
+  const effectiveBatchId = generateBatchId();
+  let inserted = 0, updated = 0, totalItems = 0;
+  {
     // Candidatos a insumo_id de todo el batch, para pedir de una sola vez la
     // mediana histórica de cada uno (ver filtro de precio sospechoso abajo).
     const idsCandidatos = new Set();
@@ -93,9 +131,9 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
         `INSERT INTO purchases
            (business_id, factura_key, proveedor_id, fecha,
             neto_total, iva_total, imp_int_total, total,
-            batch_id, branch_id,
+            batch_id, branch_id, source,
             synced_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,'maxi'),NOW(),NOW())
             ON CONFLICT (business_id, factura_key, COALESCE(branch_id, -1)) DO UPDATE SET
             proveedor_id  = EXCLUDED.proveedor_id,
             fecha         = EXCLUDED.fecha,
@@ -110,7 +148,7 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
         [businessId, facturaKey, proveedorId, fecha,
          netoTotal.toFixed(2), ivaTotal.toFixed(2),
          impIntTotal.toFixed(2), total.toFixed(2),
-         effectiveBatchId, branchId ?? null]
+         effectiveBatchId, branchId ?? null, source]
       );
 
       const purchaseId = upsertRes.rows[0].id;
@@ -120,7 +158,8 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
       // Anti-duplicado: MaxiRest manda. Si esa compra ya se había cargado a
       // mano por CSV (mismo proveedor y fecha), se quita la del CSV para que
       // no quede sumada dos veces (Comercio, 31/10/2026). Los ítems se borran
-      // en cascada.
+      // en cascada. Nunca la que se acaba de actualizar: si el CSV tenía el mismo
+      // número de factura, el upsert cayó sobre esa fila, que sigue con source='csv'.
       if (fecha) {
         await client.query(
           `DELETE FROM purchases
@@ -128,8 +167,9 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
               AND source = 'csv'
               AND proveedor_id IS NOT DISTINCT FROM $2
               AND fecha::date = $3::date
-              AND COALESCE(branch_id, -1) = COALESCE($4, -1)`,
-          [businessId, proveedorId, fecha, branchId ?? null]
+              AND COALESCE(branch_id, -1) = COALESCE($4, -1)
+              AND id <> $5`,
+          [businessId, proveedorId, fecha, branchId ?? null, purchaseId]
         );
       }
 
@@ -164,15 +204,15 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
              (purchase_id, business_id, insumo_id, fecha,
               branch_id, cantidad, neto, precio, precio_total,
               iva_tasa, iva, iva_total_item,
-              imp_int, imp_int_total, orden_compra, cpto_caja, referencia)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+              imp_int, imp_int_total, orden_compra, cpto_caja, referencia, source)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,COALESCE($18,'maxi'))`,
           [purchaseId, businessId, insumoId,
            itemFecha, it.sucursal ?? null,
            cantidadTotal, factorNeto, precioUnitario,
            it.preciotot ?? 0,
            it.iva_tasa ?? 0, it.iva ?? 0, it.iva_total ?? 0,
            it.imp_int ?? 0, it.imp_inttot ?? 0,
-           it.orden_compra ?? 0, it.cptoCaja ?? 0, it.referencia ?? '']
+           it.orden_compra ?? 0, it.cptoCaja ?? 0, it.referencia ?? '', source]
         );
         totalItems++;
 
@@ -186,27 +226,8 @@ async function upsertPurchasesBatch(businessId, facturas, insumoMap, branchId = 
     // en Configuración > Insumos (última compra / promedio 30 días / precio
     // fijo del sistema) — antes esto siempre usaba "última compra" sin mirar
     // esa configuración.
-    let preciosActualizados = 0;
-    const modoCosteo = await getModoCosteo(businessId, client);
-    const precios = await calcularPreciosPorModo(client, businessId, [...insumoIdsConCompra], modoCosteo);
-    if (precios) {
-      const idsActualizados = await aplicarPreciosCosteo(client, businessId, precios);
-      preciosActualizados = idsActualizados.length;
-      // El precio del insumo cambió: propagar en cascada a las recetas que lo usan
-      // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total quedaba
-      // congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
-      for (const insumoId of idsActualizados) {
-        await propagarCostoInsumo(insumoId, businessId, client);
-      }
-    }
-
-    await client.query('COMMIT');
-    return { inserted, updated, items: totalItems, preciosActualizados, matchesDescartados, batch_id: effectiveBatchId };
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
+    const preciosActualizados = await actualizarPreciosDeInsumos(client, { businessId, insumosBizId, insumoIds: [...insumoIdsConCompra] });
+    return { inserted, updated, items: totalItems, preciosActualizados, matchesDescartados, batch_id: effectiveBatchId, insumoIds: [...insumoIdsConCompra] };
   }
 }
 
@@ -241,4 +262,4 @@ async function upsertSuppliers(businessId, proveedores) {
   }
 }
 
-module.exports = { upsertPurchasesBatch, upsertSuppliers, generateBatchId };
+module.exports = { upsertPurchasesBatch, upsertPurchasesEnCliente, actualizarPreciosDeInsumos, facturaKeyPanel, upsertSuppliers, generateBatchId };

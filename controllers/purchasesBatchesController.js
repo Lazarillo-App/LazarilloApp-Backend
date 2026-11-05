@@ -101,7 +101,7 @@ exports.previewBatch = async (req, res, next) => {
      TO_CHAR(p.fecha, 'DD/MM/YYYY')                        AS "Fecha",
      COALESCE(ab.name, biz.name, '—')                      AS "Sucursal",
      COALESCE(s.nombre, s.razon_social, '—')               AS "Proveedor",
-     COALESCE(p.factura_key, '—')                          AS "Factura",
+     COALESCE(split_part(p.factura_key, '~', 1), '—')      AS "Factura",
      COALESCE(pi.referencia, '—')                          AS "Insumo",
      pi.cantidad                                            AS "Cantidad",
      pi.precio                                              AS "Precio Unit.",

@@ -275,7 +275,8 @@ exports.crearPromocion = async (req, res, next) => {
 /**
  * PUT /api/businesses/:businessId/promociones/:promoId
  * Actualiza una promo existente: reemplaza items, recalcula costo,
- * actualiza nombre/objetivo. El promoId es el id negativo del artículo-promo.
+ * actualiza nombre/objetivo. El promoId es el id del artículo: negativo si la promo se creó acá,
+ * positivo si es un artículo de MaxiRest que vive en la agrupación "Promociones".
  */
 exports.actualizarPromocion = async (req, res, next) => {
   const bizId = Number(req.params.businessId);
@@ -304,18 +305,36 @@ exports.actualizarPromocion = async (req, res, next) => {
     await client.query('BEGIN');
     const storageBizId = await resolveStorageBizId(bizId);
 
-    // Verificar que la promo existe y es promo
+    // La pantalla trata como promo a todo artículo de la agrupación "Promociones", incluso uno de
+    // MaxiRest que todavía no tiene receta de promo. Por eso, si el artículo existe, su primera
+    // edición la deja armada: reutiliza la receta que tenga o crea una. Solo un artículo que no
+    // existe responde 404.
     const { rows: recExist } = await client.query(
-      `SELECT id FROM recetas
-        WHERE article_id = $1 AND business_id = $2 AND es_promo = TRUE AND active = TRUE
+      `SELECT id, es_promo, active FROM recetas
+        WHERE article_id = $1 AND business_id = $2
+        ORDER BY active DESC, es_promo DESC, id DESC
         LIMIT 1`,
       [promoId, storageBizId]
     );
-    if (!recExist.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, error: 'Promoción no encontrada' });
+    let recetaId = recExist[0]?.id ?? null;
+    if (recetaId && !(recExist[0].es_promo && recExist[0].active)) {
+      await client.query(`UPDATE recetas SET es_promo = TRUE, active = TRUE, updated_at = NOW() WHERE id = $1`, [recetaId]);
+    } else if (!recetaId) {
+      const articulo = await resolveArticuloInfo(client, storageBizId, promoId);
+      if (!articulo) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ ok: false, error: 'Promoción no encontrada' });
+      }
+      const { rows: nueva } = await client.query(
+        `INSERT INTO recetas
+           (article_id, business_id, nombre, porciones, porcentaje_venta,
+            costo_total, es_promo, active, origen, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, 1, $4, 0, TRUE, TRUE, 'promo', $5, NOW(), NOW())
+         RETURNING id`,
+        [promoId, storageBizId, (nombreManual && nombreManual.trim()) || articulo.nombre, Number(porcentajeVenta) || 0, req.user?.id || null]
+      );
+      recetaId = nueva[0].id;
     }
-    const recetaId = recExist[0].id;
 
     // 1. Resolver info de cada componente
     const compInfos = [];
@@ -389,16 +408,24 @@ exports.actualizarPromocion = async (req, res, next) => {
       [nombrePromo, Number(porcentajeVenta) || 0, Math.round(costoTotal * 10000) / 10000, recetaId]
     );
 
-    // 6. Actualizar app_articles + maxi_articles (nombre, costo, rubro)
-    await client.query(
-      `UPDATE app_articles SET name = $1, rubro = $2, subrubro = $3, updated_at = NOW() WHERE id = $4 AND business_id = $5`,
-      [nombrePromo, rubroCategoria, rubroSubrubro, promoId, storageBizId]
-    );
-    await client.query(
-      `UPDATE maxi_articles SET nombre = $1, categoria = $2, subrubro = $3, costo = $4, updated_at = NOW()
-        WHERE articulo_id = $5 AND business_id = $6`,
-      [nombrePromo, rubroCategoria, rubroSubrubro, Math.round(costoTotal * 100) / 100, promoId, storageBizId]
-    );
+    // 6. Actualizar el artículo. La promo creada acá (id negativo) toma nombre y rubro de lo que lleva;
+    // la que es un artículo de MaxiRest (id positivo) conserva los suyos y solo actualiza el costo.
+    if (promoId < 0) {
+      await client.query(
+        `UPDATE app_articles SET name = $1, rubro = $2, subrubro = $3, updated_at = NOW() WHERE id = $4 AND business_id = $5`,
+        [nombrePromo, rubroCategoria, rubroSubrubro, promoId, storageBizId]
+      );
+      await client.query(
+        `UPDATE maxi_articles SET nombre = $1, categoria = $2, subrubro = $3, costo = $4, updated_at = NOW()
+          WHERE articulo_id = $5 AND business_id = $6`,
+        [nombrePromo, rubroCategoria, rubroSubrubro, Math.round(costoTotal * 100) / 100, promoId, storageBizId]
+      );
+    } else {
+      await client.query(
+        `UPDATE maxi_articles SET costo = $1, updated_at = NOW() WHERE articulo_id = $2 AND business_id = $3`,
+        [Math.round(costoTotal * 100) / 100, promoId, storageBizId]
+      );
+    }
 
     // 7. Objetivo % en price_config
     const pctPromo = Number(porcentajeVenta) || 0;

@@ -79,7 +79,17 @@ function matchers(real, negado) {
     },
     toBeCloseTo: (n, digitos = 2) => chequear(Math.abs(real - n) < 10 ** -digitos / 2, `${real} toBeCloseTo ${n}`),
     toContain: (x) => chequear(real != null && (typeof real === 'string' ? real.includes(x) : [...real].some((v) => Object.is(v, x))), `${inspeccionar(real)} toContain ${inspeccionar(x)}`),
+    toBeGreaterThan: (n) => chequear(real > n, `${real} toBeGreaterThan ${n}`),
+    toBeGreaterThanOrEqual: (n) => chequear(real >= n, `${real} toBeGreaterThanOrEqual ${n}`),
+    toBeLessThan: (n) => chequear(real < n, `${real} toBeLessThan ${n}`),
+    toBeLessThanOrEqual: (n) => chequear(real <= n, `${real} toBeLessThanOrEqual ${n}`),
     toBeNull: () => chequear(real === null, `${inspeccionar(real)} toBeNull`),
+    toThrow: (msg) => {
+      let error = null;
+      try { real(); } catch (e) { error = e; }
+      chequear(error !== null, 'se esperaba que lanzara un error');
+      if (msg !== undefined && error) chequear(msg instanceof RegExp ? msg.test(error.message) : error.message.includes(msg), `mensaje inesperado: ${error.message}`);
+    },
     toBeUndefined: () => chequear(real === undefined, `${inspeccionar(real)} toBeUndefined`),
     toBeInstanceOf: (clase) => chequear(real instanceof clase, `${inspeccionar(real)} toBeInstanceOf ${clase.name}`),
     toHaveLength: (n) => chequear(real != null && real.length === n, `largo ${real?.length} toHaveLength ${n}`),
@@ -105,6 +115,7 @@ function expect(real) {
   base.not = matchers(real, true);
   return base;
 }
+expect.objectContaining = (esp) => new Asimetrico(`objectContaining(${inspeccionar(esp)})`, (real) => contiene(real, esp));
 expect.arrayContaining = (items) =>
   new Asimetrico(`arrayContaining(${inspeccionar(items)})`, (r) => Array.isArray(r) && items.every((e) => r.some((x) => igual(x, e))));
 expect.closeTo = (n, digitos = 2) =>

@@ -102,6 +102,8 @@ function crearDb(cliente = pool) {
   }
   return {
     query,
+    // El cliente de pg tal cual, para el código del Backend que recibe un client en su transacción.
+    cliente,
     // Filas (equivalente a prisma.$queryRaw)
     many: async (consulta, params) => (await query(consulta, params)).rows,
     one: async (consulta, params) => (await query(consulta, params)).rows[0] ?? null,
@@ -111,6 +113,10 @@ function crearDb(cliente = pool) {
     async transaction(fn) {
       if (cliente !== pool) return fn(this); // ya dentro de una transacción
       const c = await pool.connect();
+      // Sin esto, una conexión que se cae mientras está tomada es un error sin atender y tira el proceso.
+      // La consulta en curso falla igual y la transacción se reporta como cualquier otro error.
+      const alCaer = (err) => console.error('[gestion/db] se cayó la conexión', err.message);
+      c.on('error', alCaer);
       try {
         await c.query('BEGIN');
         const r = await fn(crearDb(c));
@@ -120,6 +126,7 @@ function crearDb(cliente = pool) {
         await c.query('ROLLBACK').catch((err) => console.error('[gestion/db] rollback', err));
         throw e;
       } finally {
+        c.removeListener('error', alCaer);
         c.release();
       }
     },

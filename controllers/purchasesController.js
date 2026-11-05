@@ -221,7 +221,7 @@ exports.list = async (req, res, next) => {
            pi.id, pi.fecha,
            pi.insumo_id,
            p.id                  AS purchase_id,
-           p.factura_key         AS factura,
+           split_part(p.factura_key, '~', 1) AS factura,
            p.branch_id,
            ab.name               AS branch_name,
            ab.color              AS branch_color,

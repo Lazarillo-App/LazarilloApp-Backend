@@ -16,6 +16,7 @@ const { sql, db } = require('../db');
 const { runETLFilas } = require('../etl/run-etl');
 const { linkDetalleCompras } = require('../etl/link-detalle-compras');
 const { accumulateAperturaInputs } = require('../hooks/accumulate-apertura-inputs');
+const { sincronizarTrasImport } = require('../apertura/motor');
 const { filaDeRender, informeDeTabla } = require('./filas');
 const { huellaTabla, leerCargas, leerTabla, PDV_MAESTROS } = require('./db');
 const { revisarHuerfanas } = require('./huerfanas');
@@ -244,10 +245,13 @@ async function finalizarPdv(pdv, reports) {
   await linkDetalleCompras(db, pdv);
   const { huboComprasTocadas, comprasModificadas } = accumulateAperturaInputs(reports);
   if (huboComprasTocadas) {
-    // Concepto fijo por empleado (Diego 29/10/2026) y apertura de gastos: pendientes de
-    // portar (ver encabezado). Se deja constancia en vez de saltearlos en silencio.
-    console.warn("[render] compras tocadas en", pdv, "— concepto fijo por empleado y apertura de gastos todavía no portados;",
-      comprasModificadas.length, "compras distribuidas modificadas sin reaplicar");
+    // Primero el concepto fijo por empleado: la apertura por concepto mira el concepto ya corregido.
+    const { aplicarConceptosEmpleado } = require('../empleados/api'); // acá: empleados/api requiere carga-api
+    const cf = await aplicarConceptosEmpleado({ organizationId: pdv.organizationId, businessId: pdv.businessId }, { branchId: pdv.branchId ?? null })
+      .catch((e) => ({ errores: [String(e)] }));
+    if (cf.errores.length) console.error("[render] concepto fijo tras importar", pdv, cf.errores);
+    const r = await sincronizarTrasImport({ organizationId: pdv.organizationId, businessId: pdv.businessId }, comprasModificadas);
+    if (r.errores.length) console.error("[render] apertura tras importar", pdv, r.errores);
   }
 }
 
@@ -273,7 +277,7 @@ async function sincronizarTodo(opts) {
     await avisar(it, r, hechos);
     if ("report" in r && it.businessId != null) {
       const k = `${it.businessId}|${it.branchId ?? ""}`;
-      const prev = reportsPorPdv.get(k) ?? { pdv: { businessId: it.businessId, branchId: it.branchId }, reports: [] };
+      const prev = reportsPorPdv.get(k) ?? { pdv: { businessId: it.businessId, branchId: it.branchId, organizationId: it.organizationId }, reports: [] };
       prev.reports.push(r.report);
       reportsPorPdv.set(k, prev);
     }
