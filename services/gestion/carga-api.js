@@ -25,6 +25,7 @@ const { claveFactura, imputarFacturas, combinarPagos, numeroPago } = require('./
 const { leerInsumos, renderConfigurado } = require('./render/db');
 const { ErrorDatos } = require('./dashboard/resultados-api');
 const { reaplicarReglasActivas } = require('./apertura/motor');
+const { pasarFacturaACostos, sacarFacturaDeCostos } = require('./facturas/puente-costos');
 
 // Transacción de una carga + reparto de las filas que dejó (el trabajo las anota en `ids`).
 async function conReparto(ctx, trabajo) {
@@ -183,7 +184,7 @@ async function borrarFilas(tx, businessId, comprobante, codigo) {
 // La factura a la que pertenece una fila de compras, con lo cargado si es de Lazarillo.
 async function facturaDeFila(cliente, businessId, rowId) {
   const c = await cliente.one(sql`
-    SELECT comprobante, codigo, branch_id, "proveedorId", origen, proveedor FROM gestion_compras WHERE business_id = ${businessId} AND "rowId" = ${rowId}`);
+    SELECT comprobante, codigo, branch_id, "proveedorId", origen, proveedor, fecha FROM gestion_compras WHERE business_id = ${businessId} AND "rowId" = ${rowId}`);
   if (!c || !c.comprobante || !c.codigo) return null;
   const esLz = c.origen === ORIGEN_LAZARILLO;
   const cargada = esLz
@@ -305,9 +306,10 @@ async function crearFactura({ organizationId, businessId, usuario, body }) {
     const p = await prepararFactura(tx, ctx, body);
     const pago = await altaEnTx(tx, ctx, p, pagoAhora?.success ? pagoAhora.data : null, usuario,
       (lugar) => descripcionFactura({ ...p, total: p.armado.total, lugar }));
+    const costos = await pasarFacturaACostos(tx, ctx, p);
     const { armado } = p;
     ids.push(...armado.filas.map((x) => x.rowId));
-    return { ok: true, comprobante: armado.filas[0].comprobante, total: armado.total, filas: armado.filas.length, lineas: armado.lineas.length, rowId: armado.filas[0].rowId, pago };
+    return { ok: true, comprobante: armado.filas[0].comprobante, total: armado.total, filas: armado.filas.length, lineas: armado.lineas.length, rowId: armado.filas[0].rowId, pago, costos };
   });
 }
 
@@ -349,12 +351,13 @@ async function editarFactura({ organizationId, businessId, usuario, rowId, body 
         WHERE business_id = ${businessId} AND "rowId" = ${c.rowId}`);
     }
     await guardarCarga(tx, businessId, p, usuario, fa.cargada);
+    const costos = await pasarFacturaACostos(tx, ctx, p, { ...antes, fecha: iso(fa.c.fecha) });
     const lugar = p.lugares.find((l) => l.id === p.armado.filas[0].puntoDeVentaId)?.nombre ?? null;
     await registrarActividad(tx, {
       organizationId, businessId, tipo: 'factura', accion: 'editada', usuario, refId: p.armado.filas[0].rowId,
       descripcion: descripcionFactura({ ...p, total: p.armado.total, lugar }),
     });
-    return { ok: true, comprobante, total: p.armado.total, rowId: p.armado.filas[0].rowId, correccionesPerdidas: perdidas };
+    return { ok: true, comprobante, total: p.armado.total, rowId: p.armado.filas[0].rowId, correccionesPerdidas: perdidas, costos };
   });
 }
 
@@ -374,6 +377,7 @@ async function borrarFactura({ organizationId, businessId, usuario, rowId, conPa
     if (pagos.internos) await tx.execute(sql`DELETE FROM gestion_aplicaciones_pago_interno WHERE compra_business_id = ${businessId} AND "compraRowId" = ANY(${ids}::text[])`);
     if (pagos.lazarillo) await tx.execute(sql`DELETE FROM gestion_aplicaciones_pago_proveedor WHERE business_id = ${businessId} AND comprobante = ${fa.c.comprobante} AND "codPro" = ${fa.c.codigo}`);
     await borrarFilas(tx, businessId, fa.c.comprobante, fa.c.codigo);
+    await sacarFacturaDeCostos(tx, { businessId }, { comprobante: fa.c.comprobante, codigo: fa.c.codigo, fecha: iso(fa.c.fecha) });
     await registrarActividad(tx, {
       organizationId, businessId, tipo: 'factura', accion: 'eliminada', usuario,
       descripcion: `${fa.c.proveedor?.trim() || fa.c.codigo}\n${[fa.c.comprobante, pesos(total)].join(' · ')}`,
@@ -401,6 +405,7 @@ async function restaurarFacturaEliminada({ organizationId, businessId, usuario, 
     }
     await insertarArmado(tx, businessId, p);
     await guardarCarga(tx, businessId, p, usuario);
+    await pasarFacturaACostos(tx, ctx, p);
     await tx.execute(sql`UPDATE gestion_actividad SET datos = ${JSON.stringify({ ...act.datos, restauradaEn: new Date().toISOString() })}::jsonb WHERE id = ${id}`);
     const lugar = p.lugares.find((l) => l.id === p.armado.filas[0].puntoDeVentaId)?.nombre ?? null;
     await registrarActividad(tx, {

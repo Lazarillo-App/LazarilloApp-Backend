@@ -211,7 +211,30 @@ async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap
       sucursal: branchId,      // purchasesStore lo guarda como purchase_items.branch_id
     });
   }
-  const facturas = [...porFactura.values()];
+  // Una factura que ya entró por el Panel no se vuelve a sumar: mientras se cargue en los dos lados,
+  // gana la del Panel, igual que en el import de gestion. Se compara por número y proveedor (y fecha
+  // en tickets, que repiten número), en todo el negocio.
+  const { rows: delPanel } = await pool.query(
+    `SELECT split_part(factura_key, '~', 1) AS base, proveedor_id, fecha::date::text AS fecha
+       FROM purchases WHERE business_id = $1 AND source = 'lazarillo'`,
+    [businessId]
+  );
+  const clavePanel = (base, proveedor, fecha) => (/^Z-/.test(base) ? `${base}|${proveedor}|${fecha}` : `${base}|${proveedor}`);
+  const yaEnPanel = new Set(delPanel.map((r) => clavePanel(r.base, Number(r.proveedor_id), r.fecha)));
+  const normalizarBase = (key) => {
+    const [tipo, n1, n2] = String(key).split('-');
+    return `${tipo.trim().toUpperCase().replace(/^NC[ABC]?$/, 'NC')}-${Number(n1)}-${Number(n2)}`;
+  };
+  const diaDe = (v) => {
+    if (v instanceof Date) {
+      const p = (n) => String(n).padStart(2, '0');
+      return `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())}`;
+    }
+    return String(v ?? '').slice(0, 10);
+  };
+  const todas = [...porFactura.values()];
+  const facturas = todas.filter((f) => !yaEnPanel.has(clavePanel(normalizarBase(f.numero), Number(f.proveedor), diaDe(f.items[0]?.fecha))));
+  const salteadasPanel = todas.length - facturas.length;
 
   let sinInsumo = 0;
   for (const f of facturas) {
@@ -221,7 +244,7 @@ async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap
   }
 
   if (dryRun) {
-    return { pdv, branchId, facturas: facturas.length, items: filas.length, sinInsumo, pagos: pagosResultado };
+    return { pdv, branchId, facturas: facturas.length, salteadasPanel, items: filas.length, sinInsumo, pagos: pagosResultado };
   }
 
   const resultadoCompras = await upsertPurchasesBatch(businessId, facturas, insumoMap, branchId);
@@ -230,6 +253,7 @@ async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap
     pdv,
     branchId,
     facturas: facturas.length,
+    salteadasPanel,
     items: filas.length,
     sinInsumo,
     compras: resultadoCompras,

@@ -156,6 +156,7 @@ function armarFactura(
         ivaTot: ivas[k], impNtTot: imps[k], tasa: reg.alicuota,
         codCga: reg.conceptoCodigo, nomCga: conceptoNombre(reg.conceptoCodigo),
         compraId: a.rowId, proveedorId: ctx.proveedor.id, localId: a.localId,
+        puntoDeVentaId: p.puntoDeVentaId, esInsumo,
       });
     });
   });

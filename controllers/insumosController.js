@@ -926,7 +926,7 @@ exports.getCompras = async (req, res) => {
          pi.referencia,
          pi.source,
          pi.branch_id,
-         p.factura_key,
+         split_part(p.factura_key, '~', 1) AS factura_key,
          p.proveedor_id
        FROM purchase_items pi
        LEFT JOIN purchases p ON p.id = pi.purchase_id AND p.business_id = pi.business_id

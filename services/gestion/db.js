@@ -102,6 +102,8 @@ function crearDb(cliente = pool) {
   }
   return {
     query,
+    // El cliente de pg tal cual, para el código del Backend que recibe un client en su transacción.
+    cliente,
     // Filas (equivalente a prisma.$queryRaw)
     many: async (consulta, params) => (await query(consulta, params)).rows,
     one: async (consulta, params) => (await query(consulta, params)).rows[0] ?? null,
