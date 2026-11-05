@@ -323,8 +323,8 @@ function impagasSql({ organizationId, businessId, sucursal, desde }) {
     pg AS (
       SELECT comprobante, "codPro", SUM(importe) AS pagado, MAX(total) AS total80,
         JSON_AGG(JSON_BUILD_OBJECT(
-          'fecha', TO_CHAR("fechaPago", 'YYYY-MM-DD'), 'importe', importe::float8, 'medio', medio, 'orden', orden
-        ) ORDER BY "fechaPago", secuencia) AS pagos
+          'fecha', TO_CHAR(COALESCE("fechaPagoManual", "fechaPago"), 'YYYY-MM-DD'), 'importe', importe::float8, 'medio', medio, 'orden', orden
+        ) ORDER BY COALESCE("fechaPagoManual", "fechaPago"), secuencia) AS pagos
       FROM gestion_pagos g
       WHERE ${enLugar('g', businessId, sucursal)}
       GROUP BY comprobante, "codPro"
@@ -860,7 +860,7 @@ async function saldosFacturas(cliente, businessId, codPro, facturas) {
         WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ${codPro}) AS fecha80,
       (SELECT MAX(p.total)::float8 FROM gestion_pagos p
         WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ${codPro}) AS total80,
-      (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(p."fechaPago", 'YYYY-MM-DD'), 'importe', p.importe::float8)) FROM gestion_pagos p
+      (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(COALESCE(p."fechaPagoManual", p."fechaPago"), 'YYYY-MM-DD'), 'importe', p.importe::float8)) FROM gestion_pagos p
         WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ${codPro}) AS p80,
       (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(pp.fecha, 'YYYY-MM-DD'), 'importe', a.importe::float8))
         FROM gestion_aplicaciones_pago_proveedor a JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
@@ -1106,8 +1106,8 @@ function facturasCtaCteSql({ organizationId, businessId, codPro }) {
         SUM(importe) AS pagado,
         MAX(total)   AS total80,
         JSON_AGG(JSON_BUILD_OBJECT(
-          'fecha', TO_CHAR("fechaPago", 'YYYY-MM-DD'), 'importe', importe::float8, 'medio', medio, 'orden', orden
-        ) ORDER BY "fechaPago", secuencia) AS pagos
+          'fecha', TO_CHAR(COALESCE("fechaPagoManual", "fechaPago"), 'YYYY-MM-DD'), 'importe', importe::float8, 'medio', medio, 'orden', orden
+        ) ORDER BY COALESCE("fechaPagoManual", "fechaPago"), secuencia) AS pagos
       FROM gestion_pagos g
       WHERE g.business_id = ${businessId} AND "codPro" = ${codPro} AND comprobante IS NOT NULL
       GROUP BY 1, comprobante
