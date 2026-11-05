@@ -491,7 +491,7 @@ async function insumosMaxirest(organizationId) {
 }
 
 async function obtenerMaestrosFactura({ organizationId, businessId }) {
-  const [proveedores, conceptos, comprados, lugares, deMaxirest] = await Promise.all([
+  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos] = await Promise.all([
     db.many(sql`SELECT id, codigo, nombre, razon, cuit FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
     db.many(sql`
       SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro
@@ -506,8 +506,35 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
       ORDER BY codigo, fecha DESC NULLS LAST`),
     obtenerLugares(db, businessId),
     insumosMaxirest(organizationId),
+    // Qué carga habitualmente cada proveedor en el negocio (últimos 18 meses): si alguna vez trajo
+    // insumos → la línea nueva arranca en Insumo; si solo conceptos → en Concepto (Diego 05/11/2026).
+    db.many(sql`
+      SELECT c."proveedorId" AS id,
+        COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM gestion_detalle_compras d
+          WHERE d.business_id = c.business_id AND d."compraId" = c."rowId" AND NULLIF(TRIM(d.medida), '') IS NOT NULL))::int AS ins
+      FROM gestion_compras c
+      WHERE c.business_id = ${businessId} AND c."proveedorId" IS NOT NULL AND COALESCE(c."fechaManual", c.fecha) >= CURRENT_DATE - 540
+      GROUP BY 1`),
+    // Importe habitual de cada proveedor × concepto (mediana de las últimas 6 cargas del año), para
+    // avisar de un 0 de más al cargar un concepto. proveedor null = gastos varios sin proveedor.
+    db.many(sql`
+      WITH h AS (
+        SELECT c."proveedorId" AS p, COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") AS k,
+               COALESCE(c."importeManual", c.importe) AS imp,
+               row_number() OVER (PARTITION BY c."proveedorId", COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")
+                                  ORDER BY COALESCE(c."fechaManual", c.fecha) DESC) AS rn
+        FROM gestion_compras c
+        WHERE c.business_id = ${businessId} AND COALESCE(c."importeManual", c.importe) > 0
+          AND COALESCE(c."fechaManual", c.fecha) >= CURRENT_DATE - 365
+          AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NOT NULL)
+      SELECT p, TRIM(k) AS k, percentile_cont(0.5) WITHIN GROUP (ORDER BY imp)::float8 AS mediana, COUNT(*)::int AS n
+      FROM h WHERE rn <= 6 GROUP BY p, k HAVING COUNT(*) >= 2`),
   ]);
-  return { proveedores, conceptos, insumos: unirInsumos(deMaxirest, comprados), lugares };
+  const tipoDe = new Map(tipos.map((t) => [t.id, t.ins > 0 ? 'insumo' : 'concepto']));
+  return {
+    proveedores: proveedores.map((p) => ({ ...p, tipoHabitual: tipoDe.get(p.id) ?? null })),
+    conceptos, insumos: unirInsumos(deMaxirest, comprados), lugares, historialConceptos,
+  };
 }
 
 // Alta de un proveedor propio (negocios sin MaxiRest, o uno nuevo que todavía no está en el maestro).
