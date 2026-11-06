@@ -111,7 +111,7 @@ const aFila = (r) => ({
 });
 
 // WHERE de la lista: tiene que traer exactamente las compras que suma la celda clickeada del pivot.
-// Alias: c (fuente), p (proveedores), rc_ef / rv (rubro del concepto efectivo y su visibilidad).
+// Alias: c (fuente), p (proveedores), cc_ef / rc_ef / rv (concepto y rubro efectivos y su visibilidad).
 function buildDetalleConditions({
   businessId, sucursal, year, mes, meses, proveedorId, proveedorTexto, codigo, sinProveedor,
   rubroCodigo, conceptoCodigo, observacionQuery, importeQuery, historico = false,
@@ -143,7 +143,10 @@ function buildDetalleConditions({
   if (rubroCodigo && !conceptoCodigo) {
     conditions.push(sql`COALESCE(rc_ef.codigo, '__sin_rubro') = ${rubroCodigo}`);
   } else if (conceptoCodigo) {
-    conditions.push(sql`COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") = ${conceptoCodigo}`);
+    // "__sin_concepto" = sin concepto de caja asociado (mismo criterio que el pivot: sin fila en el maestro).
+    conditions.push(conceptoCodigo === '__sin_concepto'
+      ? sql`cc_ef.codigo IS NULL`
+      : sql`COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") = ${conceptoCodigo}`);
   } else {
     conditions.push(sql`((rc_ef.codigo IS NOT NULL AND ${rubroVisibleSql("visibleEnDashboard")}) OR (rc_ef.codigo IS NULL AND ${sinRubroVisibleSql("visibleEnDashboard", businessId)}))`);
   }
