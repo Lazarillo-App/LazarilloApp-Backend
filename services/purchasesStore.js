@@ -190,7 +190,10 @@ async function upsertPurchasesEnCliente(client, businessId, facturas, insumoMap,
         // mercadería real). Un salto de RATIO_PRECIO_SOSPECHOSO veces o más
         // contra la mediana ya pagada por ese insumo nunca es una suba de
         // precio real — se descarta el match, la línea queda sin insumo.
-        if (insumoId && precioUnitario > 0 && medianas.has(insumoId)) {
+        // Una factura cargada en Lazarillo no tiene ese problema: el insumo lo eligió quien cargó y el
+        // salto de precio ya se avisó en la carga ("×10 de la última compra"). Ahí no se descarta: si
+        // no, la compra no aparecía en Recetas ni en costos (Diego 06/11/2026, Nalga en Comercio).
+        if (insumoId && source !== 'lazarillo' && precioUnitario > 0 && medianas.has(insumoId)) {
           const mediana = medianas.get(insumoId);
           const ratio = Math.max(precioUnitario / mediana, mediana / precioUnitario);
           if (ratio >= RATIO_PRECIO_SOSPECHOSO) {
