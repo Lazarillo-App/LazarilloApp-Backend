@@ -281,7 +281,7 @@ async function normalizeCompras(
              -- los del chunk actual — ver comentario en rowIdsEnArchivo arriba.
              AND NOT ("rowId" = ANY(${[...rowIdsEnArchivo]}))
              -- Nunca reconciliar contra facturas cargadas en el Panel (revisión 27/10/2026).
-             AND (origen IS NULL OR NOT (origen = 'lazarillo'))
+             AND (origen IS NULL OR origen NOT IN ('lazarillo', 'sin-concepto')) -- ni facturas del Panel ni las de render/sin-concepto.js
              AND (${sql.join(lote.map((a) => sql`(
                "codCga" IS NOT DISTINCT FROM ${a.codCga}
                AND fecha = ${a.fechaISO}::timestamp
@@ -360,7 +360,7 @@ async function normalizeCompras(
            WHERE business_id = ${businessId}
              AND branch_id IS NOT DISTINCT FROM ${branchId}::bigint
              AND NOT ("rowId" = ANY(${[...rowIdsEnArchivo]}))
-             AND (origen IS NULL OR NOT (origen = 'lazarillo'))
+             AND (origen IS NULL OR origen NOT IN ('lazarillo', 'sin-concepto')) -- ni facturas del Panel ni las de render/sin-concepto.js
              AND (${sql.join(lote.map(({ anchor, identidad }) => sql`(
                "codCga" IS NOT DISTINCT FROM ${anchor.codCga}
                AND fecha = ${anchor.fechaISO}::timestamp
