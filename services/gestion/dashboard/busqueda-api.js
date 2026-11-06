@@ -9,7 +9,7 @@
 
 const { sql, db } = require('../db');
 const { buildPivotConditions, importeCondition } = require('./query-builders');
-const { SIN_RUBRO_CODE, SIN_RUBRO_NOMBRE, SIN_RUBRO_VISIBILIDAD_DEFAULT, VISIBILIDAD_FIELDS } = require('./constants');
+const { SIN_RUBRO_CODE, SIN_RUBRO_NOMBRE, VISIBILIDAD_FIELDS } = require('./constants');
 const { ErrorDatos } = require('./resultados-api');
 
 // Nombre de la sucursal de una fila (alias de app_branches = br). NULL = la principal.
@@ -223,8 +223,9 @@ async function obtenerRubrosVisibles({ organizationId, businessId, field }) {
       ORDER BY rc.nombre`),
     db.one(sql`SELECT "${sql.raw(campo)}" AS visible FROM gestion_sin_rubro_config WHERE business_id = ${businessId}`),
   ]);
-  // "Sin Rubro" va al final para no reordenar los rubros reales.
-  return [...rubros, { codigo: SIN_RUBRO_CODE, nombre: SIN_RUBRO_NOMBRE, visible: sinRubro ? sinRubro.visible : SIN_RUBRO_VISIBILIDAD_DEFAULT[campo] }];
+  // "Sin Rubro" es fijo (Diego 06/11/2026): siempre visible, no se puede apagar.
+  void sinRubro;
+  return [...rubros, { codigo: SIN_RUBRO_CODE, nombre: SIN_RUBRO_NOMBRE, visible: true, fijo: true }];
 }
 
 async function guardarRubroVisible({ organizationId, businessId, body }) {
@@ -237,6 +238,7 @@ async function guardarRubroVisible({ organizationId, businessId, body }) {
   const col = sql.raw(`"${campo}"`);
   // "Sin Rubro" es sintético: su marca vive en gestion_sin_rubro_config.
   if (codigo === SIN_RUBRO_CODE) {
+    if (!visible) throw new ErrorDatos("Sin rubro siempre se ve: es gasto y entra al total. Para sacarlo, asignale rubro.");
     await db.execute(sql`
       INSERT INTO gestion_sin_rubro_config (business_id, ${col}) VALUES (${businessId}, ${visible})
       ON CONFLICT (business_id) DO UPDATE SET ${col} = EXCLUDED.${col}`);

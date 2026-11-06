@@ -15,6 +15,7 @@ const busqueda = require('../services/gestion/dashboard/busqueda-api');
 const detalle = require('../services/gestion/dashboard/detalle-api');
 const carga = require('../services/gestion/carga-api');
 const pagos = require('../services/gestion/pagos-api');
+const sinRubro = require('../services/gestion/dashboard/sin-rubro-api');
 const apertura = require('../services/gestion/apertura/api');
 const empleados = require('../services/gestion/empleados/api');
 const arca = require('../services/gestion/arca/api');
@@ -135,6 +136,8 @@ router.patch('/dashboard/ventas/:rowId', responder((req) =>
 // ── Sin carga, Impagas, pagos y cuenta corriente ──
 const usuarioDe = (req) => req.user?.email ?? String(req.user?.id ?? '');
 const idDe = (req) => Number(req.params.id);
+// Sin rubro · por qué (Diego 06/11/2026): lo que cae en Sin rubro, agrupado por causa.
+router.get('/sin-rubro', responder((req) => sinRubro.obtenerSinRubro({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
 router.get('/sin-carga', responder((req) => pagos.obtenerSinCarga(ambito(req))));
 router.post('/sin-carga/descartes', responder((req) => pagos.crearDescarte({ ...ambito(req), usuario: usuarioDe(req), body: req.body })));
 router.delete('/sin-carga/descartes/:id', responder((req) => pagos.borrarDescarte({ ...req.gestion, id: idDe(req) })));
