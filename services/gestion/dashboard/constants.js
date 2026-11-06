@@ -12,7 +12,7 @@ const MONTH_IDXS = Array.from({ length: 12 }, (_, i) => i + 1);
 const SIN_RUBRO_CODE    = "__sin_rubro";
 const SIN_RUBRO_NOMBRE  = "Sin Rubro";
 const SIN_CONCEPTO_CODE  = "__sin_concepto";
-const SIN_CONCEPTO_NOMBRE = "Sin Concepto";
+const SIN_CONCEPTO_NOMBRE = "Sin concepto de caja asociado"; // Diego 06/11/2026
 const SIN_TIPO_CODE     = "__sin_tipo";
 const SIN_TIPO_NOMBRE   = "Sin Tipo";
 const SIN_COBRO_CODE    = "__sin_cobro";

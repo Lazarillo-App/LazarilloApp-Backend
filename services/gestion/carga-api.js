@@ -203,7 +203,7 @@ async function leerFactura(cliente, businessId, rowId) {
   if (!fa) return null;
   const { c, esLz, cargada } = fa;
   const filas = await cliente.many(sql`
-    SELECT "rowId", comprobante, "codCga", fecha, observac, importe, "importeManual", "impInt", branch_id, "proveedorId"
+    SELECT "rowId", comprobante, "codCga", fecha, observac, importe, "importeManual", "impInt", branch_id, "proveedorId", origen
     FROM gestion_compras
     WHERE business_id = ${businessId} AND comprobante = ${c.comprobante} AND codigo = ${c.codigo}
       AND ${esLz ? sql`origen = ${ORIGEN_LAZARILLO}` : sql`origen IS DISTINCT FROM ${ORIGEN_LAZARILLO}`}
@@ -229,7 +229,9 @@ async function leerFactura(cliente, businessId, rowId) {
     filas.map((f) => ({ rowId: f.rowId, comprobante: f.comprobante, codCga: f.codCga, fecha: f.fecha, observac: f.observac, importe: Number(f.importe ?? 0), impInt: Number(f.impInt ?? 0), puntoDeVentaId: idLugar(businessId, f.branch_id) })),
     lineas.map((l) => ({ ...l, cantidad: n(l.cantidad), totalIns: n(l.totalIns), tasa: n(l.tasa), impNtTot: n(l.impNtTot) })),
   );
-  return { rowId, origen: esLz ? 'lazarillo' : 'maxirest', editable: esLz && proveedorId != null, estimado: leido.estimado, proveedorId, factura: leido.factura, totalFilas };
+  // Renglones de insumos sin rubro en MaxiRest: suman en Resultados por render/sin-concepto.js.
+  const sinConcepto = filas.some((f) => f.origen === 'sin-concepto');
+  return { rowId, origen: esLz ? 'lazarillo' : 'maxirest', editable: esLz && proveedorId != null, estimado: leido.estimado, proveedorId, factura: leido.factura, totalFilas, sinConcepto };
 }
 
 // ── Pagos al proveedor ("Registrar el pago ahora") ────────────────────────────
@@ -464,9 +466,10 @@ async function facturaDeCompra({ organizationId, businessId, sp }) {
     ORDER BY ABS(fecha::date - ${p.fecha}::date), "rowId"`);
   const f = buscada ? filas.find((x) => x.comprobante && digitosCpb(x.comprobante) === buscada) : null;
   if (f) return { rowId: f.rowId };
-  // No está en Caja (informe 14) pero sí en el detalle de compras (informe 25): igual es una factura
-  // cargada, se muestra como factura con sus renglones (Diego 06/11/2026, tickets de FLORA en Comercio:
-  // el insumo no tiene concepto de caja y MaxiRest no la pasó a Caja). No suma en Resultados.
+  // Sin fila en el Panel pero sí en el detalle de compras (informe 25): igual es una factura cargada,
+  // se muestra como factura con sus renglones (Diego 06/11/2026, tickets de FLORA en Comercio: el
+  // insumo no tiene concepto de caja asociado). Desde 2026 esto ya no pasa: render/sin-concepto.js
+  // le arma su fila; queda para lo anterior.
   const lineas = buscada ? (await db.many(sql`
     SELECT comprobante, fecha, codigo, nombre, medida, cantidad::float8 AS cantidad, "totalIns"::float8 AS "totalIns", neto::float8 AS neto,
            tasa::float8 AS tasa, "impNtTot"::float8 AS "impNtTot", NULLIF(NULLIF(TRIM("codCga"), ''), '0') AS "codCga"
