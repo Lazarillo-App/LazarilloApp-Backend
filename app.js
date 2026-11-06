@@ -58,6 +58,7 @@ const syncRoutes = require('./routes/syncRoutes');
 const dashboardStoreRoutes = require('./routes/dashboardStore');
 const rrhhRoutes = require('./routes/rrhhRoutes');
 const gestionRoutes = require('./routes/gestionRoutes');
+const pulsoRoutes = require('./routes/pulsoRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
 const sectoresRoutes = require('./routes/sectoresRoutes');
 const sectoresByIdRoutes = require('./routes/sectoresByIdRoutes');
@@ -214,6 +215,7 @@ app.use('/api/businesses/:businessId/sync', syncRoutes);
 app.use('/api/businesses/:businessId/dashboard-store', dashboardStoreRoutes);
 app.use('/api/businesses/:businessId/rrhh', rrhhRoutes);
 app.use('/api/businesses/:businessId/gestion', gestionRoutes);
+app.use('/api/businesses/:businessId/pulso', pulsoRoutes);
 
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
