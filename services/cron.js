@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const pool = require('../config/db');
 const { runDailyAuto, ensureInitialBackfillOnce } = require('./salesSyncPolicy');
 const { abrirCorrida, ejecutarCorrida } = require('./gestion/render/sync');
+const { recetasDelReloj } = require('./recetasDesdeKit');
 
 let started = false;
 
@@ -135,9 +136,45 @@ function gestionCronHabilitado() {
   return nombre === servicio.trim().toLowerCase();
 }
 
+/**
+ * Recetas desde el kit (Diego, 06/11/2026): cada hora, minuto 20 (después de la ingesta de
+ * Balance del minuto 5), corre los pipelines de ventas (12) y compras/pagos (25/80) de los
+ * negocios cuyo kit subió algo nuevo. Ver services/recetasDesdeKit.js.
+ * - RECETAS_KIT_CRON=1 / 0 → fuerza encenderlo / apagarlo en este servicio.
+ *   Sin la variable, corre donde corre la ingesta de gestion (gestionCronHabilitado).
+ * - CRON_RECETAS_KIT_SCHEDULE → default "20 * * * *".
+ * Si corre en dos servicios con la misma base no se pisa: candado por negocio en la base y
+ * solo corre si hay cargas del kit posteriores a la última pasada.
+ */
+let recetasKitStarted = false;
+
+function startRecetasKitCron() {
+  if (recetasKitStarted) return;
+  recetasKitStarted = true;
+  const forzado = process.env.RECETAS_KIT_CRON;
+  const habilitado = forzado === '1' || (forzado !== '0' && gestionCronHabilitado());
+  if (!habilitado) {
+    console.log(`[cron] recetas desde el kit deshabilitado en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
+    return;
+  }
+  const tz = process.env.CRON_TZ || 'America/Argentina/Buenos_Aires';
+  const expr = process.env.CRON_RECETAS_KIT_SCHEDULE || '20 * * * *';
+  console.log(`[cron] recetas desde el kit habilitado. TZ=${tz} schedule=${expr}`);
+  cron.schedule(expr, async () => {
+    try {
+      await recetasDelReloj();
+    } catch (e) {
+      console.error('[cron] ❌ error en recetas desde el kit:', e.message);
+    }
+  }, { timezone: tz });
+}
+
 function startGestionCron() {
   if (gestionStarted) return;
   gestionStarted = true;
+
+  // Independiente de la ingesta: tiene su propia llave (RECETAS_KIT_CRON).
+  startRecetasKitCron();
 
   if (!gestionCronHabilitado()) {
     console.log(`[cron] ingesta de gestion deshabilitada en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
@@ -163,4 +200,4 @@ function startGestionCron() {
   }, { timezone: tz });
 }
 
-module.exports = { startCron, startGestionCron, syncAllBusinessesDaily, ensureBackfillAll };
+module.exports = { startCron, startGestionCron, startRecetasKitCron, syncAllBusinessesDaily, ensureBackfillAll };
