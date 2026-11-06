@@ -433,6 +433,36 @@ async function buscarFilaFactura({ businessId, sp }) {
   return { rowId: c.rowId };
 }
 
+// Factura (fila del Panel) de una compra de Recetas (tabla purchases), para abrirla con el formato de
+// la carga desde el modal de compras de Recetas (Diego 05/11/2026). Mismo negocio, sucursal y
+// proveedor, y el mismo comprobante: "A-1-1593", "A  0001-00001593" y "A000100001593" son el mismo
+// (punto de venta a 4 dígitos + número a 8). La fecha de la compra puede ser la de carga: se toma
+// la más cercana dentro de ±120 días.
+const digitosCpb = (txt) => {
+  const grupos = String(txt || '').split('~')[0].match(/\d+/g) || [];
+  if (grupos.length >= 2) return grupos[grupos.length - 2].padStart(4, '0').slice(-4) + grupos[grupos.length - 1].padStart(8, '0').slice(-8);
+  return grupos.length ? grupos[0].padStart(12, '0').slice(-12) : '';
+};
+async function facturaDeCompra({ businessId, sp }) {
+  const pid = Number(sp.get('purchaseId'));
+  if (!Number.isInteger(pid) || pid <= 0) throw rechazo('Datos inválidos');
+  const p = await db.one(sql`
+    SELECT business_id, branch_id, proveedor_id, fecha::date AS fecha, factura_key
+    FROM purchases WHERE id = ${pid}`);
+  if (!p) throw rechazo('No encontré la compra', 404);
+  if (Number(p.business_id) !== Number(businessId)) throw rechazo('La compra es de otro negocio: abrila desde ese negocio.', 409);
+  const buscada = digitosCpb(p.factura_key);
+  const filas = await db.many(sql`
+    SELECT "rowId", COALESCE(comprobante, '') AS comprobante, ABS(fecha::date - ${p.fecha}::date) AS dist
+    FROM gestion_compras
+    WHERE business_id = ${businessId} AND branch_id IS NOT DISTINCT FROM ${p.branch_id}::bigint
+      AND codigo = ${String(p.proveedor_id)} AND fecha::date BETWEEN ${p.fecha}::date - 120 AND ${p.fecha}::date + 120
+    ORDER BY ABS(fecha::date - ${p.fecha}::date), "rowId"`);
+  const f = buscada ? filas.find((x) => x.comprobante && digitosCpb(x.comprobante) === buscada) : null;
+  if (!f) throw rechazo('No encontré la factura de esta compra en el Panel', 404);
+  return { rowId: f.rowId };
+}
+
 // Detección de factura ya cargada en el modal.
 async function facturaExiste({ organizationId, businessId, sp }) {
   const proveedorId = Number(sp.get('proveedorId'));
@@ -912,6 +942,7 @@ async function borrarMedio({ businessId, id }) {
 }
 
 module.exports = {
+  facturaDeCompra, digitosCpb,
   idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
   crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor, obtenerProveedor, editarProveedor,
   crearGastoVario, obtenerVentasManuales, crearVentasManuales, borrarVentasManuales,
