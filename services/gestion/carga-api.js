@@ -447,7 +447,7 @@ const digitosCpb = (txt) => {
   if (grupos.length >= 2) return grupos[grupos.length - 2].padStart(4, '0').slice(-4) + grupos[grupos.length - 1].padStart(8, '0').slice(-8);
   return grupos.length ? grupos[0].padStart(12, '0').slice(-12) : '';
 };
-async function facturaDeCompra({ businessId, sp }) {
+async function facturaDeCompra({ organizationId, businessId, sp }) {
   const pid = Number(sp.get('purchaseId'));
   if (!Number.isInteger(pid) || pid <= 0) throw rechazo('Datos inválidos');
   const p = await db.one(sql`
@@ -463,8 +463,22 @@ async function facturaDeCompra({ businessId, sp }) {
       AND codigo = ${String(p.proveedor_id)} AND fecha::date BETWEEN ${p.fecha}::date - 120 AND ${p.fecha}::date + 120
     ORDER BY ABS(fecha::date - ${p.fecha}::date), "rowId"`);
   const f = buscada ? filas.find((x) => x.comprobante && digitosCpb(x.comprobante) === buscada) : null;
-  if (!f) throw rechazo('No encontré la factura de esta compra en el Panel', 404);
-  return { rowId: f.rowId };
+  if (f) return { rowId: f.rowId };
+  // No está en Caja (informe 14) pero sí en el detalle de compras (informe 25): se muestran sus renglones
+  // y se avisa que no suma en Resultados (Diego 06/11/2026, tickets de FLORA en Comercio).
+  const lineas = buscada ? (await db.many(sql`
+    SELECT comprobante, fecha::date AS fecha, TRIM(nombre) AS nombre, NULLIF(TRIM(medida), '') AS medida, cantidad::float8 AS cantidad,
+           neto::float8 AS unitario, COALESCE("totalIns", neto * cantidad)::float8 AS total, tasa::float8 AS tasa, "nomCga" AS concepto
+    FROM gestion_detalle_compras
+    WHERE business_id = ${businessId} AND branch_id IS NOT DISTINCT FROM ${p.branch_id}::bigint AND "codPro" = ${String(p.proveedor_id)}
+      AND fecha::date BETWEEN ${p.fecha}::date - 120 AND ${p.fecha}::date + 120
+    ORDER BY ABS(fecha::date - ${p.fecha}::date), "rowId"`)).filter((l) => l.comprobante && digitosCpb(l.comprobante) === buscada) : [];
+  if (!lineas.length) throw rechazo('No encontré la factura de esta compra en el Panel', 404);
+  const prov = await db.one(sql`SELECT nombre FROM gestion_proveedores WHERE organization_id = ${organizationId} AND codigo = ${String(p.proveedor_id)} LIMIT 1`);
+  return {
+    soloDetalle: true, comprobante: p.factura_key.split('~')[0], fecha: iso(lineas[0].fecha), proveedor: prov?.nombre ?? null,
+    lineas: lineas.map(({ comprobante, fecha, ...l }) => l),
+  };
 }
 
 // Detección de factura ya cargada en el modal.
