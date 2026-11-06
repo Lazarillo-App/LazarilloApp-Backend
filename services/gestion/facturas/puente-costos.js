@@ -44,7 +44,7 @@ function claveDesdeComprobante(comprobante, codigo, fechaISO) {
 
 const facturaAplica = (codigoProveedor) => codigoProveedor !== GV_CODIGO;
 
-// Unidades base por envase, del mismo maestro que usa MaxiRest. Sin maestro: Map vacío, factor 1.
+// Unidades base por envase: maestro de MaxiRest + envases de Lazarillo. Sin ninguno: factor 1.
 async function leerFactoresEnvase(client, businessId, organizationId) {
   const { rows } = await client.query(
     `SELECT o.esquema FROM gestion_render_origenes o
@@ -54,15 +54,34 @@ async function leerFactoresEnvase(client, businessId, organizationId) {
     [organizationId, businessId]
   );
   const esquema = rows[0]?.esquema ?? schemaDeNegocio(businessId);
-  if (!esquema || !IDENT_SEGURO.test(esquema)) return new Map();
+  const porCodigo = new Map();
+  if (esquema && IDENT_SEGURO.test(esquema)) await leerFactoresMaxirest(client, esquema, porCodigo);
+  // Envases cargados o corregidos en Lazarillo (Diego 06/11/2026) mandan sobre los de MaxiRest: si no,
+  // un "Pack 24" nuevo entraba a costos como 1 unidad y el precio quedaba 24 veces más caro.
+  const { rows: propios } = await client.query(
+    `SELECT TRIM(insumo_codigo) AS codigo, TRIM(envase) AS envase, factor::float8 AS factor, borrado
+       FROM gestion_envases_insumo WHERE organization_id = $1`,
+    [organizationId]
+  );
+  for (const r of propios) {
+    if (!/^\d+$/.test(r.codigo)) continue;
+    const k = Number(r.codigo);
+    const envases = porCodigo.get(k) ?? new Map();
+    for (const e of [...envases.keys()]) if (e.toUpperCase() === r.envase.toUpperCase()) envases.delete(e);
+    if (!r.borrado && r.factor > 0) envases.set(r.envase, r.factor);
+    porCodigo.set(k, envases);
+  }
+  return porCodigo;
+}
+
+async function leerFactoresMaxirest(client, esquema, porCodigo) {
   // Se verifica antes: dentro de una transacción, consultar una tabla que no existe la aborta entera.
   const tabla = `"${esquema}".m0_listado_de_insumos_con_discontinuados`;
   const { rows: existe } = await client.query('SELECT to_regclass($1) AS t', [tabla]);
-  if (!existe[0]?.t) return new Map();
+  if (!existe[0]?.t) return;
   const { rows: m0 } = await client.query(
     `SELECT codigo, envase1, neto1, envase2, neto2, envase3, neto3 FROM ${tabla}`
   );
-  const porCodigo = new Map();
   for (const r of m0) {
     const envases = new Map();
     for (const [envase, neto] of [[r.envase1, r.neto1], [r.envase2, r.neto2], [r.envase3, r.neto3]]) {
@@ -72,13 +91,15 @@ async function leerFactoresEnvase(client, businessId, organizationId) {
     }
     if (envases.size) porCodigo.set(Number(r.codigo), envases);
   }
-  return porCodigo;
 }
 
 function factorDe(factores, codigo, medida) {
   const envases = factores.get(Number(codigo));
   if (!envases) return 1;
-  return envases.get(String(medida ?? '').trim()) ?? 1;
+  const m = String(medida ?? '').trim();
+  if (envases.has(m)) return envases.get(m);
+  for (const [e, f] of envases) if (e.toUpperCase() === m.toUpperCase()) return f;
+  return 1;
 }
 
 // Pura: arma lo que espera el upsert, una factura por sucursal (como un PDV de MaxiRest).
