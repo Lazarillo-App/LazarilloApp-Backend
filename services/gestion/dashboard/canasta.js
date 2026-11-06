@@ -65,4 +65,41 @@ function pesoRelativo(comps) {
   return new Map(comps.map((c) => [c.clave, c.cuenta && tot > 0 ? Math.max(0, c.peso) / tot : 0]));
 }
 
-module.exports = { mesesHasta, canastaMensual, acumulada, ventanaUltimoAumento, pesoRelativo };
+// Mes de sueldos incompleto (Diego 06/11/2026: Comercio oct-26 con la mitad de los sueldos cargados daba
+// -2,3%, "inadmisible, mínimo lo mismo del mes anterior"). Un mes es incompleto si no tiene sueldos o
+// tiene menos del UMBRAL de los empleados o del total del último mes completo. Su variación (y la del mes
+// siguiente, que se compara contra él) no se mide: se estima con el promedio mensual (geométrico) de los
+// últimos VENTANA meses medidos (con menos de MIN_MEDIDOS, 0%), nunca menor que 0. Se marca como estimada.
+const UMBRAL_COMPLETO = 0.8;
+const VENTANA_ESTIMADO = 6;
+const MIN_MEDIDOS = 3;
+/**
+ * stats: un elemento por mes de `meses` ({ n, tot } o null); variaciones: una por mes desde el segundo.
+ * Devuelve { variaciones, estimados } (mismo largo que variaciones).
+ */
+function estimarIncompletos(variaciones, stats) {
+  const incompleto = new Array(stats.length).fill(false);
+  let ref = null; // último mes completo
+  for (let k = 0; k < stats.length; k++) {
+    const st = stats[k];
+    if (ref == null) { if (st && st.n > 0) ref = st; continue; }
+    if (!st || st.n < UMBRAL_COMPLETO * ref.n || st.tot < UMBRAL_COMPLETO * ref.tot) incompleto[k] = true;
+    else ref = st;
+  }
+  const out = [...variaciones];
+  const estimados = variaciones.map(() => false);
+  for (let i = 0; i < variaciones.length; i++) {
+    if (!incompleto[i + 1] && !incompleto[i]) continue;
+    const previas = [];
+    for (let j = i - 1; j >= 0 && previas.length < VENTANA_ESTIMADO; j--) {
+      if (!estimados[j] && out[j] != null) previas.push(out[j]);
+    }
+    // Con menos de MIN_MEDIDOS meses medidos no hay tendencia confiable: "mínimo lo mismo del mes anterior" (0%).
+    const geo = previas.length >= MIN_MEDIDOS ? Math.exp(previas.reduce((a, v) => a + Math.log(1 + v), 0) / previas.length) - 1 : 0;
+    out[i] = Math.max(0, geo);
+    estimados[i] = true;
+  }
+  return { variaciones: out, estimados };
+}
+
+module.exports = { mesesHasta, canastaMensual, acumulada, ventanaUltimoAumento, pesoRelativo, estimarIncompletos, UMBRAL_COMPLETO, VENTANA_ESTIMADO };
