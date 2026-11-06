@@ -638,6 +638,33 @@ async function crearProveedor({ organizationId, body }) {
   });
 }
 
+// Historial de un concepto en un lugar (últimos 12 meses), para verlo a la derecha al cargar un gasto
+// vario (Diego 05/11/2026). Una fila por comprobante; de MaxiRest o de Lazarillo.
+async function historialConcepto({ businessId, sp }) {
+  const pdvId = Number(sp.get('pdvId'));
+  const cod = String(sp.get('conceptoCodigo') || '').trim();
+  if (!Number.isInteger(pdvId) || !cod) throw rechazo('Datos inválidos');
+  const lugar = (await obtenerLugares(db, businessId)).find((l) => l.id === pdvId);
+  if (!lugar) throw rechazo('Datos inválidos');
+  const filas = await db.many(sql`
+    SELECT to_char(COALESCE(c.periodo, COALESCE(c."fechaManual", c.fecha)), 'YYYY-MM') AS periodo,
+           to_char(MIN(COALESCE(c."fechaManual", c.fecha)), 'YYYY-MM-DD') AS fecha,
+           MAX(TRIM(COALESCE(c."observacManual", c.observac, c.detalle, ''))) AS detalle,
+           MAX(TRIM(COALESCE(c.proveedor, ''))) AS proveedor,
+           MAX(TRIM(COALESCE(c."cajaPago", ''))) AS medio,
+           SUM(COALESCE(c."importeManual", c.importe))::float8 AS importe,
+           COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo
+    FROM gestion_compras c
+    WHERE c.business_id = ${businessId} AND c.branch_id IS NOT DISTINCT FROM ${lugar.branchId}::bigint
+      AND TRIM(COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")) = ${cod}
+      AND COALESCE(c.periodo, COALESCE(c."fechaManual", c.fecha)) >= date_trunc('month', CURRENT_DATE) - interval '12 months'
+      AND COALESCE(c."importeManual", c.importe) <> 0
+    GROUP BY 1, COALESCE(c.comprobante, c."rowId"), c.codigo
+    ORDER BY 2 DESC
+    LIMIT 40`);
+  return { filas };
+}
+
 // ── Gastos varios ───────────────────────────────────────────────────────────────
 // Un Ticket interno del proveedor "Gastos Varios" (9999-NNNNNNNN), sin IVA. Con pago, se registra
 // en la misma transacción; sin pago queda impago.
@@ -942,6 +969,7 @@ async function borrarMedio({ businessId, id }) {
 }
 
 module.exports = {
+  historialConcepto,
   facturaDeCompra, digitosCpb,
   idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
   crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor, obtenerProveedor, editarProveedor,

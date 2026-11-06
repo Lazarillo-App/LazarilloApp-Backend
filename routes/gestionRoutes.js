@@ -203,6 +203,7 @@ router.get('/facturas/:rowId', responder((req) => carga.obtenerFactura({ ...req.
 router.put('/facturas/:rowId', responder((req) => carga.editarFactura({ ...conUsuario(req), rowId: req.params.rowId, body: req.body })));
 router.delete('/facturas/:rowId', responder((req) =>
   carga.borrarFactura({ ...conUsuario(req), rowId: req.params.rowId, conPagos: paramsDe(req).get('conPagos') === '1' })));
+router.get('/gastos-varios/historial', responder((req) => carga.historialConcepto({ ...req.gestion, sp: paramsDe(req) })));
 router.post('/gastos-varios', responder((req) => carga.crearGastoVario({ ...conUsuario(req), body: req.body })));
 router.get('/ventas-manuales', responder((req) => carga.obtenerVentasManuales(ambito(req))));
 router.post('/ventas-manuales', responder((req) => carga.crearVentasManuales({ ...ambito(req), body: req.body })));
