@@ -120,20 +120,22 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
         AND ((rc.codigo IS NOT NULL AND ${rubroVisibleSql(col)}) OR (rc.codigo IS NULL AND ${sinRubroVisibleSql(col, businessId)}))
         AND (c."proveedorId" IS NOT NULL OR COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NOT NULL)
     ),
-    tot AS (
-      SELECT clave, mes, SUM(imp_total) AS imp_total, MODE() WITHIN GROUP (ORDER BY pdv_origen) AS pdv_origen
-      FROM (SELECT DISTINCT clave, mes, row_id, imp_total, pdv_origen FROM b) d
-      GROUP BY clave, mes
+    -- Una sola agregación (antes pm0 JOIN tot): Postgres estima 1 fila en los CTE y recalculaba "tot"
+    -- por cada fila de pm0 (1,5 M comparaciones, 9-20 s: el tablero de Container Bar quedaba en blanco,
+    -- 06/11/2026). El total de la compra de origen se cuenta una vez por compra, como el DISTINCT de antes.
+    b2 AS (
+      SELECT b.*, ROW_NUMBER() OVER (PARTITION BY clave, mes, row_id, imp_total, pdv_origen) AS rn FROM b
     ),
-    pm0 AS (
+    pm AS (
       SELECT clave, mes, SUM(imp) AS imp, AVG(dia) AS dia, BOOL_OR(vencido) AS vencido,
              MIN(proveedor_id) AS proveedor_id, MIN(proveedor) AS proveedor,
              (array_agg(concepto ORDER BY imp DESC))[1] AS concepto,
              (array_agg(concepto_codigo ORDER BY imp DESC))[1] AS concepto_codigo,
-             (array_agg(rubro ORDER BY imp DESC))[1] AS rubro
-      FROM b GROUP BY clave, mes
+             (array_agg(rubro ORDER BY imp DESC))[1] AS rubro,
+             SUM(imp_total) FILTER (WHERE rn = 1) AS imp_total,
+             MODE() WITHIN GROUP (ORDER BY pdv_origen) FILTER (WHERE rn = 1) AS pdv_origen
+      FROM b2 GROUP BY clave, mes
     ),
-    pm AS (SELECT pm0.*, tot.imp_total, tot.pdv_origen FROM pm0 JOIN tot USING (clave, mes)),
     obj AS (SELECT unnest(${meses}::date[]) AS m),
     r AS (
       SELECT o.m, x.clave, COUNT(*) AS n,
