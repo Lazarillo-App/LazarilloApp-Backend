@@ -57,3 +57,36 @@ describe("pesoRelativo", () => {
     expect(p.get("sueldos")).toBeCloseTo(34 / 67);
   });
 });
+
+describe("estimarIncompletos (sueldos a medio cargar, Diego 06/11/2026)", () => {
+  const { estimarIncompletos } = require('./canasta');
+  const st = (n, tot) => ({ n, tot });
+  it("Comercio oct-26: 9 de 13 empleados y la mitad del total → se estima con el promedio, nunca negativo", () => {
+    const stats = [st(13, 16), st(13, 16.2), st(13, 16.5), st(13, 16.6), st(13, 18.8), st(9, 10.9)];
+    const r = estimarIncompletos([0.012, 0.016, 0.042, 0.078, -0.023], stats);
+    expect(r.estimados).toEqual([false, false, false, false, true]);
+    const geo = Math.exp((Math.log(1.012) + Math.log(1.016) + Math.log(1.042) + Math.log(1.078)) / 4) - 1;
+    expect(r.variaciones[4]).toBeCloseTo(geo, 10);
+  });
+  it("el mes siguiente a uno incompleto también se estima (se compara contra un mes a medias)", () => {
+    const stats = [st(10, 10), st(10, 10.1), st(10, 10.2), st(10, 10.4), st(5, 5), st(10, 10.6)];
+    const r = estimarIncompletos([0.01, 0.01, 0.02, -0.5, 1], stats);
+    expect(r.estimados).toEqual([false, false, false, true, true]);
+    const geo = Math.exp((2 * Math.log(1.01) + Math.log(1.02)) / 3) - 1;
+    expect(r.variaciones[3]).toBeCloseTo(geo, 10);
+    expect(r.variaciones[4]).toBeCloseTo(geo, 10);
+  });
+  it("mes sin sueldos cargados → estimado; promedio negativo → 0; con menos de 3 meses medidos → 0", () => {
+    const r = estimarIncompletos([-0.05, -0.05, -0.05, null], [st(10, 10), st(10, 9.5), st(10, 9.1), st(10, 8.6), null]);
+    expect(r.estimados).toEqual([false, false, false, true]);
+    expect(r.variaciones[3]).toBe(0);
+    const r2 = estimarIncompletos([0.089, null], [st(15, 13), st(15, 14.9), null]);
+    expect(r2).toEqual({ variaciones: [0.089, 0], estimados: [false, true] });
+  });
+  it("meses completos no se tocan; sin historia no inventa", () => {
+    const r = estimarIncompletos([0.03, 0.01], [st(10, 10), st(10, 10.3), st(10, 10.4)]);
+    expect(r).toEqual({ variaciones: [0.03, 0.01], estimados: [false, false] });
+    const r2 = estimarIncompletos([null], [null, null]);
+    expect(r2).toEqual({ variaciones: [null], estimados: [false] });
+  });
+});
