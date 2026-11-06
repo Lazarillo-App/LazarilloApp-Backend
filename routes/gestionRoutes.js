@@ -191,6 +191,9 @@ router.delete('/apertura/reglas/:id', responder((req) => apertura.borrarRegla({ 
 // ── Carga manual: facturas, gastos varios, ventas, conceptos y medios de pago ──
 const conUsuario = (req) => ({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? '') });
 router.get('/facturas/maestros', responder((req) => carga.obtenerMaestrosFactura(req.gestion)));
+router.post('/facturas/envases', responder((req) => carga.guardarEnvase({ ...req.gestion, body: req.body })));
+router.delete('/facturas/envases', responder((req) => carga.borrarEnvase({ ...req.gestion, sp: paramsDe(req) })));
+router.post('/facturas/descuentos', responder((req) => carga.guardarDescuentos({ ...req.gestion, body: req.body })));
 router.post('/facturas/proveedores', responder((req) => carga.crearProveedor({ ...req.gestion, body: req.body })));
 router.get('/facturas/proveedores/:id', responder((req) => carga.obtenerProveedor({ ...req.gestion, id: idDe(req) })));
 router.patch('/facturas/proveedores/:id', responder((req) => carga.editarProveedor({ ...req.gestion, id: idDe(req), body: req.body })));

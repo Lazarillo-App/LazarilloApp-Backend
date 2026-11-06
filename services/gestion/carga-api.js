@@ -520,8 +520,92 @@ async function insumosMaxirest(organizationId) {
   }
 }
 
+// Envases propios sobre los de MaxiRest: mismo nombre = corrección (pisa el factor), borrado = se saca.
+// Cada envase queda marcado con su origen para mostrarlo en la ficha.
+function aplicarEnvasesPropios(insumos, propios) {
+  if (!propios.length) return insumos.map((i) => ({ ...i, envases: (i.envases || []).map((e) => ({ ...e, origen: e.origen || 'maxirest' })) }));
+  const porCodigo = new Map();
+  for (const e of propios) {
+    if (!porCodigo.has(e.codigo)) porCodigo.set(e.codigo, []);
+    porCodigo.get(e.codigo).push(e);
+  }
+  return insumos.map((i) => {
+    const base = (i.envases || []).map((e) => ({ ...e, origen: e.origen || 'maxirest' }));
+    const mios = porCodigo.get(String(i.codigo).trim());
+    if (!mios) return { ...i, envases: base };
+    const nombres = new Set(mios.map((e) => e.envase.toUpperCase()));
+    const envases = [
+      ...base.filter((e) => !nombres.has(String(e.envase).trim().toUpperCase())),
+      ...mios.filter((e) => !e.borrado).map((e) => ({ envase: e.envase, factor: e.factor, origen: 'lazarillo',
+        corrige: base.some((b) => String(b.envase).trim().toUpperCase() === e.envase.toUpperCase()) })),
+    ];
+    return { ...i, envases };
+  });
+}
+
+// Alta o corrección de un envase de compra de un insumo (desde la carga o la ficha del insumo).
+const envaseSchema = z.object({
+  codigo: z.string().trim().min(1).max(40),
+  envase: z.string().trim().min(1, 'Poné el nombre del envase').max(20),
+  factor: z.number().positive('Poné cuántas unidades trae').max(100000),
+});
+async function guardarEnvase({ organizationId, body }) {
+  const parsed = envaseSchema.safeParse(body);
+  if (!parsed.success) throw rechazo(parsed.error.issues[0]?.message ?? 'Datos inválidos', 422);
+  const d = parsed.data;
+  await db.execute(sql`
+    INSERT INTO gestion_envases_insumo (organization_id, insumo_codigo, envase, factor, borrado)
+    VALUES (${organizationId}, ${d.codigo}, ${d.envase}, ${d.factor}, false)
+    ON CONFLICT (organization_id, insumo_codigo, UPPER(envase))
+    DO UPDATE SET envase = EXCLUDED.envase, factor = EXCLUDED.factor, borrado = false, actualizado_en = now()`);
+  return { ok: true };
+}
+// Sacar un envase: queda marcado como borrado (si es de MaxiRest, la importación no lo vuelve a traer acá).
+async function borrarEnvase({ organizationId, sp }) {
+  const codigo = String(sp.get('codigo') || '').trim();
+  const envase = String(sp.get('envase') || '').trim();
+  if (!codigo || !envase) throw rechazo('Datos inválidos');
+  await db.execute(sql`
+    INSERT INTO gestion_envases_insumo (organization_id, insumo_codigo, envase, factor, borrado)
+    VALUES (${organizationId}, ${codigo}, ${envase}, 1, true)
+    ON CONFLICT (organization_id, insumo_codigo, UPPER(envase))
+    DO UPDATE SET borrado = true, actualizado_en = now()`);
+  return { ok: true };
+}
+
+// Último descuento de cada proveedor × insumo, para sugerirlo en la próxima carga (Diego 06/11/2026).
+// Valor 0 = ya no trae descuento: se olvida.
+const descuentosSchema = z.object({
+  proveedorId: z.number().int().positive(),
+  items: z.array(z.object({
+    codigo: z.string().trim().min(1).max(40),
+    tipo: z.enum(['%', 'u', 't']),
+    valor: z.number().min(0).max(1e10),
+  })).max(500),
+});
+async function guardarDescuentos({ organizationId, body }) {
+  const parsed = descuentosSchema.safeParse(body);
+  if (!parsed.success) throw rechazo(parsed.error.issues[0]?.message ?? 'Datos inválidos', 422);
+  const { proveedorId, items } = parsed.data;
+  const prov = await db.one(sql`SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND id = ${proveedorId}`);
+  if (!prov) throw rechazo('Proveedor no encontrado', 404);
+  for (const it of items) {
+    if (it.valor > 0) {
+      await db.execute(sql`
+        INSERT INTO gestion_descuentos_recordados (organization_id, proveedor_id, insumo_codigo, tipo, valor)
+        VALUES (${organizationId}, ${proveedorId}, ${it.codigo}, ${it.tipo}, ${it.valor})
+        ON CONFLICT (organization_id, proveedor_id, insumo_codigo)
+        DO UPDATE SET tipo = EXCLUDED.tipo, valor = EXCLUDED.valor, actualizado_en = now()`);
+    } else {
+      await db.execute(sql`DELETE FROM gestion_descuentos_recordados
+        WHERE organization_id = ${organizationId} AND proveedor_id = ${proveedorId} AND insumo_codigo = ${it.codigo}`);
+    }
+  }
+  return { ok: true, n: items.length };
+}
+
 async function obtenerMaestrosFactura({ organizationId, businessId }) {
-  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales] = await Promise.all([
+  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales, envasesPropios, descuentos] = await Promise.all([
     db.many(sql`SELECT id, codigo, nombre, razon, cuit FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
     db.many(sql`
       SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro
@@ -565,13 +649,19 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
       SELECT TRIM(codigo_maxi) AS codigo, TRIM(nombre) AS nombre, NULLIF(TRIM(unidad_med), '') AS medida, precio_ref::float8 AS precio
       FROM insumos
       WHERE business_id = ${businessId} AND origen = 'manual' AND estado = 'activo' AND codigo_maxi ~ '^L[0-9]+$'`),
+    // Envases cargados o corregidos en Lazarillo y el último descuento de cada proveedor × insumo (Diego 06/11/2026).
+    db.many(sql`SELECT TRIM(insumo_codigo) AS codigo, TRIM(envase) AS envase, factor::float8 AS factor, borrado
+      FROM gestion_envases_insumo WHERE organization_id = ${organizationId}`),
+    db.many(sql`SELECT proveedor_id AS p, TRIM(insumo_codigo) AS k, tipo, valor::float8 AS valor
+      FROM gestion_descuentos_recordados WHERE organization_id = ${organizationId}`),
   ]);
-  const maestroIns = [...deMaxirest, ...manuales.map((m) => ({ codigo: m.codigo, nombre: m.nombre, medida: m.medida, rubro: null, codCga: null,
-    precio: m.precio > 0 ? m.precio : null, discontinuado: false, envases: [] }))];
+  const conPropios = (lista) => aplicarEnvasesPropios(lista, envasesPropios);
+  const maestroIns = conPropios([...deMaxirest, ...manuales.map((m) => ({ codigo: m.codigo, nombre: m.nombre, medida: m.medida, rubro: null, codCga: null,
+    precio: m.precio > 0 ? m.precio : null, discontinuado: false, envases: [] }))]);
   const tipoDe = new Map(tipos.map((t) => [t.id, t.ins > 0 ? 'insumo' : 'concepto']));
   return {
     proveedores: proveedores.map((p) => ({ ...p, tipoHabitual: tipoDe.get(p.id) ?? null })),
-    conceptos, insumos: unirInsumos(maestroIns, comprados), lugares, historialConceptos,
+    conceptos, insumos: conPropios(unirInsumos(maestroIns, comprados)), lugares, historialConceptos, descuentos,
   };
 }
 
@@ -969,6 +1059,7 @@ async function borrarMedio({ businessId, id }) {
 }
 
 module.exports = {
+  aplicarEnvasesPropios, guardarEnvase, borrarEnvase, guardarDescuentos,
   historialConcepto,
   facturaDeCompra, digitosCpb,
   idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
