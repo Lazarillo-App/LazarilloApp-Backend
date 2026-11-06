@@ -72,7 +72,7 @@ async function obtenerLugares(cliente, businessId) {
   ];
 }
 
-// ── Actividad ───────────────────────────────────────────────────────────────────────────────
+// ── Actividad ───────────────────────────────────────────────────────────────────
 async function registrarActividad(tx, a) {
   await tx.execute(sql`
     INSERT INTO gestion_actividad (organization_id, business_id, tipo, accion, descripcion, "refId", usuario, datos)
@@ -804,7 +804,7 @@ async function historialConcepto({ businessId, sp }) {
   return { filas };
 }
 
-// ── Gastos varios ─────────────────────────────────────────────────────────────────────────────
+// ── Gastos varios ───────────────────────────────────────────────────────────────
 // Un Ticket interno del proveedor "Gastos Varios" (9999-NNNNNNNN), sin IVA. Con pago, se registra
 // en la misma transacción; sin pago queda impago.
 const gastoSchema = z.object({
@@ -871,7 +871,7 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
   });
 }
 
-// ── Ventas manuales ───────────────────────────────────────────────────────────────────────────
+// ── Ventas manuales ─────────────────────────────────────────────────────────────
 const MAN = `${PREFIJO_MANUAL}%`;
 const ventasAltaSchema = z.object({ items: z.array(itemSchema).min(1).max(400), forzar: z.boolean().optional() });
 const exigirSucursal = (sucursal) => { if (sucursal === undefined) throw rechazo('Elegí una sucursal'); };
