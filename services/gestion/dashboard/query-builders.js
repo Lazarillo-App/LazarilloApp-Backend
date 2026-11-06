@@ -2,7 +2,7 @@
 'use strict';
 
 const { sql } = require('../db');
-const { SIN_RUBRO_VISIBILIDAD_DEFAULT, VISIBILIDAD_FIELDS } = require('./constants');
+const { VISIBILIDAD_FIELDS } = require('./constants');
 const { ACENTOS_DESDE, ACENTOS_HACIA, quitarAcentos } = require('./observacion-busqueda');
 const { parsearImporte } = require('./importe-busqueda');
 const { decimalCanonico } = require('../decimal-canonico');
@@ -22,10 +22,11 @@ function rangoAnio(expr, year) {
 // si la fila falta: ante una config rota preferimos mostrar el dato antes que ocultarlo en silencio.
 // El literal del default sale de una constante nuestra (no de input), por eso va con sql.raw.
 // En Lazarillo la config es por negocio (gestion_sin_rubro_config, una fila por business_id).
+// Diego 06/11/2026: "Sin rubro" es FIJO, siempre se ve (tablero y Resultados) y no se puede apagar: lo
+// que no tiene rubro igual es gasto y tiene que entrar al total. La config vieja queda sin uso.
+// eslint-disable-next-line no-unused-vars
 function sinRubroVisibleSql(col, businessId) {
-  const safe = VISIBILIDAD_FIELDS.includes(col) ? col : "visibleEnDashboard";
-  const fallback = SIN_RUBRO_VISIBILIDAD_DEFAULT[safe] ? "true" : "false";
-  return sql`COALESCE((SELECT s."${sql.raw(safe)}" FROM gestion_sin_rubro_config s WHERE s.business_id = ${businessId}), ${sql.raw(fallback)})`;
+  return sql`true`;
 }
 
 // Visibilidad de un rubro (rc) en el Panel del negocio. En gestion vivía en el maestro de rubros;

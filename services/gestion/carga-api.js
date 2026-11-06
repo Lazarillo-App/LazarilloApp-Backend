@@ -230,7 +230,7 @@ async function leerFactura(cliente, businessId, rowId) {
     lineas.map((l) => ({ ...l, cantidad: n(l.cantidad), totalIns: n(l.totalIns), tasa: n(l.tasa), impNtTot: n(l.impNtTot) })),
   );
   // Renglones de insumos sin rubro en MaxiRest: suman en Resultados por render/sin-concepto.js.
-  const sinConcepto = filas.some((f) => f.origen === 'sin-concepto');
+  const sinConcepto = filas.some((f) => f.origen === 'sin-concepto' && (f.codCga ?? '0') === '0'); // las ya reclasificadas no
   return { rowId, origen: esLz ? 'lazarillo' : 'maxirest', editable: esLz && proveedorId != null, estimado: leido.estimado, proveedorId, factura: leido.factura, totalFilas, sinConcepto };
 }
 

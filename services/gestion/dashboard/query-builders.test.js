@@ -81,19 +81,12 @@ describe("buildPivotConditions — negocio y sucursal", () => {
 });
 
 describe("buildPivotConditions — visibilidad de Sin Rubro", () => {
-  it("Compras: consulta sin_rubro_config con la columna del dashboard y default true", () => {
-    const sql = sqlDe(pc({ tableAlias: "c", filterRubrosOcultos: true }));
-    expect(sql).toContain("gestion_sin_rubro_config");
-    expect(sql).toContain("s.business_id =");
-    expect(sql).toContain(`s."visibleEnDashboard"`);
-    expect(sql).toMatch(/,\s*true\)/);
-  });
-
-  it("Resultados: consulta la columna de resultados y default false", () => {
-    const sql = sqlDe(pc({ tableAlias: "c", filterRubrosOcultos: true, visibilidadCol: "visibleEnResultados" }));
-    expect(sql).toContain(`s."visibleEnResultados"`);
-    expect(sql).not.toContain(`s."visibleEnDashboard"`);
-    expect(sql).toMatch(/,\s*false\)/);
+  it("Sin Rubro es fijo (Diego 06/11/2026): siempre visible, en el tablero y en Resultados", () => {
+    for (const visibilidadCol of [undefined, "visibleEnResultados"]) {
+      const sql = sqlDe(pc({ tableAlias: "c", filterRubrosOcultos: true, visibilidadCol }));
+      expect(sql).not.toContain("gestion_sin_rubro_config");
+      expect(sql).toContain("rc.codigo IS NULL AND true");
+    }
   });
 
   it("los rubros reales usan la visibilidad del negocio (rv), con el default de gestion", () => {
@@ -117,10 +110,10 @@ describe("buildPivotConditions — visibilidad de Sin Rubro", () => {
 });
 
 describe("sinRubroVisibleSql", () => {
-  it("una columna fuera de la whitelist cae al dashboard, nunca se interpola cruda", () => {
+  it("es siempre true y no interpola nada", () => {
     const frag = sinRubroVisibleSql("x; DROP TABLE compras", 147);
-    expect(frag.sql).toContain(`s."visibleEnDashboard"`);
-    expect(frag.sql).not.toContain("DROP");
+    expect(frag.sql.trim()).toBe("true");
+    expect(frag.values ?? []).toEqual([]);
   });
 });
 
