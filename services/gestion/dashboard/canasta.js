@@ -73,9 +73,35 @@ function pesoRelativo(comps) {
 const UMBRAL_COMPLETO = 0.8;
 const VENTANA_ESTIMADO = 6;
 const MIN_MEDIDOS = 3;
+// "Salta y vuelve" (Diego 06/11/2026: Sueldos "Desde 31/08" daba −7,3% por ago +16,2% / sep −9,5% en
+// Comercio): dos meses seguidos que se compensan (horas, variables o algo pagado de más un mes) se
+// puentean: los dos llevan la mitad (geométrica) del cambio conjunto, como el SAC en la metodología.
+const SALTO = 0.05;
+/** Pares consecutivos medidos que se compensan → cada uno con la raíz del cambio conjunto. */
+function puentear(variaciones, saltar) {
+  const out = [...variaciones];
+  const puenteados = variaciones.map(() => false);
+  for (let i = 0; i + 1 < out.length; i++) {
+    const a = out[i], b = out[i + 1];
+    if (a == null || b == null || saltar[i] || saltar[i + 1] || puenteados[i]) continue;
+    const conjunto = (1 + a) * (1 + b) - 1;
+    if (Math.abs(a) >= SALTO && Math.abs(b) >= SALTO && Math.sign(a) !== Math.sign(b)
+        && Math.abs(conjunto) < Math.min(Math.abs(a), Math.abs(b))) {
+      const v = Math.sqrt((1 + a) * (1 + b)) - 1;
+      out[i] = v; out[i + 1] = v;
+      puenteados[i] = true; puenteados[i + 1] = true;
+      i++;
+    }
+  }
+  return { variaciones: out, puenteados };
+}
+
 /**
+ * Serie de sueldos lista para la canasta: 1) los meses a medio cargar no se miden (ver arriba);
+ * 2) los saltos que vuelven se puentean; 3) los meses incompletos se estiman; 4) un sueldo nunca baja:
+ * cada mes es como mínimo 0% ("mínimo lo mismo del mes anterior", Diego 06/11/2026).
  * stats: un elemento por mes de `meses` ({ n, tot } o null); variaciones: una por mes desde el segundo.
- * Devuelve { variaciones, estimados } (mismo largo que variaciones).
+ * Devuelve { variaciones, estimados, puenteados } (mismo largo que variaciones).
  */
 function estimarIncompletos(variaciones, stats) {
   const incompleto = new Array(stats.length).fill(false);
@@ -86,20 +112,20 @@ function estimarIncompletos(variaciones, stats) {
     if (!st || st.n < UMBRAL_COMPLETO * ref.n || st.tot < UMBRAL_COMPLETO * ref.tot) incompleto[k] = true;
     else ref = st;
   }
-  const out = [...variaciones];
+  const afectado = variaciones.map((_, i) => !!(incompleto[i + 1] || incompleto[i]));
+  const { variaciones: out, puenteados } = puentear(variaciones, afectado);
   const estimados = variaciones.map(() => false);
-  for (let i = 0; i < variaciones.length; i++) {
-    if (!incompleto[i + 1] && !incompleto[i]) continue;
+  for (let i = 0; i < out.length; i++) {
+    if (!afectado[i]) continue;
     const previas = [];
     for (let j = i - 1; j >= 0 && previas.length < VENTANA_ESTIMADO; j--) {
-      if (!estimados[j] && out[j] != null) previas.push(out[j]);
+      if (!estimados[j] && out[j] != null) previas.push(Math.max(0, out[j]));
     }
     // Con menos de MIN_MEDIDOS meses medidos no hay tendencia confiable: "mínimo lo mismo del mes anterior" (0%).
-    const geo = previas.length >= MIN_MEDIDOS ? Math.exp(previas.reduce((a, v) => a + Math.log(1 + v), 0) / previas.length) - 1 : 0;
-    out[i] = Math.max(0, geo);
+    out[i] = previas.length >= MIN_MEDIDOS ? Math.exp(previas.reduce((a, v) => a + Math.log(1 + v), 0) / previas.length) - 1 : 0;
     estimados[i] = true;
   }
-  return { variaciones: out, estimados };
+  return { variaciones: out.map((v) => (v == null ? null : Math.max(0, v))), estimados, puenteados };
 }
 
-module.exports = { mesesHasta, canastaMensual, acumulada, ventanaUltimoAumento, pesoRelativo, estimarIncompletos, UMBRAL_COMPLETO, VENTANA_ESTIMADO };
+module.exports = { mesesHasta, canastaMensual, acumulada, ventanaUltimoAumento, pesoRelativo, estimarIncompletos, puentear, UMBRAL_COMPLETO, VENTANA_ESTIMADO };

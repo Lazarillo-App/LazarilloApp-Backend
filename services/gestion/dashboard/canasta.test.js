@@ -81,12 +81,26 @@ describe("estimarIncompletos (sueldos a medio cargar, Diego 06/11/2026)", () => 
     expect(r.estimados).toEqual([false, false, false, true]);
     expect(r.variaciones[3]).toBe(0);
     const r2 = estimarIncompletos([0.089, null], [st(15, 13), st(15, 14.9), null]);
-    expect(r2).toEqual({ variaciones: [0.089, 0], estimados: [false, true] });
+    expect(r2.variaciones).toEqual([0.089, 0]);
+    expect(r2.estimados).toEqual([false, true]);
   });
   it("meses completos no se tocan; sin historia no inventa", () => {
     const r = estimarIncompletos([0.03, 0.01], [st(10, 10), st(10, 10.3), st(10, 10.4)]);
-    expect(r).toEqual({ variaciones: [0.03, 0.01], estimados: [false, false] });
+    expect(r).toEqual({ variaciones: [0.03, 0.01], estimados: [false, false], puenteados: [false, false] });
     const r2 = estimarIncompletos([null], [null, null]);
-    expect(r2).toEqual({ variaciones: [null], estimados: [false] });
+    expect(r2.variaciones).toEqual([null]);
+    expect(r2.estimados).toEqual([false]);
+  });
+  it("salta y vuelve (Comercio ago +16,2% / sep −9,5%) → se puentea: los dos con la raíz del cambio conjunto", () => {
+    const stats = [st(13, 16), st(13, 16.2), st(12, 16.6), st(13, 18.8)];
+    const r = estimarIncompletos([0.012, 0.1623, -0.0947], stats);
+    const v = Math.sqrt(1.1623 * 0.9053) - 1;
+    expect(r.puenteados).toEqual([false, true, true]);
+    expect(r.variaciones[1]).toBeCloseTo(v, 10);
+    expect(r.variaciones[2]).toBeCloseTo(v, 10);
+  });
+  it("un sueldo nunca baja: una variación negativa suelta queda en 0", () => {
+    const r = estimarIncompletos([-0.037, 0.02], [st(10, 10), st(10, 9.7), st(10, 9.9)]);
+    expect(r.variaciones).toEqual([0, 0.02]);
   });
 });
