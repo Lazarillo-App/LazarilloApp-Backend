@@ -604,8 +604,31 @@ async function guardarDescuentos({ organizationId, body }) {
   return { ok: true, n: items.length };
 }
 
+// IVA e II de la última carga por insumo / concepto (Diego 06/11/2026). ii: por unidad base; null = no se toca.
+const recordadosSchema = z.object({
+  items: z.array(z.object({
+    tipo: z.enum(['insumo', 'concepto']),
+    codigo: z.string().trim().min(1).max(40),
+    alic: z.number().min(0).max(100).nullable().optional(),
+    ii: z.number().min(0).max(1e10).nullable().optional(),
+  })).max(500),
+});
+async function guardarRecordados({ organizationId, body }) {
+  const parsed = recordadosSchema.safeParse(body);
+  if (!parsed.success) throw rechazo(parsed.error.issues[0]?.message ?? 'Datos inválidos', 422);
+  for (const it of parsed.data.items) {
+    await db.execute(sql`
+      INSERT INTO gestion_items_recordados (organization_id, tipo, codigo, alic, ii)
+      VALUES (${organizationId}, ${it.tipo}, ${it.codigo}, ${it.alic ?? null}, ${it.ii ?? null})
+      ON CONFLICT (organization_id, tipo, codigo) DO UPDATE SET
+        alic = COALESCE(EXCLUDED.alic, gestion_items_recordados.alic),
+        ii = COALESCE(EXCLUDED.ii, gestion_items_recordados.ii), actualizado_en = now()`);
+  }
+  return { ok: true, n: parsed.data.items.length };
+}
+
 async function obtenerMaestrosFactura({ organizationId, businessId }) {
-  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales, envasesPropios, descuentos] = await Promise.all([
+  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales, envasesPropios, descuentos, recordados] = await Promise.all([
     db.many(sql`SELECT id, codigo, nombre, razon, cuit FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
     db.many(sql`
       SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro
@@ -654,6 +677,8 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
       FROM gestion_envases_insumo WHERE organization_id = ${organizationId}`),
     db.many(sql`SELECT proveedor_id AS p, TRIM(insumo_codigo) AS k, tipo, valor::float8 AS valor
       FROM gestion_descuentos_recordados WHERE organization_id = ${organizationId}`),
+    db.many(sql`SELECT tipo AS t, TRIM(codigo) AS k, alic::float8 AS alic, ii::float8 AS ii
+      FROM gestion_items_recordados WHERE organization_id = ${organizationId}`),
   ]);
   const conPropios = (lista) => aplicarEnvasesPropios(lista, envasesPropios);
   const maestroIns = conPropios([...deMaxirest, ...manuales.map((m) => ({ codigo: m.codigo, nombre: m.nombre, medida: m.medida, rubro: null, codCga: null,
@@ -661,7 +686,7 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
   const tipoDe = new Map(tipos.map((t) => [t.id, t.ins > 0 ? 'insumo' : 'concepto']));
   return {
     proveedores: proveedores.map((p) => ({ ...p, tipoHabitual: tipoDe.get(p.id) ?? null })),
-    conceptos, insumos: conPropios(unirInsumos(maestroIns, comprados)), lugares, historialConceptos, descuentos,
+    conceptos, insumos: conPropios(unirInsumos(maestroIns, comprados)), lugares, historialConceptos, descuentos, recordados,
   };
 }
 
@@ -1059,7 +1084,7 @@ async function borrarMedio({ businessId, id }) {
 }
 
 module.exports = {
-  aplicarEnvasesPropios, guardarEnvase, borrarEnvase, guardarDescuentos,
+  aplicarEnvasesPropios, guardarEnvase, borrarEnvase, guardarDescuentos, guardarRecordados,
   historialConcepto,
   facturaDeCompra, digitosCpb,
   idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
