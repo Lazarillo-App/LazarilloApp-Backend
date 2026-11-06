@@ -9,7 +9,7 @@ const m = (codigo, nombre, codCga, extra = {}) => ({ codigo, nombre, medida: "K"
 describe("unirInsumos", () => {
   it("el concepto sale del rubro aunque la compra no lo tenga", () => {
     const r = unirInsumos([m("505", "Carne Picada Cerdo", "4")], [{ codigo: "505", nombre: "Carne Picada Cerdo", medida: "K", codCga: null, unit: 9000, alic: 10.5 }]);
-    expect(r).toEqual([{ codigo: "505", nombre: "Carne Picada Cerdo", medida: "K", codCga: "4", rubro: "Carnes", unit: 9000, alic: 10.5, envases: [] }]);
+    expect(r).toEqual([{ codigo: "505", nombre: "Carne Picada Cerdo", medida: "K", codCga: "4", rubro: "Carnes", unit: 9000, alic: 10.5, ii: null, envases: [] }]);
   });
   it("rubro sin concepto: usa el de la última compra; sin compra, precio del maestro", () => {
     const r = unirInsumos([m("1", "A", null), m("2", "B", null)], [{ codigo: "1", nombre: "A", medida: "K", codCga: "7", unit: 5, alic: 21 }]);
