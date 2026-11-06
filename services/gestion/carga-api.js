@@ -529,7 +529,7 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
       LEFT JOIN gestion_rubros_concepto_caja rc ON rc.organization_id = ${organizationId} AND rc.codigo = cc."codRga"
       WHERE cc.organization_id = ${organizationId} ORDER BY cc.nombre`),
     db.many(sql`
-      SELECT DISTINCT ON (codigo) codigo, TRIM(nombre) AS nombre, TRIM(medida) AS medida, "codCga", neto::float8 AS unit, tasa::float8 AS alic
+      SELECT DISTINCT ON (codigo) codigo, TRIM(nombre) AS nombre, TRIM(medida) AS medida, "codCga", neto::float8 AS unit, tasa::float8 AS alic, "impInt"::float8 AS ii
       FROM gestion_detalle_compras
       WHERE business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
         AND NULLIF(TRIM(medida), '') IS NOT NULL AND codigo IS NOT NULL AND nombre IS NOT NULL
