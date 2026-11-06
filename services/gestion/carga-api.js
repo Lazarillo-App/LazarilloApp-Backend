@@ -83,7 +83,7 @@ async function registrarActividad(tx, a) {
 function descripcionFactura(p) {
   const tipo = p.f.tipo === 'Ticket' ? 'Tic' : p.f.tipo;
   const comp = `${tipo} ${p.f.prefijo.padStart(4, '0')}-${p.f.numero.padStart(8, '0')}`;
-  return `${p.nombreProv}\n${[comp, p.lugar, pesos(p.total)].filter(Boolean).join(' · ')}`;
+  return `${p.nombreProv}\\n${[comp, p.lugar, pesos(p.total)].filter(Boolean).join(' · ')}`;
 }
 
 // ── Preparar y guardar una factura ─────────────────────────────────────────────
@@ -230,14 +230,14 @@ async function leerFactura(cliente, businessId, rowId) {
 
 // ── Pagos al proveedor ("Registrar el pago ahora") ────────────────────────────
 const pagoAhoraSchema = z.object({
-  fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  fecha: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/),
   medio: z.string().trim().min(1).max(40),
   referencia: z.string().max(200).optional().nullable(),
   importe: z.number().positive().optional(), // sin importe: salda la factura entera
 });
 
 const normalizarReferencia = (raw) => {
-  const v = raw.replace(/\s+/g, '').toUpperCase();
+  const v = raw.replace(/\\s+/g, '').toUpperCase();
   return /^[A-Z0-9]{1,100}$/.test(v) ? v : null;
 };
 
@@ -380,7 +380,7 @@ async function borrarFactura({ organizationId, businessId, usuario, rowId, conPa
     await sacarFacturaDeCostos(tx, { businessId }, { comprobante: fa.c.comprobante, codigo: fa.c.codigo, fecha: iso(fa.c.fecha) });
     await registrarActividad(tx, {
       organizationId, businessId, tipo: 'factura', accion: 'eliminada', usuario,
-      descripcion: `${fa.c.proveedor?.trim() || fa.c.codigo}\n${[fa.c.comprobante, pesos(total)].join(' · ')}`,
+      descripcion: `${fa.c.proveedor?.trim() || fa.c.codigo}\\n${[fa.c.comprobante, pesos(total)].join(' · ')}`,
       datos: fa.cargada ? { payload: fa.cargada.payload, pagos } : null,
     });
     return { ok: true, filas: filas.length };
@@ -439,8 +439,8 @@ async function facturaExiste({ organizationId, businessId, sp }) {
   const tipo = sp.get('tipo');
   const prefijo = sp.get('prefijo') ?? '';
   const numero = sp.get('numero') ?? '';
-  const fecha = /^\d{4}-\d{2}-\d{2}$/.test(sp.get('fecha') ?? '') ? sp.get('fecha') : null;
-  if (!Number.isInteger(proveedorId) || !(tipo in TIPOS_COMPROBANTE) || !/^\d{1,4}$/.test(prefijo) || !/^\d{1,8}$/.test(numero)) return { existe: false };
+  const fecha = /^\\d{4}-\\d{2}-\\d{2}$/.test(sp.get('fecha') ?? '') ? sp.get('fecha') : null;
+  if (!Number.isInteger(proveedorId) || !(tipo in TIPOS_COMPROBANTE) || !/^\\d{1,4}$/.test(prefijo) || !/^\\d{1,8}$/.test(numero)) return { existe: false };
   const prov = await db.one(sql`SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId} AND id = ${proveedorId}`);
   if (!prov) return { existe: false };
   const { comprobante } = comprobanteDe(tipo, prefijo, numero);
@@ -491,7 +491,7 @@ async function insumosMaxirest(organizationId) {
 }
 
 async function obtenerMaestrosFactura({ organizationId, businessId }) {
-  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos] = await Promise.all([
+  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales] = await Promise.all([
     db.many(sql`SELECT id, codigo, nombre, razon, cuit FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
     db.many(sql`
       SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro
@@ -529,11 +529,19 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
           AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NOT NULL)
       SELECT p, TRIM(k) AS k, percentile_cont(0.5) WITHIN GROUP (ORDER BY imp)::float8 AS mediana, COUNT(*)::int AS n
       FROM h WHERE rn <= 6 GROUP BY p, k HAVING COUNT(*) >= 2`),
+    // Insumos creados en Lazarillo (Recetas o «Crear insumo» desde la carga, códigos L1, L2…): el mismo
+    // maestro que Recetas, así un insumo nuevo no se duplica (Diego 05/11/2026).
+    db.many(sql`
+      SELECT TRIM(codigo_maxi) AS codigo, TRIM(nombre) AS nombre, NULLIF(TRIM(unidad_med), '') AS medida, precio_ref::float8 AS precio
+      FROM insumos
+      WHERE business_id = ${businessId} AND origen = 'manual' AND estado = 'activo' AND codigo_maxi ~ '^L[0-9]+$'`),
   ]);
+  const maestroIns = [...deMaxirest, ...manuales.map((m) => ({ codigo: m.codigo, nombre: m.nombre, medida: m.medida, rubro: null, codCga: null,
+    precio: m.precio > 0 ? m.precio : null, discontinuado: false, envases: [] }))];
   const tipoDe = new Map(tipos.map((t) => [t.id, t.ins > 0 ? 'insumo' : 'concepto']));
   return {
     proveedores: proveedores.map((p) => ({ ...p, tipoHabitual: tipoDe.get(p.id) ?? null })),
-    conceptos, insumos: unirInsumos(deMaxirest, comprados), lugares, historialConceptos,
+    conceptos, insumos: unirInsumos(maestroIns, comprados), lugares, historialConceptos,
   };
 }
 
@@ -608,7 +616,7 @@ const gastoSchema = z.object({
   conceptoCodigo: z.string().trim().min(1).max(20),
   detalle: z.string().trim().max(200).optional().nullable(),
   importe: z.number().positive().max(1e12),
-  fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  fecha: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/),
   pago: pagoAhoraSchema.omit({ importe: true }).optional().nullable(),
   forzar: z.boolean().optional(), // ya se avisó que hay uno parecido
 });
@@ -659,7 +667,7 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
     });
     const total = p.armado.total;
     const pago = await altaEnTx(tx, ctx, p, g.pago ?? null, usuario, (nombre) =>
-      `${GV_NOMBRE}\n${[concepto.nombre.trim(), g.detalle?.trim(), nombre, pesos(total)].filter(Boolean).join(' · ')}`);
+      `${GV_NOMBRE}\\n${[concepto.nombre.trim(), g.detalle?.trim(), nombre, pesos(total)].filter(Boolean).join(' · ')}`);
     ids.push(...p.armado.filas.map((x) => x.rowId));
     return { ok: true, comprobante: p.armado.filas[0].comprobante, numero: `${GV_PREFIJO}-${numero}`, total, rowId: p.armado.filas[0].rowId, pago };
   });
