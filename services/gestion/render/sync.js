@@ -20,6 +20,7 @@ const { sincronizarTrasImport } = require('../apertura/motor');
 const { filaDeRender, informeDeTabla } = require('./filas');
 const { huellaTabla, leerCargas, leerTabla, PDV_MAESTROS } = require('./db');
 const { revisarHuerfanas } = require('./huerfanas');
+const { sincronizarSinConcepto } = require('./sin-concepto');
 
 // Un ítem = una tabla de Render para un PDV (ej. i14 2026 del BAR → negocio 147),
 // o un maestro de la organización (ej. m17 de container → organización 9).
@@ -296,6 +297,17 @@ async function sincronizarTodo(opts) {
       const r = await revisarHuerfanas({ esquema: its[0].esquema, pdv: its[0].pdv, businessId: its[0].businessId, branchId: its[0].branchId, tablas: its.map((it) => it.tabla) });
       if (r.marcadas || r.restauradas) console.log("[render] huérfanas", its[0].pdv, r);
     } catch (e) { console.error("[render] huérfanas", its[0].pdv, e); }
+  }
+  // Renglones de insumos sin concepto de caja (no llegan al 14): una compra por comprobante para
+  // que sumen en Resultados (ver render/sin-concepto.js). En todos los PDV, en cada corrida: es una
+  // consulta por PDV y así también se ajusta cuando cambia el rubro en MaxiRest.
+  const pdvs = new Map();
+  for (const it of items) if (it.businessId != null) pdvs.set(`${it.businessId}|${it.branchId ?? ""}`, { businessId: it.businessId, branchId: it.branchId ?? null });
+  for (const pdv of pdvs.values()) {
+    try {
+      const r = await sincronizarSinConcepto(pdv);
+      if (r.altas || r.cambios || r.bajas) console.log("[render] sin concepto de caja", pdv, r);
+    } catch (e) { console.error("[render] sin concepto de caja", pdv, e); }
   }
   return { resultados, pendientes };
 }
