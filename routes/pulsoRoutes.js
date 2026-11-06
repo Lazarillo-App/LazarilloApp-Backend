@@ -8,9 +8,13 @@
 //     que ven Balance; a staff le llega null.
 //   - actualizando: true mientras corre lo que disparó POST /actualizar (o la ingesta del kit).
 //   POST /api/businesses/:businessId/pulso/actualizar  (dueño/admin) — el "actualizar ahora"
-//   del pulso: trae de MaxiRest las ventas que le faltan a Recetas (lo mismo que "Gestionar
-//   ventas", runDailyAuto) y relee del kit lo que cambió para Balance (la misma ingesta que
-//   corre cada hora). Responde enseguida; las dos cosas siguen en segundo plano.
+//   del pulso. Todo sale del KIT (lo que sube cada PC a Render), no de MaxiRest online:
+//   - Balance: relee del kit lo que cambió (la misma ingesta que corre cada hora).
+//   - Recetas: los pipelines de Mairene que leen del kit — ventas del 12
+//     (syncVentasDeNegocio → sales_daily_items) y compras/pagos del 25 y el 80
+//     (syncComprasDeNegocio → purchases, con cascada a los costos de las recetas).
+//     Antes usaba runDailyAuto (API de MaxiRest online, cortada desde octubre). Diego, 06/11.
+//   Responde enseguida; todo sigue en segundo plano.
 // El front pinta un solo punto con la peor de las dos y el detalle en el tooltip.
 // Fechas futuras (tickets cargados a propósito más adelante) no cuentan: tope mañana.
 
@@ -18,15 +22,41 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const pool = require('../config/db');
 const { requireBusinessAccess } = require('../middleware/requireBusinessAccess');
-const { runDailyAuto } = require('../services/salesSyncPolicy');
-const { resolveCredsBizId } = require('../controllers/salesSyncController');
+const { syncVentasDeNegocio } = require('../services/maxiPipelineSalesSync');
+const { syncComprasDeNegocio } = require('../services/maxiPipelinePurchasesSync');
 const { abrirCorrida, ejecutarCorrida, corridaEnCurso } = require('../services/gestion/render/sync');
 
 const VEN_BALANCE = new Set(['owner', 'admin', 'service']);
 
-// Negocios con la sync de Recetas disparada desde el pulso (un proceso: alcanza en memoria;
-// runDailyAuto además tiene su propio candado en la base).
+// Negocios con la sync de Recetas disparada desde el pulso. En memoria (un proceso) y además
+// un candado de sesión en la base, para no correr a la vez que otro servicio o el script de
+// Mairene (db/scripts/sync-maxi-pipeline-*.js) que use el mismo candado.
 const recetasEnCurso = new Set();
+const CANDADO_RECETAS = 7_310_000; // + businessId: clave del pg_try_advisory_lock
+
+async function correrRecetas(businessId) {
+  const client = await pool.connect();
+  let tomado = false;
+  try {
+    const { rows } = await client.query('SELECT pg_try_advisory_lock($1) AS ok', [CANDADO_RECETAS + businessId]);
+    tomado = !!rows[0]?.ok;
+    if (!tomado) { console.log('[pulso] recetas', businessId, 'ya corriendo en otro lado, se saltea'); return; }
+    const t0 = Date.now();
+    const ventas = await syncVentasDeNegocio(businessId);
+    const compras = await syncComprasDeNegocio(businessId);
+    console.log('[pulso] recetas', businessId, `${Date.now() - t0}ms`,
+      JSON.stringify({ ventas: resumir(ventas), compras: resumir(compras) }).slice(0, 600));
+  } finally {
+    if (tomado) await client.query('SELECT pg_advisory_unlock($1)', [CANDADO_RECETAS + businessId]).catch(() => {});
+    client.release();
+  }
+}
+
+// Para el log: sin listas largas.
+function resumir(r) {
+  if (!r || typeof r !== 'object') return r;
+  return JSON.parse(JSON.stringify(r, (k, v) => (Array.isArray(v) && v.length > 5 ? `[${v.length}]` : v)));
+}
 
 async function balanceActualizando() {
   try { return !!(await corridaEnCurso()); } catch { return false; }
@@ -76,16 +106,14 @@ router.post('/actualizar', requireBusinessAccess, async (req, res, next) => {
     }
     const businessId = Number(req.businessId);
 
-    // Recetas: ventas que faltan desde MaxiRest (credenciales del principal de la organización).
+    // Recetas: ventas (12) y compras/pagos (25, 80) desde el kit.
     let recetas = 'en_curso';
     if (!recetasEnCurso.has(businessId)) {
       recetasEnCurso.add(businessId);
       recetas = 'iniciado';
       setImmediate(async () => {
         try {
-          const credsBizId = await resolveCredsBizId(businessId);
-          const out = await runDailyAuto({ businessId, credsBizId });
-          console.log('[pulso] recetas', businessId, JSON.stringify(out).slice(0, 300));
+          await correrRecetas(businessId);
         } catch (e) {
           console.error('[pulso] recetas', businessId, e?.message || e);
         } finally {
