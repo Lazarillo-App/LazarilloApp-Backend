@@ -71,6 +71,9 @@ const facturaSchema = z.object({
     importe: dinero,
   })).default([]),
   impIntGeneral: dinero.default(0),
+  // Período económico de toda la factura (Diego 06/11/2026): si es otro mes que la fecha, la vista
+  // Económica la cuenta en ese mes (gestion_compras.periodo, como los sueldos).
+  periodo: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).nullish(),
 });
 
 const r2 = (n) => Math.round(n * 100) / 100;
