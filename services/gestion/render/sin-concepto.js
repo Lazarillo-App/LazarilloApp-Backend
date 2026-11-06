@@ -61,17 +61,34 @@ function maestroInsumosSql(esquema) {
 // si sigue sin concepto) y lo que dice el maestro del insumo (m_cod null = no está en el maestro).
 function renglonesSql({ businessId, sucursalCond, esquema }) {
   const monto = sql`COALESCE(dc."totalIns", 0) + COALESCE(dc."ivaTot", 0) + COALESCE(dc."impNtTot", 0)`;
+  // Concepto de hoy: primero el de Lazarillo (insumo → su rubro → concepto del rubro, con lo corregido en
+  // Lazarillo por encima de lo importado), y si el insumo no está en Lazarillo, el del maestro m0 del kit.
   return sql`
-    SELECT dc.business_id, dc.branch_id, dc."codCpb", dc."codPro", dc.nombre, dc.fecha,
+    SELECT dc.business_id, dc.branch_id, dc."codCpb", dc."codPro", dc.nombre, dc.fecha, dc.codigo AS codigo_insumo,
+           COALESCE(dc."ivaTot", 0) AS iva,
            CASE WHEN dc."codCpb" = '+' THEN 'NC' || substr(dc.comprobante, 2) ELSE dc.comprobante END AS comprobante,
            CASE WHEN dc."codCpb" = '+' THEN -1 ELSE 1 END * (${monto}) AS importe,
            CASE WHEN dc."codCpb" = '+' THEN -1 ELSE 1 END * COALESCE(dc."impNtTot", 0) AS imp_int,
-           m.cod AS m_cod, m.rubro AS m_rubro, cc.codigo AS cres, TRIM(cc.nombre) AS cnom
+           COALESCE(li.codigo_maxi, m.cod) AS m_cod,
+           CASE WHEN li.id IS NOT NULL THEN TRIM(lr.nombre) ELSE m.rubro END AS m_rubro,
+           li.id AS insumo_id, lr.codigo_maxi AS rubro_codigo,
+           cc.codigo AS cres, TRIM(cc.nombre) AS cnom
       FROM gestion_detalle_compras dc
       LEFT JOIN ${maestroInsumosSql(esquema)} m ON m.cod = ${codigoNorm(sql`dc.codigo`)}
+      -- LATERAL ... LIMIT 1: nunca multiplicar renglones (un código repetido en el maestro duplicaría plata).
+      LEFT JOIN LATERAL (
+        SELECT i.id, i.business_id, i.codigo_maxi, i.rubro FROM insumos i
+         WHERE i.business_id IN (SELECT ob.id FROM app_businesses ob WHERE ob.organization_id = (SELECT b.organization_id FROM app_businesses b WHERE b.id = ${businessId})) AND ${codigoNorm(sql`i.codigo_maxi`)} = ${codigoNorm(sql`dc.codigo`)}
+         ORDER BY (i.business_id = ${businessId}) DESC, i.activo DESC NULLS LAST, i.id LIMIT 1) li ON true
+      LEFT JOIN LATERAL (
+        SELECT r.codigo_maxi, r.nombre, r.cpto_caja, r.cpto_caja_lazarillo FROM insumo_rubros r
+         WHERE r.business_id = li.business_id AND NULLIF(TRIM(li.rubro), '0') IS NOT NULL AND r.codigo_maxi::text = TRIM(li.rubro)
+         ORDER BY r.id LIMIT 1) lr ON true
       LEFT JOIN gestion_conceptos_caja cc
         ON cc.organization_id = (SELECT b.organization_id FROM app_businesses b WHERE b.id = ${businessId})
-       AND cc.codigo = m.cga
+       AND cc.codigo = CASE WHEN li.id IS NOT NULL
+                            THEN NULLIF(COALESCE(lr.cpto_caja_lazarillo, NULLIF(lr.cpto_caja, 0))::text, '0')
+                            ELSE m.cga END
      WHERE dc.business_id = ${businessId}
        AND ${sucursalCond}
        AND dc.origen IS NULL
@@ -79,6 +96,15 @@ function renglonesSql({ businessId, sucursalCond, esquema }) {
        AND dc."codCpb" IN ('A', 'C', 'Z', '+')
        AND dc.fecha >= ${SIN_CONCEPTO_DESDE}::date
        AND ${esSinConcepto(sql`dc."codCga"`)}`;
+}
+
+/** Recalcula las compras sin concepto de todos los PDV del kit de una organización (tras corregir algo). */
+async function resincronizarOrganizacion(organizationId) {
+  const pdvs = await db.many(sql`
+    SELECT DISTINCT o.business_id, o.branch_id FROM gestion_render_origenes o
+      JOIN app_businesses b ON b.id = o.business_id
+     WHERE o.activo AND b.organization_id = ${organizationId}`);
+  for (const p of pdvs) await sincronizarSinConcepto({ businessId: Number(p.business_id), branchId: p.branch_id == null ? null : Number(p.branch_id) });
 }
 
 /** Recalcula las compras sin concepto de un PDV. Devuelve { altas, cambios, bajas }. */
@@ -152,4 +178,4 @@ async function sincronizarSinConcepto(pdv, { tx = db } = {}) {
   return r ?? { altas: 0, cambios: 0, bajas: 0 };
 }
 
-module.exports = { sincronizarSinConcepto, renglonesSql, esquemaDe, ORIGEN_SIN_CONCEPTO, TEXTO_SIN_CONCEPTO, SIN_CONCEPTO_DESDE };
+module.exports = { sincronizarSinConcepto, resincronizarOrganizacion, renglonesSql, esquemaDe, ORIGEN_SIN_CONCEPTO, TEXTO_SIN_CONCEPTO, SIN_CONCEPTO_DESDE };
