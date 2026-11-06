@@ -113,16 +113,20 @@ async function prepararFactura(cliente, { organizationId, businessId }, body) {
   return { f, armado, branchDe, lugares, proveedorCodigo: proveedor.codigo, nombreProv: proveedor.nombre ?? proveedor.razon ?? proveedor.codigo };
 }
 
+// Período de la factura: solo se guarda si es otro mes que su fecha (si no, la fecha ya lo dice).
+const periodoDeFactura = (f) => (f.periodo && f.periodo !== String(f.fecha).slice(0, 7) ? `${f.periodo}-01` : null);
+
 async function insertarArmado(tx, businessId, p) {
   const { armado, nombreProv, branchDe } = p;
+  const periodo = periodoDeFactura(p.f);
   await tx.execute(sql`
     INSERT INTO gestion_compras (
       business_id, branch_id, "rowId", comprobante, "codCga", concepto, fecha, codigo, proveedor, detalle, observac,
-      importe, "importeTrabajado", "impInt", per1, per2, per3, "proveedorId", "conceptoCodigo", "esBloqueado", origen
+      importe, "importeTrabajado", "impInt", per1, per2, per3, "proveedorId", "conceptoCodigo", "esBloqueado", origen, periodo
     ) VALUES ${sql.join(armado.filas.map((x) => sql`(
       ${businessId}, ${branchDe.get(x.puntoDeVentaId)}::bigint, ${x.rowId}, ${x.comprobante}, ${x.codCga}, ${x.concepto}, ${x.fecha}::date, ${x.codigo}, ${nombreProv}, ${x.detalle}, ${x.observac},
       ${x.importe}::numeric, ${x.importe}::numeric, ${x.impInt}::numeric, ${x.per1}::numeric, ${x.per2}::numeric, ${x.per3}::numeric,
-      ${x.proveedorId}::int, ${x.conceptoCodigo}, ${x.esBloqueado}, ${ORIGEN_LAZARILLO}
+      ${x.proveedorId}::int, ${x.conceptoCodigo}, ${x.esBloqueado}, ${ORIGEN_LAZARILLO}, ${periodo}::date
     )`))}`);
   if (!armado.lineas.length) return;
   const sucursalDeFila = new Map(armado.filas.map((x) => [x.rowId, branchDe.get(x.puntoDeVentaId)]));
@@ -791,6 +795,8 @@ const gastoSchema = z.object({
   fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   pago: pagoAhoraSchema.omit({ importe: true }).optional().nullable(),
   forzar: z.boolean().optional(), // ya se avisó que hay uno parecido
+  // Apertura por PDV (Diego 06/11/2026), igual que un registro de factura. Sin reparto = la regla del concepto.
+  reparto: z.array(z.object({ puntoDeVentaId: z.number().int(), pct: z.number().min(0).max(100) })).max(20).nullish(),
 });
 
 async function crearGastoVario({ organizationId, businessId, usuario, body }) {
@@ -834,7 +840,7 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
     if (!concepto) throw rechazo('Ese concepto no existe.');
     const p = await prepararFactura(tx, ctx, {
       proveedorId: gv.id, tipo: 'Ticket', prefijo: GV_PREFIJO, numero, fecha: g.fecha, observacion: g.detalle?.trim() || null,
-      registros: [{ tipo: 'concepto', conceptoCodigo: g.conceptoCodigo, nombre: concepto.nombre.trim(), neto: importe, alicuota: 0, impInt: 0, puntoDeVentaId: g.lugarId, reparto: null }],
+      registros: [{ tipo: 'concepto', conceptoCodigo: g.conceptoCodigo, nombre: concepto.nombre.trim(), neto: importe, alicuota: 0, impInt: 0, puntoDeVentaId: g.lugarId, reparto: g.reparto ?? null }],
       percepciones: [], impIntGeneral: 0,
     });
     const total = p.armado.total;
