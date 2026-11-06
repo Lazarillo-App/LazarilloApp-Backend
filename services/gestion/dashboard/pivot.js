@@ -108,26 +108,29 @@ async function obtenerPivot({ organizationId, businessId, params }) {
                         AND c.biz = d.business_id AND c.suc IS NOT DISTINCT FROM d.branch_id AND c.cga = d."codCga")
         GROUP BY 1, 2, 3, 4, 5, 6
       ),
-      lt AS (
-        SELECT comprobante, "codPro", business_id, branch_id, "codCga", SUM(w) AS wt,
-          BOOL_OR(ins IS NOT NULL) AS con_insumo
-        FROM l GROUP BY 1, 2, 3, 4, 5
+      -- Totales por comprobante con ventana (antes, un CTE "lt" aparte): Postgres estima 1 fila en
+      -- los CTE y unir c con lt elegía un nested loop de 13 M comparaciones (7-20 s, el tablero quedaba
+      -- en blanco en Container Bar, 06/11/2026). Así c se une con una sola tabla, por hash.
+      lw AS (
+        SELECT l.*,
+          SUM(w) OVER k AS wt,
+          BOOL_OR(ins IS NOT NULL) OVER k AS con_insumo
+        FROM l
+        WINDOW k AS (PARTITION BY comprobante, "codPro", business_id, branch_id, "codCga")
       )
       -- Filas con insumos: una por línea, con su parte del importe.
       SELECT c.rubro_codigo, c.rubro_nombre,
         CASE WHEN l.ins IS NULL THEN c.concepto_codigo ELSE 'ins:' || l.ins END AS concepto_codigo,
         CASE WHEN l.ins IS NULL THEN c.concepto_nombre ELSE l.nombre END        AS concepto_nombre,
         c.proveedor_id, c.proveedor_nombre, c.proveedor_texto_crudo, c.proveedor_codigo, c.proveedor_display, c.mes,
-        c.total * l.w / lt.wt AS total,
+        c.total * l.w / l.wt AS total,
         c.row_id, c.distribucion_id,
         COALESCE(c.pago_ref, '') || '|' || COALESCE(l.ins, 'c') AS pago_ref,
         c.fecha, c.observac, c.has_manual_override, c.business_id_origen, c.branch_id_origen
       FROM c
-      JOIN lt ON lt.comprobante = c.comprobante AND lt."codPro" = c.cod_pro AND lt.business_id = c.biz
-             AND lt.branch_id IS NOT DISTINCT FROM c.suc AND lt."codCga" = c.cga
-      JOIN l  ON l.comprobante = c.comprobante AND l."codPro" = c.cod_pro AND l.business_id = c.biz
+      JOIN lw l ON l.comprobante = c.comprobante AND l."codPro" = c.cod_pro AND l.business_id = c.biz
              AND l.branch_id IS NOT DISTINCT FROM c.suc AND l."codCga" = c.cga
-      WHERE lt.con_insumo AND lt.wt <> 0
+      WHERE l.con_insumo AND l.wt <> 0
       UNION ALL
       -- Sin insumos: por su concepto, como en la vista por Concepto.
       SELECT c.rubro_codigo, c.rubro_nombre, c.concepto_codigo, c.concepto_nombre,
@@ -136,10 +139,10 @@ async function obtenerPivot({ organizationId, businessId, params }) {
         c.fecha, c.observac, c.has_manual_override, c.business_id_origen, c.branch_id_origen
       FROM c
       WHERE NOT EXISTS (
-        SELECT 1 FROM lt
-        WHERE lt.comprobante = c.comprobante AND lt."codPro" = c.cod_pro AND lt.business_id = c.biz
-          AND lt.branch_id IS NOT DISTINCT FROM c.suc AND lt."codCga" = c.cga
-          AND lt.con_insumo AND lt.wt <> 0
+        SELECT 1 FROM lw
+        WHERE lw.comprobante = c.comprobante AND lw."codPro" = c.cod_pro AND lw.business_id = c.biz
+          AND lw.branch_id IS NOT DISTINCT FROM c.suc AND lw."codCga" = c.cga
+          AND lw.con_insumo AND lw.wt <> 0
       )
       ORDER BY rubro_nombre NULLS LAST, concepto_nombre NULLS LAST, fecha NULLS LAST, proveedor_nombre NULLS LAST
     `);
