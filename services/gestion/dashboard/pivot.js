@@ -358,7 +358,10 @@ function buildPivotData(sqlRows, composicion) {
     grandTotal += rubro.rowTotal;
   }
 
-  return { rows: Array.from(rubroMap.values()), columnTotals, grandTotal };
+  // Sin Rubro va siempre primero, así se ve (Diego 06/11/2026); si no tiene nada, no viene.
+  const rows = Array.from(rubroMap.values());
+  rows.sort((a, b) => (b.rubroCodigo === "__sin_rubro") - (a.rubroCodigo === "__sin_rubro"));
+  return { rows, columnTotals, grandTotal };
 }
 
 module.exports = { obtenerPivot, buildPivotData };
