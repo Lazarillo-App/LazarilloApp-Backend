@@ -194,6 +194,7 @@ router.get('/facturas/maestros', responder((req) => carga.obtenerMaestrosFactura
 router.post('/facturas/proveedores', responder((req) => carga.crearProveedor({ ...req.gestion, body: req.body })));
 router.get('/facturas/proveedores/:id', responder((req) => carga.obtenerProveedor({ ...req.gestion, id: idDe(req) })));
 router.patch('/facturas/proveedores/:id', responder((req) => carga.editarProveedor({ ...req.gestion, id: idDe(req), body: req.body })));
+router.get('/facturas/de-compra', responder((req) => carga.facturaDeCompra({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/facturas/buscar', responder((req) => carga.buscarFilaFactura({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/facturas/existe', responder((req) => carga.facturaExiste({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/facturas/ultima', responder((req) => carga.ultimaFactura({ ...req.gestion, sp: paramsDe(req) })));
