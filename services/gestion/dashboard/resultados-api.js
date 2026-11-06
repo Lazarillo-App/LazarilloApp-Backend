@@ -20,7 +20,7 @@ const { cambioValido } = require('./equilibrio-config');
 const { aggregateFlujoCajaPorMes } = require('./flujo-caja-agg');
 const { findPrimerArqueo } = require('./primer-arqueo');
 const { buildDiferenciaCajaSerie } = require('./diferencia-caja-serie');
-const { mesesHasta } = require('./canasta');
+const { mesesHasta, estimarIncompletos } = require('./canasta');
 const { resolveAnioRange } = require('./anio-range');
 
 class ErrorDatos extends Error {
@@ -402,9 +402,12 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
         WHERE ${lugar} AND ${rango} AND cc."codRga" = ${RUBRO.personal}
           AND cc.nombre ~* '(liquidaci.*sueldo|presentismo)' AND cc.nombre !~* '(sac|final)'
         GROUP BY 1, 2 HAVING SUM(${imp}) > 0)
-      SELECT a.m, (exp(percentile_cont(0.5) WITHIN GROUP (ORDER BY ln(a.s / b.s))) - 1)::float8 AS v
-      FROM e a JOIN e b ON b.emp = a.emp AND b.m = ${anterior("a.m")}
-      WHERE a.s / b.s BETWEEN 0.5 AND 2 GROUP BY a.m HAVING COUNT(*) >= 3`),
+      , st AS (SELECT m, COUNT(*)::int AS n, SUM(s)::float8 AS tot FROM e GROUP BY m),
+      va AS (
+        SELECT a.m, (exp(percentile_cont(0.5) WITHIN GROUP (ORDER BY ln(a.s / b.s))) - 1)::float8 AS v
+        FROM e a JOIN e b ON b.emp = a.emp AND b.m = ${anterior("a.m")}
+        WHERE a.s / b.s BETWEEN 0.5 AND 2 GROUP BY a.m HAVING COUNT(*) >= 3)
+      SELECT st.m, st.n, st.tot, va.v FROM st LEFT JOIN va ON va.m = st.m`),
     // Servicios: mediana de la variación de cada proveedor × concepto.
     db.many(sql`
       WITH s AS (
@@ -440,6 +443,9 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
     const map = new Map(filas.map((f) => [f.m, f.v == null ? null : Number(f.v)]));
     return meses.slice(1).map((m) => map.get(m) ?? null);
   };
+  // Sueldos: los meses a medio cargar no se miden, se estiman (ver estimarIncompletos).
+  const stSue = new Map(sue.map((f) => [f.m, { n: Number(f.n), tot: Number(f.tot) }]));
+  const sueldos = estimarIncompletos(serie(sue), meses.map((m) => stSue.get(m) ?? null));
   const alqMap = new Map(alq.map((a) => [a.m, Number(a.total)]));
   const alqVar = meses.slice(1).map((m, i) => {
     const a = alqMap.get(m), b = alqMap.get(meses[i]);
@@ -447,7 +453,7 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
   });
   const peso = (r) => Number(pesos.find((p) => p.r === r)?.total ?? 0);
   const componentes = [
-    { clave: "sueldos", nombre: "Sueldos", peso: peso(RUBRO.personal), variaciones: serie(sue), cuenta: true },
+    { clave: "sueldos", nombre: "Sueldos", peso: peso(RUBRO.personal), ...sueldos, cuenta: true },
     { clave: "mercaderias", nombre: "Mercaderías", peso: peso(RUBRO.mercaderias), variaciones: serie(merc), cuenta: true,
       aRevisar: merc.find((x) => x.m === meses[N - 1])?.revisar ?? 0 },
     { clave: "servicios", nombre: "Servicios", peso: peso(RUBRO.servicios), variaciones: serie(serv), cuenta: true },
