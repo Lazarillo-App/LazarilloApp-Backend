@@ -72,6 +72,8 @@ function renglonesSql({ businessId, sucursalCond, esquema }) {
            COALESCE(li.codigo_maxi, m.cod) AS m_cod,
            CASE WHEN li.id IS NOT NULL THEN TRIM(lr.nombre) ELSE m.rubro END AS m_rubro,
            li.id AS insumo_id, lr.codigo_maxi AS rubro_codigo,
+           -- Rubro con varios conceptos posibles (Vajilla: reposición / ítem nuevo): se decide en cada compra.
+           al.alts AS alternativas, CASE WHEN al.alts IS NOT NULL THEN lr.codigo_maxi::text END AS grupo,
            cc.codigo AS cres, TRIM(cc.nombre) AS cnom
       FROM gestion_detalle_compras dc
       LEFT JOIN ${maestroInsumosSql(esquema)} m ON m.cod = ${codigoNorm(sql`dc.codigo`)}
@@ -84,9 +86,15 @@ function renglonesSql({ businessId, sucursalCond, esquema }) {
         SELECT r.codigo_maxi, r.nombre, r.cpto_caja, r.cpto_caja_lazarillo FROM insumo_rubros r
          WHERE r.business_id = li.business_id AND NULLIF(TRIM(li.rubro), '0') IS NOT NULL AND r.codigo_maxi::text = TRIM(li.rubro)
          ORDER BY r.id LIMIT 1) lr ON true
+      LEFT JOIN LATERAL (
+        SELECT jsonb_agg(jsonb_build_object('etiqueta', a.etiqueta, 'concepto', a.concepto) ORDER BY a.orden, a.id) AS alts
+          FROM insumo_rubro_conceptos a
+         WHERE lr.codigo_maxi IS NOT NULL AND a.rubro_codigo = lr.codigo_maxi::text
+           AND a.organization_id = (SELECT b.organization_id FROM app_businesses b WHERE b.id = ${businessId})) al ON true
       LEFT JOIN gestion_conceptos_caja cc
         ON cc.organization_id = (SELECT b.organization_id FROM app_businesses b WHERE b.id = ${businessId})
-       AND cc.codigo = CASE WHEN li.id IS NOT NULL
+       AND cc.codigo = CASE WHEN al.alts IS NOT NULL THEN NULL
+                            WHEN li.id IS NOT NULL
                             THEN NULLIF(COALESCE(lr.cpto_caja_lazarillo, NULLIF(lr.cpto_caja, 0))::text, '0')
                             ELSE m.cga END
      WHERE dc.business_id = ${businessId}
@@ -116,16 +124,16 @@ async function sincronizarSinConcepto(pdv, { tx = db } = {}) {
   const r = await tx.one(sql`
     WITH l AS (${lineas}),
     d AS (
-      SELECT l.comprobante, l."codPro", l.cres, MIN(l.cnom) AS cnom,
+      SELECT l.comprobante, l."codPro", l.cres, l.grupo, MIN(l.cnom) AS cnom,
              SUM(l.importe) AS importe, SUM(l.imp_int) AS imp_int, MIN(l.fecha) AS fecha_detalle,
              LEFT(string_agg(DISTINCT TRIM(l.nombre), ', '), 500) AS insumos
         FROM l
-       GROUP BY l.comprobante, l."codPro", l.cres
+       GROUP BY l.comprobante, l."codPro", l.cres, l.grupo
       HAVING ABS(SUM(l.importe)) >= 0.01
     ),
     s AS (
       SELECT 'sc:' || md5(${String(businessId)} || '|' || COALESCE(${branchId}::text, '') || '|' || d.comprobante || '|' || COALESCE(d."codPro", '')
-                          || COALESCE('|' || d.cres, '')) AS "rowId",
+                          || COALESCE('|' || d.cres, '') || COALESCE('|r' || d.grupo, '')) AS "rowId",
              d.*, COALESCE(h.fecha, d.fecha_detalle) AS fecha,
              COALESCE(h.proveedor, TRIM(COALESCE(p.nombre, p.razon))) AS proveedor,
              COALESCE(h."proveedorId", p.id) AS proveedor_id,
