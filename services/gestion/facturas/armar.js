@@ -44,8 +44,9 @@ const fechaReal = (s) => { const d = new Date(`${s}T00:00:00Z`); return !Number.
 
 const registroSchema = z.object({
   tipo: z.enum(["concepto", "insumo"]),
-  // concepto: su código de caja; insumo: el concepto de caja elegido para la línea
-  conceptoCodigo: z.string().min(1),
+  // concepto: su código de caja; insumo: el concepto de caja elegido para la línea. Un insumo puede ir
+  // sin concepto (Diego 07/11/2026: data entry puede no saber; lo resuelve el administrador en Sin rubro).
+  conceptoCodigo: z.string().min(1).nullish(),
   insumoCodigo: z.string().nullish(),
   nombre: z.string().min(1),
   medida: z.string().nullish(),
@@ -56,7 +57,11 @@ const registroSchema = z.object({
   puntoDeVentaId: z.number().int(),
   // Reparto explícito entre PDV (suma 100). Sin reparto = todo al PDV del registro.
   reparto: repartoSchema.nullish(),
-});
+}).refine((r) => r.tipo === "insumo" || !!r.conceptoCodigo, { message: "Falta el concepto de caja", path: ["conceptoCodigo"] });
+
+// Fila del 14 sin concepto de caja (como las de MaxiRest: codCga 0). Se separa por rubro del insumo
+// para poder resolver cada una por su lado en Sin rubro.
+const TEXTO_SIN_CONCEPTO = "Sin concepto de caja asociado";
 
 const facturaSchema = z.object({
   proveedorId: z.number().int(),
@@ -100,7 +105,9 @@ function armarFactura(
   const cpb = comprobanteDe(f.tipo, f.prefijo, f.numero);
   const localDe = new Map(ctx.pdvs.map((p) => [p.id, p.localId]));
   const nombreConcepto = new Map(ctx.conceptos.map((c) => [c.codigo, c.nombre]));
-  const conceptoNombre = (cod) => nombreConcepto.get(cod) ?? cod;
+  const conceptoNombre = (cod) => (cod == null ? TEXTO_SIN_CONCEPTO : nombreConcepto.get(cod) ?? cod);
+  // Grupo de un registro sin concepto: el rubro de su insumo (lo resuelve prepararFactura).
+  const grupoDe = (reg) => (ctx.grupoSinConcepto ? ctx.grupoSinConcepto(reg) : "") ?? "";
   const local = (pdv) => {
     const l = localDe.get(pdv);
     if (l == null) throw new Error(`PDV ${pdv} desconocido`);
@@ -110,12 +117,13 @@ function armarFactura(
     `lz-${hash(`${local(pdv)}|${pdv}|${cpb.comprobante}|${ctx.proveedor.codigo}|${cga}`)}`;
 
   const filas = new Map ();
-  const fila = (pdv, cga, bloqueado) => {
-    const rowId = claveFila(pdv, cga);
+  // cga null = sin concepto: clave "0:<rubro>" (las que tienen concepto no cambian su rowId).
+  const fila = (pdv, cga, bloqueado, grupo = "") => {
+    const rowId = claveFila(pdv, cga == null ? `0:${grupo}` : cga);
     let a = filas.get(rowId);
     if (!a) {
       a = {
-        rowId, comprobante: cpb.comprobante, codCga: cga, concepto: conceptoNombre(cga), fecha: f.fecha,
+        rowId, comprobante: cpb.comprobante, codCga: cga ?? "0", concepto: conceptoNombre(cga), fecha: f.fecha,
         codigo: ctx.proveedor.codigo, detalle: cpb.detalle, observac: f.observacion?.trim() || null,
         importe: 0, impInt: 0, per1: 0, per2: 0, per3: 0,
         proveedorId: ctx.proveedor.id, conceptoCodigo: cga, localId: local(pdv), puntoDeVentaId: pdv,
@@ -142,7 +150,7 @@ function armarFactura(
     const imps = partir(reg.impInt, fracs);
     const cants = reg.cantidad ? fracs.map((x) => Math.round(reg.cantidad * x * 1000) / 1000) : fracs.map(() => 1);
     partes.forEach((p, k) => {
-      const a = fila(p.puntoDeVentaId, reg.conceptoCodigo, bloqueado);
+      const a = fila(p.puntoDeVentaId, reg.conceptoCodigo ?? null, bloqueado, reg.conceptoCodigo ? "" : grupoDe(reg));
       const importe = r2(netos[k] + ivas[k] + imps[k]);
       a.importe = r2(a.importe + importe * cpb.signo);
       a.impInt = r2(a.impInt + imps[k] * cpb.signo);
@@ -157,7 +165,7 @@ function armarFactura(
         nombre: reg.nombre, medida: esInsumo ? (reg.medida ?? null) : null,
         cantidad, neto: cantidad ? r2(netos[k] / cantidad) : netos[k], totalIns: netos[k],
         ivaTot: ivas[k], impNtTot: imps[k], tasa: reg.alicuota,
-        codCga: reg.conceptoCodigo, nomCga: conceptoNombre(reg.conceptoCodigo),
+        codCga: reg.conceptoCodigo ?? "0", nomCga: reg.conceptoCodigo ? conceptoNombre(reg.conceptoCodigo) : null,
         compraId: a.rowId, proveedorId: ctx.proveedor.id, localId: a.localId,
         puntoDeVentaId: p.puntoDeVentaId, esInsumo,
       });
@@ -176,7 +184,8 @@ function armarFactura(
   }
   if (f.impIntGeneral) {
     const filaMayor = [...filas.values()].filter((x) => x.puntoDeVentaId === pdvPrincipal && !COLUMNA_PERCEPCION[x.codCga])
-      .sort((a, b) => Math.abs(b.importe) - Math.abs(a.importe))[0];
+      // la de más importe, primero las que tienen concepto (así el II general no cae en Sin rubro)
+      .sort((a, b) => (a.conceptoCodigo == null) - (b.conceptoCodigo == null) || Math.abs(b.importe) - Math.abs(a.importe))[0];
     if (filaMayor) {
       filaMayor.importe = r2(filaMayor.importe + f.impIntGeneral * cpb.signo);
       filaMayor.impInt = r2(filaMayor.impInt + f.impIntGeneral * cpb.signo);
@@ -192,4 +201,4 @@ function armarFactura(
   return { filas: lista, lineas: lineasOk, total };
 }
 
-module.exports = { ORIGEN_LAZARILLO, TIPOS_COMPROBANTE, CONCEPTO_PERCEPCION, registroSchema, facturaSchema, comprobanteDe, armarFactura };
+module.exports = { TEXTO_SIN_CONCEPTO, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE, CONCEPTO_PERCEPCION, registroSchema, facturaSchema, comprobanteDe, armarFactura };
