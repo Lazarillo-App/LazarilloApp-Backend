@@ -12,6 +12,11 @@
 // códigos nuevos entran solos y los dados de baja en MaxiRest se desactivan
 // (nunca se borran ni se pisan datos editados en Lazarillo). Las altas
 // manuales (sin código de MaxiRest) son propias y la sync no las toca.
+//
+// Sucursales (migración 074): la nómina y las referencias son del negocio;
+// los espacios (y sus semanas) son de cada sucursal — branch_id NULL es la
+// principal. Las fechas especiales son compartidas (feriados y pre feriados)
+// o de la sucursal (eventos y cierres). La sucursal llega en ?branchId=.
 'use strict';
 
 const pool = require('../config/db');
@@ -27,6 +32,24 @@ function replicaDeNegocio(businessId) {
   }
   return null;
 }
+
+// ?branchId= → id de sucursal para RRHH (null = principal). La sucursal is_main
+// también es la principal (sus datos viven con branch_id NULL). Una sucursal
+// que no es del negocio → error 400.
+async function resolverSucursal(bizId, raw) {
+  if (raw == null || raw === '' || raw === 'main' || raw === 'null') return null;
+  const id = asInt(raw);
+  if (!id) { const e = new Error('sucursal_invalida'); e.status = 400; throw e; }
+  const { rows } = await pool.query(
+    `SELECT id, COALESCE((props->>'is_main')::boolean, FALSE) AS principal
+     FROM app_branches WHERE id=$1 AND business_id=$2`, [id, bizId]
+  );
+  if (!rows[0]) { const e = new Error('sucursal_invalida'); e.status = 400; throw e; }
+  return rows[0].principal ? null : Number(rows[0].id);
+}
+// Feriados y pre feriados valen para todas las sucursales; eventos y cierres
+// son de la sucursal donde se cargan.
+const esCompartida = (tipo) => ['feriado', 'prefer'].includes(String(tipo || '').toLowerCase());
 
 // "CANCINO" → "Cancino" (la réplica trae mayormente mayúsculas; es semilla editable)
 function titulo(s) {
@@ -75,16 +98,17 @@ const FECHAS_DEF = [
   [12, 31, 'prefer', 'Fin de Año', true],
 ];
 
-async function ensureSeed(client, bizId) {
+async function ensureSeed(client, bizId, branchId = null) {
   const { rows } = await client.query(
-    'SELECT 1 FROM rrhh_espacios WHERE business_id=$1 LIMIT 1', [bizId]
+    'SELECT 1 FROM rrhh_espacios WHERE business_id=$1 AND branch_id IS NOT DISTINCT FROM $2 LIMIT 1',
+    [bizId, branchId]
   );
   if (!rows.length) {
     for (const [i, [nombre, sector]] of [['Salón', 'Salón'], ['Cocina', 'Cocina']].entries()) {
       const esp = await client.query(
-        `INSERT INTO rrhh_espacios (business_id, nombre, sector_nomina, orden)
-         VALUES ($1,$2,$3,$4) RETURNING id`,
-        [bizId, nombre, sector, i]
+        `INSERT INTO rrhh_espacios (business_id, nombre, sector_nomina, orden, branch_id)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        [bizId, nombre, sector, i, branchId]
       );
       await client.query(
         `INSERT INTO rrhh_turnos (espacio_id, nombre, entrada, orden)
@@ -104,14 +128,14 @@ async function ensureSeed(client, bizId) {
 
   const anio = new Date().getUTCFullYear();
   const { rows: hayFechas } = await client.query(
-    'SELECT 1 FROM rrhh_fechas WHERE business_id=$1 LIMIT 1', [bizId]
+    'SELECT 1 FROM rrhh_fechas WHERE business_id=$1 AND compartida LIMIT 1', [bizId]
   );
   if (!hayFechas.length) {
     for (const [mm, dd, tipo, nombre, fijo] of FECHAS_DEF) {
       await client.query(
-        `INSERT INTO rrhh_fechas (business_id, fecha, tipo, nombre, suma_promedio, fijo)
-         VALUES ($1, make_date($2,$3,$4), $5, $6, FALSE, $7)
-         ON CONFLICT (business_id, fecha) DO NOTHING`,
+        `INSERT INTO rrhh_fechas (business_id, fecha, tipo, nombre, suma_promedio, fijo, compartida, branch_id)
+         VALUES ($1, make_date($2,$3,$4), $5, $6, FALSE, $7, TRUE, NULL)
+         ON CONFLICT (business_id, compartida, (COALESCE(branch_id, 0)), fecha) DO NOTHING`,
         [bizId, anio, mm, dd, tipo, nombre, fijo]
       );
     }
@@ -120,15 +144,15 @@ async function ensureSeed(client, bizId) {
   // Feriados inamovibles: cada año cae la misma fecha → se renuevan solos al
   // año vigente (las fechas móviles se re-fechan a mano desde ⚙ Fechas).
   await client.query(
-    `INSERT INTO rrhh_fechas (business_id, fecha, tipo, nombre, suma_promedio, fijo)
-     SELECT DISTINCT ON (EXTRACT(MONTH FROM fecha), EXTRACT(DAY FROM fecha))
+    `INSERT INTO rrhh_fechas (business_id, fecha, tipo, nombre, suma_promedio, fijo, compartida, branch_id)
+     SELECT DISTINCT ON (compartida, COALESCE(branch_id, 0), EXTRACT(MONTH FROM fecha), EXTRACT(DAY FROM fecha))
             business_id,
             make_date($2, EXTRACT(MONTH FROM fecha)::int, EXTRACT(DAY FROM fecha)::int),
-            tipo, nombre, suma_promedio, TRUE
+            tipo, nombre, suma_promedio, TRUE, compartida, branch_id
      FROM rrhh_fechas
      WHERE business_id=$1 AND fijo = TRUE
-     ORDER BY EXTRACT(MONTH FROM fecha), EXTRACT(DAY FROM fecha), fecha DESC
-     ON CONFLICT (business_id, fecha) DO NOTHING`,
+     ORDER BY compartida, COALESCE(branch_id, 0), EXTRACT(MONTH FROM fecha), EXTRACT(DAY FROM fecha), fecha DESC
+     ON CONFLICT (business_id, compartida, (COALESCE(branch_id, 0)), fecha) DO NOTHING`,
     [bizId, anio]
   );
 }
@@ -182,7 +206,7 @@ async function sincronizarNomina(bizId) {
 
 /* ───────────────────────── config ───────────────────────── */
 
-async function leerConfig(bizId) {
+async function leerConfig(bizId, branchId = null) {
   const [empleados, puestos, fechas, espacios, turnos] = await Promise.all([
     pool.query(
       `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
@@ -194,17 +218,21 @@ async function leerConfig(bizId) {
     ),
     pool.query(
       `SELECT id, to_char(fecha,'YYYY-MM-DD') AS fecha, tipo, nombre,
-              suma_promedio AS "sumaPromedio", fijo
-       FROM rrhh_fechas WHERE business_id=$1 ORDER BY fecha`, [bizId]
+              suma_promedio AS "sumaPromedio", fijo, compartida
+       FROM rrhh_fechas
+       WHERE business_id=$1 AND (compartida OR branch_id IS NOT DISTINCT FROM $2)
+       ORDER BY fecha, compartida`, [bizId, branchId]
     ),
     pool.query(
       `SELECT id, nombre, sector_nomina AS "sectorNomina", orden
-       FROM rrhh_espacios WHERE business_id=$1 ORDER BY orden, id`, [bizId]
+       FROM rrhh_espacios WHERE business_id=$1 AND branch_id IS NOT DISTINCT FROM $2
+       ORDER BY orden, id`, [bizId, branchId]
     ),
     pool.query(
       `SELECT t.id, t.espacio_id AS "espacioId", t.nombre, t.entrada, t.orden
        FROM rrhh_turnos t JOIN rrhh_espacios e ON e.id = t.espacio_id
-       WHERE e.business_id=$1 ORDER BY t.orden, t.id`, [bizId]
+       WHERE e.business_id=$1 AND e.branch_id IS NOT DISTINCT FROM $2
+       ORDER BY t.orden, t.id`, [bizId, branchId]
     ),
   ]);
   const turnosPorEspacio = new Map();
@@ -213,6 +241,7 @@ async function leerConfig(bizId) {
     turnosPorEspacio.get(t.espacioId).push(t);
   }
   return {
+    branchId,
     empleados: empleados.rows,
     puestos: puestos.rows,
     fechas: fechas.rows,
@@ -222,10 +251,16 @@ async function leerConfig(bizId) {
 
 // GET /api/businesses/:bizId/rrhh/config
 async function getConfig(req, res) {
+  let branchId;
+  try {
+    branchId = await resolverSucursal(req.businessId, req.query.branchId);
+  } catch (e) {
+    return res.status(e.status || 500).json({ ok: false, error: e.status ? e.message : 'internal' });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await ensureSeed(client, req.businessId);
+    await ensureSeed(client, req.businessId, branchId);
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
@@ -242,7 +277,7 @@ async function getConfig(req, res) {
     sync = { error: true };
   }
   try {
-    return res.json({ ok: true, config: await leerConfig(req.businessId), sync });
+    return res.json({ ok: true, config: await leerConfig(req.businessId, branchId), sync });
   } catch (e) {
     console.error('[rrhh.getConfig]', e);
     return res.status(500).json({ ok: false, error: 'internal' });
@@ -258,6 +293,12 @@ async function putConfig(req, res) {
   const bizId = req.businessId;
   const { puestos, fechas, espacios } = req.body || {};
   const avisos = [];
+  let branchId;
+  try {
+    branchId = await resolverSucursal(bizId, req.query.branchId);
+  } catch (e) {
+    return res.status(e.status || 500).json({ ok: false, error: e.status ? e.message : 'internal' });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -298,24 +339,32 @@ async function putConfig(req, res) {
     }
 
     if (Array.isArray(fechas)) {
-      const dias = [];
+      // La colección que se manda es la que ve esta sucursal: las compartidas
+      // + las suyas. Solo se sincroniza ese alcance (nunca toca eventos de otra).
+      const diasComp = []; const diasSuc = [];
       for (const f of fechas) {
         const fecha = String(f.fecha || '').slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) continue;
-        dias.push(fecha);
+        const tipo = String(f.tipo || 'feriado');
+        const comp = esCompartida(tipo);
+        (comp ? diasComp : diasSuc).push(fecha);
         await client.query(
-          `INSERT INTO rrhh_fechas (business_id, fecha, tipo, nombre, suma_promedio, fijo)
-           VALUES ($1,$2,$3,$4,$5,$6)
-           ON CONFLICT (business_id, fecha) DO UPDATE
+          `INSERT INTO rrhh_fechas (business_id, fecha, tipo, nombre, suma_promedio, fijo, compartida, branch_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (business_id, compartida, (COALESCE(branch_id, 0)), fecha) DO UPDATE
              SET tipo=EXCLUDED.tipo, nombre=EXCLUDED.nombre,
                  suma_promedio=EXCLUDED.suma_promedio, fijo=EXCLUDED.fijo`,
-          [bizId, fecha, String(f.tipo || 'feriado'), f.nombre || null,
-            !!f.sumaPromedio, !!f.fijo]
+          [bizId, fecha, tipo, f.nombre || null, !!f.sumaPromedio, !!f.fijo, comp, comp ? null : branchId]
         );
       }
       await client.query(
-        `DELETE FROM rrhh_fechas WHERE business_id=$1 AND NOT (fecha = ANY($2::date[]))`,
-        [bizId, dias]
+        `DELETE FROM rrhh_fechas WHERE business_id=$1 AND compartida AND NOT (fecha = ANY($2::date[]))`,
+        [bizId, diasComp]
+      );
+      await client.query(
+        `DELETE FROM rrhh_fechas WHERE business_id=$1 AND NOT compartida
+           AND branch_id IS NOT DISTINCT FROM $2 AND NOT (fecha = ANY($3::date[]))`,
+        [bizId, branchId, diasSuc]
       );
     }
 
@@ -326,16 +375,17 @@ async function putConfig(req, res) {
         if (!nombre) continue;
         let espId = asInt(e.id);
         if (espId) {
-          await client.query(
+          const up = await client.query(
             `UPDATE rrhh_espacios SET nombre=$3, sector_nomina=$4, orden=$5
-             WHERE id=$1 AND business_id=$2`,
-            [espId, bizId, nombre, e.sectorNomina || null, i]
+             WHERE id=$1 AND business_id=$2 AND branch_id IS NOT DISTINCT FROM $6`,
+            [espId, bizId, nombre, e.sectorNomina || null, i, branchId]
           );
+          if (!up.rowCount) continue; // espacio de otra sucursal: no se toca
         } else {
           const r = await client.query(
-            `INSERT INTO rrhh_espacios (business_id, nombre, sector_nomina, orden)
-             VALUES ($1,$2,$3,$4) RETURNING id`,
-            [bizId, nombre, e.sectorNomina || null, i]
+            `INSERT INTO rrhh_espacios (business_id, nombre, sector_nomina, orden, branch_id)
+             VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+            [bizId, nombre, e.sectorNomina || null, i, branchId]
           );
           espId = r.rows[0].id;
         }
@@ -389,7 +439,8 @@ async function putConfig(req, res) {
       }
       const { rows: espSobran } = await client.query(
         `SELECT id, nombre FROM rrhh_espacios
-         WHERE business_id=$1 AND NOT (id = ANY($2::bigint[]))`, [bizId, idsEspacios]
+         WHERE business_id=$1 AND branch_id IS NOT DISTINCT FROM $3
+           AND NOT (id = ANY($2::bigint[]))`, [bizId, idsEspacios, branchId]
       );
       for (const e of espSobran) {
         const { rows: conSemanas } = await client.query(
@@ -412,7 +463,7 @@ async function putConfig(req, res) {
   }
   client.release();
   try {
-    return res.json({ ok: true, avisos, config: await leerConfig(bizId) });
+    return res.json({ ok: true, avisos, config: await leerConfig(bizId, branchId) });
   } catch (e) {
     console.error('[rrhh.putConfig leer]', e);
     return res.status(500).json({ ok: false, error: 'internal' });
