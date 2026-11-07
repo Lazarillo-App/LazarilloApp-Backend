@@ -97,14 +97,25 @@ async function prepararFactura(cliente, { organizationId, businessId }, body) {
   const lugares = await obtenerLugares(cliente, businessId);
   const usados = new Set(f.registros.flatMap((r) => [r.puntoDeVentaId, ...(r.reparto ?? []).map((x) => x.puntoDeVentaId)]));
   if ([...usados].some((id) => !lugares.some((p) => p.id === id))) throw rechazo('Sucursal inexistente');
-  const codigos = [...new Set([...f.registros.map((r) => r.conceptoCodigo), ...f.percepciones.map((p) => CONCEPTO_PERCEPCION[p.tipo])])];
+  const codigos = [...new Set([...f.registros.map((r) => r.conceptoCodigo).filter(Boolean), ...f.percepciones.map((p) => CONCEPTO_PERCEPCION[p.tipo])])];
+  // Insumos sin concepto (Diego 07/11/2026): su fila del 14 va aparte por rubro, para resolverla en Sin rubro.
+  const sinConcepto = f.registros.filter((r) => !r.conceptoCodigo && r.insumoCodigo).map((r) => String(r.insumoCodigo).trim().replace(/\.0+$/, ''));
+  const rubroDe = new Map(sinConcepto.length ? (await cliente.many(sql`
+    SELECT DISTINCT ON (k) k, rubro FROM (
+      SELECT regexp_replace(TRIM(i.codigo_maxi::text), '\\.0+$', '') AS k, NULLIF(NULLIF(TRIM(i.rubro), ''), '0') AS rubro,
+             (i.business_id = ${businessId}) AS propio, i.activo, i.id
+        FROM insumos i
+       WHERE i.business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
+         AND regexp_replace(TRIM(i.codigo_maxi::text), '\\.0+$', '') = ANY(${sinConcepto}::text[])) x
+    ORDER BY k, propio DESC, activo DESC NULLS LAST, id`)).map((x) => [x.k, x.rubro ?? '']) : []);
+  const grupoSinConcepto = (r) => rubroDe.get(String(r.insumoCodigo ?? '').trim().replace(/\.0+$/, '')) ?? '';
   const conceptos = await cliente.many(sql`
     SELECT codigo, nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ANY(${codigos}::text[])`);
   const faltan = codigos.filter((c) => !conceptos.some((x) => x.codigo === c));
   if (faltan.length) throw rechazo(`Concepto de caja inexistente: ${faltan.join(', ')}`);
   let armado;
   try {
-    armado = armarFactura(f, { proveedor: { id: proveedor.id, codigo: proveedor.codigo }, pdvs: lugares, conceptos });
+    armado = armarFactura(f, { proveedor: { id: proveedor.id, codigo: proveedor.codigo }, pdvs: lugares, conceptos, grupoSinConcepto });
   } catch (err) {
     throw rechazo(err instanceof Error ? err.message : 'No se pudo armar la factura');
   }
@@ -652,7 +663,7 @@ async function guardarRecordados({ organizationId, body }) {
 }
 
 async function obtenerMaestrosFactura({ organizationId, businessId }) {
-  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales, envasesPropios, descuentos, recordados] = await Promise.all([
+  const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales, envasesPropios, descuentos, recordados, porRubro] = await Promise.all([
     db.many(sql`SELECT id, codigo, nombre, razon, cuit FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
     db.many(sql`
       SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro
@@ -703,6 +714,7 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
       FROM gestion_descuentos_recordados WHERE organization_id = ${organizationId}`),
     db.many(sql`SELECT tipo AS t, TRIM(codigo) AS k, alic::float8 AS alic, ii::float8 AS ii
       FROM gestion_items_recordados WHERE organization_id = ${organizationId}`),
+    conceptoPorRubroLazarillo(organizationId, businessId),
   ]);
   const conPropios = (lista) => aplicarEnvasesPropios(lista, envasesPropios);
   const maestroIns = conPropios([...deMaxirest, ...manuales.map((m) => ({ codigo: m.codigo, nombre: m.nombre, medida: m.medida, rubro: null, codCga: null,
@@ -710,8 +722,33 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
   const tipoDe = new Map(tipos.map((t) => [t.id, t.ins > 0 ? 'insumo' : 'concepto']));
   return {
     proveedores: proveedores.map((p) => ({ ...p, tipoHabitual: tipoDe.get(p.id) ?? null })),
-    conceptos, insumos: conPropios(unirInsumos(maestroIns, comprados)), lugares, historialConceptos, descuentos, recordados,
+    conceptos, insumos: conRubroLazarillo(conPropios(unirInsumos(maestroIns, comprados)), porRubro), lugares, historialConceptos, descuentos, recordados,
   };
+}
+
+// Lo que se corrige en Lazarillo sobre el rubro del insumo manda sobre MaxiRest (Diego 06-07/11/2026):
+// concepto del rubro (cpto_caja_lazarillo) o varios conceptos posibles (se pregunta al cargar).
+async function conceptoPorRubroLazarillo(organizationId, businessId) {
+  return db.many(sql`
+    SELECT DISTINCT ON (k) k, lr.cpto_caja_lazarillo::text AS concepto, al.alts AS alternativas
+      FROM (SELECT i.*, regexp_replace(TRIM(i.codigo_maxi::text), '\\.0+$', '') AS k FROM insumos i
+             WHERE i.business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
+               AND NULLIF(NULLIF(TRIM(i.rubro), ''), '0') IS NOT NULL) i
+      JOIN insumo_rubros lr ON lr.business_id = i.business_id AND lr.codigo_maxi::text = TRIM(i.rubro)
+      LEFT JOIN LATERAL (
+        SELECT jsonb_agg(jsonb_build_object('etiqueta', a.etiqueta, 'codigo', a.concepto) ORDER BY a.orden, a.id) AS alts
+          FROM insumo_rubro_conceptos a WHERE a.organization_id = ${organizationId} AND a.rubro_codigo = lr.codigo_maxi::text) al ON true
+     WHERE lr.cpto_caja_lazarillo IS NOT NULL OR al.alts IS NOT NULL
+     ORDER BY k, (i.business_id = ${businessId}) DESC, i.activo DESC NULLS LAST, i.id`);
+}
+function conRubroLazarillo(insumos, porRubro) {
+  if (!porRubro.length) return insumos;
+  const de = new Map(porRubro.map((r) => [r.k, r]));
+  return insumos.map((i) => {
+    const r = de.get(String(i.codigo ?? '').trim().replace(/\.0+$/, ''));
+    if (!r) return i;
+    return r.alternativas ? { ...i, codCga: null, alternativas: r.alternativas } : { ...i, codCga: r.concepto };
+  });
 }
 
 // Alta de un proveedor propio (negocios sin MaxiRest, o uno nuevo que todavía no está en el maestro).
