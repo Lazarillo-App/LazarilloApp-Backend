@@ -17,10 +17,15 @@
 // los espacios (y sus semanas) son de cada sucursal — branch_id NULL es la
 // principal. Las fechas especiales son compartidas (feriados y pre feriados)
 // o de la sucursal (eventos y cierres). La sucursal llega en ?branchId=.
+//
+// Nómina compartida (migración 075): un negocio sin nómina propia puede usar
+// la de otro de su cartera (vinculada). nominaDe(biz) da el negocio cuyos
+// empleados se usan: config, altas/ediciones y la sync van contra ese.
 'use strict';
 
 const pool = require('../config/db');
 const { PDV_MAP } = require('../services/maxiPdvMap');
+const { getEffectiveRole, listAccessibleBusinesses } = require('../services/auth/accessControl');
 
 /* ───────────────────────── helpers ───────────────────────── */
 
@@ -47,6 +52,18 @@ async function resolverSucursal(bizId, raw) {
   if (!rows[0]) { const e = new Error('sucursal_invalida'); e.status = 400; throw e; }
   return rows[0].principal ? null : Number(rows[0].id);
 }
+// Negocio dueño de la nómina que usa bizId (él mismo, o el de origen si comparte).
+async function nominaDe(bizId) {
+  const { rows } = await pool.query(
+    'SELECT origen_business_id FROM rrhh_nomina_vinculo WHERE business_id=$1', [bizId]
+  );
+  return rows[0] ? Number(rows[0].origen_business_id) : Number(bizId);
+}
+const nombreNegocio = async (id) => {
+  const { rows } = await pool.query('SELECT name FROM app_businesses WHERE id=$1', [id]);
+  return rows[0]?.name || `#${id}`;
+};
+
 // Feriados y pre feriados valen para todas las sucursales; eventos y cierres
 // son de la sucursal donde se cargan.
 const esCompartida = (tipo) => ['feriado', 'prefer'].includes(String(tipo || '').toLowerCase());
@@ -207,11 +224,12 @@ async function sincronizarNomina(bizId) {
 /* ───────────────────────── config ───────────────────────── */
 
 async function leerConfig(bizId, branchId = null) {
+  const nominaId = await nominaDe(bizId);
   const [empleados, puestos, fechas, espacios, turnos] = await Promise.all([
     pool.query(
       `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
               to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi"
-       FROM rrhh_empleados WHERE business_id=$1 ORDER BY nombre, apellido`, [bizId]
+       FROM rrhh_empleados WHERE business_id=$1 ORDER BY nombre, apellido`, [nominaId]
     ),
     pool.query(
       `SELECT id, codigo, nombre FROM rrhh_puestos WHERE business_id=$1 ORDER BY id`, [bizId]
@@ -242,6 +260,10 @@ async function leerConfig(bizId, branchId = null) {
   }
   return {
     branchId,
+    // nómina compartida: de qué negocio vienen los empleados (null = propia)
+    nomina: nominaId !== Number(bizId)
+      ? { compartidaCon: { id: nominaId, nombre: await nombreNegocio(nominaId) } }
+      : { compartidaCon: null },
     empleados: empleados.rows,
     puestos: puestos.rows,
     fechas: fechas.rows,
@@ -271,7 +293,7 @@ async function getConfig(req, res) {
   client.release();
   let sync = null;
   try {
-    sync = await sincronizarNomina(req.businessId);
+    sync = await sincronizarNomina(await nominaDe(req.businessId));
   } catch (e) {
     console.error('[rrhh.getConfig sync nómina]', e.message);
     sync = { error: true };
@@ -570,7 +592,7 @@ async function crearEmpleado(req, res) {
       `INSERT INTO rrhh_empleados (business_id, nombre, apellido, sector, activo, origen)
        VALUES ($1,$2,$3,$4,TRUE,'manual')
        RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen`,
-      [req.businessId, nombre, String(req.body?.apellido || '').trim() || null,
+      [await nominaDe(req.businessId), nombre, String(req.body?.apellido || '').trim() || null,
         req.body?.sector || null]
     );
     return res.json({ ok: true, empleado: rows[0] });
@@ -595,7 +617,7 @@ async function editarEmpleado(req, res) {
        WHERE id=$1 AND business_id=$2
        RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
                  to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi"`,
-      [id, req.businessId,
+      [id, await nominaDe(req.businessId),
         typeof b.nombre === 'string' && b.nombre.trim() ? b.nombre.trim() : null,
         typeof b.apellido === 'string' ? b.apellido.trim() : null,
         typeof b.sector === 'string' ? b.sector : null,
@@ -605,6 +627,84 @@ async function editarEmpleado(req, res) {
     return res.json({ ok: true, empleado: rows[0] });
   } catch (e) {
     console.error('[rrhh.editarEmpleado]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+
+/* ───────────────────────── nómina compartida ─────────────────────────
+ * GET    /nomina/candidatos  → negocios de la cartera del usuario (menos este)
+ *                              con cuántos empleados tiene su nómina.
+ * PUT    /nomina/vinculo     body { origenBusinessId } → este negocio pasa a usar
+ *                              la nómina de ese (siempre se guarda la raíz).
+ * DELETE /nomina/vinculo     → deja de compartir (si no hay cronogramas cargados).
+ */
+async function candidatosNomina(req, res) {
+  try {
+    const accesibles = await listAccessibleBusinesses(req.user?.id);
+    const ids = [...new Set(accesibles.map((a) => Number(a.business_id)))].filter((id) => id !== Number(req.businessId));
+    if (!ids.length) return res.json({ ok: true, negocios: [] });
+    const { rows } = await pool.query(
+      `SELECT b.id, b.name AS nombre,
+              v.origen_business_id AS "origenId", o.name AS "origenNombre",
+              (SELECT count(*)::int FROM rrhh_empleados e
+                WHERE e.business_id = COALESCE(v.origen_business_id, b.id) AND e.activo) AS empleados
+       FROM app_businesses b
+       LEFT JOIN rrhh_nomina_vinculo v ON v.business_id = b.id
+       LEFT JOIN app_businesses o ON o.id = v.origen_business_id
+       WHERE b.id = ANY($1::bigint[])
+       ORDER BY empleados DESC, b.name`, [ids]
+    );
+    return res.json({ ok: true, negocios: rows });
+  } catch (e) {
+    console.error('[rrhh.candidatosNomina]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+
+async function vincularNomina(req, res) {
+  const bizId = Number(req.businessId);
+  const pedido = asInt(req.body?.origenBusinessId);
+  if (!pedido || pedido === bizId) return res.status(400).json({ ok: false, error: 'origen_invalido' });
+  try {
+    if (!(await getEffectiveRole(req.user?.id, pedido))) {
+      return res.status(403).json({ ok: false, error: 'sin_acceso_al_origen', message: 'Ese negocio no es de tu cartera.' });
+    }
+    const raiz = await nominaDe(pedido);
+    if (raiz === bizId) return res.status(400).json({ ok: false, error: 'ciclo', message: 'Ese negocio ya usa la nómina de este.' });
+    const { rows: propios } = await pool.query('SELECT 1 FROM rrhh_empleados WHERE business_id=$1 LIMIT 1', [bizId]);
+    if (propios.length) {
+      return res.status(409).json({ ok: false, error: 'tiene_nomina_propia', message: 'Este negocio ya tiene empleados propios: no se puede vincular a otra nómina.' });
+    }
+    const { rows: deps } = await pool.query('SELECT 1 FROM rrhh_nomina_vinculo WHERE origen_business_id=$1 LIMIT 1', [bizId]);
+    if (deps.length) {
+      return res.status(409).json({ ok: false, error: 'tiene_dependientes', message: 'Otros negocios usan la nómina de este: no se puede vincular.' });
+    }
+    await pool.query(
+      `INSERT INTO rrhh_nomina_vinculo (business_id, origen_business_id) VALUES ($1,$2)
+       ON CONFLICT (business_id) DO UPDATE SET origen_business_id = EXCLUDED.origen_business_id, created_at = now()`,
+      [bizId, raiz]
+    );
+    return res.json({ ok: true, compartidaCon: { id: raiz, nombre: await nombreNegocio(raiz) } });
+  } catch (e) {
+    console.error('[rrhh.vincularNomina]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+
+async function desvincularNomina(req, res) {
+  const bizId = Number(req.businessId);
+  try {
+    const { rows: cargadas } = await pool.query(
+      `SELECT 1 FROM rrhh_celdas c JOIN rrhh_filas f ON f.id = c.fila_id
+       JOIN rrhh_semanas s ON s.id = f.semana_id WHERE s.business_id=$1 LIMIT 1`, [bizId]
+    );
+    if (cargadas.length) {
+      return res.status(409).json({ ok: false, error: 'tiene_cronogramas', message: 'Este negocio ya tiene cronogramas con esa gente: no se puede dejar de compartir.' });
+    }
+    const { rowCount } = await pool.query('DELETE FROM rrhh_nomina_vinculo WHERE business_id=$1', [bizId]);
+    return res.json({ ok: true, eliminado: rowCount > 0 });
+  } catch (e) {
+    console.error('[rrhh.desvincularNomina]', e);
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 }
@@ -822,5 +922,6 @@ async function borrarSemana(req, res) {
 module.exports = {
   getConfig, putConfig,
   listarNominaMaxirest, importarNomina, crearEmpleado, editarEmpleado,
+  candidatosNomina, vincularNomina, desvincularNomina,
   listarSemanas, getSemana, putSemana, borrarSemana,
 };

@@ -18,6 +18,11 @@ router.post('/empleados/importar', ctrl.importarNomina);
 router.post('/empleados', ctrl.crearEmpleado);
 router.patch('/empleados/:id', ctrl.editarEmpleado);
 
+// Nómina compartida con otro negocio de la cartera (vinculada, no copia)
+router.get('/nomina/candidatos', ctrl.candidatosNomina);
+router.put('/nomina/vinculo', ctrl.vincularNomina);
+router.delete('/nomina/vinculo', ctrl.desvincularNomina);
+
 // Semanas de cronograma (la lista va ANTES que las parametrizadas)
 router.get('/semanas', ctrl.listarSemanas);
 router.get('/semanas/:semana', ctrl.getSemana);
