@@ -7,9 +7,11 @@
 //   config  = empleados + puestos + fechas especiales + espacios (con turnos)
 //   semana  = filas por turno, cada fila de UN empleado, celdas por día (0=Do…6=Sa)
 //
-// Los empleados son de Lazarillo: POST /empleados/importar trae la semilla de
-// la réplica de MaxiRest (container/comercio.i000_nomina) una sola vez; las
-// altas siguientes son propias.
+// Los empleados son de Lazarillo. Cada GET /config sincroniza con la réplica
+// de MaxiRest (container/comercio.i000_nomina, se actualiza cada noche): los
+// códigos nuevos entran solos y los dados de baja en MaxiRest se desactivan
+// (nunca se borran ni se pisan datos editados en Lazarillo). Las altas
+// manuales (sin código de MaxiRest) son propias y la sync no las toca.
 'use strict';
 
 const pool = require('../config/db');
@@ -131,12 +133,60 @@ async function ensureSeed(client, bizId) {
   );
 }
 
+/* ───────────────────────── sync de nómina ─────────────────────────
+ * Altas: código activo en la réplica que no está en RRHH → se inserta.
+ * Bajas: código con fecha_baja en la réplica → se desactiva y se anota la
+ *   fecha en baja_maxi. Si después lo reactivan a mano, no se vuelve a bajar
+ *   salvo que MaxiRest cargue una baja con OTRA fecha. Nunca reactiva sola.
+ * Devuelve { altas:[nombres], bajas:[nombres] } o null si el negocio no tiene
+ * réplica de MaxiRest.
+ */
+async function sincronizarNomina(bizId) {
+  const origen = replicaDeNegocio(bizId);
+  if (!origen) return null;
+  const { rows: rep } = await pool.query(
+    `SELECT DISTINCT ON (TRIM(codigo)) TRIM(codigo) AS codigo, nombre, apellido, sector,
+            to_char(fecha_baja,'YYYY-MM-DD') AS baja
+     FROM ${origen.schema}.i000_nomina
+     WHERE pdv = $1 AND codigo IS NOT NULL AND TRIM(codigo) <> ''
+       AND (COALESCE(TRIM(nombre),'') <> '' OR COALESCE(TRIM(apellido),'') <> '')
+     ORDER BY TRIM(codigo), (fecha_baja IS NULL) DESC`,
+    [origen.pdv]
+  );
+  const { rows: lz } = await pool.query(
+    `SELECT id, codigo_maxi, nombre, apellido, activo, to_char(baja_maxi,'YYYY-MM-DD') AS baja_maxi
+     FROM rrhh_empleados WHERE business_id=$1 AND codigo_maxi IS NOT NULL`, [bizId]
+  );
+  const porCodigo = new Map(lz.map((e) => [e.codigo_maxi, e]));
+  const altas = []; const bajas = [];
+  for (const r of rep) {
+    const e = porCodigo.get(r.codigo);
+    if (!e) {
+      if (r.baja) continue; // dado de baja y nunca importado: no se trae
+      const ins = await pool.query(
+        `INSERT INTO rrhh_empleados (business_id, codigo_maxi, nombre, apellido, sector, activo, origen)
+         VALUES ($1,$2,$3,$4,$5,TRUE,'maxirest')
+         ON CONFLICT (business_id, codigo_maxi) DO NOTHING RETURNING id`,
+        [bizId, r.codigo, titulo(r.nombre) || r.codigo, titulo(r.apellido) || null, r.sector || null]
+      );
+      if (ins.rowCount) altas.push(`${titulo(r.nombre)} ${titulo(r.apellido)}`.trim());
+    } else if (r.baja && r.baja !== e.baja_maxi) {
+      await pool.query(
+        'UPDATE rrhh_empleados SET activo=FALSE, baja_maxi=$2 WHERE id=$1', [e.id, r.baja]
+      );
+      if (e.activo) bajas.push(`${e.nombre || ''} ${e.apellido || ''}`.trim());
+    }
+  }
+  return { altas, bajas };
+}
+
 /* ───────────────────────── config ───────────────────────── */
 
 async function leerConfig(bizId) {
   const [empleados, puestos, fechas, espacios, turnos] = await Promise.all([
     pool.query(
-      `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen
+      `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
+              to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi"
        FROM rrhh_empleados WHERE business_id=$1 ORDER BY nombre, apellido`, [bizId]
     ),
     pool.query(
@@ -184,8 +234,15 @@ async function getConfig(req, res) {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
   client.release();
+  let sync = null;
   try {
-    return res.json({ ok: true, config: await leerConfig(req.businessId) });
+    sync = await sincronizarNomina(req.businessId);
+  } catch (e) {
+    console.error('[rrhh.getConfig sync nómina]', e.message);
+    sync = { error: true };
+  }
+  try {
+    return res.json({ ok: true, config: await leerConfig(req.businessId), sync });
   } catch (e) {
     console.error('[rrhh.getConfig]', e);
     return res.status(500).json({ ok: false, error: 'internal' });
@@ -485,7 +542,8 @@ async function editarEmpleado(req, res) {
          sector   = CASE WHEN $5::text IS NOT NULL THEN NULLIF($5,'') ELSE sector END,
          activo   = COALESCE($6, activo)
        WHERE id=$1 AND business_id=$2
-       RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen`,
+       RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
+                 to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi"`,
       [id, req.businessId,
         typeof b.nombre === 'string' && b.nombre.trim() ? b.nombre.trim() : null,
         typeof b.apellido === 'string' ? b.apellido.trim() : null,
