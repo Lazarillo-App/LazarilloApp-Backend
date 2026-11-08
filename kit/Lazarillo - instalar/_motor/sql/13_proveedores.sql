@@ -1,0 +1,1 @@
+SELECT id, codigo, nombre, razon, direccion, localidad, contacto, telefono, fax, celular, tipo_iva, cuit, foto, cbu, aliascbu, cod_cga, dias_venc, iva, iva_dif, e_mail, observac, fecultipp, detperc FROM mxpro ORDER BY id;

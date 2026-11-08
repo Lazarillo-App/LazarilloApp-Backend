@@ -1,0 +1,1 @@
+SELECT DATABASE() AS base, VERSION() AS motor;

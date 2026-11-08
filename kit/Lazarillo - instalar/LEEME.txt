@@ -1,0 +1,12 @@
+LAZARILLO - kit para la PC del local (sin Drive)
+
+Instalar (una sola vez, en la PC donde esta MaxiRest):
+  1. Descomprimir esta carpeta (en Descargas o el Escritorio, da igual).
+  2. Doble clic en "INSTALAR EN ESTA PC.bat".
+     Si Windows muestra "Windows protegio su PC": Mas informacion > Ejecutar de todas formas.
+  3. Entrar con tu usuario de Lazarillo (duenio o administrador) y elegir el local.
+  Listo: el kit queda en C:\Lazarillo, corre solo a las 08:00 y al prender la PC, y sube
+  los datos de ese local por Lazarillo. No usa Google Drive.
+
+La contrasena no queda guardada. Para cortar esta PC: Lazarillo > Configuracion > Conexiones.
+Despues de instalar, esta carpeta descomprimida se puede borrar.

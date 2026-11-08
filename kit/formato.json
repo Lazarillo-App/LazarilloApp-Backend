@@ -1,0 +1,15 @@
+{
+  "_nota": "Cómo se arma cada archivo al bajar el kit (el repo guarda todo en UTF-8 sin BOM y con saltos LF).",
+  "bom": [
+    "_motor/lz_lazarillo.ps1",
+    "_motor/lz_vigilante.ps1",
+    "_motor/lz_vincular.ps1"
+  ],
+  "crlf": [
+    "INSTALAR EN ESTA PC.bat",
+    "LAZARILLO.bat",
+    "LEEME.txt",
+    "VINCULAR ESTA PC.bat",
+    "_motor/lz_api.txt"
+  ]
+}
