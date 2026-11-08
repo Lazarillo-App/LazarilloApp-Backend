@@ -18,16 +18,28 @@ function normalizarRol(row) {
   return { rolId: Number(row.id), nombre: row.nombre, secciones, ocultos };
 }
 
-/** Permisos del usuario sobre el negocio, o null si no tiene rol a medida. */
+/** Permisos del usuario sobre el negocio, o null si no tiene límites.
+ *  Admin con rol a medida → ese rol. Admin sin rol a medida → el "Administración" ajustado de
+ *  la organización (o del negocio), si el dueño lo ajustó; si no, null (ve todo). */
 async function getPermisos(userId, businessId) {
   if (!userId || !businessId) return null;
   const { rows } = await pool.query(
     `
     WITH biz AS (SELECT id, owner_id, organization_id FROM app_businesses WHERE id = $2)
-    SELECT ua.role, ua.scope_type, cr.id, cr.nombre, cr.secciones, cr.ocultos,
+    SELECT ua.role, ua.scope_type,
+           COALESCE(cr.id, base.id) AS id, COALESCE(cr.nombre, base.nombre) AS nombre,
+           COALESCE(cr.secciones, base.secciones) AS secciones, COALESCE(cr.ocultos, base.ocultos) AS ocultos,
+           (cr.id IS NULL AND base.id IS NULL) AS sin_limites,
            (SELECT owner_id FROM biz) = $1 AS es_owner
       FROM user_assignments ua
       LEFT JOIN app_custom_roles cr ON cr.id = ua.custom_role_id AND cr.deleted_at IS NULL
+      LEFT JOIN LATERAL (
+        SELECT b.* FROM app_custom_roles b
+         WHERE b.es_administracion AND b.deleted_at IS NULL
+           AND (b.organization_id = (SELECT organization_id FROM biz)
+             OR (b.business_id = $2 AND (SELECT organization_id FROM biz) IS NULL))
+         LIMIT 1
+      ) base ON ua.role = 'admin' AND cr.id IS NULL
      WHERE ua.user_id = $1 AND ua.revoked_at IS NULL
        AND ((ua.scope_type = 'business' AND ua.scope_id = $2)
          OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM biz)))
@@ -38,8 +50,8 @@ async function getPermisos(userId, businessId) {
   if (rows.some((r) => r.es_owner || r.role === 'owner')) return null;
   const admins = rows.filter((r) => r.role === 'admin');
   if (!admins.length) return null; // staff: vista de siempre
-  // Si tiene algún acceso admin SIN rol a medida, ve todo. Si no, manda el del negocio.
-  if (admins.some((r) => !r.id)) return null;
+  // Un acceso admin sin límites (Administración sin ajustar) gana: ve todo.
+  if (admins.some((r) => r.sin_limites)) return null;
   const elegido = admins.find((r) => r.scope_type === 'business') || admins[0];
   return normalizarRol(elegido);
 }
