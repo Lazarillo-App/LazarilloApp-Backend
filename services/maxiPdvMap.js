@@ -15,6 +15,11 @@
 //
 // 214 (subnegocio de 210) todavía no está mapeado: no aparece ningún pdv
 // propio en el schema `comercio` aparte de COMERCIO.
+//
+// Negocios NUEVOS (kit vinculado, Diego 08/11/2026: "no entiendo por qué no se actualizan
+// los datos de Palermo suites en Lazarillo"): cada PC vinculada (kit_pcs) dice su esquema,
+// pdv, negocio y sucursal — refrescarPdvMap() los suma acá solos, sin tocar este archivo.
+// Los de arriba (fijos) mandan: un pdv del kit que choque con uno fijo se ignora.
 'use strict';
 
 const PDV_MAP = {
@@ -23,6 +28,50 @@ const PDV_MAP = {
   FCSANJUSTO: { schema: 'container', businessId: 204, branchId: 15 },
   COMERCIO: { schema: 'comercio', businessId: 210, branchId: null },
 };
+
+const FIJOS = new Set(Object.keys(PDV_MAP));
+const RE_ESQUEMA = /^[a-z_][a-z0-9_]*$/;
+let ultimoRefresco = 0;
+
+// Suma (o saca) los pdv de las PC vinculadas. La última vinculación de cada esquema+pdv manda;
+// una PC desvinculada sigue mapeada (sus datos ya subidos siguen siendo de ese negocio).
+// Nunca tira: sin la tabla kit_pcs (o sin base) deja el mapa como está.
+async function refrescarPdvMap({ forzar = false, db = null } = {}) {
+  if (!forzar && Date.now() - ultimoRefresco < 60_000) return PDV_MAP;
+  try {
+    const base = db || require('../config/db');
+    const { rows } = await base.query(
+      `SELECT DISTINCT ON (esquema, pdv) esquema, pdv, business_id, branch_id
+         FROM kit_pcs ORDER BY esquema, pdv, creado_en DESC, id DESC`);
+    const vivos = new Set();
+    for (const r of rows) {
+      const pdv = String(r.pdv || '');
+      if (!pdv || !RE_ESQUEMA.test(String(r.esquema || ''))) continue;
+      const nuevo = { schema: r.esquema, businessId: Number(r.business_id), branchId: r.branch_id == null ? null : Number(r.branch_id), origen: 'kit' };
+      if (FIJOS.has(pdv)) {
+        const f = PDV_MAP[pdv];
+        if (f.schema !== nuevo.schema || f.businessId !== nuevo.businessId) {
+          console.warn(`[pdv-map] el kit dice ${nuevo.schema}.${pdv} → negocio ${nuevo.businessId}, pero el fijo es ${f.schema} → ${f.businessId}: manda el fijo`);
+        }
+        continue;
+      }
+      if (vivos.has(pdv)) { console.warn(`[pdv-map] pdv ${pdv} repetido en dos esquemas: queda el primero`); continue; }
+      vivos.add(pdv);
+      PDV_MAP[pdv] = nuevo;
+    }
+    for (const k of Object.keys(PDV_MAP)) if (!FIJOS.has(k) && !vivos.has(k)) delete PDV_MAP[k];
+    ultimoRefresco = Date.now();
+  } catch (e) {
+    if (!/kit_pcs/.test(String(e.message))) console.warn('[pdv-map] no pude leer kit_pcs:', e.message);
+  }
+  return PDV_MAP;
+}
+
+// Al arrancar y cada 10 minutos (los que usan el mapa sin esperar: RRHH, costeo, sync).
+if (process.env.PDV_MAP_SIN_REFRESCO !== '1') {
+  setTimeout(() => { refrescarPdvMap({ forzar: true }); }, 25_000).unref();
+  setInterval(() => { refrescarPdvMap({ forzar: true }); }, 10 * 60_000).unref();
+}
 
 // Todos los pdv de un negocio: [{ pdv, schema, branchId }] (vacío si no está mapeado).
 function pdvsDeNegocio(businessId) {
@@ -58,4 +107,4 @@ async function verificarSucursales(db, businessId) {
   }
 }
 
-module.exports = { PDV_MAP, pdvsDeNegocio, schemaDeNegocio, verificarSucursales };
+module.exports = { PDV_MAP, pdvsDeNegocio, schemaDeNegocio, verificarSucursales, refrescarPdvMap };
