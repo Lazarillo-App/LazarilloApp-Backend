@@ -4,9 +4,13 @@ Instalar (una sola vez, en la PC donde esta MaxiRest):
   1. Descomprimir esta carpeta (en Descargas o el Escritorio, da igual).
   2. Doble clic en "INSTALAR EN ESTA PC.bat".
      Si Windows muestra "Windows protegio su PC": Mas informacion > Ejecutar de todas formas.
+     Aparece una ventanita "Lazarillo - instalando" con una barra que se mueve. Si la PC no
+     tiene Python, lo instala sola (unos minutos): no la cierres.
   3. Entrar con tu usuario de Lazarillo (duenio o administrador) y elegir el local.
   Listo: el kit queda en C:\Lazarillo, corre solo a las 08:00 y al prender la PC, y sube
   los datos de ese local por Lazarillo. No usa Google Drive.
 
+Ya instalado, en C:\Lazarillo quedan LAZARILLO.bat (correr el kit a mano) y
+VINCULAR ESTA PC.bat (volver a vincular).
 La contrasena no queda guardada. Para cortar esta PC: Lazarillo > Configuracion > Conexiones.
 Despues de instalar, esta carpeta descomprimida se puede borrar.
