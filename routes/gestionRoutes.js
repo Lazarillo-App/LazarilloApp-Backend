@@ -16,6 +16,7 @@ const detalle = require('../services/gestion/dashboard/detalle-api');
 const carga = require('../services/gestion/carga-api');
 const pagos = require('../services/gestion/pagos-api');
 const sinRubro = require('../services/gestion/dashboard/sin-rubro-api');
+const detalleVentas = require('../services/gestion/dashboard/detalle-ventas-api');
 const apertura = require('../services/gestion/apertura/api');
 const empleados = require('../services/gestion/empleados/api');
 const arca = require('../services/gestion/arca/api');
@@ -101,6 +102,7 @@ router.delete('/dashboard/canasta/aumentos', responder((req) =>
   api.borrarAumento({ ...ambito(req), body: req.body })));
 router.get('/m/resumen', responder((req) =>
   api.obtenerResumenMes({ ...ambito(req), anio: entero(paramsDe(req), 'anio'), mes: entero(paramsDe(req), 'mes') })));
+router.get('/m/detalle', responder((req) => detalleVentas.obtenerDetalleVentas({ ...ambito(req), sp: paramsDe(req) })));
 router.get('/m/anual', responder((req) =>
   api.obtenerAnual({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
 router.get('/dashboard/actualizado', responder((req) => api.obtenerActualizado(ambito(req))));
