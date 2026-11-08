@@ -107,4 +107,4 @@ async function verificarSucursales(db, businessId) {
   }
 }
 
-module.exports = { PDV_MAP, pdvsDeNegocio, schemaDeNegocio, verificarSucursales, refrescarPdvMap };
+module.exports = { PDV_MAP, PDV_FIJOS: FIJOS, pdvsDeNegocio, schemaDeNegocio, verificarSucursales, refrescarPdvMap };

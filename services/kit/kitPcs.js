@@ -18,6 +18,7 @@ const bcrypt = require('bcryptjs');
 const pool = require('../../config/db');
 const { listAccessibleBusinesses } = require('../auth/accessControl');
 const { getPermisos, puedeSeccion } = require('../auth/permisos');
+const { PDV_FIJOS } = require('../maxiPdvMap');
 
 const PREFIJO = 'lzk_';
 const ROLES_QUE_VINCULAN = new Set(['owner', 'admin']);
@@ -169,10 +170,16 @@ async function destinoDe(client, businessId, branchId) {
 
   let pdv = slug(sucursal ? `${neg.name} ${sucursal}` : neg.name).replace(/_/g, '').toUpperCase().slice(0, 30)
     || `NEG${businessId}`;
+  // El pdv tiene que ser único en TODA la base, no solo en el esquema: Recetas, RRHH y el reloj
+  // del kit lo buscan por nombre en PDV_MAP (un mapa pdv → negocio). Un local "Bar" de otra
+  // organización con pdv BAR se ignoraba (choca con el fijo del 147) y dos "Container" en
+  // esquemas distintos se pisaban: el segundo nunca llegaba a Recetas.
   for (let k = 0; ; k++) {
     const cand = k === 0 ? pdv : `${pdv}${k + 1}`;
+    if (PDV_FIJOS.has(cand)) continue;
     const { rows } = await client.query(
-      'SELECT 1 FROM gestion_render_origenes WHERE esquema = $1 AND pdv = $2', [esquema, cand]);
+      `SELECT 1 FROM gestion_render_origenes WHERE pdv = $1
+        UNION ALL SELECT 1 FROM kit_pcs WHERE pdv = $1 LIMIT 1`, [cand]);
     if (!rows.length) { pdv = cand; break; }
   }
   const { rows: ins } = await client.query(
