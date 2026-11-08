@@ -155,6 +155,11 @@ exports.create = async (req, res) => {
       [uid, biz.id]
     );
     await pool.query(`UPDATE app_users SET active_business_id=$1 WHERE id=$2`, [biz.id, uid]);
+    // Organización propia desde el alta: el Panel de gestión la necesita (Diego, 08/11).
+    try {
+      const orgId = await require('../services/gestion/organizacion-auto').asegurarOrganizacion(biz.id, uid);
+      if (orgId) biz.organization_id = orgId;
+    } catch (e) { console.warn('[businesses.create] organización:', e?.message); }
 
 
     // Backfill inicial 7 días (no bloqueante)
