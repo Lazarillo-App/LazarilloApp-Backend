@@ -22,18 +22,24 @@ const empleados = require('../services/gestion/empleados/api');
 const arca = require('../services/gestion/arca/api');
 const actividad = require('../services/gestion/actividad-api');
 const { db: gestionDb, sql: gestionSql } = require('../services/gestion/db');
+const { asegurarOrganizacion } = require('../services/gestion/organizacion-auto');
 
 router.use(requireBusinessRole('admin'));
 
 // El negocio de la URL tiene que ser el que validó el guard (que lo toma del header
 // X-Business-Id o del negocio activo): si difieren, se estarían pidiendo datos de un
 // negocio con los permisos de otro.
-router.use((req, res, next) => {
+router.use(async (req, res, next) => {
   if (Number(req.params.businessId) !== Number(req.businessId)) {
     return res.status(403).json({ error: 'business_mismatch' });
   }
   // Los maestros de gestion (conceptos, rubros, proveedores) son de la organización.
-  const organizationId = Number(req.business?.organization_id);
+  let organizationId = Number(req.business?.organization_id);
+  if (!Number.isFinite(organizationId) || organizationId <= 0) {
+    // Negocio nuevo (asistente de alta) sin organización: se le crea una propia.
+    organizationId = Number(await asegurarOrganizacion(req.businessId, req.user?.id));
+    if (req.business && organizationId > 0) req.business.organization_id = organizationId;
+  }
   if (!Number.isFinite(organizationId) || organizationId <= 0) {
     return res.status(409).json({ error: 'business_sin_organizacion', message: 'El Panel necesita que el negocio pertenezca a una organización.' });
   }
