@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const pool = require('../../config/db');
 const { listAccessibleBusinesses } = require('../auth/accessControl');
+const { getPermisos, puedeSeccion } = require('../auth/permisos');
 
 const PREFIJO = 'lzk_';
 const ROLES_QUE_VINCULAN = new Set(['owner', 'admin']);
@@ -65,7 +66,13 @@ async function localesDe(userId) {
     const prev = rolPorNegocio.get(id);
     if (!prev || (NIVEL[a.role] ?? 0) > (NIVEL[prev] ?? 0)) rolPorNegocio.set(id, a.role);
   }
-  const ids = [...rolPorNegocio].filter(([, r]) => ROLES_QUE_VINCULAN.has(r)).map(([id]) => id);
+  const candidatos = [...rolPorNegocio].filter(([, r]) => ROLES_QUE_VINCULAN.has(r));
+  // Un admin con rol a medida vincula solo si su rol tiene Conexiones en "Editar".
+  const ids = [];
+  for (const [id, r] of candidatos) {
+    if (r === 'admin' && !puedeSeccion(await getPermisos(userId, id), 'conexiones', 'editar')) continue;
+    ids.push(id);
+  }
   if (!ids.length) return [];
 
   const { rows: negocios } = await pool.query(
