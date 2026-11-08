@@ -15,7 +15,7 @@
 'use strict';
 
 const pool = require('../config/db');
-const { PDV_MAP } = require('./maxiPdvMap');
+const { PDV_MAP, refrescarPdvMap } = require('./maxiPdvMap');
 const { syncVentasDeNegocio } = require('./maxiPipelineSalesSync');
 const { syncComprasDeNegocio } = require('./maxiPipelinePurchasesSync');
 
@@ -36,6 +36,7 @@ async function correrRecetas(businessId, origen = 'pulso') {
     tomado = !!rows[0]?.ok;
     if (!tomado) { console.log(`[recetas-kit] ${origen} ${businessId}: ya corriendo en otro lado, se saltea`); return { saltado: true }; }
     const t0 = Date.now();
+    await refrescarPdvMap(); // negocios nuevos del kit vinculado (kit_pcs)
     const ventas = await syncVentasDeNegocio(businessId);
     const compras = await syncComprasDeNegocio(businessId);
     console.log(`[recetas-kit] ${origen} ${businessId} ${Date.now() - t0}ms`,
@@ -104,6 +105,7 @@ async function hayNovedades(businessId, porEsquema) {
 
 // La pasada del reloj: de a un negocio (no cargar la base de golpe).
 async function recetasDelReloj() {
+  await refrescarPdvMap({ forzar: true });
   for (const [businessId, porEsquema] of destinosPorNegocio()) {
     try {
       if (enCurso.has(businessId)) continue;

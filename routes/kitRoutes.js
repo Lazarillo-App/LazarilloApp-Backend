@@ -63,6 +63,8 @@ router.post('/vincular', async (req, res, next) => {
     if (!u) return;
     const r = await kit.vincular(u, req.body || {});
     console.log(`[kit] PC ${req.body?.pc} vinculada a ${r.esquema}.${r.pdv} por usuario ${u.id}${r.reemplazo ? ` (reemplaza a ${r.reemplazo})` : ''}`);
+    // Recetas (ventas/compras del kit) reconoce el negocio nuevo sin esperar el refresco de 10 min.
+    require('../services/maxiPdvMap').refrescarPdvMap({ forzar: true }).catch(() => {});
     res.set('Cache-Control', 'no-store');
     res.status(201).json({ ok: true, ...r });
   } catch (e) {
