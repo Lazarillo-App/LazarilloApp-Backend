@@ -1,10 +1,12 @@
 // services/kit/versiones.js
 // El kit se baja desde Lazarillo (Diego, 08/11/2026). Una "versión" es el zip "Lazarillo -
 // instalar" (INSTALAR EN ESTA PC.bat + _motor con el motor, los generadores y las consultas).
-//   - El kit VIVE EN EL SERVIDOR (Diego, 08/11: "no quiero que se publique desde usuario"): sale
-//     de la carpeta kit/ de este repo (el zip en base64, partido en kit/instalar-*.b64). Al
-//     arrancar (y antes de cualquier lectura, por si la migración todavía no estaba), se publica
-//     si esa huella todavía no está en kit_versiones.
+//   - El kit VIVE EN EL SERVIDOR, como código (Diego, 08/11: "no quiero que se publique desde
+//     usuario", "¿no podés editarlo igual que el resto de toda la web por código?"): los archivos
+//     están en kit/Lazarillo - instalar/ de este repo y se editan como cualquier otro. Al arrancar
+//     (y antes de cualquier lectura, por si la migración todavía no estaba) se arma el zip y, si
+//     ese contenido todavía no está en kit_versiones, se publica. kit/formato.json dice qué
+//     archivos llevan BOM y cuáles saltos CRLF (el repo guarda todo UTF-8 sin BOM y con LF).
 //     Se valida que sea el kit y que NO traiga credenciales; se guarda normalizado bajo
 //     "Lazarillo - instalar/". No hay forma de publicar desde la app.
 //   - zipParaDescargar: la última versión con _motor/lz_api.txt apuntando a ESTE servidor
@@ -70,22 +72,44 @@ async function publicar(buffer, { origenSha = null, notas = null } = {}) {
 const numeroDe = (v) => { const m = /(\d+)/.exec(String(v || '')); return m ? Number(m[1]) : null; };
 
 const CARPETA_KIT = path.join(__dirname, '..', '..', 'kit');
+const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 
+// Arma el zip desde kit/Lazarillo - instalar/ aplicando kit/formato.json. Devuelve
+// { buffer, huella } — la huella es del CONTENIDO (rutas + bytes), no del zip, que cambia con la fecha.
 function zipDelRepo(carpeta = CARPETA_KIT) {
-  let partes;
-  try { partes = fs.readdirSync(carpeta).filter((f) => /^instalar-\d+\.b64$/i.test(f)); } catch { return null; }
-  if (!partes.length) return null;
-  partes.sort((x, y) => Number(/\d+/.exec(x)[0]) - Number(/\d+/.exec(y)[0]));
-  const b64 = partes.map((f) => fs.readFileSync(path.join(carpeta, f), 'utf8')).join('').replace(/\s+/g, '');
-  return Buffer.from(b64, 'base64');
+  const raiz = path.join(carpeta, RAIZ.replace(/\/$/, ''));
+  if (!fs.existsSync(raiz)) return null;
+  let formato = {};
+  try { formato = JSON.parse(fs.readFileSync(path.join(carpeta, 'formato.json'), 'utf8')); } catch { /* sin formato */ }
+  const conBom = new Set(formato.bom || []);
+  const conCrlf = new Set(formato.crlf || []);
+  const rutas = [];
+  (function recorrer(dir, rel) {
+    for (const n of fs.readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${n.name}` : n.name;
+      if (n.isDirectory()) recorrer(path.join(dir, n.name), r);
+      else if (n.isFile()) rutas.push(r);
+    }
+  })(raiz, '');
+  rutas.sort();
+  const zip = new AdmZip();
+  const h = crypto.createHash('sha256');
+  for (const r of rutas) {
+    let d = fs.readFileSync(path.join(raiz, r));
+    if (conCrlf.has(r)) d = Buffer.from(d.toString('utf8').replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'), 'utf8');
+    if (conBom.has(r) && !d.subarray(0, 3).equals(BOM)) d = Buffer.concat([BOM, d]);
+    zip.addFile(RAIZ + r, d);
+    h.update(r).update('\0').update(sha(d)).update('\0');
+  }
+  return { buffer: zip.toBuffer(), huella: h.digest('hex') };
 }
 
-// Al arrancar: publica el kit del repo si esa huella todavía no está. Nunca tira abajo el
+// Al arrancar: publica el kit del repo si ese contenido todavía no está. Nunca tira abajo el
 // servidor: cualquier error queda en el log.
 async function sincronizarDesdeRepo({ carpeta = CARPETA_KIT } = {}) {
-  const buffer = zipDelRepo(carpeta);
-  if (!buffer) return { estado: 'sin_kit_en_repo' };
-  const origenSha = sha(buffer);
+  const delRepo = zipDelRepo(carpeta);
+  if (!delRepo) return { estado: 'sin_kit_en_repo' };
+  const { buffer, huella: origenSha } = delRepo;
   const cliente = await pool.connect();
   try {
     await cliente.query('SELECT pg_advisory_lock(hashtext($1))', ['kit_versiones_sync']);
