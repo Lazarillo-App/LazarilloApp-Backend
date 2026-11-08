@@ -19,6 +19,7 @@ const { proyectarMes, debeProyectar, METODOS } = require('./proyeccion');
 const { cambioValido } = require('./equilibrio-config');
 const { aggregateFlujoCajaPorMes } = require('./flujo-caja-agg');
 const { findPrimerArqueo } = require('./primer-arqueo');
+const { cajaDe, nombresDe } = require('./caja-compartida');
 const { buildDiferenciaCajaSerie } = require('./diferencia-caja-serie');
 const { mesesHasta, estimarIncompletos } = require('./canasta');
 const { resolveAnioRange } = require('./anio-range');
@@ -228,9 +229,29 @@ async function disponiblePorMes({ businessId, anio, sucursal }) {
   );
 }
 
+// Suma mes a mes de varias series ({mes: número|null}); un mes sin dato en todas queda null.
+function sumarSeries(series) {
+  const out = {};
+  for (const s of series) {
+    for (const [mes, v] of Object.entries(s)) {
+      if (v == null) { if (!(mes in out)) out[mes] = null; continue; }
+      out[mes] = (out[mes] ?? 0) + v;
+    }
+  }
+  return out;
+}
+
+// Lugares que entran en la caja de esta vista: ella misma + los que comparten caja (caja-compartida.js).
+async function lugaresDeCaja({ businessId, sucursal }) {
+  const { extras } = await cajaDe({ businessId, sucursal });
+  return { lugares: [{ businessId, sucursal }, ...extras], extras };
+}
+
 async function obtenerFlujoCaja({ businessId, anio, sucursal }) {
   if (!Number.isInteger(anio)) throw new ErrorDatos("Falta anio");
-  return { anio, meses: await disponiblePorMes({ businessId, anio, sucursal }) };
+  const { lugares, extras } = await lugaresDeCaja({ businessId, sucursal });
+  const meses = sumarSeries(await Promise.all(lugares.map((l) => disponiblePorMes({ ...l, anio }))));
+  return { anio, meses, ...(extras.length ? { compartidaCon: await nombresDe(extras) } : {}) };
 }
 
 // body { anio, mes, monto }; la sucursal sale del filtro (undefined = todas no se puede cargar:
@@ -241,6 +262,9 @@ async function guardarFlujoCaja({ businessId, sucursal, body }) {
     && Number.isInteger(mes) && mes >= 1 && mes <= 12
     && typeof monto === "number" && Number.isFinite(monto);
   if (!valido || sucursal === undefined) throw new ErrorDatos("Invalid body");
+  // Caja compartida: el arqueo es uno solo para todo el grupo y vive en su lugar ancla.
+  const { ancla } = await cajaDe({ businessId, sucursal });
+  if (ancla) { businessId = ancla.businessId; sucursal = ancla.sucursal; }
   // Un monto en 0 significa "sin dato" (ver spec 2026-08-31): se borra la fila en vez de
   // guardar un $0 que después no se puede limpiar. Borrar una fila inexistente es no-op.
   if (monto === 0) {
@@ -310,7 +334,10 @@ async function obtenerDiferenciaCaja({ organizationId, businessId, year, sucursa
   // rango → los 12 meses en null (spec §3.1), nunca 400.
   if (year < 2000 || year > new Date().getFullYear() + 1) return { diferenciaPorMes: diferenciaVacia() };
 
-  const primerArqueo = await findPrimerArqueo({ businessId, sucursal });
+  // Caja compartida: los arqueos son del grupo, así que ventas y compras también (todos sus lugares).
+  const { lugares } = await lugaresDeCaja({ businessId, sucursal });
+  const primeros = (await Promise.all(lugares.map((l) => findPrimerArqueo(l)))).filter(Boolean);
+  const primerArqueo = primeros.sort((a, b) => a.anio - b.anio || a.mes - b.mes)[0] ?? null;
   if (primerArqueo == null || primerArqueo.anio > year) return { diferenciaPorMes: diferenciaVacia() };
 
   const anios = [];
@@ -318,14 +345,17 @@ async function obtenerDiferenciaCaja({ organizationId, businessId, year, sucursa
 
   const totalesPorAnio = {};
   await Promise.all(anios.map(async (anio) => {
-    const o = { organizationId, businessId, anio, sucursal };
-    const [ingresosPorMes, egresosPorMes, gananciaPorMes, disponible] = await Promise.all([
-      sumVentasPorMes(o),
-      sumComprasPorMes({ ...o, visibilidadCol: "visibleEnDashboard" }),
-      sumComprasPorMes({ ...o, visibilidadCol: "visibleEnResultados" }),
-      disponiblePorMes(o),
-    ]);
-    totalesPorAnio[anio] = { ingresosPorMes, egresosPorMes, gananciaPorMes, disponiblePorMes: disponible };
+    const porLugar = await Promise.all(lugares.map(async (l) => {
+      const o = { organizationId, businessId: l.businessId, anio, sucursal: l.sucursal };
+      return Promise.all([
+        sumVentasPorMes(o),
+        sumComprasPorMes({ ...o, visibilidadCol: "visibleEnDashboard" }),
+        sumComprasPorMes({ ...o, visibilidadCol: "visibleEnResultados" }),
+        disponiblePorMes(o),
+      ]);
+    }));
+    const serie = (i) => sumarSeries(porLugar.map((p) => p[i]));
+    totalesPorAnio[anio] = { ingresosPorMes: serie(0), egresosPorMes: serie(1), gananciaPorMes: serie(2), disponiblePorMes: serie(3) };
   }));
 
   return { diferenciaPorMes: buildDiferenciaCajaSerie({ year, primerArqueo, totalesPorAnio }) };
