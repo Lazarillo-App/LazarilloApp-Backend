@@ -20,7 +20,7 @@ const apertura = require('../services/gestion/apertura/api');
 const empleados = require('../services/gestion/empleados/api');
 const arca = require('../services/gestion/arca/api');
 const actividad = require('../services/gestion/actividad-api');
-const { db: gestionDb } = require('../services/gestion/db');
+const { db: gestionDb, sql: gestionSql } = require('../services/gestion/db');
 
 router.use(requireBusinessRole('admin'));
 
@@ -160,9 +160,16 @@ router.patch('/pagos-proveedor/:id', responder((req) => pagos.editarPago({ ...re
 router.delete('/pagos-proveedor/:id', responder((req) => pagos.anularPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
 router.delete('/pagos-proveedor/:id/aplicaciones', responder((req) => pagos.quitarAplicacion({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), sp: paramsDe(req) })));
 // Lugares del negocio con la forma de gestion (un "local" con sus "puntos de venta").
+// La principal se muestra con el nombre de su sucursal (la marcada is_main: «CONTAINER BAR · RAMOS MEJIA»),
+// no el del negocio repetido (Diego 08/11/2026). Solo para mostrar: todo lo demás va por id.
 router.get('/locales', responder(async (req) => {
   const lugares = await carga.obtenerLugares(gestionDb, req.gestion.businessId);
-  return [{ id: req.gestion.businessId, nombre: req.business?.name ?? lugares[0]?.nombre ?? '', puntosDeVenta: lugares }];
+  const principal = await gestionDb.one(gestionSql`
+    SELECT TRIM(name) AS name FROM app_branches
+     WHERE business_id = ${req.gestion.businessId} AND COALESCE((props->>'is_main')::boolean, false)
+     ORDER BY id LIMIT 1`).catch(() => null);
+  const puntosDeVenta = lugares.map((l) => (l.branchId == null && principal?.name ? { ...l, nombre: principal.name } : l));
+  return [{ id: req.gestion.businessId, nombre: req.business?.name ?? lugares[0]?.nombre ?? '', puntosDeVenta }];
 }));
 router.get('/cta-cte', responder((req) => pagos.obtenerCtaCte({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/cta-cte/proveedores', responder((req) => pagos.buscarProveedoresCtaCte({ ...req.gestion, sp: paramsDe(req) })));
