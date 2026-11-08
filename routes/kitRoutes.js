@@ -9,12 +9,15 @@
 //   GET  /api/kit/yo        (llave) → a qué local está vinculada esta PC
 //   POST /api/kit/cargas    (llave) { tabla, tipo, columnas, filas, numerar?, detalle? }
 //                           → reemplaza esa tabla de ese pdv (ver services/kit/cargas.js)
+//   GET  /api/kit/motor     (llave) → versión publicada del kit + sha256 de cada archivo de _motor
+//   GET  /api/kit/motor/archivo?ruta=gen/lz_render.py  (llave) → ese archivo (para actualizarse sin Drive)
 'use strict';
 
 const express = require('express');
 const router = express.Router();
 const kit = require('../services/kit/kitPcs');
 const { cargar } = require('../services/kit/cargas');
+const versiones = require('../services/kit/versiones');
 
 // Freno simple a probar contraseñas: 8 intentos fallidos por IP+email cada 15 minutos.
 const fallos = new Map();
@@ -95,6 +98,25 @@ router.post('/cargas', conLlave, async (req, res, next) => {
     if (e.status) return res.status(e.status).json({ error: e.message });
     next(e);
   }
+});
+
+router.get('/motor', conLlave, async (req, res, next) => {
+  try {
+    const m = await versiones.manifiesto();
+    if (!m) return res.status(404).json({ error: 'todavia_no_hay_kit_publicado' });
+    res.set('Cache-Control', 'no-store');
+    res.json(m);
+  } catch (e) { next(e); }
+});
+
+router.get('/motor/archivo', conLlave, async (req, res, next) => {
+  try {
+    const d = await versiones.archivo(req.query.ruta);
+    if (!d) return res.status(404).json({ error: 'no_existe' });
+    res.set('Cache-Control', 'no-store');
+    res.set('Content-Type', 'application/octet-stream');
+    res.send(d);
+  } catch (e) { next(e); }
 });
 
 module.exports = router;
