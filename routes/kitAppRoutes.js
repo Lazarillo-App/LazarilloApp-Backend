@@ -22,9 +22,19 @@ function urlPublica(req) {
 }
 
 const PUEDEN = new Set(['owner', 'admin', 'service']);
+const { getPermisos, puedeSeccion } = require('../services/auth/permisos');
 
-function soloAdmin(req, res, next) {
+// Dueño y Administración vinculan PC y bajan el instalador. Un rol a medida, solo si tiene
+// la sección Conexiones (para vincular/desvincular, en "Editar").
+async function soloAdmin(req, res, next) {
   if (!PUEDEN.has(req.businessRole)) return res.status(403).json({ error: 'forbidden', need: 'admin' });
+  if (req.businessRole === 'admin') {
+    try {
+      const permisos = await getPermisos(req.user?.id, req.businessId);
+      const modo = req.method === 'GET' ? 'ver' : 'editar';
+      if (!puedeSeccion(permisos, 'conexiones', modo)) return res.status(403).json({ error: 'sin_permiso', seccion: 'conexiones', modo });
+    } catch (e) { return next(e); }
+  }
   next();
 }
 

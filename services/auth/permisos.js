@@ -5,7 +5,7 @@
 // permisos === null  → sin límites (todo lo que su rol base ya permitía).
 const pool = require('../../config/db');
 
-const SECCIONES = ['resultados', 'carga', 'recetas', 'rrhh', 'conceptos', 'medios', 'configuracion'];
+const SECCIONES = ['resultados', 'carga', 'recetas', 'rrhh', 'conceptos', 'medios', 'configuracion', 'conexiones'];
 
 function normalizarRol(row) {
   if (!row) return null;
