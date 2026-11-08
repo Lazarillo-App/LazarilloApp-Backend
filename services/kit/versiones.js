@@ -91,11 +91,25 @@ function zipDelRepo(carpeta = CARPETA_KIT) {
       else if (n.isFile()) rutas.push(r);
     }
   })(raiz, '');
-  rutas.sort();
+  // Un archivo grande puede estar partido en "<nombre>.parte-01", "<nombre>.parte-02"… (el motor,
+  // 137 KB): se unen en orden y el zip lleva <nombre>. Así un cambio sube solo el pedazo tocado.
+  const PARTE = /^(.+)\.parte-(\d+)$/;
+  const partes = new Map();
+  const finales = [];
+  for (const r of rutas) {
+    const m = PARTE.exec(r);
+    if (!m) { finales.push(r); continue; }
+    if (!partes.has(m[1])) { partes.set(m[1], []); finales.push(m[1]); }
+    partes.get(m[1]).push({ n: Number(m[2]), r });
+  }
+  const leer = (r) => (partes.has(r)
+    ? Buffer.concat(partes.get(r).sort((a, b) => a.n - b.n).map((p) => fs.readFileSync(path.join(raiz, p.r))))
+    : fs.readFileSync(path.join(raiz, r)));
+  finales.sort();
   const zip = new AdmZip();
   const h = crypto.createHash('sha256');
-  for (const r of rutas) {
-    let d = fs.readFileSync(path.join(raiz, r));
+  for (const r of finales) {
+    let d = leer(r);
     if (conCrlf.has(r)) d = Buffer.from(d.toString('utf8').replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'), 'utf8');
     if (conBom.has(r) && !d.subarray(0, 3).equals(BOM)) d = Buffer.concat([BOM, d]);
     zip.addFile(RAIZ + r, d);
