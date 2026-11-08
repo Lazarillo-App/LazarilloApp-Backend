@@ -70,6 +70,8 @@ const publicAccessRoutes = require('./routes/publicAccessRoutes');
 const recetaProposalsRoutes = require('./routes/recetaProposalsRoutes');
 const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
+const rolesRoutes = require('./routes/rolesRoutes');
+const { requireSeccion } = require('./services/auth/permisos');
 const meRoutes = require('./routes/meRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const placesRoutes = require('./routes/placesRoutes');
@@ -182,6 +184,7 @@ app.use('/api/places', placesRoutes);
 
 // rutas con auth
 app.use('/api/team', teamRoutes);
+app.use('/api/roles', rolesRoutes);
 
 // módulos sin :businessId en la URL
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);
@@ -218,7 +221,7 @@ app.use('/api/businesses', metodosCoccionRoutes);
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
 app.use('/api/businesses/:businessId/sync', syncRoutes);
 app.use('/api/businesses/:businessId/dashboard-store', dashboardStoreRoutes);
-app.use('/api/businesses/:businessId/rrhh', rrhhRoutes);
+app.use('/api/businesses/:businessId/rrhh', requireSeccion('rrhh'), rrhhRoutes);
 app.use('/api/businesses/:businessId/gestion', gestionRoutes);
 app.use('/api/businesses/:businessId/pulso', pulsoRoutes);
 app.use('/api/businesses/:businessId/kit', kitAppRoutes);
