@@ -29,29 +29,81 @@ function Aviso($t,$x,$i) { if ($SinAviso) { return }
 #  El modo de siempre (kit del Drive) sigue abajo, sin cambios.
 #  (Este bloque va en ASCII a proposito: este archivo no tiene BOM.)
 # ------------------------------------------------------------
+#  (08/11, Diego: "me abrio powershell y quedo ahi, la pantalla en negro"): lo arranca
+#  INSTALAR EN ESTA PC.bat escondido (conhost), y este bloque muestra una ventanita de progreso propia que se
+#  sigue moviendo mientras copia o instala Python (nunca "no responde"). Si una PC ya tiene
+#  el kit del Drive, no lo pisa. Lo que va pasando queda en %TEMP%\lazarillo_instalacion.txt.
+$script:prog = $null
+function Progreso($txt) {
+  if ($SinAviso) { return }
+  try {
+    if (-not $script:prog) {
+      Add-Type -AssemblyName System.Windows.Forms
+      Add-Type -AssemblyName System.Drawing
+      [System.Windows.Forms.Application]::EnableVisualStyles()
+      $f = New-Object System.Windows.Forms.Form
+      $f.Text = "Lazarillo - instalando"
+      $f.StartPosition = 'CenterScreen'; $f.FormBorderStyle = 'FixedDialog'
+      $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.ControlBox = $false; $f.TopMost = $true
+      $f.ClientSize = New-Object System.Drawing.Size(420, 112)
+      $f.BackColor = [System.Drawing.Color]::White
+      $l = New-Object System.Windows.Forms.Label
+      $l.Location = New-Object System.Drawing.Point(20, 18); $l.Size = New-Object System.Drawing.Size(380, 44)
+      $l.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+      $l.ForeColor = [System.Drawing.Color]::FromArgb(22, 50, 74)
+      $b = New-Object System.Windows.Forms.ProgressBar
+      $b.Style = 'Marquee'; $b.MarqueeAnimationSpeed = 30
+      $b.Location = New-Object System.Drawing.Point(20, 74); $b.Size = New-Object System.Drawing.Size(380, 14)
+      $f.Controls.Add($l); $f.Controls.Add($b)
+      $f.Show(); $f.Activate()
+      $script:prog = $f; $script:progL = $l
+    }
+    $script:progL.Text = $txt
+    [System.Windows.Forms.Application]::DoEvents()
+  } catch { }
+}
+function Refrescar { try { if ($script:prog) { [System.Windows.Forms.Application]::DoEvents() } } catch { } }
+function CerrarProgreso { try { if ($script:prog) { $script:prog.Close(); $script:prog.Dispose(); $script:prog = $null } } catch { } }
+$logTmp = Join-Path $env:TEMP "lazarillo_instalacion.txt"
+function Paso($m) { W $m; try { $L | Set-Content -Path $logTmp -Encoding UTF8 } catch { } }
+
 if (Test-Path (Join-Path $origen "lz_api.txt")) {
+  Progreso "Preparando la instalacion..."
+  # Esta PC ya tiene el kit del Drive: no se pisa (perderia el Drive, el MEGA y los maestros).
+  $destPrevio = Join-Path $destino "_motor\destinos.txt"
+  if ((Test-Path $destPrevio) -and -not (Select-String -Path $destPrevio -Pattern '^\s*modo\s*=\s*vinculado' -Quiet)) {
+    CerrarProgreso
+    Aviso "Lazarillo" ("Esta PC ya tiene Lazarillo instalado con Google Drive (" + $destino + ").`n`nNo hace falta instalar de nuevo. Si queres pasarla al modo sin Drive, avisale a Lazarillo.") 48
+    exit 1
+  }
   W "INSTALADOR LAZARILLO (sin Drive)"
   W "equipo  = $env:COMPUTERNAME"
   W "fecha   = $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
   W "kit origen = $kitDrive"
   if ($Probar) { W "MODO PRUEBA: no copio ni instalo nada"; $L | ForEach-Object { Write-Output $_ }; exit 0 }
+  Progreso "Copiando el kit a C:\Lazarillo..."
   try {
     New-Item -ItemType Directory -Force -Path (Join-Path $destino "_motor") | Out-Null
+    # LAZARILLO.bat y VINCULAR ESTA PC.bat vienen en _motor\raiz (asi la carpeta descargada
+    # muestra un solo .bat para hacer doble clic) y van a la raiz de C:\Lazarillo.
     foreach ($b in @("LAZARILLO.bat", "LEEME.txt", "VINCULAR ESTA PC.bat")) {
-      $f = Join-Path $kitDrive $b
-      if (Test-Path $f) { Copy-Item -LiteralPath $f -Destination $destino -Force }
+      foreach ($f in @((Join-Path (Join-Path $origen "raiz") $b), (Join-Path $kitDrive $b))) {
+        if (Test-Path -LiteralPath $f) { Copy-Item -LiteralPath $f -Destination $destino -Force; break }
+      }
     }
     # archivo por archivo (Copy-Item carpeta\* -Recurse anida si la subcarpeta ya existe)
     foreach ($f in (Get-ChildItem -LiteralPath $origen -Recurse -File)) {
+      Refrescar
       $rel = $f.FullName.Substring($origen.Length).TrimStart('\')
-      if ($rel -ieq "destinos.txt" -or $rel -ieq "lz_vinculo.txt") { continue }
+      if ($rel -ieq "destinos.txt" -or $rel -ieq "lz_vinculo.txt" -or $rel -like "raiz\*") { continue }
       $dst = Join-Path (Join-Path $destino "_motor") $rel
       New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
       Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
     }
-    W "  kit copiado a $destino"
+    Paso "  kit copiado a $destino"
   } catch {
-    W "  ERROR copiando el kit: $($_.Exception.Message)"
+    Paso "  ERROR copiando el kit: $($_.Exception.Message)"
+    CerrarProgreso
     Aviso "Lazarillo - error" ("No pude copiar el kit a " + $destino + ":`n" + $_.Exception.Message) 16
     exit 1
   }
@@ -74,18 +126,27 @@ if (Test-Path (Join-Path $origen "lz_api.txt")) {
     }
   }
   if (-not $hayPy) {
-    W "  Python: no esta, intento instalarlo con winget"
+    Paso "  Python: no esta, intento instalarlo con winget"
+    Progreso "Instalando Python (lo usan los informes). Puede tardar unos minutos..."
     try {
       $wg = Get-Command winget.exe -ErrorAction Stop
-      & $wg.Source install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-      W "  Python: winget termino (codigo $LASTEXITCODE)"
+      # en otro proceso y esperando con la ventanita viva (si no, Windows la marca "no responde")
+      $pw = Start-Process -FilePath $wg.Source -WindowStyle Hidden -PassThru -ArgumentList @(
+        "install", "-e", "--id", "Python.Python.3.12", "--scope", "user", "--silent",
+        "--accept-package-agreements", "--accept-source-agreements")
+      $t0 = Get-Date
+      while (-not $pw.HasExited -and ((Get-Date) - $t0).TotalMinutes -lt 15) { Refrescar; Start-Sleep -Milliseconds 200 }
+      if (-not $pw.HasExited) { Paso "  Python: winget no termino en 15 minutos" } else { Paso "  Python: winget termino (codigo $($pw.ExitCode))" }
     } catch {
-      W "  Python: no pude instalarlo solo ($($_.Exception.Message))"
+      Paso "  Python: no pude instalarlo solo ($($_.Exception.Message))"
+      CerrarProgreso
       Aviso "Lazarillo - falta Python" "Esta PC no tiene Python y no lo pude instalar solo.`n`nInstalalo desde python.org (marcando 'Add python.exe to PATH') y volve a correr INSTALAR EN ESTA PC." 48
     }
-  } else { W "  Python: ok" }
+  } else { Paso "  Python: ok" }
 
   # Vincular (ventana). Espera a que la cierren.
+  Paso "  abro la ventana de vincular"
+  CerrarProgreso
   $vinc = Join-Path $destino "_motor\lz_vincular.ps1"
   $archVin = Join-Path $destino "_motor\lz_vinculo.txt"
   if (Test-Path $vinc) {
