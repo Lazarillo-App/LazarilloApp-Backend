@@ -291,4 +291,8 @@ async function sacarFacturaDeCostos(tx, { businessId }, { comprobante, codigo, f
   return { aplicada: ids.length > 0, insumos: ids.length };
 }
 
-module.exports = { pasarFacturaACostos, sacarFacturaDeCostos, armarFacturasCosteo, proveedorNumerico, claveDesdeComprobante, BASE_PROVEEDOR_PANEL };
+module.exports = {
+  pasarFacturaACostos, sacarFacturaDeCostos, armarFacturasCosteo, proveedorNumerico, claveDesdeComprobante, BASE_PROVEEDOR_PANEL,
+  // Para db/scripts/gestion-facturas-viejas-a-costos.js (prueba de solo lectura).
+  resolverBizInsumos, mapaInsumos, facturaAplica,
+};
