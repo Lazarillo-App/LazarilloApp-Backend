@@ -20,7 +20,65 @@ const FIELD_MASK = [
   'places.websiteUri',
   'places.nationalPhoneNumber',
   'places.internationalPhoneNumber',
+  // Para que el asistente de alta quede completo (Diego, 08/11): resumen,
+  // horarios, fotos, puntaje, link de Maps, canales y qué sirve.
+  'places.editorialSummary',
+  'places.generativeSummary',
+  'places.regularOpeningHours',
+  'places.photos',
+  'places.rating',
+  'places.userRatingCount',
+  'places.googleMapsUri',
+  'places.primaryTypeDisplayName',
+  'places.dineIn',
+  'places.takeout',
+  'places.delivery',
+  'places.servesBreakfast',
+  'places.servesLunch',
+  'places.servesDinner',
+  'places.servesBeer',
+  'places.servesWine',
+  'places.servesCocktails',
 ].join(',');
+
+const pad2 = (n) => String(n ?? 0).padStart(2, '0');
+const hhmm = (t) => (t ? `${pad2(t.hour)}:${pad2(t.minute)}` : '');
+
+// Horarios de Google (periods, day 0 = domingo) → filas editables agrupando
+// los días con el mismo horario: [{ dias: [1,2,3,4,5], abre: '09:00', cierra: '01:00' }].
+// Abierto las 24 h = un solo period sin close.
+function horariosDe(roh) {
+  const periods = Array.isArray(roh?.periods) ? roh.periods : [];
+  if (!periods.length) return [];
+  if (periods.length === 1 && !periods[0].close) {
+    return [{ dias: [1, 2, 3, 4, 5, 6, 0], abre: '00:00', cierra: '24:00' }];
+  }
+  const porDia = new Map(); // día → lista de turnos "abre-cierra"
+  for (const p of periods) {
+    if (!p.open) continue;
+    const d = p.open.day;
+    const t = `${hhmm(p.open)}-${hhmm(p.close) || '24:00'}`;
+    porDia.set(d, [...(porDia.get(d) || []), t].sort());
+  }
+  // Lunes primero, domingo al final
+  const orden = [1, 2, 3, 4, 5, 6, 0].filter((d) => porDia.has(d));
+  const grupos = [];
+  for (const d of orden) {
+    const clave = porDia.get(d).join('|');
+    const g = grupos.find((x) => x.clave === clave);
+    if (g) g.dias.push(d); else grupos.push({ clave, dias: [d] });
+  }
+  const filas = [];
+  for (const g of grupos) {
+    for (const t of g.clave.split('|')) {
+      const [abre, cierra] = t.split('-');
+      filas.push({ dias: g.dias, abre, cierra });
+    }
+  }
+  return filas;
+}
+exports._horariosDe = horariosDe; // para tests
+
 
 function pickComponent(components, types) {
   for (const t of types) {
@@ -39,13 +97,26 @@ function mapPlace(p) {
     calle: pickComponent(comps, ['route']),
     numero: pickComponent(comps, ['street_number']),
     telefono: p.nationalPhoneNumber || p.internationalPhoneNumber || '',
-    descripcion: '',
+    descripcion: p.editorialSummary?.text || p.generativeSummary?.overview?.text || '',
     web: p.websiteUri || '',
     instagram: '', facebook: '', tiktok: '',
     logos: [],
     lat: p.location?.latitude ?? null,
     lng: p.location?.longitude ?? null,
     direccion: p.formattedAddress || '',
+    resumen: p.editorialSummary?.text || p.generativeSummary?.overview?.text || '',
+    horarios: horariosDe(p.regularOpeningHours),
+    // null = Google no lo informa (el usuario elige); true/false = lo informa
+    canales: { salon: p.dineIn ?? null, takeAway: p.takeout ?? null, delivery: p.delivery ?? null },
+    sirve: {
+      desayuno: p.servesBreakfast ?? null, almuerzo: p.servesLunch ?? null, cena: p.servesDinner ?? null,
+      cerveza: p.servesBeer ?? null, vino: p.servesWine ?? null, tragos: p.servesCocktails ?? null,
+    },
+    fotos: (p.photos || []).slice(0, 4).map((f) => f.name).filter(Boolean),
+    rating: p.rating ?? null,
+    resenas: p.userRatingCount ?? null,
+    tipo: p.primaryTypeDisplayName?.text || '',
+    mapsUrl: p.googleMapsUri || '',
   };
 }
 
@@ -94,6 +165,34 @@ exports.search = async (req, res) => {
     res.json({ opciones });
   } catch (e) {
     console.error('[places/search] error:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
+
+// GET /api/places/photos?names=places/X/photos/Y,places/X/photos/Z&w=800
+// Resuelve cada foto a una URL pública de Google (photoUri) sin exponer la key.
+exports.photos = async (req, res) => {
+  try {
+    if (!process.env.GOOGLE_MAPS_API_KEY) {
+      return res.status(500).json({ error: 'places_not_configured' });
+    }
+    const names = String(req.query.names || '').split(',').map((x) => x.trim())
+      .filter((x) => /^places\/[^/]+\/photos\/[^/]+$/.test(x)).slice(0, 4);
+    if (!names.length) return res.json({ fotos: [] });
+    const w = Math.min(Math.max(Number(req.query.w) || 800, 100), 1600);
+    const fotos = await Promise.all(names.map(async (name) => {
+      try {
+        const r = await fetch(`https://places.googleapis.com/v1/${name}/media?maxWidthPx=${w}&skipHttpRedirect=true`, {
+          headers: { 'X-Goog-Api-Key': process.env.GOOGLE_MAPS_API_KEY },
+        });
+        if (!r.ok) return null;
+        const j = await r.json();
+        return j.photoUri ? { name, url: j.photoUri } : null;
+      } catch { return null; }
+    }));
+    res.json({ fotos: fotos.filter(Boolean) });
+  } catch (e) {
+    console.error('[places/photos] error:', e);
     res.status(500).json({ error: 'internal' });
   }
 };
