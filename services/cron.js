@@ -197,6 +197,8 @@ function startGestionCron() {
     } catch (e) {
       console.error('[cron] ❌ error en ingesta de gestion:', e.message);
     }
+    // Aumentos de la carta (informe 12): una vez por día, después de la lectura.
+    await require('./gestion/render/aumentos').detectarAumentosDelDia();
   }, { timezone: tz });
 }
 
