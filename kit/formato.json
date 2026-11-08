@@ -7,9 +7,9 @@
   ],
   "crlf": [
     "INSTALAR EN ESTA PC.bat",
-    "LAZARILLO.bat",
     "LEEME.txt",
-    "VINCULAR ESTA PC.bat",
-    "_motor/lz_api.txt"
+    "_motor/lz_api.txt",
+    "_motor/raiz/LAZARILLO.bat",
+    "_motor/raiz/VINCULAR ESTA PC.bat"
   ]
 }
