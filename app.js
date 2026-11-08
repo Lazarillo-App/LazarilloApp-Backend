@@ -59,6 +59,8 @@ const dashboardStoreRoutes = require('./routes/dashboardStore');
 const rrhhRoutes = require('./routes/rrhhRoutes');
 const gestionRoutes = require('./routes/gestionRoutes');
 const pulsoRoutes = require('./routes/pulsoRoutes');
+const kitRoutes = require('./routes/kitRoutes');
+const kitAppRoutes = require('./routes/kitAppRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
 const sectoresRoutes = require('./routes/sectoresRoutes');
 const sectoresByIdRoutes = require('./routes/sectoresByIdRoutes');
@@ -143,6 +145,9 @@ app.use('/api', maintenanceMode);
 app.use('/api/auth', authRoutes);
 app.use('/api/dev', devRoutes);
 app.use('/api/diagnostic', diagnosticRoutes);
+// Kit vinculado (sin Drive): el instalador entra con usuario y contraseña y la corrida con la
+// llave de su PC, por eso va antes del authRequired general.
+app.use('/api/kit', kitRoutes);
 
 // ✅ AGREGAR ACÁ — antes del guard global de /api
 app.use('/api/recetas', recetaUploadRoutes);
@@ -216,6 +221,7 @@ app.use('/api/businesses/:businessId/dashboard-store', dashboardStoreRoutes);
 app.use('/api/businesses/:businessId/rrhh', rrhhRoutes);
 app.use('/api/businesses/:businessId/gestion', gestionRoutes);
 app.use('/api/businesses/:businessId/pulso', pulsoRoutes);
+app.use('/api/businesses/:businessId/kit', kitAppRoutes);
 
 // organizaciones y recetas
 app.use('/api', organizationsRoutes);
