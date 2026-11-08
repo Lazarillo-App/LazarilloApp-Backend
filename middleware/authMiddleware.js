@@ -2,6 +2,7 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { getEffectiveRole } = require('../services/auth/accessControl');
+const { getPermisos } = require('../services/auth/permisos');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret';
 const SERVICE_BEARER = (process.env.SERVICE_BEARER || '').trim();
@@ -165,6 +166,11 @@ async function loadActiveBusiness(req, res, next) {
     req.businessId = row.id;
     req.business = { ...row, props };
     req.businessRole = effectiveRole;   // 'owner' | 'admin' | 'staff'
+    // Rol a medida (solo admins): qué secciones ve y qué partes se le ocultan.
+    req.permisos = null;
+    if (effectiveRole === 'admin') {
+      try { req.permisos = await getPermisos(uid, row.id); } catch (e) { console.warn('[permisos]', e.message); }
+    }
     next();
   } catch (e) {
     console.error('loadActiveBusiness error:', e);

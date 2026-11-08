@@ -4,6 +4,7 @@
 
 const pool = require('../config/db');
 const { listAccessibleBusinesses } = require('../services/auth/accessControl');
+const { getPermisos } = require('../services/auth/permisos');
 
 /* ════════════════════════════════════════════════════════════════════
    GET /api/me/access
@@ -69,6 +70,14 @@ exports.getAccess = async (req, res, next) => {
         if (oa !== ob) return oa - ob;
         return a.id - b.id;
       });
+    }
+
+    // Rol a medida por negocio (solo admins; null = sin límites)
+    for (const b of businesses) {
+      b.permisos = null;
+      if (b.role === 'admin') {
+        try { b.permisos = await getPermisos(uid, b.id); } catch (e) { console.warn('[getAccess permisos]', e.message); }
+      }
     }
 
     // Orgs donde tengo assignment directo (no contar las que llegan por owner_id de un biz)
