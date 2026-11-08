@@ -17,6 +17,10 @@
 //     La lógica vive en services/recetasDesdeKit.js (la usa también el reloj de cada hora).
 //   Responde enseguida; todo sigue en segundo plano.
 // El front pinta un solo punto con la peor de las dos y el detalle en el tooltip.
+//   - kit (Diego, 08/11: "no sé si está atrasado o que no hay compras cargadas"): cuándo subió
+//     el kit por última vez y hasta qué fecha llega lo que subió (services/kit/frescuraKit.js).
+//     El front juzga el punto por la SUBIDA y por si la app ya tomó todo, no por la fecha del
+//     último dato (un local puede no tener compras hace semanas y estar al día).
 // Fechas futuras (tickets cargados a propósito más adelante) no cuentan: tope mañana.
 
 const express = require('express');
@@ -24,6 +28,7 @@ const router = express.Router({ mergeParams: true });
 const pool = require('../config/db');
 const { requireBusinessAccess } = require('../middleware/requireBusinessAccess');
 const { dispararRecetas, recetasEnCurso } = require('../services/recetasDesdeKit');
+const { frescuraKit, olvidarFrescura } = require('../services/kit/frescuraKit');
 const { abrirCorrida, ejecutarCorrida, corridaEnCurso } = require('../services/gestion/render/sync');
 
 const VEN_BALANCE = new Set(['owner', 'admin', 'service']);
@@ -62,8 +67,10 @@ router.get('/', requireBusinessAccess, async (req, res, next) => {
         }
       : null;
     const actualizando = recetasEnCurso(businessId) || (conBalance && await balanceActualizando());
+    let kit = null;
+    try { kit = await frescuraKit(businessId); } catch (e) { console.warn('[pulso] kit', e.message); }
     res.set('Cache-Control', 'no-store');
-    res.json({ recetas, balance, actualizando });
+    res.json({ recetas, balance, kit, actualizando });
   } catch (e) {
     next(e);
   }
@@ -75,6 +82,7 @@ router.post('/actualizar', requireBusinessAccess, async (req, res, next) => {
       return res.status(403).json({ ok: false, error: 'forbidden', need: 'admin' });
     }
     const businessId = Number(req.businessId);
+    olvidarFrescura(businessId);
 
     // Recetas: ventas (12) y compras/pagos (25, 80) desde el kit (services/recetasDesdeKit.js;
     // el mismo proceso corre solo cada hora cuando el kit sube algo nuevo).
