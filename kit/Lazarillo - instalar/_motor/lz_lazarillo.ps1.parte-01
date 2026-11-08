@@ -1,0 +1,596 @@
+
+# ============================================================
+#  LAZARILLO - un solo archivo hace todo
+#
+#  1) Releva que hay instalado en esta PC  -> out\<PC>\_relevamiento.txt
+#  2) Extrae los datos de MaxiRest          -> out\<base> - <PC>\*.tsv
+#  3) Deja programada la extraccion diaria y el vigilante
+#  4) Avisa al final con un solo cartel
+#
+#  SOLO LECTURA sobre el ERP: no modifica nada de MaxiRest.
+# ============================================================
+param([switch]$SinAviso, [switch]$SoloExtraer, [switch]$YaActualice, [switch]$SoloRepartir)
+
+# El script vive en _motor\ y la raiz del kit es la carpeta de arriba.
+# Si por lo que sea quedo suelto en otro lado, trabaja sobre su propia carpeta.
+$aqui  = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ((Split-Path -Leaf $aqui) -eq "_motor") { $motor = $aqui; $base = Split-Path -Parent $aqui }
+else { $motor = $aqui; $base = $aqui }
+# ------------------------------------------------------------
+#  HAY DOS LAZARILLO.bat IGUALES y hacen cosas distintas: el del Drive (que
+#  no tiene destinos.txt y por lo tanto no reparte nada a ningun lado) y el
+#  instalado en C:\Lazarillo (el bueno). Es una trampa: cualquiera toca el que
+#  tiene a mano. Asi que si me estan corriendo desde el Drive y esta PC YA
+#  tiene el kit instalado, le paso la posta al instalado y me voy callado.
+#  Resultado: toques el que toques, corre el que corresponde.
+# ------------------------------------------------------------
+$instalado = "C:\Lazarillo\_motor\lz_lazarillo.ps1"
+if ((-not (Test-Path (Join-Path $motor "destinos.txt"))) -and (Test-Path $instalado) -and
+    ($instalado -ne $MyInvocation.MyCommand.Path)) {
+  $ar = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $instalado)
+  if ($SoloExtraer) { $ar += '-SoloExtraer' }
+  if ($SinAviso)    { $ar += '-SinAviso' }
+  if ($SoloRepartir) { $ar += '-SoloRepartir' }
+  Start-Process -FilePath powershell.exe -ArgumentList $ar -WindowStyle Hidden -Wait
+  exit 0
+}
+
+$pcDir = Join-Path (Join-Path $base "out") $env:COMPUTERNAME
+New-Item -ItemType Directory -Force -Path $pcDir | Out-Null
+
+# Version del motor = fecha del propio archivo. Sirve para saber de un vistazo
+# si la PC ya tiene el cambio que se subio al Drive (queda en _VERSION.txt, en
+# la raiz del kit, al lado de LAZARILLO.bat, y en el cartel del final).
+# NUMERO DE VERSION: se sube DE A UNO cada vez que se empuja un cambio del
+# motor a las PC. Diego lo lee de un vistazo en _VERSION.txt y en el cartel
+# final, y asi sabe si esa PC ya tiene el cambio sin mirar fechas.
+$MOTOR_VER = "V49"
+
+$miArchivo = $MyInvocation.MyCommand.Path
+$version   = $MOTOR_VER + " - " + (Get-Item $miArchivo).LastWriteTime.ToString('dd/MM/yyyy HH:mm')
+
+# YA CORRIO HOY: la corrida automatica se dispara a las 08:00 Y al prender la
+# PC, porque en un punto de venta puede estar apagada a esa hora. Si ya hubo
+# una corrida buena hoy, sale sin hacer nada y sin pisar el log. Esto NO aplica
+# al doble clic en LAZARILLO.bat: eso corre siempre.
+$marcaDia = Join-Path $pcDir "_ultima.txt"
+if ($SoloExtraer -and (Test-Path $marcaDia)) {
+  if ((Get-Content $marcaDia -TotalCount 1 -ErrorAction SilentlyContinue) -eq (Get-Date -Format 'yyyy-MM-dd')) { exit 0 }
+}
+
+# ------------------------------------------------------------
+#  UN SOLO LAZARILLO A LA VEZ (V38 28/09, reescrito V39 29/09).
+#  Las dos tareas ("Extraer MaxiRest" a las 08:00 y "Extraer al prender") pueden
+#  dispararse juntas, y la guarda "YA CORRIO HOY" no alcanza: mira _ultima.txt,
+#  que se escribe al FINAL, asi que las dos pasan y corren en paralelo sobre el
+#  MISMO _log.txt y los MISMOS .tsv.
+#  El candado del V38 no alcanzo: preguntaba con Test-Path y recien despues
+#  escribia el archivo, dos operaciones distintas. Entre una y otra hay una
+#  ventana en la que las dos corridas pasan las dos. Paso en Comercio el 29/09
+#  con el V38 ya puesto: dos extracciones de la misma base en el mismo log
+#  (1.622.294 y 2.235.605 filas, arrancadas con 16 s de diferencia), dos bloques
+#  de informes y dos "Listo". Ademas la escritura del candado estaba dentro de
+#  un try/catch vacio: si fallaba, la corrida seguia sin candado y sin dejar
+#  rastro.
+#  V39: el candado se toma ABRIENDO el archivo con CreateNew, que falla si ya
+#  existe. Esa decision la toma el sistema de archivos de una sola vez, no hay
+#  ventana posible. El archivo queda ABIERTO toda la corrida, asi que "hay otro
+#  Lazarillo vivo" se contesta con el handle y no con el PID ni con el reloj: si
+#  puedo abrirlo en exclusiva, el dueño murio (corte de luz) o lo dejo el motor
+#  viejo, y lo saco. -YaActualice no lo toma: esa es la corrida hija que arranca
+#  la autoactualizacion, y el padre ya lo tiene tomado (y lo suelta antes).
+# ------------------------------------------------------------
+$candadoCorrida = Join-Path $pcDir "_corriendo.txt"
+$script:tengoCandado = $false
+$script:candadoFS    = $null
+$script:candadoAviso = ""
+function SoltarCandado {
+  if ($script:candadoFS) {
+    try { $script:candadoFS.Close() } catch { }
+    try { $script:candadoFS.Dispose() } catch { }
+    $script:candadoFS = $null
+  }
+  if (-not $script:tengoCandado) { return }
+  try { Remove-Item -LiteralPath $candadoCorrida -Force -ErrorAction SilentlyContinue } catch { }
+  $script:tengoCandado = $false
+}
+function AbrirCandado($modo) {
+  # Una sola operacion del sistema de archivos, y me quedo con el handle:
+  #   CreateNew -> solo funciona si el archivo NO existe
+  #   Open      -> solo funciona si existe Y nadie lo tiene abierto
+  # FileShare None: mientras lo tengo, nadie mas lo abre, lo mueve ni lo borra.
+  try {
+    $fs = [System.IO.File]::Open($candadoCorrida, $modo, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $fs.SetLength(0)
+    $b = [System.Text.Encoding]::ASCII.GetBytes("$PID")
+    $fs.Write($b, 0, $b.Length)
+    $fs.Flush()
+    $script:candadoFS = $fs
+    $script:tengoCandado = $true
+    return "tomado"
+  }
+  catch [System.IO.DirectoryNotFoundException] { return "error" }
+  catch [System.IO.FileNotFoundException]      { return "libre" }
+  catch [System.UnauthorizedAccessException]   { return "error" }
+  catch [System.IO.IOException]                { return "ocupado" }
+  catch                                        { return "error" }
+}
+if ((-not $YaActualice) -and (-not $SoloRepartir)) {
+  # 1) el caso normal: no hay candado, lo creo yo.
+  $estadoCandado = AbrirCandado ([System.IO.FileMode]::CreateNew)
+  if ($estadoCandado -eq "ocupado") {
+    # 2) hay un _corriendo.txt. Si puedo ABRIRLO en exclusiva es que nadie lo
+    #    tiene: quedo de una corrida que murio (corte de luz) o lo dejo un motor
+    #    viejo, que lo escribia y lo cerraba. Abrirlo ES tomarlo: no hay que
+    #    borrar ni renombrar nada, asi que no queda ninguna ventana entre
+    #    "esta libre" y "es mio". (V39 lo hacia borrando y volviendo a crear, y
+    #    en la prueba de carrera con huerfano eso dejaba entrar 2 de 12.)
+    $estadoCandado = AbrirCandado ([System.IO.FileMode]::Open)
+    if ($estadoCandado -eq "libre") { $estadoCandado = AbrirCandado ([System.IO.FileMode]::CreateNew) }
+    if ($estadoCandado -eq "tomado") { $script:candadoAviso = "Candado: habia un _corriendo.txt sin dueño, lo tome yo y sigo" }
+  }
+  # Salgo SIN escribir el log: si lo tocara, le pisaria la corrida a la otra,
+  # que es justo lo que este candado viene a evitar.
+  if ($estadoCandado -eq "ocupado") { exit 0 }
+  # Si no se pudo ni tomar ni rescatar (permisos, disco lleno), sigo igual: no
+  # correr es peor que correr sin candado. Pero queda escrito en el log.
+  if ($estadoCandado -eq "error") { $script:candadoAviso = "Candado: NO se pudo tomar, sigo igual pero SIN candado ($candadoCorrida)" }
+  # V40: si lo tomo bien tambien lo digo. Hasta ahora el candado solo hablaba
+  # cuando algo salia mal, asi que un log sin lineas de candado no distinguia
+  # "funciono" de "ni se ejecuto" - y eso es justo lo que hubo que adivinar el
+  # 30/09. Ahora cada corrida deja escrito quien tiene el candado.
+  if ($estadoCandado -eq "tomado" -and (-not $script:candadoAviso)) { $script:candadoAviso = "Candado: tomado por esta corrida (PID $PID)" }
+} else {
+  if ($YaActualice) { $script:candadoAviso = "Candado: corrida hija (-YaActualice); lo mantiene el proceso padre" }
+}
+
+$logFile = Join-Path $pcDir "_log.txt"
+# -SoloRepartir (lo dispara el vigilante del admin cada minuto) NO pisa el log de
+# la corrida: escribe en su propio _reparto.txt, que se recorta solo.
+if ($SoloRepartir) {
+  $logFile = Join-Path $pcDir "_reparto.txt"
+  try { if ((Test-Path $logFile) -and ((Get-Item $logFile).Length -gt 200KB)) { Move-Item $logFile ($logFile + ".viejo") -Force } } catch { }
+} else {
+  ("{0}  === LAZARILLO ===" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) | Set-Content -Path $logFile -Encoding UTF8
+}
+
+# V39: el candado se resuelve antes de que exista el log, asi que si tuvo algo
+# que decir lo dejo aca, apenas el log esta escrito. Nunca en silencio.
+if ($script:candadoAviso -and (-not $SoloRepartir)) {
+  try { ("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $script:candadoAviso) | Add-Content -Path $logFile -Encoding UTF8 } catch { }
+}
+
+function Log($m) { Add-Content -Path $logFile -Value ("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) -Encoding UTF8 }
+function Aviso($t,$x,$i) {
+  if ($SinAviso) { return }
+  # cerrar la barra de estado si estaba abierta (vale para el cartel final y
+  # para los cartels de error que salen antes de tiempo)
+  try { if ($progArch) { "100|FIN" | Set-Content -Path $progArch -Encoding UTF8 } } catch { }
+  try { (New-Object -ComObject WScript.Shell).Popup($x,180,$t,$i) | Out-Null } catch { } }
+
+# ------------------------------------------------------------
+#  BARRA DE ESTADO. Fase() escribe en que anda la corrida y, en la PRIMERA
+#  llamada, abre la ventanita lz_barra.ps1 (que corre en su propio proceso y
+#  lee ese archivo). Solo en corridas MANUALES: la automatica va -SinAviso y no
+#  muestra nada. Se lanza de forma perezosa (en la 1er Fase, que cae DESPUES de
+#  la autoactualizacion) asi no se abren dos ventanas cuando el motor se relanza.
+# ------------------------------------------------------------
+$progArch = Join-Path $pcDir "_progreso.txt"
+$script:barraLanzada = $false
+function Fase($pct, $txt) {
+  Log $txt
+  if ($SinAviso) { return }
+  try { ("{0}|{1}" -f $pct, $txt) | Set-Content -Path $progArch -Encoding UTF8 } catch { }
+  if (-not $script:barraLanzada) {
+    $script:barraLanzada = $true
+    try {
+      $barra = Join-Path $motor "lz_barra.ps1"
+      if (Test-Path $barra) {
+        Start-Process -FilePath powershell.exe -WindowStyle Normal `
+          -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', $barra, '-arch', $progArch) `
+          -ErrorAction SilentlyContinue | Out-Null
+      }
+    } catch { }
+  }
+}
+
+$resumen = New-Object System.Collections.ArrayList
+function Res($m) { [void]$resumen.Add($m) }
+
+# Deja el vigilante andando (mira cada minuto si hay una orden pendiente).
+# Se instala aunque la extraccion falle, asi se puede reintentar a distancia.
+# Lanzador invisible. Si se llama a powershell.exe directo desde el Programador,
+# Windows abre la consola un instante ANTES de leer -WindowStyle Hidden, asi que
+# parpadea una ventana negra en la cara del usuario (cada minuto, en el caso del
+# vigilante). wscript.exe no abre ninguna ventana, y desde ahi se arranca
+# PowerShell con modo de ventana 0 (oculta) y sin esperar.
+function LanzadorOculto($ps1, $extra, $vbs) {
+  $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File ""' + $ps1 + '""'
+  if ($extra) { $cmd += ' ' + $extra }
+  $linea = 'CreateObject("WScript.Shell").Run "' + $cmd + '", 0, False'
+  Set-Content -Path $vbs -Value $linea -Encoding ASCII
+  return $vbs
+}
+
+# Diego decidio (23/09/2026) NO tener vigilante: la tarea de cada minuto le
+# parpadeaba una ventana en la cara. Sin vigilante no se puede pedir nada a
+# distancia: para correr algo en esta PC hay que hacer doble clic en
+# LAZARILLO.bat. InstalarVigilante queda escrita por si algun dia se vuelve.
+function DesinstalarVigilante {
+  try {
+    $sal = & schtasks.exe /Delete /TN "Lazarillo - Vigilante" /F 2>&1
+    Log ("Vigilante: baja -> " + ($sal -join " "))
+    Remove-Item (Join-Path $motor "lz_vigilante.vbs") -Force -ErrorAction SilentlyContinue
+    Res "Vigilante: dado de baja (no queda ninguna tarea de cada minuto)"
+  } catch {
+    Log "ERROR al dar de baja el vigilante: $($_.Exception.Message)"
+    Res "Vigilante: NO se pudo dar de baja"
+  }
+}
+
+function InstalarVigilante {
+  try {
+    $vig = Join-Path $motor "lz_vigilante.ps1"
+    if (-not (Test-Path $vig)) { Log "No esta lz_vigilante.ps1, salteo el vigilante"; Res "Vigilante: falta lz_vigilante.ps1"; return }
+    $vbs = LanzadorOculto $vig "" (Join-Path $motor "lz_vigilante.vbs")
+    $tr = 'wscript.exe //B //Nologo \"' + $vbs + '\"'
+    $sal = & schtasks.exe /Create /TN "Lazarillo - Vigilante" /TR $tr /SC MINUTE /MO 1 /F 2>&1
+    Log ("Vigilante: " + ($sal -join " "))
+    if ($LASTEXITCODE -eq 0) { Res "Vigilante: activo (mira ordenes cada minuto)" }
+    else { Res "Vigilante: NO se pudo instalar" }
+  } catch {
+    Log "ERROR al instalar el vigilante: $($_.Exception.Message)"
+    Res "Vigilante: NO se pudo instalar"
+  }
+}
+
+# ------------------------------------------------------------
+#  El LANZADOR LLEVA LA VERSION EN EL NOMBRE: "LAZARILLO V4.bat".
+#  Idea de Diego (24/09): mirando la carpeta ya sabe si el archivo que tiene
+#  enfrente es el ultimo, sin abrir nada ni esperar a ver que pasa. Cada
+#  corrida deja el nombre al dia y borra los de versiones anteriores, tanto
+#  en el kit de esta PC como en el del Drive.
+# ------------------------------------------------------------
+function RenombrarLanzador($carpeta) {
+  if (-not ($carpeta -and (Test-Path $carpeta))) { return }
+  try {
+    # ------------------------------------------------------------
+    #  NUNCA BAJAR LA VERSION DEL NOMBRE (pasó el 24/09).
+    #  Ramos corrio con V9 justo antes de que el Drive le sincronizara el V10
+    #  y, al terminar, le puso SU nombre al .bat del kit del Drive: borro el
+    #  "LAZARILLO V10.bat" y dejo "LAZARILLO V9.bat". Diego vio el numero ir
+    #  para atras, que es exactamente lo contrario de para lo que sirve.
+    #  Regla: si en la carpeta ya hay un lanzador de version MAS ALTA que la
+    #  mia, no toco nada. Solo el motor mas nuevo manda sobre el nombre.
+    # ------------------------------------------------------------
+    $mia = 0
+    if ($MOTOR_VER -match '^V(\d+)$') { $mia = [int]$matches[1] }
+    $masAlta = 0
+    foreach ($b in (Get-ChildItem -Path $carpeta -Filter "LAZARILLO V*.bat" -File -ErrorAction SilentlyContinue)) {
+      if ($b.BaseName -match '^LAZARILLO V(\d+)$') {
+        $n = [int]$matches[1]
+        if ($n -gt $masAlta) { $masAlta = $n }
+      }
+    }
+    if ($masAlta -gt $mia) { return }
+
+    $nuevo = Join-Path $carpeta ("LAZARILLO " + $MOTOR_VER + ".bat")
+    # OJO: NO reescribir el .bat si ya existe. Puede ser el que Windows esta
+    # ejecutando en este mismo momento, y si se lo pisan mientras corre, cmd
+    # pierde la cuenta de por donde iba y la ventana negra queda colgada.
+    if (-not (Test-Path $nuevo)) {
+    # OJO (bug real, 24/09): en PowerShell la COMA une MAS FUERTE que el "+".
+    # Escrito como @("a", "b " + $v + " c", "d") la linea del medio NO se
+    # concatena: se parte en tres elementos del array y el .bat sale con
+    # renglones sueltos ("V9", "- generando...") que cmd intenta ejecutar y
+    # tira "no se reconoce como un comando interno o externo". Cada
+    # concatenacion va entre PARENTESIS si o si.
+    @("@echo off",
+      ("title Lazarillo " + $MOTOR_VER + " - generando, no cierres esta ventana"),
+      "echo.",
+      ("echo   Lazarillo " + $MOTOR_VER + " - trabajando. Tarda unos 4 minutos."),
+      "echo   Cuando termine aparece el cartel y esta ventana se cierra sola.",
+      "echo.",
+      'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0_motor\lz_lazarillo.ps1"') |
+      Set-Content -Path $nuevo -Encoding ASCII -ErrorAction Stop
+    }
+    Get-ChildItem -Path $carpeta -Filter "LAZARILLO*.bat" -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -ne $nuevo } |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+  } catch { }
+}
+
+# Copia un arbol respetando las subcarpetas, archivo por archivo.
+# OJO: "Copy-Item origen\* destino -Recurse" NO sirve acá: si en el destino ya
+# existe una subcarpeta con el mismo nombre, PowerShell mete la carpeta ADENTRO
+# y queda "Ventas (22)\Ventas (22)". Esto pisa archivo por archivo y no anida.
+function CopiarArbol($desde, $hasta, $que, [switch]$SoloMasNuevo, [switch]$SoloExistentes) {
+  if (-not $hasta) { return }
+  if (-not (Test-Path $desde)) { Log "$que : no existe el origen ($desde)"; return }
+  try {
+    $n = 0; $salteados = 0
+    foreach ($f in (Get-ChildItem -Path $desde -Recurse -File -ErrorAction Stop)) {
+      $rel = $f.FullName.Substring($desde.Length).TrimStart('\')
+      $dst = Join-Path $hasta $rel
+      # -SoloMasNuevo: si el destino ya tiene ese archivo y es IGUAL o MAS NUEVO,
+      # no se pisa (lo usa el reparto del admin, para no bajar una copia vieja del
+      # puente encima de lo que la PC escribio directo en su MEGA).
+      # -SoloExistentes (V32): solo ACTUALIZA los archivos que ya estan en el
+      # destino, nunca agrega uno nuevo. Lo usan los maestros del Drive: Diego
+      # decide que maestros van en cada carpeta y Lazarillo no le suma ninguno.
+      if ($SoloExistentes -and (-not (Test-Path -LiteralPath $dst))) { $salteados++; continue }
+      if ($SoloMasNuevo -and (Test-Path -LiteralPath $dst)) {
+        if ((Get-Item -LiteralPath $dst).LastWriteTimeUtc -ge $f.LastWriteTimeUtc) { $salteados++; continue }
+      }
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+      Copy-Item -Path $f.FullName -Destination $dst -Force -ErrorAction Stop
+      $n++
+    }
+    if ($salteados -gt 0) { Log "$que : $salteados salteados (ya al dia, o no van en esa carpeta)" }
+    Log "$que : copiado a $hasta ($n archivos)"
+    Res "$que : al dia"
+  } catch {
+    Log "$que : ERROR copiando a $hasta - $($_.Exception.Message)"
+    # V38: el motivo va TAMBIEN al resumen. El log se puede cortar o cruzar; el
+    # _estado.txt se escribe entero de una sola vez al final, asi que es el
+    # unico lugar donde el motivo se lee seguro desde el Drive.
+    Res ("$que : NO se pudo copiar - " + $_.Exception.Message)
+  }
+}
+
+# ------------------------------------------------------------
+#  UN ARCHIVO POR INFORME. Al dejar un informe en el MEGA, borra la version
+#  anterior del MISMO informe aunque tenga OTRA extension (.xls vs .XLSX): lo
+#  que lo lee por nombre le da igual la extension, asi que dos archivos del
+#  mismo informe lo confunden. La coincidencia va por el NOMBRE COMPLETO
+#  normalizado (solo alfanumericos, minusculas), NO por el numero: hay dos "11"
+#  distintos (COMPRAS POR INSUMO ANUAL y RUBROS CONCEPTOS DE CAJA) y jamas hay
+#  que pisar uno con el otro. Solo toca archivos cuyo nombre normalizado coincide
+#  con uno que Lazarillo ACABA de dejar; nunca borra informes que Lazarillo no hace.
+function ClaveInforme($nombre) {
+  $stem = [System.IO.Path]::GetFileNameWithoutExtension($nombre)
+  return ($stem -replace '[^0-9A-Za-z]', '').ToLower()
+}
+function PisarDuplicados($destDir, $origen) {
+  if ((-not $destDir) -or (-not (Test-Path $destDir)) -or (-not (Test-Path $origen))) { return }
+  try {
+    $claves = @{}
+    foreach ($f in (Get-ChildItem -Path $origen -Recurse -File -ErrorAction SilentlyContinue)) {
+      $claves[(ClaveInforme $f.Name)] = $f.Name
+    }
+    foreach ($f in (Get-ChildItem -LiteralPath $destDir -File -ErrorAction SilentlyContinue)) {
+      $k = ClaveInforme $f.Name
+      if ($k -and $claves.ContainsKey($k) -and ($f.Name -ne $claves[$k])) {
+        try {
+          Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+          Log ("Duplicado borrado en " + (Split-Path -Leaf $destDir) + ": " + $f.Name + " (queda " + $claves[$k] + ")")
+        } catch { Log ("No pude borrar duplicado " + $f.Name + ": " + $_.Exception.Message) }
+      }
+    }
+  } catch { }
+}
+
+# HUERFANOS SIN SUFIJO (Diego, 25/09: "no quiero cosas que no se usen o mal
+# nombradas"). En una carpeta del MEGA COMPARTIDA (canchas = SJ + RAMOS) un
+# informe sin sufijo no es de nadie: quedo de una corrida que todavia no tenia
+# su linea en rutas_informes.txt. Cuando una PC CON sufijo escribe "X RAMOS.xls",
+# cualquier "X.xls" (misma clave sin el sufijo) de esa carpeta se MUEVE — nunca
+# se borra — a la subcarpeta "_A BORRAR (Lazarillo)". Una PC sin sufijo (el Bar)
+# no dispara nada. Solo mira los informes que la PC acaba de escribir.
+function ApartarSinSufijo($destDir, $origen, $sufijo) {
+  # V26: el sufijo puede ir al final ("X RAMOS.xls") o en el medio
+  # ("22 - ventas detalladas RAMOS_2026 V7.XLSX", los anuales de Transaccionales).
+  $s = ("" + $sufijo).Trim()
+  if ((-not $s) -or (-not $destDir) -or (-not (Test-Path $destDir)) -or (-not (Test-Path $origen))) { return }
+  try {
+    $patron = '\s+' + [regex]::Escape($s) + '(?=[_.\s]|$)'
+    $sinSuf = @{}
+    foreach ($f in (Get-ChildItem -LiteralPath $origen -File -ErrorAction SilentlyContinue)) {
+      $sinNombre = [regex]::Replace($f.Name, $patron, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+      if ($sinNombre -ne $f.Name) { $sinSuf[(ClaveInforme $sinNombre)] = $f.Name }
+    }
+    if ($sinSuf.Count -eq 0) { return }
+    $apartado = Join-Path $destDir "_A BORRAR (Lazarillo)"
+    $movidos = 0
+    foreach ($f in (Get-ChildItem -LiteralPath $destDir -File -ErrorAction SilentlyContinue)) {
+      $k = ClaveInforme $f.Name
+      if ($k -and $sinSuf.ContainsKey($k)) {
+        try {
+          New-Item -ItemType Directory -Force -Path $apartado | Out-Null
+          $dst = Join-Path $apartado $f.Name
+          if (Test-Path -LiteralPath $dst) { $dst = Join-Path $apartado ((Get-Date -Format 'yyyyMMdd-HHmmss') + ' ' + $f.Name) }
+          Move-Item -LiteralPath $f.FullName -Destination $dst -ErrorAction Stop
+          Log ("Huerfano sin sufijo apartado en " + (Split-Path -Leaf $destDir) + ": " + $f.Name + " (lo reemplaza " + $sinSuf[$k] + ")")
+          $movidos++
+        } catch { Log ("No pude apartar " + $f.Name + ": " + $_.Exception.Message) }
+      }
+    }
+    if ($movidos -gt 0) { Res ("Limpieza: $movidos informes viejos sin sufijo pasados a _A BORRAR (Lazarillo)") }
+  } catch { }
+}
+
+if (-not $SoloRepartir) { try { Get-ChildItem -Path $base -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch { } }
+
+# ------------------------------------------------------------
+#  TRANSACCIONALES CON LOS NOMBRES DE DIEGO (V29, 25/09).
+#  Diego: "no me respetaste los nombres". En cada carpeta del Drive
+#  (Transaccionales\<PDV>\<informe>) Diego ya tiene SUS archivos, con SU nombre,
+#  y sus planillas los leen por ese nombre:
+#     Ramos - FC Canchas : "14 - gastos compras detallado canchas_2026 V7.XLSX",
+#                          "22 - VENTA DETALLADA CANCHAS_2026 V7.XLSX"
+#     Nuñez - Comercio   : "22 - VENTA DETALLADA COMERCIO_2026 V7.xlsx", ...
+#  Lazarillo escribia el suyo al lado ("... RAMOS_2026 V7.XLSX") y quedaban dos.
+#  Regla: para cada informe (mismo numero) se busca en la carpeta el archivo de
+#  Diego del año mas nuevo y se usa ESE nombre, cambiando solo el año. Asi
+#  tambien el año que viene sale con su nombre. Si no hay ninguno, va el nombre
+#  generado (con el sufijo del PDV). Las copias con el nombre de Lazarillo que
+#  quedaron de antes se apartan (MOVER, no borrar) a "_A BORRAR (Lazarillo)".
+#  No cuentan como "de Diego": los que tienen "(" (respaldos "(humano ...)") ni
+#  los "homologado".
+# ------------------------------------------------------------
+function CopiarTransaccionales($origDrv, $destFinal, $sufijo, $ref, [string[]]$Excluir = @(), [string[]]$Solo = @()) {
+  # V37 (27/09): -Excluir / -Solo filtran por la subcarpeta de 1er nivel
+  # ("Fecha de pagos (80)"). Asi el 80 va a FUTUROS TRANSACCIONALES y no a
+  # Transaccionales (Diego: "esos archivos me generan problema en la base").
+  $que = if ($Solo.Count -gt 0) { "Informes al Drive (FUTUROS TRANSACCIONALES)" } else { "Informes al Drive (Transaccionales)" }
+  # V30 (Diego 25/09): "que se bajen con estas referencias en los nombres, asi
+  # los identifico rapido": ramosfc / sanjustofc / comercio / bar ramos (7mo
+  # campo de rutas_informes.txt). Con referencia, el nombre es FIJO:
+  #   "<informe> <referencia>_<año> V7.xlsx"  ej. "22 - ventas detalladas FCRAMOS_2026 V7.xlsx"
+  # V36 (27/09): referencias BAR/FCRAMOS/FCSANJUSTO/COMERCIO, todo lo demas en minuscula.
+  # y cualquier otro archivo del MISMO informe y MISMO año en esa carpeta (los
+  # "...canchas_2026", "...COMERCIO_2026", "...SJ_2026", "...RAMOS_2026") se
+  # aparta a "_A BORRAR (Lazarillo)" (MOVER, no borrar). No se tocan los
+  # "homologado" ni los que tienen "(" (respaldos). Sin referencia: regla V29.
+  $baseDrive = @{ '14' = '14 - gastos compras detallado'; '22' = '22 - ventas detalladas';
+                  '25' = '25 - compras detalle de compras'; '80' = '80 - compras - detalle de pagos' }
+  $ref = ("" + $ref).Trim()
+  if (-not (Test-Path $origDrv)) { Log "$que : no existe el origen ($origDrv)"; return }
+  $s = ("" + $sufijo).Trim()
+  $patSuf = if ($s) { '\s+' + [regex]::Escape($s) + '(?=[_.\s]|$)' } else { $null }
+  $ic = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  $n = 0; $adoptados = 0; $apartados = 0; $errores = 0
+  $detalleErr = New-Object System.Collections.ArrayList   # V38: para el _estado.txt
+  $carpetas = @(Get-Item -LiteralPath $origDrv) + @(Get-ChildItem -LiteralPath $origDrv -Directory -Recurse -ErrorAction SilentlyContinue)
+  foreach ($sd in $carpetas) {
+    $rel = $sd.FullName.Substring($origDrv.Length).TrimStart('\')
+    $top = ($rel -split '\\')[0]
+    if ($Solo.Count -gt 0 -and (-not $rel -or -not ($Solo -contains $top))) { continue }
+    if ($rel -and ($Excluir -contains $top)) { continue }
+    $destSub = if ($rel) { Join-Path $destFinal $rel } else { $destFinal }
+    $gens = @(Get-ChildItem -LiteralPath $sd.FullName -File -ErrorAction SilentlyContinue)
+    if ($gens.Count -eq 0) { continue }
+    try { New-Item -ItemType Directory -Force -Path $destSub | Out-Null } catch { }
+    $existentes = @(Get-ChildItem -LiteralPath $destSub -File -ErrorAction SilentlyContinue)
+    $destinosUsados = @{}
+    $usadoNumAnio = @{}
+    $prefGen = @{}
+    foreach ($g in $gens) {
+      try {
+        $mg = [regex]::Match($g.Name, '^(?<pre>.+?)_(?<y>\d{4})(?<post> V7\.[^.]+)$', $ic)
+        $mn = [regex]::Match($g.Name, '^(?<num>\d+[A-Za-z]?)\s*-\s', $ic)
+        $nombreFinal = $g.Name
+        if ($mg.Success -and $mn.Success) {
+          $pre = $mg.Groups['pre'].Value; $anio = $mg.Groups['y'].Value; $num = $mn.Groups['num'].Value
+          $preSin = if ($patSuf) { [regex]::Replace($pre, $patSuf, '', $ic) } else { $pre }
+          $prefGen[$pre.ToLower()] = $true; $prefGen[$preSin.ToLower()] = $true
+          $humanos = @(); $parecidos = @()
+          foreach ($e in $existentes) {
+            if ($e.Name -match '[(]' -or $e.Name -match '(?i)homologado') { continue }
+            $me = [regex]::Match($e.Name, '^(?<pre>.+?)_(?<y>\d{4})(?<post> V7\.[^.]+)$', $ic)
+            if (-not $me.Success) { continue }
+            if (-not [regex]::IsMatch($e.Name, '^' + [regex]::Escape($num) + '\s*-\s', $ic)) { continue }
+            $ePre = $me.Groups['pre'].Value
+            if ($ePre -ieq $pre) { continue }                          # el generado con sufijo: no es de Diego
+            $item = [pscustomobject]@{ f = $e; pre = $ePre; y = [int]$me.Groups['y'].Value; post = $me.Groups['post'].Value }
+            if ($ePre -ieq $preSin) { $parecidos += $item } else { $humanos += $item }
+          }
+          $plantilla = $null
+          if ($ref) {
+            $bd = $baseDrive[$num.ToLower()]
+            if (-not $bd) { $bd = $preSin.ToLower() }
+            $nombreFinal = $bd + ' ' + $ref + '_' + $anio + ' V7.xlsx'   # V36: extension en minuscula
+            $humanos = @(); $parecidos = @()
+          }
+          # si Diego ya tiene ESE año, su nombre exacto (mayusculas incluidas)
+          $mismoAnio = @($humanos | Where-Object { $_.y -eq [int]$anio })
+          if ($mismoAnio.Count -gt 0) { $plantilla = $mismoAnio | Sort-Object @{e={$_.f.LastWriteTimeUtc};Descending=$true} | Select-Object -First 1 }
+          elseif ($humanos.Count -gt 0) { $plantilla = $humanos | Sort-Object @{e={$_.y};Descending=$true}, @{e={$_.f.LastWriteTimeUtc};Descending=$true} | Select-Object -First 1 }
+          elseif ($parecidos.Count -gt 0) { $plantilla = $parecidos | Sort-Object @{e={$_.y};Descending=$true} | Select-Object -First 1 }
+          if ($plantilla) {
+            $nombreFinal = $plantilla.pre + '_' + $anio + $plantilla.post
+            if ($nombreFinal -ne $g.Name) { $adoptados++; Log ("Transaccionales: " + $g.Name + " -> uso el nombre de Diego: " + $nombreFinal) }
+          }
+        }
+        $dst = Join-Path $destSub $nombreFinal
+        Copy-Item -LiteralPath $g.FullName -Destination $dst -Force -ErrorAction Stop
+        $destinosUsados[$nombreFinal.ToLower()] = $true
+        if ($mg.Success -and $mn.Success) { $usadoNumAnio[($num.ToLower() + '|' + $anio)] = $true }
+        $n++
+      } catch {
+        $errores++
+        Log ("$que : ERROR con " + $g.Name + " - " + $_.Exception.Message)
+        [void]$detalleErr.Add($g.Name + " -> " + $_.Exception.Message)
+      }
+    }
+    # apartar las copias con nombre de Lazarillo que ya no son el destino
+    $apartado = Join-Path $destSub "_A BORRAR (Lazarillo)"
+    foreach ($e in @(Get-ChildItem -LiteralPath $destSub -File -ErrorAction SilentlyContinue)) {
+      if ($destinosUsados.ContainsKey($e.Name.ToLower())) { continue }
+      $me = [regex]::Match($e.Name, '^(?<pre>.+?)_(?<y>\d{4})(?<post> V7\.[^.]+)$', $ic)
+      if (-not $me.Success) { continue }
+      if ($e.Name -match '[(]' -or $e.Name -match '(?i)homologado') { continue }
+      if ((-not $ref) -and (-not $prefGen.ContainsKey($me.Groups['pre'].Value.ToLower()))) { continue }
+      # solo si ESE informe y ESE año se acaba de escribir con otro nombre
+      $mnE = [regex]::Match($e.Name, '^(?<num>\d+[A-Za-z]?)\s*-\s', $ic)
+      if (-not $mnE.Success) { continue }
+      if (-not $usadoNumAnio.ContainsKey(($mnE.Groups['num'].Value.ToLower() + '|' + $me.Groups['y'].Value))) { continue }
+      try {
+        New-Item -ItemType Directory -Force -Path $apartado | Out-Null
+        $dstA = Join-Path $apartado $e.Name
+        if (Test-Path -LiteralPath $dstA) { $dstA = Join-Path $apartado ((Get-Date -Format 'yyyyMMdd-HHmmss') + ' ' + $e.Name) }
+        Move-Item -LiteralPath $e.FullName -Destination $dstA -ErrorAction Stop
+        Log ("Transaccionales: nombre viejo apartado: " + $e.Name)
+        $apartados++
+      } catch { Log ("No pude apartar " + $e.Name + ": " + $_.Exception.Message) }
+    }
+  }
+  Log "$que : $n archivos en $destFinal ($adoptados con el nombre de Diego, $apartados copias viejas apartadas)"
+  if ($errores -gt 0) {
+    Res "$que : NO se pudo copiar ($errores con error)"
+    # V38: que archivo y por que. Hasta 3, para no inflar el cartel final.
+    foreach ($d in @($detalleErr | Select-Object -First 3)) { Res ("    " + $d) }
+    if ($errores -gt 3) { Res ("    (y " + ($errores - 3) + " mas, en el _log.txt)") }
+  }
+  else { Res "$que : al dia" }
+  if ($apartados -gt 0) { Res ("Limpieza: $apartados archivos con nombre viejo pasados a _A BORRAR (Lazarillo)") }
+}
+
+# ------------------------------------------------------------
+#  REPARTO AL MEGA (V28). Lo que dejan en "Informes MEGA\<destino>" del Drive
+#  los PDV sin MEGA local (San Justo, Comercio) + el espejo de los que si lo
+#  tienen, el admin lo pasa a la carpeta real del MEGA (2do campo de la linea
+#  de rutas_informes.txt con ese <destino> en el 6to).
+#  Antes solo pasaba en la corrida de las 08:00 del admin. Diego (25/09): "que
+#  cuando haya cambios en el drive lo pase automaticamente". Ahora lo llama
+#  tambien el vigilante del admin CADA MINUTO (-SoloRepartir): mira si hay algo
+#  mas nuevo en el puente y, SOLO si hay, copia eso. Sin cambios no escribe nada.
+# ------------------------------------------------------------
+function HayNuevos($desde, $hasta) {
+  foreach ($f in (Get-ChildItem -LiteralPath $desde -Recurse -File -ErrorAction SilentlyContinue)) {
+    $dst = Join-Path $hasta ($f.FullName.Substring($desde.Length).TrimStart('\'))
+    if (-not (Test-Path -LiteralPath $dst)) { return $true }
+    if ((Get-Item -LiteralPath $dst).LastWriteTimeUtc -lt $f.LastWriteTimeUtc) { return $true }
+  }
+  return $false
+}
+function RepartirMega {
+  $rutasR = Join-Path $motor "rutas_informes.txt"
+  $raizR = $null
+  if ($destinos["kit_drive"]) { $raizR = Join-Path (Split-Path -Parent (Split-Path -Parent $destinos["kit_drive"])) "Informes MEGA" }
+  if (-not ($raizR -and (Test-Path $raizR))) { return 0 }
+  # La carpeta FINAL de cada PDV sin MEGA sale del 2do campo de su linea en
+  # rutas_informes.txt, buscada por el 6to (destino). Comercio cuelga de otra
+  # raiz ("BASE DE DATOS NUÑEZ", "00 - BUFFET"): con el mapa no hay rutas a mano.
+  $mapaDest = @{}
+  if (Test-Path $rutasR) {
+    foreach ($l in (Get-Content $rutasR -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+      if ($l -match '^\s*#' -or -not $l.Trim()) { continue }
+      $p = $l -split '\s*\|\s*'
+      if ($p.Count -ge 6) {
+        $dst6 = $p[5].Trim(); $carp2 = $p[1].Trim()
+        if ($dst6 -and $carp2) { $mapaDest[$dst6] = $carp2 }
+      }
+    }
+  }
+  $hechos = 0
+  foreach ($d in (Get-ChildItem -LiteralPath $raizR -Directory -ErrorAction SilentlyContinue)) {
+    $final = $mapaDest[$d.Name]
+    if ($final -and (Test-Path $final)) {
+      if (HayNuevos $d.FullName $final) {
+        CopiarArbol $d.FullName $final ("Reparto al MEGA (" + $d.Name + ")") -SoloMasNuevo
+        PisarDuplicados $final $d.FullName
+        $hechos++
+      } elseif (-not $SoloRepartir) { Res ("Reparto al MEGA (" + $d.Name + ") : al dia") }
+    } elseif ($final) {
+      Log ("Reparto al MEGA: no existe la carpeta destino de " + $d.Name + " ($final)")

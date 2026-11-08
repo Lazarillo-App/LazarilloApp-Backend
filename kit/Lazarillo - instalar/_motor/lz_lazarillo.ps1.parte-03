@@ -1,0 +1,639 @@
+        foreach ($linea in (Get-Content $arch.FullName -ErrorAction SilentlyContinue)) {
+          if ($linea -match '(?i)maxilink\.exe\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)') {
+            $h=$matches[1]; $u=$matches[2]; $pw=$matches[3]; $db=$matches[4]; $pt=$matches[5]
+            $origen = $arch.FullName
+          }
+        }
+      } catch { }
+      if ($db) { break }
+    }
+    if ($db) { break }
+  }
+}
+
+# ============================================================
+#  2e) BUSCAR EN SERIO Y APRENDER (Diego, 24/09: "las rutas de MaxiRest
+#      cambian, lo tiene que aprender el instalador")
+#
+#  Hasta aca todo dependia de ADIVINAR por el nombre de la carpeta: se miraban
+#  solo las carpetas de la raiz de cada disco que dijeran "maxi", "maria" o
+#  "mysql". Eso alcanzo en el admin (C:\MaxiREST_Admin) y en Ramos
+#  (C:\MaxiREST_sincronizado) y se cayo en San Justo (C:\MaxiREST_SQL), donde
+#  el archivo de conexion no estaba donde se lo esperaba.
+#
+#  Cada instalacion de MaxiRest esta en un lugar distinto y no hay una regla.
+#  Asi que cuando los atajos fallan, se busca DE VERDAD: se recorren los discos
+#  fijos buscando los archivos que solo existen si ahi hay un MaxiRest, sin
+#  importar como se llame la carpeta. Se saltean Windows y Program Files, que
+#  es donde nunca esta y donde se perderia el tiempo.
+#
+#  Y lo mas importante: lo que encuentra QUEDA ESCRITO en destinos.txt
+#  (maxirest = ...), asi la proxima corrida entra derecho y esta busqueda larga
+#  se hace UNA sola vez por PC.
+# ============================================================
+if (-not $db) {
+  Log "2e No aparecio por los atajos: busco MaxiRest por todo el disco"
+  $saltear = @('Windows','Program Files','Program Files (x86)','ProgramData','$Recycle.Bin','System Volume Information','AppData')
+  $hallados = @()
+  foreach ($u in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Where-Object { $_.Used -ne $null })) {
+    try {
+      foreach ($raiz in (Get-ChildItem -Path $u.Root -Directory -ErrorAction SilentlyContinue)) {
+        if ($saltear -contains $raiz.Name) { continue }
+        foreach ($patron in @("Datos*ysql*.txt","MAXIREST.EXE","mxlink_update.bat")) {
+          try {
+            $hallados += @(Get-ChildItem -Path $raiz.FullName -Recurse -Depth 4 -Filter $patron -File -ErrorAction SilentlyContinue)
+          } catch { }
+        }
+      }
+    } catch { }
+  }
+  # el archivo de conexion puede estar en el PERFIL DEL USUARIO, que la vuelta
+  # de arriba saltea (AppData). En San Justo no aparecio en ningun lado del
+  # disco, asi que se lo busca tambien aca antes de darse por vencido.
+  foreach ($r in @($env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, $env:PROGRAMDATA)) {
+    if (-not ($r -and (Test-Path $r))) { continue }
+    try { $hallados += @(Get-ChildItem -Path $r -Recurse -Depth 5 -Filter "Datos*ysql*.txt" -File -ErrorAction SilentlyContinue) } catch { }
+  }
+
+  $carpetas = @($hallados | ForEach-Object { $_.DirectoryName } | Select-Object -Unique)
+  foreach ($c in $carpetas) { Log "2e encontre un MaxiRest en: $c" }
+
+  # ------------------------------------------------------------
+  #  Si igual no aparece, dejar anotado TODO lo que huela a conexion.
+  #  En San Justo no hay DatosMysql.txt ni mxlink_update.bat: la base se llama
+  #  mx_50340 (se ve como carpeta dentro de C:\Servidor_MariaDB) y el usuario y
+  #  la clave tienen que estar en algun otro lado. En vez de adivinar, se
+  #  barren los archivos chicos de texto de la carpeta de MaxiRest buscando
+  #  lineas que nombren la base o al usuario, y se guardan en el relevamiento
+  #  para poder mirarlas. Sin esto, cada intento es una corrida perdida.
+  # ------------------------------------------------------------
+  $pistas = New-Object System.Collections.ArrayList
+  foreach ($c in @($carpetas | Select-Object -First 3)) {
+    try {
+      foreach ($f in (Get-ChildItem -Path $c -Recurse -Depth 3 -Include *.txt,*.ini,*.cnf,*.cfg,*.bat,*.cmd,*.log,*.xml,*.json -File -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Length -gt 0 -and $_.Length -lt 1MB } | Select-Object -First 400)) {
+        foreach ($linea in (Get-Content $f.FullName -ErrorAction SilentlyContinue | Select-Object -First 400)) {
+          if ($linea -match '(?i)(mx_\d+|user_\d+|maxilink\.exe|password|pwd\s*=)') {
+            [void]$pistas.Add(("  [" + $f.Name + "] " + $linea.Trim()))
+          }
+        }
+      }
+    } catch { }
+  }
+  if ($pistas.Count -gt 0) {
+    $pf = Join-Path $pcDir "_pistas_conexion.txt"
+    try {
+      @("PISTAS DE CONEXION - $env:COMPUTERNAME - $(Get-Date -Format 'yyyy-MM-dd HH:mm')", "") +
+        @($pistas | Select-Object -Unique -First 200) | Set-Content -Path $pf -Encoding UTF8
+      Log "2e deje $($pistas.Count) pistas de conexion en _pistas_conexion.txt"
+    } catch { }
+  }
+
+  foreach ($c in $carpetas) {
+    if ($db) { break }
+    # el archivo de conexion, en cualquier lado de esa carpeta
+    foreach ($f in @(Get-ChildItem -Path $c -Recurse -Depth 2 -Filter "Datos*ysql*.txt" -File -ErrorAction SilentlyContinue)) {
+      $ln = @()
+      try { $ln = @(Get-Content $f.FullName -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }) } catch { }
+      if ($ln.Count -ge 5) {
+        $h=$ln[0]; $u=$ln[1]; $pw=$ln[2]; $db=$ln[3]; $pt=$ln[4]
+        $origen = $f.FullName
+        Log ("2e DatosMysql: usuario=$u base=$db puerto=$pt")
+        break
+      }
+    }
+    if ($db) { break }
+    # o la linea de maxilink en algun .bat de esa carpeta
+    foreach ($arch in @(Get-ChildItem -Path $c -Recurse -Depth 2 -Include *.bat,*.cmd -File -ErrorAction SilentlyContinue)) {
+      foreach ($linea in (Get-Content $arch.FullName -ErrorAction SilentlyContinue)) {
+        if ($linea -match '(?i)maxilink\.exe"?\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)') {
+          $h=$matches[1]; $u=$matches[2]; $pw=$matches[3]; $db=$matches[4]; $pt=$matches[5]
+          $origen = $arch.FullName
+          Log ("2e maxilink en $($arch.Name): usuario=$u base=$db")
+          break
+        }
+      }
+      if ($db) { break }
+    }
+  }
+
+  # APRENDERLO: queda anotado en destinos.txt y la proxima vez entra derecho
+  if ($db -and $origen) {
+    try {
+      $cfgP = Join-Path $motor "destinos.txt"
+      if (Test-Path $cfgP) {
+        $carp = Split-Path -Parent $origen
+        $actual = @(Get-Content $cfgP -ErrorAction SilentlyContinue)
+        if (-not ($actual -match '^\s*maxirest\s*=')) {
+          Add-Content -Path $cfgP -Value @("", "# Donde esta MaxiRest en esta PC. Lo aprendio solo el $(Get-Date -Format 'dd/MM/yyyy'),", "# buscando por el disco: las rutas de MaxiRest cambian en cada instalacion.", "maxirest = $carp") -Encoding UTF8
+          Log "2e aprendido: maxirest = $carp (anotado en destinos.txt)"
+          Res "Aprendi donde esta MaxiRest en esta PC"
+        }
+      }
+    } catch { Log "2e no pude anotar la ruta aprendida: $($_.Exception.Message)" }
+  }
+}
+
+# ============================================================
+#  2g) LA BASE CORRECTA SALE DE rutas_informes.txt (V27, Comercio 25/09).
+#  En Comercio, con MaxiRest abierto la conexion sale de maxilink -> base
+#  "buffet" (la real). A las 08:00, con MaxiRest cerrado, salia de
+#  C:\MaxiBack\...\DatosMysql.txt -> base "mx_31113", OTRA base (una copia
+#  vieja: todo ~10% mas chico). Resultado: carpeta con otro nombre, no
+#  coincidia con rutas_informes.txt y no repartia nada ("Comercio no corrio").
+#  Regla: el 1er campo de la linea de ESTA PC en rutas_informes.txt
+#  ("<base> - <EQUIPO>") dice cual es la base. Si la conexion vino de un archivo
+#  (DatosMysql, .bat, busqueda) y apunta a otra base del mismo servidor, se usa
+#  la de rutas. Si la que dice maxilink en vivo no coincide, se usa la de
+#  maxilink pero el estado queda en REVISAR para corregir la linea.
+# ============================================================
+if ($db) {
+  try {
+    $baseRutas = $null
+    $rutasG = Join-Path $motor "rutas_informes.txt"
+    if (Test-Path $rutasG) {
+      $sufEq = ' - ' + $env:COMPUTERNAME
+      foreach ($l in (Get-Content $rutasG -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        if ($l -match '^\s*#' -or -not $l.Trim()) { continue }
+        $c1 = ($l -split '\s*\|\s*')[0].Trim()
+        if ($c1.ToUpper().EndsWith($sufEq.ToUpper())) { $baseRutas = $c1.Substring(0, $c1.Length - $sufEq.Length).Trim() }
+      }
+    }
+    if ($baseRutas -and ($baseRutas -ne $db)) {
+      if ($origen -eq "proceso maxilink.exe en memoria") {
+        Log "2g MaxiRest (maxilink) usa la base '$db' pero rutas_informes.txt dice '$baseRutas'"
+        Res "Ruteo: falta corregir rutas_informes.txt (MaxiRest usa '$db', la linea dice '$baseRutas')"
+      } elseif ("$origen" -notlike 'lz_conexion*') {
+        Log "2g la conexion de $origen apunta a '$db'; rutas_informes.txt dice '$baseRutas': uso $baseRutas"
+        $db = $baseRutas
+      }
+    }
+  } catch { Log "2g no pude contrastar la base con rutas_informes.txt: $($_.Exception.Message)" }
+}
+
+if (-not $db) {
+  Log "ERROR: no encontre los datos de conexion a la base"
+  Res "Extraccion: NO se pudo (no aparecen los datos de conexion)"
+  if (-not $SoloExtraer) { DesinstalarVigilante }
+  $avisoUsuario = $null
+
+  # ============================================================
+  #  2f) DEJAR LISTO EL USUARIO DE SOLO LECTURA (Diego, 24/09).
+  #
+  #  Algunos PDV (San Justo) no guardan la conexion en NINGUN archivo: MaxiRest
+  #  se conecta con un usuario que su instalador crea en la base, y la clave no
+  #  queda escrita en texto en ningun lado. La solucion que uso Diego, y que hay
+  #  que dejar automatica: crear en la base un usuario propio de Lazarillo, de
+  #  SOLO LECTURA, con una clave conocida.
+  #
+  #  El kit no puede crear ese usuario solo (necesitaria la clave de root, que
+  #  no tiene y no debe tener). Pero SI puede dejar todo masticado: detecta el
+  #  nombre de la base, elige una clave, y escribe DOS archivos al lado del bat:
+  #     _CREAR USUARIO LAZARILLO.sql   -> se pega en HeidiSQL conectado como root
+  #     lz_conexion.txt                -> ya armado con esa misma clave
+  #  Asi el unico paso manual es: abrir HeidiSQL como root, pegar el .sql, F9.
+  #  Despues LAZARILLO entra solo. Vale para Canchas Ramos y cualquier PDV nuevo.
+  # ============================================================
+  if (-not (Test-Path (Join-Path $base "lz_conexion.txt"))) {
+    # nombre de la base: se lee del datadir de MariaDB (my.ini) o de las
+    # carpetas mx_#### que MariaDB crea, una por base.
+    $baseNom = $null
+    $dataDirs = New-Object System.Collections.ArrayList
+    foreach ($u in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Where-Object { $_.Used -ne $null })) {
+      try {
+        foreach ($mi in (Get-ChildItem -Path $u.Root -Recurse -Depth 3 -Filter "my.ini" -File -ErrorAction SilentlyContinue | Select-Object -First 5)) {
+          foreach ($l in (Get-Content $mi.FullName -ErrorAction SilentlyContinue)) {
+            if ($l -match '(?i)^\s*datadir\s*=\s*(.+?)\s*$') { [void]$dataDirs.Add(($matches[1].Trim().Trim('"'))) }
+          }
+        }
+      } catch { }
+    }
+    $mxDirs = New-Object System.Collections.ArrayList
+    foreach ($dd in @($dataDirs | Select-Object -Unique)) {
+      if (Test-Path $dd) {
+        foreach ($d in (Get-ChildItem -Path $dd -Directory -ErrorAction SilentlyContinue)) {
+          if ($d.Name -match '^mx_\d+$') { [void]$mxDirs.Add($d.Name) }
+        }
+      }
+    }
+    $mxDirs = @($mxDirs | Select-Object -Unique)
+    if ($mxDirs.Count -eq 1) { $baseNom = $mxDirs[0] }
+
+    if ($baseNom) {
+      # clave nueva, aleatoria, distinta por PC. Sin caracteres que compliquen
+      # ni el SQL ni el archivo de texto.
+      $abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+      $clave = 'Lzr-' + $env:COMPUTERNAME.Substring(0,[Math]::Min(4,$env:COMPUTERNAME.Length)) + '-' + (-join (1..8 | ForEach-Object { $abc[(Get-Random -Maximum $abc.Length)] }))
+      $sqlP = Join-Path $base "_CREAR USUARIO LAZARILLO.sql"
+      @("-- Lazarillo: crear el usuario de SOLO LECTURA que usa el kit.",
+        "-- Abri HeidiSQL conectado como root, pega esto en una Consulta y apreta F9.",
+        "-- Es de solo lectura: solo puede LEER la base $baseNom, no tocar nada.",
+        "",
+        "CREATE OR REPLACE USER 'lazarillo'@'127.0.0.1' IDENTIFIED BY '$clave';",
+        "GRANT SELECT ON $baseNom.* TO 'lazarillo'@'127.0.0.1';",
+        "FLUSH PRIVILEGES;") | Set-Content -Path $sqlP -Encoding UTF8
+      $cxP = Join-Path $base "lz_conexion.txt"
+      @("host = 127.0.0.1",
+        "usuario = lazarillo",
+        "clave = $clave",
+        "base = $baseNom",
+        ("puerto = " + $(if ($pt) { $pt } else { "3399" }))) | Set-Content -Path $cxP -Encoding UTF8
+      # ^ OJO el PARENTESIS: sin el, la coma une mas fuerte que el + y el puerto
+      #   salia en dos renglones ("puerto = " vacio y "3399" suelto) -> -P vacio y
+      #   las 47 consultas fallaban (Canchas Ramos, 25/09). Mismo bug que V10.
+      Log "2f deje listo el usuario de solo lectura: base $baseNom, ver _CREAR USUARIO LAZARILLO.sql"
+      Res "Base detectada ($baseNom): falta crear el usuario (ver _CREAR USUARIO LAZARILLO.sql)"
+      $avisoUsuario = "Encontre la base ($baseNom) pero no la clave para entrar.`n`n" +
+        "Te deje TODO listo en C:\Lazarillo:`n" +
+        "  1) Abri HeidiSQL como root, pega el archivo`n" +
+        "     '_CREAR USUARIO LAZARILLO.sql' en una Consulta y apreta F9.`n" +
+        "  2) Volve a correr LAZARILLO. Entra solo.`n`n" +
+        "El lz_conexion.txt ya quedo armado, no toques nada mas."
+    }
+  }
+
+  # ------------------------------------------------------------
+  #  SUBIR EL RELEVAMIENTO AL DRIVE ANTES DE SALIR (24/09).
+  #  Este aviso decia "avisale a Claude que ya esta" y era MENTIRA: el reparte
+  #  (paso 5) nunca llegaba a correr, asi que el relevamiento se quedaba en la
+  #  PC del punto de venta, que es justo la que Claude no puede leer. Paso en
+  #  San Justo: el cartel mandaba a avisarme y yo no tenia con que trabajar.
+  #  Justamente cuando la corrida FALLA es cuando mas falta hace el diagnostico.
+  # ------------------------------------------------------------
+  $subido = $false
+  if ($destinos["datos_drive"]) {
+    try {
+      $dst = Join-Path (Join-Path $destinos["datos_drive"] "_logs") $env:COMPUTERNAME
+      New-Item -ItemType Directory -Force -Path $dst | Out-Null
+      Copy-Item -Path (Join-Path $pcDir "*") -Destination $dst -Force -ErrorAction Stop
+      Log "Relevamiento subido al Drive: $dst"
+      $subido = $true
+    } catch { Log "No pude subir el relevamiento al Drive: $($_.Exception.Message)" }
+  }
+  # Si detectamos la base y dejamos el usuario listo, ESE es el mensaje util:
+  # el problema tiene una solucion de dos pasos en la propia PC.
+  if ($avisoUsuario) {
+    $txt = $avisoUsuario
+  } else {
+    $txt = "Relevé la PC pero no encontré los datos de conexión a la base.`n`n"
+    if ($subido) {
+      $txt += "Ya le subí el informe a Claude por el Drive.`n`nAvisale que ya está: con eso lo resuelve sin que corras nada más."
+    } else {
+      $txt += "El informe quedó en:`n$pcDir\_relevamiento.txt`n`n" +
+              "No pude subirlo al Drive, así que hay que pasárselo a Claude a mano."
+    }
+  }
+  if ($SoloExtraer) { $txt = "No encontré los datos de conexión a la base." }
+  Aviso "Lazarillo" $txt 48
+  SoltarCandado   # V39: no dejo el _corriendo.txt tirado si aborto
+  exit 1
+}
+Log "Conexion tomada de: $origen"
+Log "Base: $db en ${h}:${pt}"
+
+# 2c) cliente mysql.exe
+$mysql = $null
+foreach ($c in $cands) {
+  foreach ($try in @((Join-Path $c "mysql.exe"), (Join-Path $c "bin\mysql.exe"))) {
+    if ((-not $mysql) -and (Test-Path $try)) { $mysql = $try }
+  }
+  if ($mysql) { break }
+}
+if (-not $mysql) {
+  Log "ERROR: no encontre mysql.exe"
+  Res "Extraccion: NO se pudo (falta mysql.exe)"
+  Aviso "Lazarillo" "No encontré mysql.exe en esta PC.`n`nEl relevamiento quedó en:`n$pcDir\_relevamiento.txt" 48
+  SoltarCandado   # V39: no dejo el _corriendo.txt tirado si aborto
+  exit 1
+}
+Log "Cliente: $mysql"
+
+# ============================================================
+#  PASO 3 - EXTRACCION
+# ============================================================
+$sqlDir = Join-Path $motor "sql"
+if (-not (Test-Path $sqlDir)) {
+  Log "ERROR: falta la carpeta sql\"
+  Res "Extraccion: NO se pudo (falta la carpeta sql)"
+  Aviso "Lazarillo" "Falta la carpeta sql\ al lado de LAZARILLO.bat." 16
+  SoltarCandado   # V39: no dejo el _corriendo.txt tirado si aborto
+  exit 1
+}
+$outDir = Join-Path (Join-Path $base "out") ("{0} - {1}" -f $db, $env:COMPUTERNAME)
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+Fase 30 "Extrayendo la base (puede tardar un minuto)..."
+
+# Red de seguridad: si la conexion vino sin host o sin puerto (lz_conexion.txt
+# mal armado, como el de Canchas Ramos del 25/09), se usan los de siempre de
+# MaxiRest en vez de armar un comando roto.
+if (-not $h)  { $h  = "127.0.0.1"; Log "Conexion sin host: uso 127.0.0.1" }
+if (-not $pt) { $pt = "3399";      Log "Conexion sin puerto: uso 3399" }
+
+$r = Ejecutar-Extraccion $h $pt $u $pw $db $mysql $sqlDir $outDir
+$n = $r.n; $filas = $r.filas; $fallas = $r.fallas; $seg = $r.seg
+
+# V44: si fallaron TODAS por "Access denied" del usuario de solo lectura,
+# intento autorepararlo (ver funcion Reparar-UsuarioLectura) y, si quedo
+# creado, repito la extraccion una sola vez. Si no se puede reparar (no hay
+# clave de root guardada en esta PC), sigo de largo: el error de conexion
+# queda igual que antes (V43) y no se escala nada mas.
+if (($n -gt 0) -and ($fallas.Count -ge $n)) {
+  $primerErrX = Join-Path $outDir ($fallas[0] + ".err")
+  $txtX = $null
+  if (Test-Path $primerErrX) { $txtX = (Get-Content -Path $primerErrX -Raw -ErrorAction SilentlyContinue) }
+  if ($txtX -and ($txtX -match "(?i)Access denied for user '$([regex]::Escape($u))'")) {
+    Log "Extraccion: todas las consultas fallaron por acceso denegado del usuario '$u' - intento autoreparar"
+    $rep = Reparar-UsuarioLectura $h $pt $u $pw $db $mysql
+    if ($rep.ok) {
+      Log "Autoreparacion OK: reintento la extraccion"
+      Res "Autoreparacion: el usuario '$u' no existia, lo recree con la clave de root local"
+      $r = Ejecutar-Extraccion $h $pt $u $pw $db $mysql $sqlDir $outDir
+      $n = $r.n; $filas = $r.filas; $fallas = $r.fallas; $seg = $r.seg
+    } else {
+      Res "Autoreparacion: NO se pudo - $($rep.motivo)"
+    }
+  }
+}
+@("equipo    = $env:COMPUTERNAME","fecha     = $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+  "conexion  = $origen","base      = $db","servidor  = ${h}:${pt}","cliente   = $mysql",
+  "consultas = $n","filas     = $filas","errores   = $($fallas.Count)") |
+  Set-Content -Path (Join-Path $outDir "_info.txt") -Encoding UTF8
+Log "Extraccion terminada en $seg s - $n consultas, $filas filas, $($fallas.Count) con error"
+
+# V43: si fallaron TODAS las consultas es un problema de CONEXION (no una
+# consulta puntual rota) - leo el .err de la primera que fallo (todas tienen
+# el mismo error de mysql.exe, por ser el mismo comando repetido) y lo meto
+# en el resumen, asi el control diario ve la razon real (usuario borrado,
+# clave mala, servidor caido, etc.) sin que alguien tenga que entrar a la PC.
+$razonConexion = $null
+if (($n -gt 0) -and ($fallas.Count -ge $n)) {
+  $primerErr = Join-Path $outDir ($fallas[0] + ".err")
+  if (Test-Path $primerErr) {
+    $txt = (Get-Content -Path $primerErr -Raw -ErrorAction SilentlyContinue)
+    if ($txt) { $razonConexion = (($txt -replace '\s+',' ').Trim()) }
+  }
+}
+
+if ($fallas.Count -gt 0) {
+  if ($razonConexion) { Res "Extraccion: $n consultas, $filas filas, $($fallas.Count) con error - CONEXION: $razonConexion" }
+  else { Res "Extraccion: $n consultas, $filas filas, $($fallas.Count) con error" }
+}
+else { Res "Extraccion: $n consultas OK, $filas filas, $seg segundos" }
+
+# EXTRACCION ROTA = NO SE GENERA NI SE REPARTE NADA (25/09). Antes, con las 47
+# consultas en error, igual "generaba": contaba y volvia a repartir los informes
+# VIEJOS que habian quedado de otra corrida. Si no hay datos, no hay informes.
+$extraccionMala = (($n -gt 0) -and ($fallas.Count -ge $n)) -or ($filas -eq 0)
+if ($extraccionMala) {
+  Log "Extraccion sin datos: NO genero informes, maestros ni nomina, y NO reparto nada"
+  if ($razonConexion) { Res "Informes/maestros: NO se generaron (fallo de conexion: $razonConexion)" }
+  else { Res "Informes/maestros: NO se generaron (la extraccion fallo; no se repartio nada viejo)" }
+}
+
+# ============================================================
+#  PASO 4 - DEJAR TODO PROGRAMADO
+#
+#  V41 (04/10): ANTES este paso se saltaba en las corridas automaticas
+#  (-SoloExtraer), asi que si una tarea se borraba o se rompia (paso en San
+#  Justo: desaparecio "Lazarillo - Extraer al prender" y nadie se entero hasta
+#  que llevaba 4 dias sin correr), SOLO se volvia a crear si alguien corria
+#  LAZARILLO.bat a mano. Ahora corre SIEMPRE, tambien en las corridas
+#  automaticas: los schtasks.exe de aca son /F (pisan sin romper nada si ya
+#  estaban bien) y el .vbs de Inicio se vuelve a escribir y releer cada vez,
+#  asi que si algo de esto se rompe, se autoarregla solo la proxima vez que
+#  la PC corra -como tarde, al otro dia a las 08:00-, sin esperar a que
+#  alguien la toque a mano.
+# ============================================================
+  Fase 45 "Programando las tareas..."
+  $yo = $MyInvocation.MyCommand.Path
+
+  # 4a) la corrida diaria tiene DOS disparadores, porque la PC de un punto de
+  # venta puede estar apagada a las 08:00:
+  #   - todos los dias a las 08:00
+  #   - al iniciar sesion, 3 minutos despues de prender la PC
+  # Con -StartWhenAvailable Windows ademas recupera la corrida perdida. Para
+  # que no se repita tres veces el mismo dia, el script se guarda la fecha de
+  # la ultima corrida OK en _ultima.txt y sale solo si ya corrio hoy (ver
+  # "YA CORRIO HOY" arriba). Eso solo aplica a la corrida automatica: un doble
+  # clic en LAZARILLO.bat corre siempre.
+  # Se usa schtasks.exe y NO Register-ScheduledTask. Register decia "anduvo
+  # bien" y no hacia nada: en el admin dejo la accion vieja (powershell en vez
+  # de wscript) y, despues de borrar la tarea a mano, directamente no la creo y
+  # la PC quedo SIN tarea diaria. schtasks es el que viene funcionando parejo en
+  # las dos PC. Como schtasks admite un solo disparador por tarea, son dos:
+  #   "Lazarillo - Extraer MaxiRest"    -> todos los dias 08:00
+  #   "Lazarillo - Extraer al prender"  -> al iniciar sesion, 3 minutos despues
+  # Las dos llaman a lo mismo, y el propio script sale solo si ya corrio hoy.
+  try {
+    $vbsDia = LanzadorOculto $yo "-SoloExtraer -SinAviso" (Join-Path $motor "lz_diaria.vbs")
+    $trDia  = 'wscript.exe //B //Nologo \"' + $vbsDia + '\"'
+    $hechas = 0
+
+    # V42 (07/10): antes se intentaba recrear esta tarea SIEMPRE, todos los
+    # dias, aunque ya estuviera perfecta. Ahora primero se pregunta (de solo
+    # lectura, Get-ScheduledTask, sin hacer falta admin) si ya esta como tiene
+    # que estar; si es asi, no se toca. Si de verdad falta o esta mal (el caso
+    # de San Justo), recien ahi se intenta recrear con schtasks.exe, igual que
+    # antes.
+    $yaBien08 = $false
+    try {
+      $tExist08 = Get-ScheduledTask -TaskName "Lazarillo - Extraer MaxiRest" -ErrorAction Stop
+      $acc08 = $tExist08.Actions | Select-Object -First 1
+      if ($tExist08.State -ne 'Disabled' -and $acc08 -and $acc08.Execute -like '*wscript*' -and $acc08.Arguments -like ('*' + $vbsDia + '*')) {
+        $yaBien08 = $true
+      }
+    } catch { }
+    if ($yaBien08) {
+      Log "Tarea 08:00 -> ya estaba bien, no hizo falta recrearla"
+      $hechas++
+    } else {
+      $sal = & schtasks.exe /Create /TN "Lazarillo - Extraer MaxiRest" /TR $trDia /SC DAILY /ST 08:00 /F 2>&1
+      Log ("Tarea 08:00 -> " + ($sal -join " "))
+      if ($LASTEXITCODE -eq 0) { $hechas++ }
+    }
+
+    # ------------------------------------------------------------
+    #  "AL PRENDER": SE DEJAN LAS DOS, tarea real Y .vbs de Inicio (Diego, 24/09).
+    #
+    #  Crear la tarea ONLOGON necesita permisos de ADMINISTRADOR: en Ramos
+    #  (usuario SERVER) sale, en el admin y en San Justo da "Acceso denegado".
+    #  El fallback es un .vbs en la carpeta de Inicio de Windows, que no pide
+    #  permiso, pero SOLO arranca cuando ese usuario inicia sesion en Windows.
+    #
+    #  Diego quiere las DOS a la vez, y es seguro: si al prender disparan las dos,
+    #  la segunda ve el candado "ya corrio hoy" (_ultima.txt) y sale sin trabajar.
+    #  Asi la corrida al prender esta cubierta por partida doble: por la tarea
+    #  real donde se puede crear, y por el .vbs siempre.
+    #
+    #  Correr LAZARILLO como administrador UNA vez es lo que hace que la tarea
+    #  real se cree en el admin y en San Justo; el .vbs queda igual de respaldo.
+    # ------------------------------------------------------------
+    $startup = [Environment]::GetFolderPath('Startup')
+    $vbsIni  = Join-Path $startup "Lazarillo - al prender.vbs"
+
+    # (1) la tarea real: V42 (07/10) - antes se intentaba recrear SIEMPRE, y
+    # como ONLOGON pide admin, tiraba "Acceso denegado" TODOS los dias aunque
+    # la tarea ya estuviera perfecta (Diego: "la idea era que lo haga solo...
+    # genera dependencia, no me sirve asi"). Ahora primero se pregunta de solo
+    # lectura (sin admin) si ya esta como tiene que estar; si es asi, no se
+    # toca, no hace falta admin para nada y no queda REVISAR. Si de verdad
+    # falta o esta rota (el caso de San Justo), recien ahi se intenta recrear,
+    # y si no hay admin, sigue cayendo al .vbs de Inicio igual que antes.
+    $yaBienPrender = $false
+    try {
+      $tExistP = Get-ScheduledTask -TaskName "Lazarillo - Extraer al prender" -ErrorAction Stop
+      $accP = $tExistP.Actions | Select-Object -First 1
+      if ($tExistP.State -ne 'Disabled' -and $accP -and $accP.Execute -like '*wscript*' -and $accP.Arguments -like ('*' + $vbsDia + '*')) {
+        $yaBienPrender = $true
+      }
+    } catch { }
+    if ($yaBienPrender) {
+      Log "Tarea al prender (tarea real) -> ya estaba bien, no hizo falta recrearla (no hizo falta admin)"
+      $hechas++
+    } else {
+      $sal = & schtasks.exe /Create /TN "Lazarillo - Extraer al prender" /TR $trDia /SC ONLOGON /DELAY 0003:00 /F 2>&1
+      Log ("Tarea al prender (tarea real) -> " + ($sal -join " "))
+      if ($LASTEXITCODE -eq 0) { $hechas++; Log "Tarea al prender: tarea real creada (hace falta admin; salio bien)" }
+      else { Log "Tarea al prender: no pude crear la tarea real (falta admin). Queda el .vbs de Inicio." }
+    }
+
+    # (2) el .vbs de Inicio: SIEMPRE, tenga o no la tarea real. Es el respaldo.
+    try {
+      $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File ""' + $yo + '"" -SoloExtraer -SinAviso'
+      # PARENTESIS obligatorios: la coma une mas fuerte que el "+" y sin ellos
+      # este .vbs salia partido en cuatro renglones y no arrancaba nada
+      # (mismo bug que el del .bat, ver RenombrarLanzador).
+      @('WScript.Sleep 180000',
+        ('CreateObject("WScript.Shell").Run "' + $cmd + '", 0, False')) |
+        Set-Content -Path $vbsIni -Encoding ASCII -ErrorAction Stop
+      # ME LO RELEO: este .vbs estuvo ROTO varios dias por el bug de la coma y
+      # nadie se entero porque el log decia "escrito" y nadie miraba el contenido.
+      # Un archivo que el programa GENERA no se da por bueno hasta leerlo, y esa
+      # carpeta no se puede inspeccionar desde afuera: este renglon es la prueba.
+      $comp = @(Get-Content -LiteralPath $vbsIni -ErrorAction SilentlyContinue)
+      if ($comp.Count -eq 2 -and $comp[1] -like '*WScript.Shell*' -and $comp[1] -like '*, 0, False') {
+        Log "Tarea al prender (.vbs de Inicio): verificado OK (2 renglones, la orden entera)"
+      } else {
+        Log ("Tarea al prender (.vbs de Inicio): OJO, quedo MAL: " + $comp.Count + " renglones")
+        foreach ($r in $comp) { Log ("    | " + $r) }
+        Res "Arranque al prender: el .vbs quedo mal, avisar"
+      }
+    } catch {
+      Log "Tarea al prender: no pude dejar el .vbs de Inicio -> $($_.Exception.Message)"
+    }
+
+    if ($hechas -ge 2) { Res "Corrida diaria: 08:00 y al prender (tarea real + respaldo)" }
+    elseif ($hechas -eq 1) { Res "Corrida diaria: 08:00 lista; al prender por el .vbs de Inicio (para la tarea real, correr como admin una vez)" }
+    else { Res "Corrida diaria: NO se pudo programar" }
+  } catch {
+    Log "ERROR al programar la tarea diaria: $($_.Exception.Message)"
+    Res "Corrida diaria: NO se pudo programar"
+  }
+
+  # 4b) vigilante: por defecto NO (Diego lo dio de baja el 23/09 porque le
+  # parpadeaba una ventana). Se puede dejar activo en una PC poniendo
+  # "vigilante = si" en destinos.txt; hoy solo lo tiene la del admin, que es
+  # la unica a la que Claude le puede dejar un .flag directo.
+  if ($destinos["vigilante"] -and ($destinos["vigilante"] -match '^\s*(?i:si|s|1|true)\s*$')) {
+    InstalarVigilante
+  } else {
+    DesinstalarVigilante
+  }
+
+  # constancia
+  $est = New-Object System.Collections.ArrayList
+  foreach ($nn in @("Lazarillo - Extraer MaxiRest","Lazarillo - Extraer al prender","Lazarillo - Vigilante")) {
+    try {
+      $t = Get-ScheduledTask -TaskName $nn -ErrorAction Stop
+      $i = Get-ScheduledTaskInfo -TaskName $nn
+      [void]$est.Add("[$nn]  estado=$($t.State)  proxima=$($i.NextRunTime)  ultima=$($i.LastRunTime)  resultado=$($i.LastTaskResult)")
+      # con que se lanza (para verificar que no abra ventana) y en que contexto
+      foreach ($ac in $t.Actions) { [void]$est.Add("    lanza: $($ac.Execute) $($ac.Arguments)") }
+      foreach ($tg in $t.Triggers) { [void]$est.Add("    disparador: $($tg.CimClass.CimClassName)  $($tg.StartBoundary)$(if ($tg.Delay) { ' +' + $tg.Delay })") }
+      [void]$est.Add("    usuario=$($t.Principal.UserId)  logon=$($t.Principal.LogonType)  runlevel=$($t.Principal.RunLevel)")
+    } catch { [void]$est.Add("[$nn] NO EXISTE") }
+  }
+  $est | Set-Content -Path (Join-Path $pcDir "_tarea.txt") -Encoding UTF8
+
+# ============================================================
+#  PASO 4.5 - GENERAR LOS INFORMES EN ESTA PC
+#
+#  Si la PC tiene Python, genera los 13 informes a partir de los .tsv
+#  recien extraidos, sin esperar a que el Drive sincronice ni a que los
+#  haga nadie mas. Si no hay Python, no pasa nada: sigue de largo y los
+#  informes los sigue haciendo Claude como hasta ahora.
+# ============================================================
+function BuscarPython {
+  # 1) el que instala el Python install manager (no depende del PATH de la tarea)
+  $c = Join-Path $env:LOCALAPPDATA "Python\bin\python.exe"
+  if (Test-Path $c) { return $c }
+  # 2) instalaciones clasicas de python.org
+  foreach ($d in (Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Programs\Python") -Directory -ErrorAction SilentlyContinue |
+                  Sort-Object Name -Descending)) {
+    $p = Join-Path $d.FullName "python.exe"
+    if (Test-Path $p) { return $p }
+  }
+  # 3) lo que haya en el PATH
+  $g = Get-Command python.exe -ErrorAction SilentlyContinue
+  if ($g) { return $g.Source }
+  return $null
+}
+
+$salidaInf = Join-Path $base "informes"
+$py = BuscarPython
+$lzInf = Join-Path $motor "gen\lz_informes.py"
+
+# V48 (07/11): si a esta PC le falta un script principal (lz_informes.py,
+# lz_maestros.py), antes de saltear se lo trae del kit del Drive: hasta 3
+# intentos con pausas de 30/60 s, por si el Drive todavia lo esta bajando.
+function Asegurar-DelKit($ruta, $que) {
+  if (Test-Path $ruta) { return }
+  if (-not $destinos["kit_drive"]) { return }
+  $mDrv = Join-Path $destinos["kit_drive"] "_motor"
+  for ($k = 1; $k -le 3; $k++) {
+    $null = Sync-KitMotorRapido -motorDrive $mDrv -motorLocal $motor
+    if (Test-Path $ruta) { Log ($que + ": faltaba " + (Split-Path -Leaf $ruta) + ", lo traje del kit del Drive (intento " + $k + ")"); return }
+    if ($k -lt 3) { Start-Sleep -Seconds (30 * $k) }
+  }
+  Log ($que + ": falta " + (Split-Path -Leaf $ruta) + " y no lo pude traer del kit del Drive (3 intentos)")
+}
+if ($py -and (-not $extraccionMala) -and -not ($destinos["informes"] -and ($destinos["informes"] -match '^\s*(?i:no|n|0|false)\s*$'))) {
+  Asegurar-DelKit $lzInf "Informes"
+}
+
+# ------------------------------------------------------------
+#  RUTEO DE ESTE PDV (rutas_informes.txt, en el kit del Drive)
+#  Una linea por punto de venta, separada por " | ":
+#     <carpeta _DATOS> | <carpeta MEGA> | <carpeta Drive> | <nomina si/no> | <sufijo>
+#  El SUFIJO es lo que distingue a dos PDV que comparten carpeta del MEGA
+#  (Canchas Ramos y San Justo): " RAMOS" y " SJ". Si esta vacio, los archivos
+#  salen con el nombre generico de MaxiRest (asi va el Bar de Ramos, que tiene
+#  su carpeta para el solo).
+#  Vive en el Drive a proposito: destinos.txt es local de cada PC y no se puede
+#  editar a distancia, rutas_informes.txt viaja con el kit.
+# ------------------------------------------------------------
+$miRuta = $null
+$rutasArch = Join-Path $motor "rutas_informes.txt"
+if (Test-Path $rutasArch) {
+  $miDat = Split-Path -Leaf $outDir
+  # UTF8: rutas_informes.txt puede tener rutas con ñ (Comercio/Nuñez). Sin esto
+  # Get-Content las lee como ANSI y la ñ se rompe (NUÑEZ -> NUÃ±EZ).
+  foreach ($l in (Get-Content $rutasArch -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+    if ($l -match '^\s*#' -or -not $l.Trim()) { continue }
+    $p = $l -split '\s*\|\s*'
+    if ($p.Count -ge 1 -and $p[0].Trim() -eq $miDat) { $miRuta = $p }
+  }
+}
+$sufijoPDV = ''
+if ($miRuta -and $miRuta.Count -ge 5) {
+  # El separador " | " de rutas_informes.txt se come los espacios que rodean
+  # cada campo, asi que el sufijo llega como "SJ", sin el espacio de adelante.
+  # Aca se lo volvemos a poner: un solo espacio + el texto. Si el campo esta
+  # vacio (Bar de Ramos, que no lleva sufijo), queda vacio, NO un espacio suelto.
+  $s = $miRuta[4].Trim()
+  if ($s) { $sufijoPDV = ' ' + $s }
+}
+if ($sufijoPDV) { Log "Ruteo: esta PC firma sus informes con el sufijo '$sufijoPDV'" }
+# V34: constancia de que version de rutas_informes.txt uso esta PC (tamaño y
+# campos de su linea), para ver en el estado si le llego la ultima.
+try { if (Test-Path $rutasArch) { Res ("Kit: rutas " + (Get-Item $rutasArch).Length + " bytes, " + $(if ($miRuta) { $miRuta.Count } else { 0 }) + " campos") } } catch { }

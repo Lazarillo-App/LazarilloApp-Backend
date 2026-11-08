@@ -1,0 +1,596 @@
+
+# ------------------------------------------------------------
+#  A DONDE VAN LAS COPIAS PARA EL MEGA de esta PC. Lo usan los transaccionales
+#  (5c), los maestros (4.6) y la nomina (4.7), asi que se calcula una sola vez:
+#    - si la PC tiene su carpeta del MEGA sincronizada (mega_informes), directo;
+#    - si no (San Justo, Comercio), al puente del Drive "Informes MEGA\<destino>"
+#      y el admin lo reparte a la carpeta real del MEGA en su corrida (5e).
+#  El <destino> es el 6to campo de rutas_informes.txt.
+# ------------------------------------------------------------
+$raizInformesMega = $null
+if ($destinos["kit_drive"]) {
+  $raizInformesMega = Join-Path (Split-Path -Parent (Split-Path -Parent $destinos["kit_drive"])) "Informes MEGA"
+}
+$destMegaPDV = ''
+if ($miRuta -and $miRuta.Count -ge 6) { $destMegaPDV = $miRuta[5].Trim() }
+$megaInformesDest = $null
+if ($destinos["mega_informes"]) { $megaInformesDest = $destinos["mega_informes"] }
+elseif ($destMegaPDV -and $raizInformesMega) { $megaInformesDest = Join-Path $raizInformesMega $destMegaPDV }
+
+# ESPEJO EN EL DRIVE (Diego, 25/09: "todos los informes del mega, de todos los
+# negocios, que queden en el drive"). Las PC con MEGA local (Bar de Ramos,
+# Canchas Ramos) escribian solo en su MEGA y en el Drive no quedaba nada. Ahora
+# ademas dejan copia en el puente "Informes MEGA\<destino>", igual que las que no
+# tienen MEGA. El admin, al repartir, NO pisa un archivo del MEGA mas nuevo que el
+# del puente (5e), asi esta copia nunca le gana a lo que la PC escribio directo.
+$espejoDrive = $null
+if ($destinos["mega_informes"] -and $destMegaPDV -and $raizInformesMega) {
+  $espejoDrive = Join-Path $raizInformesMega $destMegaPDV
+}
+
+if ($destinos["informes"] -and ($destinos["informes"] -match '^\s*(?i:no|n|0|false)\s*$')) {
+  # REGLA DURA: los transaccionales salen de los PUNTOS DE VENTA, nunca del
+  # admin (su base esta sincronizada y le faltan la caja y los mozos reales).
+  # La PC del admin lleva "informes = no" en destinos.txt.
+  Log "Informes: esta PC no genera transaccionales (informes = no en destinos.txt)"
+} elseif ($extraccionMala) {
+  Log "Informes: salteo (la extraccion no trajo datos)"
+} elseif (-not $py) {
+  Log "Informes: esta PC no tiene Python, los sigue haciendo Claude"
+} elseif (-not (Test-Path $lzInf)) {
+  Log "Informes: falta $lzInf, salteo"
+} else {
+  Fase 55 "Generando los informes (tarda varios minutos)..."
+  try {
+    # las librerias: si falta alguna, la instala una sola vez
+    & $py -c "import pandas, openpyxl" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Log "Informes: faltan librerias, instalando pandas y openpyxl (tarda un rato la primera vez)"
+      & $py -m pip install --quiet --disable-pip-version-check pandas openpyxl 2>&1 |
+        ForEach-Object { Log ("  pip: " + $_) }
+    }
+    # Se borra lo generado en la corrida anterior ANTES de generar: si el
+    # generador falla, no tienen que quedar archivos viejos que despues se
+    # cuenten como "generados" y se repartan como nuevos (paso el 25/09).
+    foreach ($sub in @("mega","drive")) {
+      $p = Join-Path $salidaInf $sub
+      if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $t1 = Get-Date
+    # V31: informes EXTRA por PDV (8vo campo de rutas_informes.txt, ej. "70,71"
+    # en San Justo). Va con nombre ("extras=...") porque PowerShell 5.1 se come
+    # los argumentos vacios y el sufijo puede venir vacio.
+    $extrasPDV = if ($miRuta -and $miRuta.Count -ge 8) { ($miRuta[7] -replace '\s', '') } else { '' }
+    $argsInf = @($lzInf, $outDir, $salidaInf, (Get-Date).Year)
+    if ($sufijoPDV) { $argsInf += $sufijoPDV }
+    if ($extrasPDV) { $argsInf += ('extras=' + $extrasPDV) }
+    & $py @argsInf 2>&1 | ForEach-Object { Log ("  " + $_) }
+
+    # V46 (14/10, Diego: "que se autogestione"): si algun informe dio ERROR
+    # puede ser un gen*.py que a esta PC todavia no le llego por el sync de
+    # Drive (lo vimos ausente al principio de la corrida, un instante antes de
+    # que terminara de sincronizar). En vez de esperar al proximo disparador
+    # del dia (que puede no existir si la PC solo prende una vez), reintento
+    # ADENTRO de esta misma corrida: reviso de nuevo el kit del Drive y repito
+    # SOLO los informes que fallaron, con pausas cortas, unos minutos como mucho.
+    $intentoInf = 1
+    while (($LASTEXITCODE -ne 0) -and ($intentoInf -le 3) -and $destinos["kit_drive"]) {
+      $infTxt = Join-Path $salidaInf "_informes.txt"
+      $fallidos = @()
+      if (Test-Path $infTxt) {
+        $fallidos = @(Get-Content $infTxt -Encoding UTF8 | ForEach-Object {
+          if ($_ -match '^ERROR\s+(\S+)\s') { $matches[1] }
+        } | Select-Object -Unique)
+      }
+      if ($fallidos.Count -eq 0) { break }
+      $espera = 30 * $intentoInf
+      Log ("Informes: " + $fallidos.Count + " con error (" + ($fallidos -join ',') + ") - reintento " + $intentoInf + "/3 en " + $espera + "s, por si el kit todavia esta sincronizando")
+      Start-Sleep -Seconds $espera
+      $traidos = Sync-KitMotorRapido -motorDrive (Join-Path $destinos["kit_drive"] "_motor") -motorLocal $motor
+      if ($traidos -gt 0) { Log "Informes: reintento trajo $traidos archivo(s) nuevo(s) del kit antes de reintentar" }
+      $argsRetry = @($lzInf, $outDir, $salidaInf, (Get-Date).Year)
+      if ($sufijoPDV) { $argsRetry += $sufijoPDV }
+      if ($extrasPDV) { $argsRetry += ('extras=' + $extrasPDV) }
+      $argsRetry += ('solo=' + ($fallidos -join ','))
+      & $py @argsRetry 2>&1 | ForEach-Object { Log ("  [reintento $intentoInf] " + $_) }
+      $intentoInf++
+    }
+    if ($intentoInf -gt 1) {
+      if ($LASTEXITCODE -eq 0) { Log "Informes: reintento automatico OK, no quedo ningun error" }
+      else { Log "Informes: reintento automatico agotado (3 intentos), sigue con error - ver detalle arriba" }
+    }
+
+    $seg2 = [int]((Get-Date) - $t1).TotalSeconds
+    $hechos = @(Get-ChildItem -Path (Join-Path $salidaInf "mega") -File -ErrorAction SilentlyContinue).Count
+    if ($hechos -gt 0) {
+      Log "Informes: $hechos generados en $seg2 s"
+      Res "Informes: $hechos generados en esta PC ($seg2 s)"
+    } else {
+      Log "Informes: no quedo ningun archivo en $salidaInf\mega"
+      Res "Informes: NO se generaron"
+    }
+  } catch {
+    Log "ERROR generando los informes: $($_.Exception.Message)"
+    Res "Informes: NO se generaron"
+  }
+}
+
+# ============================================================
+#  PASO 4.6 - MAESTROS
+#
+#  Los maestros NO salen de cualquier PC: salen de la que es la FUENTE de
+#  maestros de esa organizacion. En Container esa PC es el ADMIN; en Comercio
+#  (Nuñez), que no tiene admin, es el propio punto de venta. Por eso no se
+#  decide por tipo de PC sino por una marca en destinos.txt:
+#      maestros = si
+#  y las carpetas destino, las que tenga cada organizacion:
+#      maestros_drive    = ...\Informes ERP\Maestros
+#      maestros_mega     = ...\- MAESTROS
+#      maestros_informes = ...\Informes del Sistema
+#  El mismo maestro se llama DISTINTO en cada una; de eso se ocupa lz_maestros.py.
+# ============================================================
+if ((-not $extraccionMala) -and $destinos["maestros"] -and ($destinos["maestros"] -match '^\s*(?i:si|s|1|true)\s*$')) {
+  $lzMae     = Join-Path $motor "gen\lz_maestros.py"
+  $salidaMae = Join-Path $base "maestros"
+  if ($py) { Asegurar-DelKit $lzMae "Maestros" }
+  if (-not $py) {
+    Log "Maestros: esta PC no tiene Python, salteo"
+    Res "Maestros: NO se generaron (falta Python)"
+  } elseif (-not (Test-Path $lzMae)) {
+    Log "Maestros: falta $lzMae, salteo"
+  } else {
+    try {
+      Fase 80 "Generando los maestros..."
+      & $py $lzMae $outDir $salidaMae 2>&1 | ForEach-Object { Log ("  " + $_) }
+      $mapa = @{ "drive" = "maestros_drive"; "mega_maestros" = "maestros_mega"; "mega_informes" = "maestros_informes" }
+      $repartidas = 0
+      foreach ($k in $mapa.Keys) {
+        $orig = Join-Path $salidaMae $k
+        $dst  = $destinos[$mapa[$k]]
+        if ($dst -and (Test-Path $orig)) {
+          # En el Drive (Informes ERP\Maestros) SOLO se actualizan los maestros que
+          # ya estan ahi (Diego, 27/09: "dejarla originalmente con lo que tenia";
+          # los de insumos 0, 1 y 2 no estaban). Los MEGA siguen recibiendo todos.
+          if ($k -eq "drive") { CopiarArbol $orig $dst ("Maestros a " + (Split-Path -Leaf $dst)) -SoloExistentes }
+          else { CopiarArbol $orig $dst ("Maestros a " + (Split-Path -Leaf $dst)) }
+          $repartidas++
+        }
+      }
+      # un archivo por maestro en el MEGA de verdad (mismo criterio que informes)
+      if ($destinos["maestros_informes"]) { PisarDuplicados $destinos["maestros_informes"] (Join-Path $salidaMae "mega_informes") }
+      # PC maestra SIN MEGA local (Comercio): el juego "mega_informes" de los
+      # maestros no tiene carpeta local, va al puente del Drive junto con los
+      # transaccionales y el admin lo reparte al MEGA. Diego: en Comercio los
+      # maestros viven en la misma "Informes del Sistema" que los transaccionales.
+      if ((-not $destinos["maestros_informes"]) -and $megaInformesDest) {
+        $om = Join-Path $salidaMae "mega_informes"
+        if (Test-Path $om) { CopiarArbol $om $megaInformesDest "Maestros al Drive (para el MEGA)"; $repartidas++ }
+      }
+      if ($repartidas -gt 0) { Res "Maestros: 9 generados, copiados a $repartidas carpetas" }
+      else { Log "Maestros: generados pero no hay ninguna carpeta destino en destinos.txt" }
+    } catch {
+      Log "ERROR generando los maestros: $($_.Exception.Message)"
+      Res "Maestros: NO se generaron"
+    }
+  }
+}
+
+# ============================================================
+#  PASO 4.7 - NOMINA (000 - nomina.xls)
+#
+#  La nomina es la lista de empleados y sale de la base de CADA PDV, no del
+#  admin: el admin tiene 5 empleados y el bar tiene 60. Por eso no viaja con
+#  los maestros: la genera el propio punto de venta.
+#
+#  Quien la genera se decide en rutas_informes.txt (4to campo = si), asi no
+#  hay que tocar el destinos.txt de cada PC. Hoy solo la genera Ramos; el dia
+#  que Diego quiera la de otro PDV, se agrega "| si" en su linea y listo.
+#
+#  Va a DOS carpetas del MEGA, que son las mismas donde Diego la bajaba a mano:
+#     - la de informes de este PDV   (mega_informes de destinos.txt)
+#     - la carpeta "- MAESTROS", que cuelga de "Base de datos CONTAINER"
+#  La segunda se deduce subiendo desde la primera hasta "Base de datos
+#  CONTAINER", asi no hace falta configurarla en cada PC.
+# ============================================================
+$haceNomina = ((-not $extraccionMala) -and $miRuta -and $miRuta.Count -ge 4 -and $miRuta[3].Trim() -match '^(?i:si|s|1)$')
+if ($haceNomina) {
+  $genNom = Join-Path $motor "gen\gen_nomina.py"
+  $salNom = Join-Path $base "nomina"
+  # la nomina tambien lleva el sufijo del PDV: si dos puntos de venta comparten
+  # la carpeta del MEGA, dos "000 - nomina.xls" se pisarian igual que los informes
+  $archNom = Join-Path $salNom ("000 - nomina" + $sufijoPDV + ".xls")
+  if (-not $py) { Log "Nomina: esta PC no tiene Python, salteo" }
+  elseif (-not (Test-Path $genNom)) { Log "Nomina: falta $genNom, salteo" }
+  else {
+    try {
+      New-Item -ItemType Directory -Force -Path $salNom | Out-Null
+      Fase 88 "Generando la nomina..."
+      & $py $genNom $outDir $archNom 2>&1 | ForEach-Object { Log ("  " + $_) }
+      if (Test-Path $archNom) {
+        # 1) la copia para el MEGA de este PDV: su carpeta local (mega_informes)
+        #    o, si no tiene MEGA (Comercio), el puente del Drive que reparte el admin.
+        $dests = New-Object System.Collections.ArrayList
+        if ($megaInformesDest) { [void]$dests.Add($megaInformesDest) }
+        # 1b) y su copia en el Drive si la PC tiene MEGA local (ESPEJO)
+        if ($espejoDrive) { [void]$dests.Add($espejoDrive) }
+        # 2) la carpeta "- MAESTROS" (Container): la que diga destinos.txt, o deducida
+        if ($destinos["maestros_mega"]) { [void]$dests.Add($destinos["maestros_mega"]) }
+        elseif ($destinos["mega_informes"]) {
+          $d = $destinos["mega_informes"]
+          while ($d -and ((Split-Path -Leaf $d) -ne "Base de datos CONTAINER")) { $d = Split-Path -Parent $d }
+          if ($d) { [void]$dests.Add((Join-Path $d "- MAESTROS")) }
+        }
+        # 3) la nomina tambien es un maestro (Diego, 24/09): va al Drive de
+        #    Maestros de la organizacion (en Comercio, "Maestros COMERCIO").
+        if ($destinos["maestros_drive"]) { [void]$dests.Add($destinos["maestros_drive"]) }
+        $n = 0
+        foreach ($dst in ($dests | Select-Object -Unique)) {
+          try { New-Item -ItemType Directory -Force -Path $dst -ErrorAction SilentlyContinue | Out-Null } catch { }
+          if (-not (Test-Path $dst)) { Log "Nomina: no existe $dst, no copio ahi"; continue }
+          # V33 (Diego, 27/09): en las carpetas de maestros del DRIVE solo se
+          # actualiza lo que ya esta; la nomina no se agrega si no estaba.
+          if ($destinos["maestros_drive"] -and ($dst -eq $destinos["maestros_drive"]) -and
+              (-not (Test-Path -LiteralPath (Join-Path $dst (Split-Path -Leaf $archNom))))) {
+            Log "Nomina: $dst no la tiene, no la agrego (Drive: solo se actualiza lo que ya esta)"; continue
+          }
+          try {
+            Copy-Item -Path $archNom -Destination (Join-Path $dst (Split-Path -Leaf $archNom)) -Force -ErrorAction Stop
+            Log "Nomina: copiada a $dst"; $n++
+          } catch { Log "Nomina: ERROR copiando a $dst - $($_.Exception.Message)" }
+        }
+        if ($n -gt 0) { Res "Nomina: al dia en $n carpetas" } else { Res "Nomina: generada pero no se pudo copiar" }
+      } else { Log "Nomina: el generador no dejo el archivo"; Res "Nomina: NO se genero" }
+    } catch {
+      Log "ERROR generando la nomina: $($_.Exception.Message)"
+      Res "Nomina: NO se genero"
+    }
+  }
+}
+
+# ============================================================
+#  PASO 5 - REPARTIR (Drive y MEGA)
+#  destinos.txt lo escribe el instalador con las rutas de ESTA PC.
+#  Si no existe (kit corriendo desde el Drive), no hay nada que repartir.
+# ============================================================
+function Copiar($desde, $hasta, $que, [string[]]$Excluir = @()) {
+  if (-not $hasta) { return }
+  if (-not (Test-Path $desde)) { Log "$que : no existe el origen ($desde)"; return }
+  try {
+    New-Item -ItemType Directory -Force -Path $hasta | Out-Null
+    # V41: antes era un solo Copy-Item -Recurse sobre "$desde\*". Si $desde
+    # tiene un archivo bloqueado por OTRO proceso (el candado, _corriendo.txt,
+    # que esta corrida misma tiene abierto con FileShare::None hasta el final),
+    # Copy-Item -Recurse choca con ese archivo y ABORTA TODA la copia -ni
+    # siquiera copia los archivos sueltos que no estaban bloqueados-, y eso
+    # es lo que venia pasando TODOS LOS DIAS en las 4 PC activas desde el V40.
+    # Ahora se arma la lista de items a mano y se salta los que esten en
+    # -Excluir, copiando el resto uno por uno: si uno falla, los demas ya
+    # copiados quedan copiados.
+    $items = @(Get-ChildItem -Path $desde -Force -ErrorAction Stop)
+    if ($Excluir.Count -gt 0) { $items = @($items | Where-Object { $Excluir -notcontains $_.Name }) }
+    foreach ($it in $items) {
+      Copy-Item -Path $it.FullName -Destination $hasta -Recurse -Force -ErrorAction Stop
+    }
+    $n = @(Get-ChildItem -Path $hasta -File -ErrorAction SilentlyContinue).Count
+    Log "$que : copiado a $hasta ($n archivos)"
+    Res "$que : al dia"
+  } catch {
+    Log "$que : ERROR copiando a $hasta - $($_.Exception.Message)"
+    # V38: el motivo va TAMBIEN al resumen. El log se puede cortar o cruzar; el
+    # _estado.txt se escribe entero de una sola vez al final, asi que es el
+    # unico lugar donde el motivo se lee seguro desde el Drive.
+    Res ("$que : NO se pudo copiar - " + $_.Exception.Message)
+  }
+}
+
+if ($destinos.Count -gt 0) {
+  Fase 93 "Repartiendo al Drive y al MEGA..."
+  # 5a) los datos extraidos -> Drive (asi los puedo leer yo)
+  if ($destinos["datos_drive"]) {
+    Copiar $outDir (Join-Path $destinos["datos_drive"] (Split-Path -Leaf $outDir)) "Datos al Drive"
+  }
+  # 5a-bis) los logs -> Drive. Sin esto, en una PC donde el kit vive local
+  # (C:\Lazarillo) no hay forma de ver que paso sin pedirselo a alguien.
+  if ($destinos["datos_drive"]) {
+    Copiar $pcDir (Join-Path (Join-Path $destinos["datos_drive"] "_logs") $env:COMPUTERNAME) "Logs al Drive" -Excluir @("_corriendo.txt")
+  }
+  # 5a-ter) NO se copia nada a _INFORMES\<PC> (decision de Diego, 24/09).
+  # Esa carpeta existia de cuando los informes los generaba Claude en el Drive
+  # y el PDV los bajaba. Ahora el PDV los genera y los escribe DIRECTO en los
+  # destinos finales (MEGA y Transaccionales), asi que era una copia de mas
+  # ocupando lugar en el Drive. La carpeta _INFORMES se puede borrar.
+
+  # 5b) los informes que dejo Claude en el Drive -> MEGA de esta PC.
+  # Solo si esta PC NO los genero ella misma; si los genero, el MEGA se
+  # llena desde 5c y no queremos meterle las subcarpetas mega\ y drive\.
+  if ($destinos["informes_drive"] -and $destinos["mega_informes"] -and
+      -not (Test-Path (Join-Path $salidaInf "mega"))) {
+    Copiar $destinos["informes_drive"] $destinos["mega_informes"] "Informes al MEGA"
+  }
+  # ------------------------------------------------------------
+  #  5c) LOS INFORMES AL MEGA. Hay dos caminos y la PC elige el mas corto:
+  #
+  #    (1) si ESTA PC tiene su carpeta del MEGA (mega_informes), escribe ahi
+  #        directo. Es el caso del Bar de Ramos y anda hace dias.
+  #
+  #    (2) si NO la tiene — San Justo y Canchas Ramos no tienen sincronizado
+  #        el MEGA de siempre — deja los archivos en el DRIVE, en
+  #            G:\Mi unidad\Informes MEGA\<destino>
+  #        y el ADMIN, que es la unica PC con el MEGA completo, los pasa a su
+  #        lugar definitivo en su propia corrida (paso 5e).
+  #
+  #  OJO (Diego, 24/09): "Informes MEGA" va AFUERA de la carpeta Lazarillo,
+  #  colgando de "Mi unidad" a la misma altura que Lazarillo e Informes ERP.
+  #  Por eso se sube DOS niveles desde el kit del Drive:
+  #    kit_drive = G:\Mi unidad\Lazarillo\_KIT Lazarillo
+  #    parent    = G:\Mi unidad\Lazarillo
+  #    parent^2  = G:\Mi unidad   <- aca cuelga "Informes MEGA"
+  #
+  #  El <destino> sale del 6to campo de rutas_informes.txt ("canchas", "resto").
+  #  Los dos PDV de canchas comparten esa carpeta a proposito: no se pisan
+  #  porque cada archivo lleva el sufijo del PDV (" SJ" / " RAMOS").
+  #  Idea de Diego: "que vaya todo a una carpeta del drive y desde ahi
+  #  redistribuimos al mega donde corresponde".
+  # ------------------------------------------------------------
+  # $megaInformesDest y $raizInformesMega ya se calcularon arriba (una sola vez).
+  if ((-not $extraccionMala) -and (Test-Path (Join-Path $salidaInf "mega"))) {
+    if ($megaInformesDest) {
+      $qmega = if ($destinos["mega_informes"]) { "Informes al MEGA" } else { "Informes al Drive (para el MEGA)" }
+      CopiarArbol (Join-Path $salidaInf "mega") $megaInformesDest $qmega
+      # si es el MEGA de verdad (no el puente), un archivo por informe
+      if ($destinos["mega_informes"]) {
+        PisarDuplicados $megaInformesDest (Join-Path $salidaInf "mega")
+        # y si esta PC firma con sufijo, lo viejo SIN sufijo de la carpeta compartida se aparta
+        ApartarSinSufijo $megaInformesDest (Join-Path $salidaInf "mega") $sufijoPDV
+      }
+      # copia de lo mismo en el Drive (solo PC con MEGA local; ver ESPEJO arriba)
+      if ($espejoDrive) {
+        CopiarArbol (Join-Path $salidaInf "mega") $espejoDrive "Informes al Drive (copia del MEGA)"
+        ApartarSinSufijo $espejoDrive (Join-Path $salidaInf "mega") $sufijoPDV
+      }
+    } else {
+      Log "Informes: esta PC no tiene carpeta del MEGA ni destino en rutas_informes.txt, los dejo quietos"
+      Res "Informes al MEGA: falta configurar el destino"
+    }
+  }
+
+  # ------------------------------------------------------------
+  #  5e) EL ADMIN REPARTE lo que dejaron los PDV sin MEGA.
+  #  Se prende con "reparte_mega = si" en destinos.txt (hoy solo el admin).
+  #  Toma cada subcarpeta de "Informes MEGA\<destino>" del Drive y la copia a
+  #  <Base de datos CONTAINER>\COMPRAS\<destino>\Informes del Sistema.
+  #  La raiz del CONTAINER se deduce subiendo desde maestros_informes, que el
+  #  instalador ya detecto, asi no hay una ruta mas escrita a mano.
+  # ------------------------------------------------------------
+  if ($destinos["reparte_mega"] -and ($destinos["reparte_mega"] -match '^\s*(?i:si|s|1|true)\s*$')) {
+    # V28: el reparto es la funcion RepartirMega (arriba), la misma que usa el
+    # vigilante cada minuto. Aca copia solo lo que tenga novedades.
+    [void](RepartirMega)
+  }
+  # 5d) los anuales a su carpeta DEFINITIVA del Drive (Transaccionales\<PDV>).
+  # La ruta sale de rutas_informes.txt: una linea por PDV,
+  #   <carpeta dentro de _DATOS> | <carpeta MEGA> | <carpeta Drive por año>
+  # Se busca la linea cuyo primer campo sea el nombre de la carpeta de datos
+  # de ESTA PC, asi el mismo kit sirve para los cuatro puntos de venta.
+  $rutas = Join-Path $motor "rutas_informes.txt"
+  $mioDat = Split-Path -Leaf $outDir
+  if ((-not $extraccionMala) -and (Test-Path $rutas) -and (Test-Path (Join-Path $salidaInf "drive"))) {
+    $destFinal = $null
+    foreach ($l in (Get-Content $rutas -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+      if ($l -match '^\s*#') { continue }
+      $p = $l -split '\s*\|\s*'
+      if ($p.Count -ge 3 -and $p[0].Trim() -eq $mioDat) { $destFinal = $p[2].Trim() }
+    }
+    if ($destFinal) {
+      $origDrv = Join-Path $salidaInf "drive"
+      $refDrive = if ($miRuta -and $miRuta.Count -ge 7) { $miRuta[6].Trim() } else { '' }
+      # V47 (Diego 22/10): el 80 VUELVE a Transaccionales\<PDV>\Fecha de pagos (80),
+      # junto con el 22, 14 y 25 (deshace el V37 del 27/09, que lo mandaba a
+      # "Informes ERP\FUTUROS TRANSACCIONALES"). Se copian todos juntos, como antes.
+      CopiarTransaccionales $origDrv $destFinal $sufijoPDV $refDrive
+    }
+    else { Log "Informes: no hay linea para '$mioDat' en rutas_informes.txt, no copio a Transaccionales" }
+  }
+}
+
+# ============================================================
+#  PASO 6 - DEJAR CONSTANCIA Y AVISAR
+# ============================================================
+# _VERSION.txt queda en la raiz del kit, al lado de LAZARILLO.bat: se abre con
+# doble clic y dice que version del motor tiene ESTA PC y cuando corrio. Es la
+# forma de saber si el cambio que se subio al Drive ya llego aca.
+try {
+  # El archivo se llama "_VERSION V3.txt": el numero esta en el NOMBRE, asi
+  # Diego lo ve en la carpeta sin abrir nada (idea suya, 24/09). Antes de
+  # escribirlo se borran los de versiones anteriores.
+  Get-ChildItem -Path $base -Filter "_VERSION *.txt" -File -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+  @("LAZARILLO - version instalada en esta PC",
+    "",
+    "motor      = $version",
+    "ultima corrida = $(Get-Date -Format 'dd/MM/yyyy HH:mm')",
+    "equipo     = $env:COMPUTERNAME",
+    "base       = $db",
+    "",
+    "Si el numero de version no coincide con el que te dijo Claude, esta PC",
+    "todavia no bajo el cambio: volve a correr LAZARILLO.bat en un rato.") |
+    Set-Content -Path (Join-Path $base ("_VERSION " + $MOTOR_VER + ".txt")) -Encoding UTF8
+} catch { }
+
+# ------------------------------------------------------------
+#  MEGA ABIERTO Y AL INICIO (V28, Diego 25/09: "me podes asegurar que en ramos
+#  quedo el mega al inicio?"). Solo en las PC que escriben en el MEGA (las que
+#  tienen mega_informes o reparten). Si MEGAsync no esta corriendo o no arranca
+#  solo al prender, el estado queda REVISAR (la linea dice "falta").
+# ------------------------------------------------------------
+$usaMega = $destinos["mega_informes"] -or ($destinos["reparte_mega"] -and ($destinos["reparte_mega"] -match '^\s*(?i:si|s|1|true)\s*$'))
+if ($usaMega) {
+  try {
+    $corre = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '(?i)^megasync' }).Count -gt 0
+    $alInicio = $false; $apagado = $false
+    foreach ($rk in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run')) {
+      try {
+        $props = Get-ItemProperty -Path $rk -ErrorAction Stop
+        foreach ($pr in $props.PSObject.Properties) {
+          if ($pr.Name -notmatch '^PS' -and ("" + $pr.Name + " " + $pr.Value) -match '(?i)megasync') { $alInicio = $true }
+        }
+      } catch { }
+    }
+    foreach ($sd in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
+      if ($sd -and (Test-Path $sd)) {
+        if (@(Get-ChildItem -LiteralPath $sd -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)megasync' }).Count -gt 0) { $alInicio = $true }
+      }
+    }
+    # si el usuario lo apago en Administrador de tareas > Inicio, queda marcado en StartupApproved (1er byte impar = deshabilitado)
+    foreach ($ak in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder')) {
+      try {
+        $props = Get-ItemProperty -Path $ak -ErrorAction Stop
+        foreach ($pr in $props.PSObject.Properties) {
+          # solo MEGAsync: "MEGA VPN" es otra app y puede estar apagada a proposito (27/09)
+          if ($pr.Name -match '(?i)megasync' -and ($pr.Value -is [byte[]]) -and ($pr.Value[0] % 2 -eq 1)) { $apagado = $true }
+        }
+      } catch { }
+    }
+    $txtCorre = if ($corre) { "abierto" } else { "falta abrirlo (no esta corriendo)" }
+    $txtIni = if ($alInicio -and -not $apagado) { "arranca al prender" } elseif ($apagado) { "falta habilitarlo al inicio (esta deshabilitado en Administrador de tareas > Inicio)" } else { "falta que arranque al prender la PC" }
+    Log ("MEGA: corriendo=$corre  al inicio=$alInicio  deshabilitado=$apagado")
+    Res ("MEGA: " + $txtCorre + ", " + $txtIni)
+  } catch { Log ("MEGA: no pude revisar - " + $_.Exception.Message) }
+}
+
+# ------------------------------------------------------------
+#  ESTADO Y LOG AL DRIVE, PARA TODAS LAS PC (Diego, 25/09).
+#  Antes solo el admin (el que tenia datos_drive) dejaba su log en el Drive.
+#  Diego: "todos tienen que mandar log al drive, necesito los veas". Asi Claude
+#  verifica por el conector de Drive que cada PDV corrio y como, sin depender
+#  del puente ni de que Diego este en la PC. TODO aditivo y blindado: si algo de
+#  esto falla, la corrida ya termino igual (va al final, despues de repartir).
+# ------------------------------------------------------------
+try {
+  # VERDICTO: OK salvo que alguna linea del resumen hable de un problema.
+  # Con esto el chequeo es de segundos: se lee la primera linea y listo.
+  $malas = @($resumen | Where-Object { $_ -match '(?i)NO se pudo|NO se gener|NO se program|ERROR|falta ' })
+  $verdicto = if ($malas.Count -gt 0) { "REVISAR" } else { "OK" }
+  # Primera linea = todo lo que hace falta para el vistazo: fecha, veredicto,
+  # base, equipo, version. Debajo, el resumen completo del cartel.
+  $est = @(("{0}  {1}  {2} {3}  motor {4}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $verdicto, $db, $env:COMPUTERNAME, $MOTOR_VER), "") +
+         @($resumen | ForEach-Object { "  - $_" })
+  # a) al lado del log de esta PC (viaja con el log al Drive)
+  $est | Set-Content -Path (Join-Path $pcDir "_estado.txt") -Encoding UTF8
+  # b) a una carpeta UNICA del Drive, un archivo por PC. Asi el chequeo de "corrio
+  #    bien?" de TODOS los PDV es UNA sola lectura de esta carpeta, no una por PC.
+  if ($destinos["kit_drive"]) {
+    $estDir = Join-Path (Join-Path (Split-Path -Parent $destinos["kit_drive"]) "_LOGS Y CONTROLES") "_estado"
+    New-Item -ItemType Directory -Force -Path $estDir | Out-Null
+    $est | Set-Content -Path (Join-Path $estDir ($env:COMPUTERNAME + ".txt")) -Encoding UTF8
+  }
+} catch { }
+try {
+  # A donde va el log en el Drive:
+  #   - si la PC tiene datos_drive (el admin), respeta esa carpeta (ya andaba);
+  #   - si no, se deduce de kit_drive: <...\Lazarillo>\_LOGS Y CONTROLES\<PC>.
+  # kit_drive siempre esta en un PDV instalado, asi que todos terminan visibles.
+  $logDest = $null
+  if ($destinos["datos_drive"]) {
+    $logDest = Join-Path (Join-Path $destinos["datos_drive"] "_logs") $env:COMPUTERNAME
+  } elseif ($destinos["kit_drive"]) {
+    $logDest = Join-Path (Join-Path (Split-Path -Parent $destinos["kit_drive"]) "_LOGS Y CONTROLES") $env:COMPUTERNAME
+  }
+  if ($logDest -and (Get-Command Copiar -ErrorAction SilentlyContinue)) {
+    Copiar $pcDir $logDest "Estado y log al Drive" -Excluir @("_corriendo.txt")
+  }
+} catch { }
+
+# ------------------------------------------------------------
+#  BARRIDO DE LO PROPIO (Diego, 24/09: "corre solo el limpiar al terminar").
+#  Solo la basura que deja Lazarillo y no tiene discusion posible. Todo lo
+#  que esta dentro de las carpetas de Diego (los BU HUMANO, los logs de
+#  homologacion) NO se toca aca: eso sigue pidiendo confirmacion con
+#  LIMPIAR.bat, porque si algun dia me equivoco en la lista no quiero mover
+#  nada suyo sin que nadie mire.
+# ------------------------------------------------------------
+try {
+  $barridos = 0
+  foreach ($k in @($base, $destinos["kit_drive"]) | Select-Object -Unique) {
+    if (-not ($k -and (Test-Path $k))) { continue }
+    # cache de Python: se regenera solo
+    foreach ($pc in (Get-ChildItem -LiteralPath $k -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue)) {
+      Remove-Item $pc.FullName -Recurse -Force -ErrorAction SilentlyContinue; $barridos++
+    }
+    # lanzador y constancia con los nombres viejos (antes de que llevaran version)
+    foreach ($v in @("LAZARILLO.bat","_VERSION.txt")) {
+      $f = Join-Path $k $v
+      if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue; $barridos++ }
+    }
+    # los generadores viven en _motor\gen. Si hay una carpeta "gen" colgando de
+    # la raiz del kit es una copia mia mal puesta (24/09) y nadie la lee: fuera,
+    # antes de que alguien la edite creyendo que es la buena.
+    $genRaiz = Join-Path $k "gen"
+    if ((Test-Path $genRaiz) -and (Test-Path (Join-Path $k "_motor\gen"))) {
+      Remove-Item $genRaiz -Recurse -Force -ErrorAction SilentlyContinue; $barridos++
+    }
+    # el kit del DRIVE no trabaja: si alguien corrio el .bat de ahi, quedan
+    # carpetas de trabajo que no van (el kit instalado si las usa, no se tocan)
+    if (-not (Test-Path (Join-Path $k "_motor\destinos.txt"))) {
+      foreach ($d in @("out","informes","maestros","nomina")) {
+        $f = Join-Path $k $d
+        if (Test-Path $f) { Remove-Item $f -Recurse -Force -ErrorAction SilentlyContinue; $barridos++ }
+      }
+    }
+  }
+  # carpeta puente que ya no se usa (los informes van directo a su destino)
+  if ($destinos["kit_drive"]) {
+    $inf = Join-Path (Split-Path -Parent $destinos["kit_drive"]) "_INFORMES"
+    if (Test-Path $inf) { Remove-Item $inf -Recurse -Force -ErrorAction SilentlyContinue; $barridos++ }
+    # "Informes MEGA" quedo MAL adentro de Lazarillo en V12-V18 (Diego lo queria
+    # afuera, colgando de "Mi unidad"). Desde V19 va al lugar bueno; el viejo,
+    # que esta un nivel adentro, se borra solo aca. El bueno (dos niveles arriba)
+    # NO se toca porque no cuelga de la carpeta Lazarillo.
+    $megaViejo = Join-Path (Split-Path -Parent $destinos["kit_drive"]) "Informes MEGA"
+    if (Test-Path $megaViejo) { Remove-Item $megaViejo -Recurse -Force -ErrorAction SilentlyContinue; $barridos++ }
+  }
+  if ($barridos -gt 0) { Log "Barrido: saque $barridos cosas mias que ya no van" }
+} catch { }
+
+# el lanzador lleva la version en el nombre, aca y en el kit del Drive
+RenombrarLanzador $base
+if ($destinos["kit_drive"]) { RenombrarLanzador $destinos["kit_drive"] }
+
+# marca del dia: con esto la corrida automatica no se repite si la PC se
+# prende y apaga varias veces (ver "YA CORRIO HOY" al principio).
+try { Get-Date -Format 'yyyy-MM-dd' | Set-Content -Path $marcaDia -Encoding UTF8 } catch { }
+
+Fase 100 "Listo"   # cierra la barra de estado antes del cartel final
+
+# ------------------------------------------------------------
+#  SEGUNDA COPIA DEL LOG AL DRIVE (V38, 28/09).
+#  La copia de arriba ("Estado y log al Drive") corre ANTES de esta linea, asi
+#  que el log que llegaba al Drive nunca tenia el cierre: no habia forma de
+#  saber, mirando solo el Drive, si la corrida termino o se corto. Ahora se
+#  copia una segunda vez, ya con el "Listo" adentro: si el log del Drive NO
+#  termina en "Listo", esa corrida se corto de verdad. Silenciosa a proposito:
+#  no agrega nada al resumen, asi no cambia el veredicto OK/REVISAR.
+# ------------------------------------------------------------
+try {
+  $logDest2 = $null
+  if ($destinos["datos_drive"]) {
+    $logDest2 = Join-Path (Join-Path $destinos["datos_drive"] "_logs") $env:COMPUTERNAME
+  } elseif ($destinos["kit_drive"]) {
+    $logDest2 = Join-Path (Join-Path (Split-Path -Parent $destinos["kit_drive"]) "_LOGS Y CONTROLES") $env:COMPUTERNAME
+  }
+  if ($logDest2) {
+    New-Item -ItemType Directory -Force -Path $logDest2 | Out-Null
+    foreach ($f in @("_log.txt","_estado.txt")) {
+      $o = Join-Path $pcDir $f
+      if (Test-Path -LiteralPath $o) { Copy-Item -LiteralPath $o -Destination (Join-Path $logDest2 $f) -Force -ErrorAction SilentlyContinue }
+    }
+  }
+} catch { }
+SoltarCandado   # V39: lo suelto DESPUES de la segunda copia del log, no antes
+                # (el cartel que viene abajo espera 180 s y no toca archivos)
+
+
+$txt = "Equipo: $env:COMPUTERNAME`nBase:   $db`nMotor:  $version`n`n" + (($resumen | ForEach-Object { "  - $_" }) -join "`n") +
+       "`n`nLos datos quedaron en:`n$outDir"
+if ($fallas.Count -gt 0) { Aviso "Lazarillo - termino con avisos" ($txt + "`n`nFallaron: " + ($fallas -join ", ")) 48 }
+else { Aviso "Lazarillo - listo" $txt 64 }

@@ -1,0 +1,651 @@
+    } else {
+      Log ("Reparto al MEGA: no hay destino en rutas_informes.txt para " + $d.Name)
+    }
+  }
+  return $hechos
+}
+
+# ------------------------------------------------------------
+#  destinos.txt: rutas de ESTA PC (lo escribe el instalador).
+#  Si no existe, el kit esta corriendo desde el Drive y no reparte nada.
+# ------------------------------------------------------------
+$destinos = @{}
+$cfgDest = Join-Path $motor "destinos.txt"
+if (Test-Path $cfgDest) {
+  foreach ($l in (Get-Content $cfgDest -ErrorAction SilentlyContinue)) {
+    if ($l -match '^\s*([a-z_]+)\s*=\s*(.+?)\s*$') { $destinos[$matches[1]] = $matches[2] }
+  }
+}
+
+# ------------------------------------------------------------
+#  V48 (07/11, Diego: "el kit antes de empezar chequea conexion, si no hay,
+#  pospone la tarea para dentro de media hora. Asi sucesivamente").
+#  El 07/11 la PC del admin corrio a las 08:00 sin internet: saco los datos y
+#  armo todo, pero no pudo subir nada a Render y no hubo un segundo intento.
+#  Solo en la corrida AUTOMATICA (-SoloExtraer -SinAviso); el doble clic corre
+#  siempre. Se prueba lo que de verdad hace falta: llegar al servidor de Render
+#  (nombre + puerto de lz_coneccion_render.txt). Sin ese archivo no se chequea.
+#  Sin conexion: 3 pruebas en 1 minuto (la PC recien prendida tarda en agarrar
+#  la red); si sigue sin, deja la tarea de una sola vez "Lazarillo - Reintento"
+#  para dentro de 30 min y sale SIN marcar "ya corrio hoy". Si la media hora cae
+#  a las 23 o despues, corre igual: lo local se arma, y Render se pone al dia en
+#  la corrida de manana (sube el año entero de nuevo).
+# ------------------------------------------------------------
+function Probar-Render {
+  # V49 (08/11): una PC VINCULADA (lz_vinculo.txt, ver lz_vincular.ps1) sube por la API de
+  # Lazarillo y no directo a la base: se prueba el servidor de Lazarillo, no el puerto de Render.
+  $h = $null; $p = 5432
+  $vin = Join-Path $motor "lz_vinculo.txt"
+  if (Test-Path $vin) {
+    foreach ($l in (Get-Content $vin -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+      if ($l -match '^\s*url\s*=\s*(https?)://([^/:\s]+)(:(\d+))?') {
+        $h = $matches[2]
+        if ($matches[4]) { $p = [int]$matches[4] } elseif ($matches[1] -eq 'https') { $p = 443 } else { $p = 80 }
+      }
+    }
+  }
+  if (-not $h) {
+    $cfg = Join-Path $motor "lz_coneccion_render.txt"
+    if (-not (Test-Path $cfg)) { return "sin_config" }
+    foreach ($l in (Get-Content $cfg -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+      if ($l -match '^\s*host\s*=\s*(\S+)\s*$') { $h = $matches[1] }
+      elseif ($l -match '^\s*puerto\s*=\s*(\d+)\s*$') { $p = [int]$matches[1] }
+    }
+  }
+  if (-not $h) { return "sin_config" }
+  try { $null = [System.Net.Dns]::GetHostAddresses($h) } catch { return "sin_dns" }
+  $tc = New-Object System.Net.Sockets.TcpClient
+  try {
+    $t = $tc.ConnectAsync($h, $p)
+    if ($t.Wait(8000) -and $tc.Connected) { return "ok" }
+    return "sin_puerto"
+  } catch { return "sin_puerto" } finally { try { $tc.Close() } catch { } }
+}
+if ($SoloExtraer -and $SinAviso -and (-not $YaActualice) -and (-not $SoloRepartir)) {
+  $con = "sin_config"
+  try { $con = Probar-Render } catch { $con = "sin_config" }
+  $pruebas = 1
+  while (($con -eq "sin_dns" -or $con -eq "sin_puerto") -and $pruebas -lt 3) {
+    Start-Sleep -Seconds 30
+    try { $con = Probar-Render } catch { $con = "sin_config" }
+    $pruebas++
+  }
+  if ($con -eq "ok") {
+    if (Test-Path (Join-Path $motor "lz_vinculo.txt")) { Log "Conexion: llego a Lazarillo (PC vinculada: sube por Lazarillo, sin Drive), sigo" }
+    else { Log "Conexion: llego al servidor de Render, sigo" }
+  } elseif ($con -ne "sin_config") {
+    $motivo = if ($con -eq "sin_dns") { "no encuentra el servidor (sin internet o sin DNS)" } else { "el servidor de Render no responde" }
+    $prox = (Get-Date).AddMinutes(30)
+    $pospuse = $false
+    if ($prox.Hour -lt 23 -and $prox.Date -eq (Get-Date).Date) {
+      try {
+        $vbsRe = LanzadorOculto $miArchivo "-SoloExtraer -SinAviso" (Join-Path $motor "lz_diaria.vbs")
+        $trRe  = 'wscript.exe //B //Nologo \"' + $vbsRe + '\"'
+        $sal = & schtasks.exe /Create /TN "Lazarillo - Reintento" /TR $trRe /SC ONCE /ST ($prox.ToString('HH:mm')) /F 2>&1
+        if ($LASTEXITCODE -eq 0) { $pospuse = $true }
+        else { Log ("Conexion: no pude dejar el reintento (" + ($sal -join " ") + ")") }
+      } catch { Log ("Conexion: no pude dejar el reintento - " + $_.Exception.Message) }
+    }
+    if ($pospuse) {
+      Log ("Conexion: " + $motivo + " (3 pruebas en 1 minuto). Pospongo la corrida a las " + $prox.ToString('HH:mm'))
+      try {
+        $estP = @(("{0}  POSPUESTA  - {1}  motor {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $env:COMPUTERNAME, $MOTOR_VER), "",
+                  ("  - Sin conexion: " + $motivo),
+                  ("  - Reintenta sola a las " + $prox.ToString('HH:mm') + " (y asi cada media hora hasta las 23)"))
+        $estP | Set-Content -Path (Join-Path $pcDir "_estado.txt") -Encoding UTF8
+        if ($destinos["kit_drive"]) {
+          $estDirP = Join-Path (Join-Path (Split-Path -Parent $destinos["kit_drive"]) "_LOGS Y CONTROLES") "_estado"
+          New-Item -ItemType Directory -Force -Path $estDirP | Out-Null
+          $estP | Set-Content -Path (Join-Path $estDirP ($env:COMPUTERNAME + ".txt")) -Encoding UTF8
+        }
+      } catch { }
+      SoltarCandado
+      exit 0
+    }
+    Log ("Conexion: " + $motivo + ". No pospongo (ya es tarde o no se pudo dejar la tarea): corro igual; Render se pone al dia en la proxima corrida")
+  }
+}
+
+# ------------------------------------------------------------
+#  V48 (07/11): COPIA SEGURA desde el kit del Drive. Antes se copiaba directo
+#  encima del archivo de la PC; si el Drive todavia no lo habia bajado (o se
+#  cortaba a mitad), la copia fallaba y el archivo de la PC desaparecia. Paso
+#  en San Justo el 07/11 con lz_informes.py: "Actualice 1 archivos" y enseguida
+#  "falta lz_informes.py, salteo" -> ningun informe ni nada a Render en el dia.
+#  Ahora se copia a un temporal, se compara el tamaño y recien ahi se reemplaza
+#  (local a local). Si algo falla, queda el que habia.
+# ------------------------------------------------------------
+function Copiar-Seguro($desde, $hasta) {
+  $tmp = $hasta + ".lz_nuevo"
+  try {
+    Copy-Item -LiteralPath $desde -Destination $tmp -Force -ErrorAction Stop
+    if ((Get-Item -LiteralPath $tmp).Length -ne (Get-Item -LiteralPath $desde).Length) { throw "copia incompleta" }
+    Copy-Item -LiteralPath $tmp -Destination $hasta -Force -ErrorAction Stop
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    return $true
+  } catch {
+    try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+    return $false
+  }
+}
+
+# ------------------------------------------------------------
+#  V46 (14/10, Diego: "que se autogestione"): reintento corto para cuando a
+#  ESTA PC le falta un gen*.py que sigue sincronizando desde el Drive. No usa
+#  poda ni auto-relanzamiento, solo trae lo que haya cambiado o falte - pensado
+#  para llamarse de nuevo, un rato despues, sin tener que esperar al proximo
+#  disparador del dia (una PC que solo prende una vez no tiene ese "plan B").
+# ------------------------------------------------------------
+function Sync-KitMotorRapido {
+  param($motorDrive, $motorLocal)
+  $nuevos = 0
+  if (-not (Test-Path $motorDrive)) { return 0 }
+  try {
+    foreach ($f in (Get-ChildItem -Path $motorDrive -Recurse -File -ErrorAction SilentlyContinue)) {
+      $rel = $f.FullName.Substring($motorDrive.Length).TrimStart('\')
+      if ($rel -ieq "destinos.txt" -or $rel -ieq "lz_vinculo.txt") { continue }   # V49: la llave es de ESTA PC, nunca viaja
+      $local = Join-Path $motorLocal $rel
+      $hayQue = $true
+      if ($f.Length -eq 0) { $hayQue = $false }
+      elseif (Test-Path $local) {
+        $li = Get-Item $local
+        if (($li.Length -eq $f.Length) -and ($li.LastWriteTimeUtc -ge $f.LastWriteTimeUtc)) { $hayQue = $false }
+      }
+      if ($hayQue) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $local) | Out-Null
+        if (Copiar-Seguro $f.FullName $local) { $nuevos++ }
+      }
+    }
+  } catch { }
+  return $nuevos
+}
+
+# ------------------------------------------------------------
+#  AUTOACTUALIZACION: si en el kit del Drive hay una version mas nueva
+#  de algun archivo del motor, la trae. Asi puedo corregir los tres PDV
+#  desde aca sin que Diego toque nada. destinos.txt nunca se pisa.
+# ------------------------------------------------------------
+if ($destinos["kit_drive"]) {
+  $motorDrive = Join-Path $destinos["kit_drive"] "_motor"
+  if (Test-Path $motorDrive) {
+    $nuevos = 0
+    $sinTraer = @()
+    try {
+      foreach ($f in (Get-ChildItem -Path $motorDrive -Recurse -File -ErrorAction SilentlyContinue)) {
+        $rel = $f.FullName.Substring($motorDrive.Length).TrimStart('\')
+        if ($rel -ieq "destinos.txt" -or $rel -ieq "lz_vinculo.txt") { continue }   # V49: la llave es de ESTA PC, nunca viaja
+        $local = Join-Path $motor $rel
+        $hayQue = $true
+        # V34 (27/09): antes solo copiaba si el del Drive era MAS NUEVO por fecha.
+        # rutas_informes.txt no llego a los PDV con esa regla (quedaron con la
+        # version sin referencia ni extras). Ahora: si el TAMAÑO es distinto se
+        # copia siempre (el Drive manda); si es igual, solo si el Drive es mas nuevo.
+        if ($f.Length -eq 0) { $hayQue = $false }
+        elseif (Test-Path $local) {
+          $li = Get-Item $local
+          if (($li.Length -eq $f.Length) -and ($li.LastWriteTimeUtc -ge $f.LastWriteTimeUtc)) { $hayQue = $false }
+        }
+        if ($hayQue) {
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $local) | Out-Null
+          if (Copiar-Seguro $f.FullName $local) {
+            $nuevos++
+            if ($rel -ieq "lz_lazarillo.ps1") { $meCambie = $true }
+          } else {
+            $sinTraer += $rel
+          }
+        }
+      }
+    } catch { }
+    if ($nuevos -gt 0) { Log "Actualice $nuevos archivos del motor desde el Drive"; Res "Kit: actualizado ($nuevos archivos)" }
+    if ($sinTraer.Count -gt 0) { Log ("Kit: no pude traer del Drive " + ($sinTraer -join ", ") + " (todavia sincronizando?) - queda el que habia en esta PC") }
+    # PODA (V31, Diego: "no quiero cosas que no se usen"). Lo que se saco del
+    # kit del Drive (una consulta .sql o un generador que ya no va) se aparta de
+    # esta PC a _motor\_viejo\<carpeta> (MOVER, no borrar). Con red de seguridad:
+    # solo si la carpeta del Drive se ve completa (>= 20 consultas), para no
+    # vaciar nada si el Drive esta a medio sincronizar.
+    try {
+      $sqlDrv = @(Get-ChildItem -Path (Join-Path $motorDrive "sql") -Filter "*.sql" -File -ErrorAction Stop)
+      if ($sqlDrv.Count -ge 20) {
+        foreach ($sub in @("sql", "gen")) {
+          $dDir = Join-Path $motorDrive $sub; $lDir = Join-Path $motor $sub
+          if (-not ((Test-Path $dDir) -and (Test-Path $lDir))) { continue }
+          $enDrive = @{}
+          foreach ($f in @(Get-ChildItem -LiteralPath $dDir -File -ErrorAction SilentlyContinue)) { $enDrive[$f.Name.ToLower()] = $true }
+          if ($enDrive.Count -lt 5) { continue }
+          foreach ($f in @(Get-ChildItem -LiteralPath $lDir -File -ErrorAction SilentlyContinue)) {
+            if ($enDrive.ContainsKey($f.Name.ToLower())) { continue }
+            $vj = Join-Path (Join-Path $motor "_viejo") $sub
+            New-Item -ItemType Directory -Force -Path $vj | Out-Null
+            Move-Item -LiteralPath $f.FullName -Destination (Join-Path $vj $f.Name) -Force -ErrorAction Stop
+            Log ("Poda: " + $sub + "\" + $f.Name + " ya no esta en el kit del Drive, lo aparte a _motor\_viejo")
+          }
+        }
+      }
+    } catch { Log ("Poda: no pude revisar - " + $_.Exception.Message) }
+    # ME ACTUALICE A MI MISMO. El proceso que esta corriendo tiene el codigo
+    # VIEJO cargado en memoria: si sigo, aplico lo de antes y el cambio recien
+    # se ve en la corrida siguiente. Eso obligaba a correr el .bat dos veces y
+    # a adivinar si la version habia llegado. Arranco la nueva y salgo.
+    if ($meCambie -and (-not $YaActualice)) {
+      Log "El motor se actualizo: arranco la version nueva y salgo"
+      $ar = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $miArchivo, '-YaActualice')
+      if ($SoloExtraer) { $ar += '-SoloExtraer' }
+      if ($SinAviso)    { $ar += '-SinAviso' }
+      if ($SoloRepartir) { $ar += '-SoloRepartir' }
+      # V40 (30/09): ACA ESTABA EL AGUJERO. El V38/V39 soltaba el candado
+      # ANTES de arrancar la hija, para no dejarlo trabado si la hija se colgaba.
+      # Pero la hija corre con -YaActualice y por diseño NO toma el candado, asi
+      # que durante TODA la corrida hija (varios minutos) el candado quedaba libre:
+      # la otra tarea arrancaba, lo tomaba y corria en paralelo con la hija. Eso
+      # es lo que paso en Comercio el 30/09, ya con el V39 puesto y con el kit
+      # actualizandose de V38 a V39: dos extracciones (62 s y 52 s), dos bloques
+      # de informes y dos "Listo" en el mismo log.
+      # Ahora el padre SE QUEDA con el candado mientras espera a la hija (-Wait lo
+      # deja vivo todo ese rato) y recien lo suelta cuando la hija termino. Si el
+      # padre muere de verdad, el handle se libera solo y la corrida siguiente lo
+      # rescata, que es justo para lo que esta el rescate por handle del V39.
+      Start-Process -FilePath powershell.exe -ArgumentList $ar -WindowStyle Hidden -Wait
+      SoltarCandado
+      exit 0
+    }
+  }
+}
+
+# ------------------------------------------------------------
+#  EL NOMBRE DEL LANZADOR SE ACOMODA AL PRINCIPIO, NO AL FINAL.
+#  Antes esto corria recien al terminar la corrida, asi que si la corrida
+#  FALLABA a mitad de camino (San Justo, que no encontraba la base) los
+#  lanzadores viejos quedaban ahi. Y si se empujaban varias versiones seguidas
+#  sin que corriera nada en el medio, se apilaban cuatro .bat en la carpeta del
+#  Drive: justo el desorden que no queremos.
+#  Diego, 24/09: "tiene que estar contemplada esa variante porque puede pasar".
+#  Aca ya sabemos que version somos (la autoactualizacion ya paso), asi que
+#  cualquier corrida — termine bien o mal — deja UN solo lanzador, el mas nuevo.
+#  Al final se vuelve a llamar, por si algo cambio durante la corrida.
+# ------------------------------------------------------------
+# -SoloRepartir: el vigilante del admin, cada minuto. Solo el reparto al MEGA
+# (ya paso la autoactualizacion de arriba) y sale. Un candado evita que dos
+# repartos se pisen (o que se cruce con la corrida grande de las 08:00).
+if ($SoloRepartir) {
+  if (-not ($destinos["reparte_mega"] -and ($destinos["reparte_mega"] -match '^\s*(?i:si|s|1|true)\s*$'))) { exit 0 }
+  $candado = Join-Path $pcDir "_reparto.lock"
+  if ((Test-Path $candado) -and ((Get-Item $candado).LastWriteTime -gt (Get-Date).AddMinutes(-15))) { exit 0 }
+  try {
+    (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | Set-Content -Path $candado -Encoding UTF8
+    $n = RepartirMega
+    if ($n -gt 0) { Log ("Reparto rapido: $n carpeta(s) con novedades pasadas al MEGA") }
+  } catch { Log ("Reparto rapido: ERROR " + $_.Exception.Message) }
+  finally { Remove-Item $candado -Force -ErrorAction SilentlyContinue }
+  exit 0
+}
+
+RenombrarLanzador $base
+if ($destinos["kit_drive"]) { RenombrarLanzador $destinos["kit_drive"] }
+
+# ------------------------------------------------------------
+#  PASO 0 - ordenar la carpeta
+#  En la raiz del kit solo quedan LAZARILLO.bat, LEEME.txt, _motor\ y out\.
+#  Cualquier otra cosa se guarda (no se borra) en _motor\_viejo\.
+# ------------------------------------------------------------
+$quedan     = @("lazarillo.bat","limpiar.bat","instalar en esta pc.bat","leeme.txt",
+                "lz_conexion.txt","desktop.ini","vincular esta pc.bat")
+# el archivo de version se llama "_VERSION V3.txt": el nombre cambia con cada
+# version, asi que no se puede listar por nombre fijo.
+$quedanPat  = @("_version *.txt","lazarillo*.bat")
+# OJO: "informes" y "maestros" son carpetas de trabajo que crea el propio kit.
+# Si no estan en esta lista, el Paso 0 se las lleva a _motor\_viejo en la
+# corrida siguiente y queda basura acumulandose.
+$quedanDirs = @("_motor","out","informes","maestros")
+$viejo = Join-Path $motor "_viejo"
+$movidos = 0
+foreach ($it in (Get-ChildItem -Path $base -Force -ErrorAction SilentlyContinue | Where-Object { $motor -ne $base })) {
+  $esDir = $it.PSIsContainer
+  if ($esDir -and ($quedanDirs -contains $it.Name.ToLower())) { continue }
+  if ((-not $esDir) -and ($quedan -contains $it.Name.ToLower())) { continue }
+  if ((-not $esDir) -and ($quedanPat | Where-Object { $it.Name.ToLower() -like $_ })) { continue }
+  if ((-not $esDir) -and ($it.Extension -eq ".flag")) { continue }
+  try {
+    New-Item -ItemType Directory -Force -Path $viejo | Out-Null
+    $dest = Join-Path $viejo $it.Name
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
+    Move-Item -Path $it.FullName -Destination $viejo -Force -ErrorAction Stop
+    $movidos++
+  } catch { }
+}
+if ($movidos -gt 0) { Log "Paso 0: guarde $movidos archivos viejos en _motor\_viejo" }
+
+# ------------------------------------------------------------
+#  Carpetas candidatas (se usan para relevar Y para encontrar MaxiRest)
+# ------------------------------------------------------------
+$cands = @()
+# lo que esta PC ya aprendio en una corrida anterior va PRIMERO: asi no se
+# repite la busqueda larga por todo el disco (ver paso 2e).
+if ($destinos["maxirest"] -and (Test-Path $destinos["maxirest"])) { $cands += $destinos["maxirest"] }
+foreach ($u in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Where-Object { $_.Used -ne $null })) {
+  try {
+    foreach ($d in (Get-ChildItem -Path ($u.Root) -Directory -ErrorAction SilentlyContinue)) {
+      if ($d.Name -match '(?i)maxi|maria|mysql') { $cands += $d.FullName }
+    }
+  } catch { }
+}
+foreach ($p in @("C:\MaxiREST_Admin","C:\MaxiRest","C:\Maxirest7","C:\Servidor_MariaDB","C:\Archivos de programa\MaxiRest","C:\Program Files\MaxiRest","C:\Program Files (x86)\MaxiRest")) {
+  if (Test-Path $p) { $cands += $p }
+}
+$cands = @($cands | Select-Object -Unique)
+
+# ============================================================
+#  PASO 1 - RELEVAMIENTO
+# ============================================================
+if (-not $SoloExtraer) {
+  Fase 8 "Relevando la PC..."
+  $rf = Join-Path $pcDir "_relevamiento.txt"
+  $L = New-Object System.Collections.ArrayList
+  function W($m) { [void]$L.Add($m) }
+
+  W "RELEVAMIENTO LAZARILLO"
+  W "equipo  = $env:COMPUTERNAME"
+  W "usuario = $env:USERNAME"
+  W "fecha   = $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+  W ""
+  W "== CARPETAS CANDIDATAS =="
+  if ($cands.Count -eq 0) { W "  (ninguna)" }
+  foreach ($c in $cands) {
+    W "  $c"
+    foreach ($n in @("MAXIREST.EXE","MAXISHELL.EXE","MAXILINK.EXE","maxilink.exe","mysql.exe","mysqld.exe","mxlink_update.bat","MaxiREST.ini","my.ini","mxmod.DBF","mxsuc.DBF")) {
+      $p = Join-Path $c $n
+      if (Test-Path $p) { W ("      tiene {0,-20} ({1:N0} bytes)" -f $n, (Get-Item $p).Length) }
+    }
+    if (Test-Path (Join-Path $c "bin\mysql.exe")) { W "      tiene bin\mysql.exe" }
+    $exes = Get-ChildItem -Path (Join-Path $c '*') -Include *.exe -File -ErrorAction SilentlyContinue | Select-Object -First 20
+    if ($exes) { W ("      ejecutables: " + (($exes | ForEach-Object { $_.Name }) -join ", ")) }
+    $bats = Get-ChildItem -Path (Join-Path $c '*') -Include *.bat,*.cmd,*.ini,*.cnf -File -ErrorAction SilentlyContinue | Select-Object -First 30
+    if ($bats) { W ("      bat/ini:     " + (($bats | ForEach-Object { $_.Name }) -join ", ")) }
+    $subs = Get-ChildItem -Path $c -Directory -ErrorAction SilentlyContinue | Select-Object -First 25
+    if ($subs) { W ("      subcarpetas: " + (($subs | ForEach-Object { $_.Name }) -join ", ")) }
+  }
+  W ""
+
+  W "== POSIBLES DATOS DE CONEXION =="
+  $encontro = $false
+  foreach ($c in $cands) {
+    $archivos = @()
+    try { $archivos += Get-ChildItem -Path $c -Recurse -Depth 2 -Include *.bat,*.cmd,*.ini,*.cnf,*.cfg,*.txt -File -ErrorAction SilentlyContinue } catch {
+      try { $archivos += Get-ChildItem -Path (Join-Path $c '*') -Include *.bat,*.cmd,*.ini,*.cnf,*.cfg,*.txt -File -ErrorAction SilentlyContinue } catch { }
+    }
+    foreach ($arch in ($archivos | Select-Object -First 400)) {
+      try {
+        foreach ($linea in (Get-Content $arch.FullName -ErrorAction SilentlyContinue -TotalCount 200)) {
+          if ($linea -match '(?i)maxilink\.exe\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+' -or
+              $linea -match '(?i)\bmx_\d+\b' -or
+              $linea -match '(?i)^\s*(datadir|port|socket|bind-address)\s*=') {
+            W ("  [{0}] {1}" -f $arch.Name, $linea.Trim())
+            $encontro = $true
+          }
+        }
+      } catch { }
+    }
+  }
+  if (-not $encontro) { W "  (no encontre ninguna linea con pinta de conexion)" }
+  W ""
+
+  W "== SERVICIOS DE BASE DE DATOS =="
+  $svc = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)maria|mysql|maxi' -or $_.DisplayName -match '(?i)maria|mysql|maxi' }
+  if ($svc) { foreach ($s in $svc) { W ("  {0,-28} {1,-10} {2}" -f $s.Name, $s.Status, $s.DisplayName) } } else { W "  (ninguno)" }
+  W ""
+
+  W "== PUERTOS ESCUCHANDO (posibles bases) =="
+  try {
+    $con = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in 3306,3307,3308,3396,3397,3398,3399,3400 }
+    if ($con) { foreach ($x in ($con | Sort-Object LocalPort -Unique)) { W ("  puerto {0} en {1}" -f $x.LocalPort, $x.LocalAddress) } }
+    else { W "  (ninguno de los habituales: 3306, 3307, 3399)" }
+  } catch { W "  (no pude consultar los puertos)" }
+  W ""
+
+  W "== PROCESOS DE MAXIREST / BASE =="
+  $pr = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '(?i)maxi|maria|mysql' }
+  if ($pr) { foreach ($p in $pr) { try { W ("  {0,-20} {1}" -f $p.ProcessName, $p.Path) } catch { W ("  {0}" -f $p.ProcessName) } } } else { W "  (ninguno corriendo)" }
+  W ""
+
+  # Contenido de los archivos donde MaxiRest suele guardar la conexion.
+  # Sirve para saber, sin adivinar, con que usuario/clave se conecta esta PC.
+  W "== CONFIG (contenido de archivos de conexion) =="
+  $confNames = @("DatosMysql.txt","MaxiREST.ini","mrlinknk.cnf","mxlink_update.bat","port_mr.bat")
+  $vistos = @{}
+  foreach ($c in $cands) {
+    foreach ($nm in $confNames) {
+      foreach ($p in @((Join-Path $c $nm))) {
+        if ((Test-Path $p) -and (-not $vistos.ContainsKey($p.ToLower()))) {
+          $vistos[$p.ToLower()] = $true
+          W "  --- $p ---"
+          try { foreach ($ln in (Get-Content $p -ErrorAction SilentlyContinue -TotalCount 60)) { W ("    " + $ln) } } catch { W "    (no pude leer)" }
+        }
+      }
+    }
+  }
+  if ($vistos.Count -eq 0) { W "  (no encontre archivos de config)" }
+
+  $L | Set-Content -Path $rf -Encoding UTF8
+  Log "Relevamiento escrito en $rf"
+  Res "Relevamiento: listo"
+}
+
+# ============================================================
+#  V44: AUTOREPARACION DEL USUARIO DE SOLO LECTURA.
+#
+#  Si lz_conexion.txt (o cualquier otra fuente) ya tiene host/usuario/clave/base
+#  pero el usuario de solo lectura ('lazarillo') no existe en la base (o se
+#  borro, o la clave no coincide), la extraccion fallaba TOTAL y quedaba en
+#  manos de alguien entrar a mano con HeidiSQL y correr el CREATE USER (paso
+#  en San Justo el 09/10). Diego, 09/10: "aceitemos el proceso de tal forma
+#  que este seguro que el usuario no esta creado. Si no lo esta lo crea".
+#
+#  La clave de root NUNCA se guarda ni se transmite: se la busca, YA
+#  GUARDADA POR HEIDISQL, en el registro de ESTA MISMA PC (quien administra
+#  esa PC ya tuvo que guardarla ahi alguna vez para poder entrar). Si no hay
+#  ninguna sesion de root guardada, no hay forma de autoreparar: se avisa
+#  "no tengo la clave de root" y ahi termina, sin escalar el error.
+# ============================================================
+function Obtener-ClaveRootLocal($hh, $ppt) {
+  # HeidiSQL guarda la clave de cada sesion en
+  # HKCU\Software\HeidiSQL\Servers\<sesion>\Password, OFUSCADA (no cifrada):
+  # el texto tiene largo impar (2n+1); el ULTIMO caracter es un digito hex que
+  # es el "corrimiento"; cada par de caracteres hex anterior, menos ese
+  # corrimiento, da el codigo del caracter real.
+  try {
+    $raiz = "HKCU:\Software\HeidiSQL\Servers"
+    if (-not (Test-Path $raiz)) { return $null }
+    foreach ($s in (Get-ChildItem -Path $raiz -ErrorAction SilentlyContinue)) {
+      $p = Get-ItemProperty -Path $s.PSPath -ErrorAction SilentlyContinue
+      if (-not $p) { continue }
+      if ("$($p.User)".ToLower() -ne "root") { continue }
+      $raw = $p.Password
+      if (-not $raw) { continue }
+      if ($raw.Length % 2 -eq 0) { continue }
+      $shift = [Convert]::ToInt32($raw.Substring($raw.Length - 1, 1), 16)
+      $hex = $raw.Substring(0, $raw.Length - 1)
+      $clave = ""
+      for ($i = 0; $i -lt $hex.Length; $i += 2) {
+        $cod = [Convert]::ToInt32($hex.Substring($i, 2), 16) - $shift
+        if ($cod -lt 0) { $cod += 256 }
+        $clave += [char]$cod
+      }
+      if ($clave) { return @{ clave = $clave; sesion = $s.PSChildName } }
+    }
+  } catch { }
+  return $null
+}
+
+function Reparar-UsuarioLectura($hh, $ppt, $uu, $pwpw, $ddb, $mysqlExe) {
+  # Intenta recrear el usuario de solo lectura con la clave de root hallada
+  # localmente. Devuelve un hashtable { ok; motivo }: si no se pudo, el motivo
+  # dice POR QUE (no clave de root encontrada, o la clave no funciono / fallo
+  # la creacion) para que quede ESCRITO en el resumen (Diego, 09/10: "si no lo
+  # crea el usuario, no queda guardado" - antes, si la clave de root existia
+  # pero el CREATE fallaba por otro motivo, el aviso final decia lo mismo que
+  # si no hubiera clave ninguna, y la razon real solo quedaba en el log, que
+  # no siempre llega al Drive en una corrida que falla).
+  $rootInfo = Obtener-ClaveRootLocal $hh $ppt
+  if (-not $rootInfo) {
+    Log "Autoreparacion: no tengo la clave de root (ninguna sesion root guardada en HeidiSQL en esta PC)"
+    return @{ ok = $false; motivo = "no tengo la clave de root en esta PC" }
+  }
+  Log "Autoreparacion: encontre clave de root en la sesion HeidiSQL '$($rootInfo.sesion)' - intento recrear '$uu'"
+  $sql = "CREATE OR REPLACE USER '$uu'@'127.0.0.1' IDENTIFIED BY '$pwpw'; GRANT SELECT ON $ddb.* TO '$uu'@'127.0.0.1'; FLUSH PRIVILEGES;"
+  $ok = $false
+  $motivo = $null
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName  = $mysqlExe
+    $psi.Arguments = "-h $hh -P $ppt -u root -p$($rootInfo.clave) --batch"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow  = $true
+    $psi.RedirectStandardInput  = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.StandardInput.Write($sql)
+    $proc.StandardInput.Close()
+    $errores = $proc.StandardError.ReadToEnd()
+    [void]$proc.StandardOutput.ReadToEnd()
+    $proc.WaitForExit()
+    if ($proc.ExitCode -eq 0 -and -not $errores) { $ok = $true; Log "Autoreparacion: usuario '$uu' recreado OK" }
+    else {
+      $motivo = "la clave de root de la sesion '$($rootInfo.sesion)' no funciono o fallo la creacion: $(($errores -replace '\s+',' ').Trim())"
+      Log "Autoreparacion: fallo al recrear el usuario - $(($errores -replace '\s+',' ').Trim())"
+    }
+  } catch {
+    $motivo = "excepcion al intentar reparar: $($_.Exception.Message)"
+    Log "Autoreparacion: excepcion al intentar reparar - $($_.Exception.Message)"
+  }
+  $rootInfo = $null
+  return @{ ok = $ok; motivo = $motivo }
+}
+
+function Ejecutar-Extraccion($hh, $ppt, $uu, $pwpw, $ddb, $mysqlExe, $sqlDirIn, $outDirIn) {
+  # Una pasada completa de extraccion (todas las consultas de sql\). Se uso
+  # tal cual estaba desde V42; ahora es funcion para poder reintentarla una
+  # vez despues de una autoreparacion (V44), sin duplicar el codigo.
+  $t0x = Get-Date; $nx = 0; $filasx = 0; $fallasx = @()
+  foreach ($f in (Get-ChildItem -Path $sqlDirIn -Filter *.sql | Sort-Object Name)) {
+    $name = [IO.Path]::GetFileNameWithoutExtension($f.Name)
+    $tsv = Join-Path $outDirIn "$name.tsv"
+    $err = Join-Path $outDirIn "$name.err"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName  = $mysqlExe
+    $psi.Arguments = "-h $hh -P $ppt -u $uu -p$pwpw -D $ddb --default-character-set=utf8 --batch"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow  = $true
+    $psi.RedirectStandardInput  = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.StandardInput.Write((Get-Content -Path $f.FullName -Raw))
+    $proc.StandardInput.Close()
+    $salida  = $proc.StandardOutput.ReadToEnd()
+    $errores = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    $utf8x = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tsv, $salida, $utf8x)
+    [System.IO.File]::WriteAllText($err, $errores, $utf8x)
+
+    $c = 0
+    try { $li = @(Get-Content -Path $tsv -ErrorAction SilentlyContinue); if ($li.Count -gt 0) { $c = $li.Count - 1 } } catch { $c = -1 }
+    $filasx += [Math]::Max(0,$c)
+    if ((Test-Path $err) -and ((Get-Item $err).Length -gt 0)) { $fallasx += $name; Log ("{0,-32} ERROR" -f $name) }
+    else { Log ("{0,-32} {1,9} filas" -f $name, $c) }
+    $nx++
+  }
+  $segx = [int]((Get-Date) - $t0x).TotalSeconds
+  return @{ n = $nx; filas = $filasx; fallas = $fallasx; seg = $segx }
+}
+
+# ============================================================
+#  PASO 2 - CONEXION A LA BASE
+# ============================================================
+Fase 15 "Buscando la conexion a la base..."
+$h=$null; $u=$null; $pw=$null; $db=$null; $pt=$null; $origen=$null
+
+# 2a) archivo puesto a mano al lado del bat.
+# Se busca "lz_conexion*.txt": asi tambien lo toma si Windows lo dejo como
+# "lz_conexion.txt.txt" (la trampa de las extensiones ocultas).
+$cfg = Get-ChildItem -Path $base -Filter "lz_conexion*.txt" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cfg) {
+  $lineas = @(Get-Content $cfg.FullName -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" -and $_ -notmatch '^\s*#' })
+  $conEtiqueta = $false
+  foreach ($l in $lineas) {
+    if ($l -match '^\s*(\w+)\s*=\s*(.+?)\s*$') {
+      $conEtiqueta = $true
+      switch ($matches[1].ToLower()) { "host" {$h=$matches[2]} "usuario" {$u=$matches[2]} "clave" {$pw=$matches[2]} "base" {$db=$matches[2]} "puerto" {$pt=$matches[2]} }
+    }
+  }
+  # Si no tiene etiquetas (host=, usuario=, ...), se leen las 5 lineas sueltas
+  # EN ORDEN: host, usuario, clave, base, puerto. Asi acepta los dos formatos
+  # y no importa cual se copie (paso el 24/09 con San Justo).
+  if (-not $conEtiqueta -and $lineas.Count -ge 5) {
+    $h=$lineas[0]; $u=$lineas[1]; $pw=$lineas[2]; $db=$lineas[3]; $pt=$lineas[4]
+  }
+  if ($db) { $origen = $cfg.Name }
+  else { Log "2a $($cfg.Name) existe pero no pude leer la base (revisar formato)" }
+}
+
+# 2b) leer el comando con el que arranco maxilink.exe (que esta corriendo).
+# Es la fuente mas confiable: los argumentos traen host, usuario, clave, base y
+# puerto, sin depender de que exista un .bat. Sirve igual en el admin y en cada PDV.
+if (-not $db) {
+  $cmds = @()
+  try {
+    $cmds += (Get-CimInstance Win32_Process -Filter "Name='maxilink.exe'" -ErrorAction SilentlyContinue | ForEach-Object { $_.CommandLine })
+  } catch { }
+  try {
+    $cmds += (Get-WmiObject Win32_Process -Filter "Name='maxilink.exe'" -ErrorAction SilentlyContinue | ForEach-Object { $_.CommandLine })
+  } catch { }
+  $cmds = @($cmds | Where-Object { $_ })
+  Log ("2b proceso maxilink: {0} con linea de comando" -f $cmds.Count)
+  foreach ($cl in $cmds) {
+    if ($cl -match '(?i)maxilink\.exe"?\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)') {
+      $h=$matches[1]; $u=$matches[2]; $pw=$matches[3]; $db=$matches[4]; $pt=$matches[5]
+      $origen = "proceso maxilink.exe en memoria"
+      Log ("2b proceso: usuario=$u base=$db")
+      break
+    }
+  }
+}
+
+# 2c) DatosMysql.txt: es donde MaxiRest guarda la conexion en los puntos de venta.
+# Son 5 lineas sueltas, en este orden: host, usuario, clave, base, puerto.
+if (-not $db) {
+  # No alcanza con mirar la raiz de la carpeta de MaxiRest: no esta siempre en
+  # el mismo lugar ni se llama igual en todas las instalaciones (San Justo tiene
+  # MaxiRest en C:\MaxiREST_SQL y ahi la busqueda directa no lo encontro).
+  # Se busca cualquier "Datos*Mysql*.txt" hasta dos niveles adentro.
+  foreach ($c in $cands) {
+    $encontrados = @()
+    try { $encontrados = @(Get-ChildItem -Path $c -Recurse -Depth 2 -Filter "Datos*ysql*.txt" -File -ErrorAction SilentlyContinue) } catch { }
+    foreach ($f in $encontrados) {
+      $p = $f.FullName
+      $ln = @()
+      try { $ln = @(Get-Content $p -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }) } catch { }
+      if ($ln.Count -ge 5) {
+        $h=$ln[0]; $u=$ln[1]; $pw=$ln[2]; $db=$ln[3]; $pt=$ln[4]
+        $origen = $p
+        Log ("2c DatosMysql: usuario=$u base=$db puerto=$pt")
+        break
+      } else { Log ("2c DatosMysql en $p pero tiene {0} lineas utiles, esperaba 5" -f $ln.Count) }
+    }
+    if ($db) { break }
+  }
+}
+
+# 2d) buscar la linea de maxilink en cualquier .bat/.cmd de las carpetas candidatas
+if (-not $db) {
+  foreach ($c in $cands) {
+    $archivos = @()
+    try { $archivos += Get-ChildItem -Path $c -Recurse -Depth 2 -Include *.bat,*.cmd -File -ErrorAction SilentlyContinue } catch {
+      try { $archivos += Get-ChildItem -Path (Join-Path $c '*') -Include *.bat,*.cmd -File -ErrorAction SilentlyContinue } catch { }
+    }
+    foreach ($arch in $archivos) {
+      try {

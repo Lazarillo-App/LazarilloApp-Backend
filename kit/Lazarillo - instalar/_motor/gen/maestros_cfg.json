@@ -1,0 +1,254 @@
+{
+ "7": {
+  "modo": "simple",
+  "tsv": "07_rubros.tsv",
+  "cols": [
+   "ID",
+   "CODIGO",
+   "NOMBRE",
+   "COLOR",
+   "GRUPO_NRO",
+   "GRUPO_COL",
+   "GRUPO_FOT",
+   "EXCLUYEINF",
+   "EVENTO",
+   "DELIACT",
+   "EVE_FOR",
+   "EVE_FORM",
+   "EVE_FORMH",
+   "DISCONT",
+   "FECHA_UPDA",
+   "MODO_VISTA"
+  ],
+  "ren": {
+   "ID": "id",
+   "CODIGO": "codigo",
+   "NOMBRE": "nombre",
+   "COLOR": "color",
+   "GRUPO_NRO": "grupo_nro",
+   "GRUPO_COL": "grupo_col",
+   "GRUPO_FOT": "grupo_fot",
+   "EXCLUYEINF": "excluyeinf",
+   "EVENTO": "evento",
+   "DELIACT": "deliact",
+   "EVE_FOR": "eve_for",
+   "EVE_FORM": "eve_form",
+   "EVE_FORMH": "eve_formh",
+   "DISCONT": "discont",
+   "FECHA_UPDA": "fecha_update",
+   "MODO_VISTA": "modo_vista"
+  },
+  "anchos": {
+   "NOMBRE": 40,
+   "EVENTO": 2,
+   "EVE_FOR": 12,
+   "EVE_FORM": 12,
+   "EVE_FORMH": 12,
+   "MODO_VISTA": 1
+  }
+ },
+ "8": {
+  "modo": "simple",
+  "tsv": "08_subrubros.tsv",
+  "cols": [
+   "ID",
+   "CODIGO",
+   "NOMBRE",
+   "DELIACT",
+   "EVE_FOR",
+   "EVE_FORM",
+   "EVE_FORMH",
+   "FECHA_UPDA"
+  ],
+  "ren": {
+   "ID": "id",
+   "CODIGO": "codigo",
+   "NOMBRE": "nombre",
+   "DELIACT": "deliact",
+   "EVE_FOR": "eve_for",
+   "EVE_FORM": "eve_form",
+   "EVE_FORMH": "eve_formh",
+   "FECHA_UPDA": "fecha_update"
+  },
+  "anchos": {
+   "NOMBRE": 40,
+   "EVE_FOR": 12,
+   "EVE_FORM": 12,
+   "EVE_FORMH": 12
+  }
+ },
+ "11": {
+  "modo": "simple",
+  "tsv": "11_rubros_caja.tsv",
+  "cols": [
+   "ID",
+   "CODIGO",
+   "NOMBRE",
+   "CALC_RENT"
+  ],
+  "ren": {
+   "ID": "id",
+   "CODIGO": "codigo",
+   "NOMBRE": "nombre",
+   "CALC_RENT": "calc_rent"
+  },
+  "anchos": {
+   "NOMBRE": 40
+  }
+ },
+ "17": {
+  "modo": "simple",
+  "tsv": "12_conceptos_caja.tsv",
+  "cols": [
+   "ID",
+   "CODIGO",
+   "NOMBRE",
+   "TIPO",
+   "COD_RGA",
+   "COD_IMP"
+  ],
+  "ren": {
+   "ID": "id",
+   "CODIGO": "codigo",
+   "NOMBRE": "nombre",
+   "TIPO": "tipo",
+   "COD_RGA": "cod_rga",
+   "COD_IMP": "cod_imp"
+  },
+  "anchos": {
+   "NOMBRE": 60,
+   "TIPO": 2,
+   "COD_IMP": 16
+  }
+ },
+ "2": {
+  "modo": "simple",
+  "tsv": "15_rubros_insumos.tsv",
+  "cols": [
+   "CODIGO",
+   "NOMBRE",
+   "COD_CGA"
+  ],
+  "ren": {
+   "CODIGO": "codigo",
+   "NOMBRE": "nombre",
+   "COD_CGA": "cod_cga"
+  },
+  "anchos": {
+   "NOMBRE": 40
+  }
+ },
+ "00": {
+  "modo": "simple",
+  "tsv": "13_proveedores.tsv",
+  "cols": [
+   "ID",
+   "CODIGO",
+   "NOMBRE",
+   "RAZON",
+   "DIRECCION",
+   "LOCALIDAD",
+   "CONTACTO",
+   "TELEFONO",
+   "FAX",
+   "CELULAR",
+   "TIPO_IVA",
+   "CUIT",
+   "FOTO",
+   "CBU",
+   "ALIASCBU",
+   "COD_CGA",
+   "DIAS_VENC",
+   "IVA",
+   "IVA_DIF",
+   "E_MAIL",
+   "OBSERVAC",
+   "FECULTIPP",
+   "DETPERC"
+  ],
+  "ren": {
+   "ID": "id",
+   "CODIGO": "codigo",
+   "NOMBRE": "nombre",
+   "RAZON": "razon",
+   "DIRECCION": "direccion",
+   "LOCALIDAD": "localidad",
+   "CONTACTO": "contacto",
+   "TELEFONO": "telefono",
+   "FAX": "fax",
+   "CELULAR": "celular",
+   "TIPO_IVA": "tipo_iva",
+   "CUIT": "cuit",
+   "FOTO": "foto",
+   "CBU": "cbu",
+   "ALIASCBU": "aliascbu",
+   "COD_CGA": "cod_cga",
+   "DIAS_VENC": "dias_venc",
+   "IVA": "iva",
+   "IVA_DIF": "iva_dif",
+   "E_MAIL": "e_mail",
+   "OBSERVAC": "observac",
+   "FECULTIPP": "fecultipp",
+   "DETPERC": "detperc"
+  },
+  "anchos": {
+   "NOMBRE": 60,
+   "RAZON": 100,
+   "DIRECCION": 60,
+   "LOCALIDAD": 30,
+   "CONTACTO": 60,
+   "TELEFONO": 30,
+   "FAX": 30,
+   "CELULAR": 30,
+   "TIPO_IVA": 2,
+   "CUIT": 70,
+   "CBU": 44,
+   "ALIASCBU": 20,
+   "E_MAIL": 100,
+   "OBSERVAC": 120
+  }
+ },
+ "6": {
+  "modo": "simple",
+  "tsv": "09_articulos.tsv",
+  "cols": [
+   "COD_RUA",
+   "COD_SUA",
+   "CODIGO",
+   "NOMBRE",
+   "PRECIO1",
+   "PRECIO2",
+   "PRECIO3",
+   "PRECIO4"
+  ],
+  "ren": {
+   "COD_RUA": "cod_rua",
+   "COD_SUA": "cod_sua",
+   "CODIGO": "codigo",
+   "NOMBRE": "nombre",
+   "PRECIO1": "precio1",
+   "PRECIO2": "precio2",
+   "PRECIO3": "precio3",
+   "PRECIO4": "precio4"
+  },
+  "anchos": {
+   "NOMBRE": 120
+  }
+ },
+ "1": {
+  "modo": "insumos",
+  "discont": false,
+  "anchos": {
+   "NOMBRE": 100,
+   "UNIDAD_MED": 10
+  }
+ },
+ "0": {
+  "modo": "insumos",
+  "discont": true,
+  "anchos": {
+   "NOMBRE": 100,
+   "UNIDAD_MED": 10
+  }
+ }
+}
