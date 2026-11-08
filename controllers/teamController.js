@@ -93,6 +93,7 @@ exports.listMembers = async (req, res, next) => {
         SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
                b.id AS scope_id, 'owner'::text AS role,
                u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
+               NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre,
                u.created_at, u.updated_at,
                u.email, u.name, u.account_status,
                u.invitation_expires_at, u.invitation_accepted_at,
@@ -115,6 +116,7 @@ exports.listMembers = async (req, res, next) => {
         SELECT * FROM (
           SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
                  ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
+                 ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre,
                  ua.created_at, ua.updated_at,
                  u.email, u.name, u.account_status,
                  u.invitation_expires_at, u.invitation_accepted_at,
@@ -155,6 +157,7 @@ exports.listMembers = async (req, res, next) => {
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
              ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
+             ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre,
              ua.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -171,6 +174,7 @@ exports.listMembers = async (req, res, next) => {
       SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
              b.id AS scope_id, 'owner'::text AS role,
              u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
+             NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre,
              u.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -620,12 +624,15 @@ exports.updateAssignment = async (req, res, next) => {
         const uid = req.user?.id;
         const assignmentId = Number(req.params.assignmentId);
         const { alias, role } = req.body || {};
+        // customRoleId: número = rol a medida (solo admin); null = Administración completa.
+        const tocaRolMedida = Object.prototype.hasOwnProperty.call(req.body || {}, 'customRoleId');
+        const customRoleId = tocaRolMedida && req.body.customRoleId != null ? Number(req.body.customRoleId) : null;
         const sectorIds = Array.isArray(req.body?.sectorIds)
             ? [...new Set(req.body.sectorIds.map(Number).filter(Number.isFinite))]
             : undefined;
 
         if (!assignmentId) return res.status(400).json({ ok: false, error: 'invalid_id' });
-        if (alias == null && role == null && sectorIds === undefined) {
+        if (alias == null && role == null && sectorIds === undefined && !tocaRolMedida) {
             return res.status(400).json({ ok: false, error: 'nothing_to_update' });
         }
         if (role && !isValidRole(role) && role !== 'owner') {
@@ -668,6 +675,32 @@ exports.updateAssignment = async (req, res, next) => {
             }
         }
 
+        // Rol a medida: tiene que ser de la misma organización (o negocio) y solo va con admin.
+        // Solo el dueño los asigna (un admin no puede darse ni dar más permisos).
+        if (tocaRolMedida && callerRole !== 'owner') {
+            return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
+        }
+        // Un admin no puede ascender a Administración completa a alguien que tiene rol a medida.
+        if (!tocaRolMedida && callerRole !== 'owner' && a.custom_role_id && role != null && role !== a.role) {
+            return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
+        }
+        if (tocaRolMedida && customRoleId != null) {
+            if (finalRole !== 'admin') {
+                return res.status(400).json({ ok: false, error: 'custom_role_requires_admin' });
+            }
+            const { rows: rr } = await pool.query(
+                `SELECT cr.id FROM app_custom_roles cr
+                  WHERE cr.id = $1 AND cr.deleted_at IS NULL
+                    AND (
+                      (cr.organization_id IS NOT NULL AND cr.organization_id = CASE WHEN $2 = 'organization' THEN $3::bigint
+                         ELSE (SELECT organization_id FROM app_businesses WHERE id = $3::bigint) END)
+                      OR (cr.business_id IS NOT NULL AND $2 = 'business' AND cr.business_id = $3::bigint)
+                    )`,
+                [customRoleId, a.scope_type, a.scope_id]
+            );
+            if (!rr.length) return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
+        }
+
         await client.query('BEGIN');
 
         const sets = [];
@@ -684,6 +717,11 @@ exports.updateAssignment = async (req, res, next) => {
         if (role != null) {
             sets.push(`role = $${i++}`);
             params.push(role);
+        }
+        if (tocaRolMedida || (role != null && role !== 'admin')) {
+            // Al pasar a staff (o a Administración completa) se suelta el rol a medida.
+            sets.push(`custom_role_id = $${i++}`);
+            params.push(finalRole === 'admin' ? customRoleId : null);
         }
         if (sectorIds !== undefined) {
             sets.push(`sector_ids = $${i++}`);
@@ -705,8 +743,8 @@ exports.updateAssignment = async (req, res, next) => {
             entityId: assignmentId,
             action: 'update',
             diff: {
-                before: { alias: a.alias, role: a.role },
-                after: { alias: updated[0].alias, role: updated[0].role },
+                before: { alias: a.alias, role: a.role, custom_role_id: a.custom_role_id ?? null },
+                after: { alias: updated[0].alias, role: updated[0].role, custom_role_id: updated[0].custom_role_id ?? null },
             },
         });
 
