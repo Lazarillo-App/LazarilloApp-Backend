@@ -1,18 +1,19 @@
-# kit/ — el kit Lazarillo para descargar desde la app
+# kit/ — el kit Lazarillo, como código
 
-El kit vive en el servidor (Diego, 08/11/2026: "no quiero que se publique desde usuario,
-esto tiene que estar en el servidor de lazarillo actualizado").
+El kit vive en el servidor y se edita como el resto del código (Diego, 08/11/2026: "no quiero
+que se publique desde usuario, esto tiene que estar en el servidor de lazarillo actualizado").
 
-- `instalar-1.b64` … `instalar-N.b64`: el zip "Lazarillo - instalar" en base64, partido en
-  pedazos (se unen en orden numérico). Así viaja byte por byte igual (BOM de los .ps1, CRLF
-  de los .bat).
-- Al arrancar, el servidor (`services/kit/versiones.js` → `sincronizarDesdeRepo`) calcula la
-  huella del zip y, si no está en `kit_versiones`, lo publica. Nunca vuelve a una versión más
-  vieja ($MOTOR_VER menor que la vigente), porque testing y producción comparten la base.
+- `Lazarillo - instalar/`: los archivos del kit tal cual los ve la PC (INSTALAR EN ESTA PC.bat,
+  LAZARILLO.bat, VINCULAR ESTA PC.bat, LEEME.txt y `_motor/` con el motor, los generadores y las
+  consultas). Para cambiar algo: editar el archivo, PR a testing, merge. Nada más.
+- `formato.json`: el repo guarda todo en UTF-8 sin BOM y con saltos LF; al armar el zip se le
+  pone BOM a los .ps1 que lo necesitan (PowerShell 5.1) y CRLF a los .bat y .txt.
+- Al arrancar, el servidor (`services/kit/versiones.js`) arma el zip y, si ese contenido no está
+  en `kit_versiones`, lo publica. Nunca vuelve a una versión más vieja ($MOTOR_VER menor que la
+  vigente), porque testing y producción comparten la base.
 - ⚙ Configuración › Conexiones › "Descargar instalador" entrega la última, con
   `_motor/lz_api.txt` apuntando al servidor que la sirve.
-- El zip NUNCA lleva credenciales: se rechaza si trae lz_vinculo.txt, lz_coneccion_render.txt,
-  lz_conexion.txt o destinos.txt.
-
-Para actualizar: armar el zip nuevo desde `_KIT Lazarillo` (mismo contenido que el Drive),
-reemplazar los .b64 y mergear a testing. El deploy lo publica solo.
+- NUNCA credenciales acá (el repo es público): se rechaza el kit si trae lz_vinculo.txt,
+  lz_coneccion_render.txt, lz_conexion.txt o destinos.txt.
+- Las PC que todavía usan el Drive (`_KIT Lazarillo`) siguen leyendo de ahí: un cambio del
+  motor se hace en los dos lados hasta que todas se actualicen desde el servidor.
