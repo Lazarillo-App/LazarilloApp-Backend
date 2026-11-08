@@ -86,7 +86,7 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
                            WHERE ${lugarV} ${condTurno} AND ${enRango(dAnt, corte)}`);
       })();
 
-  const [tot, turnos, servicio, cobro, mozos, dtoTurno, dias, comp, pagos] = await Promise.all([
+  const [tot, turnos, servicio, cobro, mozos, dtoTurno, dias, comp, pagos, anuladas] = await Promise.all([
     db.one(sql`SELECT SUM(${imp})::float8 AS total, COUNT(DISTINCT (v.fecha::date, v.comprobant))::int AS tickets,
                       SUM(${cub})::int AS cubiertos, SUM(COALESCE(v.descuento, 0))::float8 AS descuento,
                       COUNT(DISTINCT (v.fecha::date, v.comprobant)) FILTER (WHERE COALESCE(v.descuento, 0) <> 0)::int AS con_dto
@@ -115,6 +115,14 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
                 WHERE ${filtroSucursalSql('c', businessId, sucursal)} AND UPPER(TRIM(c."cajaPago")) = 'CAJA'
                   AND c."fechaPago" >= ${desde}::date AND c."fechaPago" < ${hastaExcl}::date
                 ORDER BY 3 DESC`),
+    // Anulaciones (Diego 08/11/2026: "las anulaciones vienen en el 22"): las notas de crédito del
+    // 22 (NCB/NCA y las «Y» de los tickets U) son filas con importe negativo; su «cobro» es el
+    // comprobante que anulan. Una por comprobante (una NC puede venir partida en varios cobros).
+    db.many(sql`SELECT to_char(v.fecha::date, 'YYYY-MM-DD') AS fecha, TRIM(v.comprobant) AS comprobante,
+                       MAX(TRIM(v.cobro)) AS anula, COALESCE(NULLIF(TRIM(v.turno), ''), '—') AS turno,
+                       MAX(TRIM(v.tipo)) AS tipo, MAX(TRIM(v.mozo)) AS mozo, (-SUM(${imp}))::float8 AS importe
+                ${base} AND ${imp} < 0
+                GROUP BY 1, 2, 4 ORDER BY 7 DESC`),
   ]);
 
   let comparacion = null;
@@ -171,6 +179,10 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     cobro: cobro.map((c) => ({ cobro: c.cobro, importe: r2(c.importe), n: c.n })),
     mozos: mozos.map((m) => ({ mozo: m.mozo, importe: r2(m.importe), tickets: m.tickets })),
     descuentos: { importe: r2(tot?.descuento), tickets: tot?.con_dto ?? 0, porTurno: dtoTurno.map((d) => ({ turno: d.turno, importe: r2(d.importe) })) },
+    anulaciones: {
+      importe: r2(anuladas.reduce((s, a) => s + a.importe, 0)), n: anuladas.length,
+      detalle: anuladas.map((a) => ({ fecha: a.fecha, comprobante: a.comprobante, anula: a.anula, turno: a.turno, tipo: a.tipo, mozo: a.mozo, importe: r2(a.importe) })),
+    },
     pagosCaja: pagos.map((p) => ({ concepto: p.concepto, proveedor: p.proveedor, importe: r2(p.importe), fecha: p.fecha })),
     dias: dias.map((d) => ({ fecha: d.fecha, importe: r2(d.importe) })),
     articulos,
