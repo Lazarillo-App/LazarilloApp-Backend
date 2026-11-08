@@ -41,6 +41,39 @@ router.use((req, res, next) => {
   next();
 });
 
+// Roles a medida: qué sección es cada ruta y qué partes ocultas se cortan también acá
+// (no alcanza con esconderlas en pantalla). Sin rol a medida, req.permisos es null y pasa todo.
+const { puedeSeccion, estaOculto } = require('../services/auth/permisos');
+const SECCION_POR_RUTA = [
+  [/^\/(facturas|gastos-varios|empleados|conceptos-empleado|pagos-proveedor|ventas-manuales)(\/|$)/, 'carga'],
+  [/^\/conceptos(\/|$)/, 'conceptos'],
+  [/^\/medios-pago(\/|$)/, 'medios'],
+];
+const OCULTO_POR_RUTA = [
+  [/^\/dashboard\/equilibrio/, 'tarjeta.equilibrio'],
+  [/^\/dashboard\/canasta/, 'tarjeta.canasta'],
+  [/^\/dashboard\/diferencia-caja/, 'tabla.dif_caja'],
+  [/^\/impagas/, 'btn.impagas'],
+  [/^\/sin-carga/, 'btn.sin_carga'],
+];
+router.use((req, res, next) => {
+  const p = req.permisos;
+  if (!p) return next();
+  const ruta = req.path;
+  const modo = req.method === 'GET' ? 'ver' : 'editar';
+  const seccion = (SECCION_POR_RUTA.find(([re]) => re.test(ruta)) || [null, 'resultados'])[1];
+  // Los maestros que usa la carga (conceptos, medios) se pueden LEER si se ve la carga.
+  const leeParaCarga = modo === 'ver' && (seccion === 'conceptos' || seccion === 'medios') && puedeSeccion(p, 'carga');
+  // Lo que la carga necesita leer del panel (locales, búsqueda de proveedores) también.
+  const leeDelPanel = modo === 'ver' && seccion === 'resultados' && puedeSeccion(p, 'carga') && /^\/(locales|cta-cte|search)/.test(ruta);
+  if (!puedeSeccion(p, seccion, modo) && !leeParaCarga && !leeDelPanel) {
+    return res.status(403).json({ error: 'sin_permiso', seccion, modo });
+  }
+  const oculto = OCULTO_POR_RUTA.find(([re]) => re.test(ruta));
+  if (oculto && estaOculto(p, oculto[1])) return res.status(403).json({ error: 'sin_permiso', oculto: oculto[1] });
+  next();
+});
+
 // Query string tal como lo arma el front (mismos parámetros que la API de gestion).
 const paramsDe = (req) => new URL(req.originalUrl, 'http://local').searchParams;
 
