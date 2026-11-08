@@ -15,9 +15,10 @@
 //    cada hora). Mismas reglas que la API: lo editado en Lazarillo (valor ≠ espejo), los
 //    artículos manuales/promo y los de precio manual no se tocan; el costo nunca (el kit no lo
 //    trae).
-//  - Rubro/subrubro: la API de menú guarda categoria = rubro de MaxiRest y subrubro = subrubro,
-//    el botón manual al revés. Se usa el orden que ya tienen los artículos del negocio (el que
-//    más coincide); sin artículos, el de la API de menú.
+//  - Rubro/subrubro van INTERCAMBIADOS a propósito (categoria = subrubro de MaxiRest, subrubro =
+//    rubro; confirmado por la usuaria y por los datos: 1011 contra 14 en el Bar). Se usa el orden
+//    que ya tienen los artículos del negocio; sin artículos, el intercambiado (o el directo si el
+//    negocio tiene invertir_jerarquia_articulos, como el botón de sincronizar).
 //  - Insumos: la sync aditiva de siempre (repos/insumosRepo.upsertFromMaxi): crea los que faltan
 //    y no toca los existentes.
 'use strict';
@@ -84,7 +85,10 @@ function insumoDesdeM0(f) {
 
 // ¿En qué orden guarda rubro/subrubro este negocio? existentes: [{articulo_id, categoria_maxi,
 // subrubro_maxi}] — cuenta coincidencias de cada orden contra m6.
-function elegirOrden(existentes, filasM6) {
+// Sin artículos para comparar: el criterio de Lazarillo (confirmado por la usuaria 08/11:
+// rubro y subrubro van intercambiados) — categoria = subrubro de MaxiRest, subrubro = rubro;
+// con invertir_jerarquia_articulos, al revés (igual que el botón de sincronizar).
+function elegirOrden(existentes, filasM6, { invertirJerarquia = false } = {}) {
   const porId = new Map(filasM6.map((f) => [entero(f.codigo), f]));
   let directo = 0; let invertido = 0;
   for (const e of existentes) {
@@ -95,7 +99,10 @@ function elegirOrden(existentes, filasM6) {
     if (cat === txt(f.rubro).toLowerCase()) directo++;
     else if (cat === txt(f.subrubro).toLowerCase()) invertido++;
   }
-  const orden = invertido > directo ? 'rubro_subrubro' : 'rubro_categoria';
+  let orden;
+  if (invertido > directo) orden = 'rubro_subrubro';
+  else if (directo > invertido) orden = 'rubro_categoria';
+  else orden = invertirJerarquia ? 'rubro_categoria' : 'rubro_subrubro';
   return { orden, directo, invertido };
 }
 
@@ -131,7 +138,10 @@ async function aplicarArticulos(businessId, filasM6, { dryRun, actualizar }) {
   const { rows: existentes } = await pool.query(
     `SELECT articulo_id, nombre, nombre_maxi, precio, precio_maxi, categoria_maxi, subrubro_maxi, origen
        FROM maxi_articles WHERE business_id = $1`, [businessId]);
-  const { orden, directo, invertido } = elegirOrden(existentes, filasM6);
+  const { rows: fl } = await pool.query(
+    `SELECT COALESCE((props->>'invertir_jerarquia_articulos')::boolean, false) AS inv FROM app_businesses WHERE id = $1`,
+    [businessId]).catch(() => ({ rows: [] }));
+  const { orden, directo, invertido } = elegirOrden(existentes, filasM6, { invertirJerarquia: !!fl[0]?.inv });
   const porId = new Map(existentes.map((e) => [Number(e.articulo_id), e]));
   const articulos = filasM6.map((f) => articuloDesdeM6(f, orden)).filter(Boolean);
 

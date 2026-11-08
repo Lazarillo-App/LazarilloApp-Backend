@@ -41,9 +41,10 @@ test('insumo: forma de upsertFromMaxi, rubro = cod_rui, precio 0 no cuenta', () 
   assert.equal(insumoDesdeM0({ codigo: null, nombre: 'x' }), null);
 });
 
-test('orden: gana el que más coincide con lo que ya tiene el negocio; sin datos, el de la API de menú', () => {
+test('orden: gana el que más coincide con lo que ya tiene el negocio; sin datos, intercambiado', () => {
   const filas = [m6(), m6({ codigo: '3', rubro: 'PIZZAS', subrubro: 'Comida' })];
   assert.equal(elegirOrden([{ articulo_id: 2, categoria_maxi: 'comida' }, { articulo_id: 3, categoria_maxi: 'Comida' }], filas).orden, 'rubro_subrubro');
   assert.equal(elegirOrden([{ articulo_id: 2, categoria_maxi: 'SANDWICHES-BURRITOS' }], filas).orden, 'rubro_categoria');
-  assert.equal(elegirOrden([], filas).orden, 'rubro_categoria');
+  assert.equal(elegirOrden([], filas).orden, 'rubro_subrubro');
+  assert.equal(elegirOrden([], filas, { invertirJerarquia: true }).orden, 'rubro_categoria');
 });
