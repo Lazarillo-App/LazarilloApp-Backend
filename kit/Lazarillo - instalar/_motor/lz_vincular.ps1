@@ -93,7 +93,8 @@ function Mensaje-Error($r) {
 }
 
 function Pedir-Locales($url, $email, $clave) {
-  return Api-Post $url "/api/kit/locales" @{ email = $email; password = $clave }
+  # con la huella: si un local ya lo tiene ESTA PC, el servidor lo marca (ocupado.esta)
+  return Api-Post $url "/api/kit/locales" @{ email = $email; password = $clave; huella = (Huella-Pc) }
 }
 
 function Pedir-Vinculo($url, $email, $clave, $local, $maestros, $reemplazar) {
@@ -240,14 +241,22 @@ $bEntrar.Add_Click({
   if ($locales.Count -eq 0) { $err1.Text = "Tu usuario no es dueño ni administrador de ningún negocio."; return }
   $script:email = $tEmail.Text.Trim(); $script:clave = $tClave.Text
   $lista.Controls.Clear()
+  $preelegir = $null
   foreach ($l in $locales) {
     $item = New-Object System.Windows.Forms.Panel; $item.Size = New-Object System.Drawing.Size(366, 58); $item.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 6)
     $rb = Nuevo "RadioButton" 6 4 354 24 (Nombre-Local $l); $rb.Tag = $l
     $det = Nuevo "Label" 24 28 336 20 ""; $det.ForeColor = $gris
-    if ($l.ocupado) {
+    if ($l.ocupado -and $l.ocupado.esta) {
+      # Es ESTA misma PC (Diego 08/11: "cuando es la misma PC no se da cuenta"): se puede
+      # elegir y viene elegido; vincular de nuevo renueva la llave sin duplicar.
+      $det.Text = "esta PC (ya vinculada: se renueva, sin duplicar)"
+      $det.ForeColor = [System.Drawing.Color]::FromArgb(5, 150, 105)
+      if (-not $preelegir) { $preelegir = $rb; if ($l.ocupado.maestros -ne $null) { $chkMae.Checked = [bool]$l.ocupado.maestros } }
+    } elseif ($l.ocupado) {
       $rb.Enabled = $false
+      $item.Size = New-Object System.Drawing.Size(366, 78)
       $det.Text = "ya tiene PC: " + $l.ocupado.pc
-      $lk = New-Object System.Windows.Forms.LinkLabel; $lk.Text = "Reemplazar esa PC..."; $lk.Location = New-Object System.Drawing.Point(200, 28); $lk.Size = New-Object System.Drawing.Size(160, 20); $lk.Tag = $rb
+      $lk = New-Object System.Windows.Forms.LinkLabel; $lk.Text = "Reemplazar esa PC..."; $lk.Location = New-Object System.Drawing.Point(24, 50); $lk.Size = New-Object System.Drawing.Size(200, 20); $lk.Tag = $rb
       $lk.Add_LinkClicked({
         param($s, $e)
         $rbx = $s.Tag; $lx = $rbx.Tag
@@ -269,6 +278,7 @@ $bEntrar.Add_Click({
     $item.Controls.AddRange(@($rb, $det))
     $lista.Controls.Add($item)
   }
+  if ($preelegir) { $preelegir.Checked = $true }
   $p1.Visible = $false; $p2.Visible = $true; $paso.Text = "2 · ¿QUÉ LOCAL ES ESTA PC?"; $tit.Text = "Elegí el local"
   $form.AcceptButton = $bVincular
 })
