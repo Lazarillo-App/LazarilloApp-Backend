@@ -6,6 +6,8 @@ que se publique desde usuario, esto tiene que estar en el servidor de lazarillo 
 - `Lazarillo - instalar/`: los archivos del kit tal cual los ve la PC (INSTALAR EN ESTA PC.bat,
   LAZARILLO.bat, VINCULAR ESTA PC.bat, LEEME.txt y `_motor/` con el motor, los generadores y las
   consultas). Para cambiar algo: editar el archivo, PR a testing, merge. Nada más.
+- Un archivo grande puede ir partido en `<nombre>.parte-01`, `.parte-02`… (el motor): se unen en
+  orden al armar el zip, así un cambio sube solo el pedazo tocado.
 - `formato.json`: el repo guarda todo en UTF-8 sin BOM y con saltos LF; al armar el zip se le
   pone BOM a los .ps1 que lo necesitan (PowerShell 5.1) y CRLF a los .bat y .txt.
 - Al arrancar, el servidor (`services/kit/versiones.js`) arma el zip y, si ese contenido no está
