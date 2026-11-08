@@ -150,7 +150,7 @@ if (Test-Path (Join-Path $origen "lz_api.txt")) {
   $vinc = Join-Path $destino "_motor\lz_vincular.ps1"
   $archVin = Join-Path $destino "_motor\lz_vinculo.txt"
   if (Test-Path $vinc) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $vinc
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $vinc -DesdeInstalador
   }
   $repDir = Join-Path (Join-Path $destino "out") $env:COMPUTERNAME
   New-Item -ItemType Directory -Force -Path $repDir | Out-Null
