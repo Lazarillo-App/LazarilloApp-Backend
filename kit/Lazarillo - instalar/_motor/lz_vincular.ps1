@@ -12,7 +12,7 @@
 #    - Se desvincula desde la app: Configuración > Conexiones.
 #  Sistema: solo MaxiRest por ahora.
 # ============================================================
-param([switch]$SoloFunciones)
+param([switch]$SoloFunciones, [switch]$DesdeInstalador)
 
 $ErrorActionPreference = 'Stop'
 $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -42,8 +42,20 @@ function Huella-Pc {
   return -join ($b | ForEach-Object { $_.ToString('x2') })
 }
 
-# POST con JSON. Devuelve @{ Status; Datos } sin tirar excepción en 4xx/5xx.
+# POST con JSON. Si se corta la conexión (08/11: el primer "Vincular" de Diego cayó justo
+# cuando el servidor se reiniciaba), reintenta solo 2 veces más antes de mostrar el error.
 function Api-Post($url, $ruta, $cuerpo) {
+  $r = $null
+  for ($i = 1; $i -le 3; $i++) {
+    $r = Api-Post-Una $url $ruta $cuerpo
+    if ($r.Status -ne 0) { return $r }
+    if ($i -lt 3) { $hasta = (Get-Date).AddSeconds(4 * $i); while ((Get-Date) -lt $hasta) { try { [System.Windows.Forms.Application]::DoEvents() } catch { }; Start-Sleep -Milliseconds 150 } }
+  }
+  return $r
+}
+
+# Un POST con JSON. Devuelve @{ Status; Datos } sin tirar excepción en 4xx/5xx.
+function Api-Post-Una($url, $ruta, $cuerpo) {
   try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
   $json = $cuerpo | ConvertTo-Json -Depth 6 -Compress
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
@@ -51,6 +63,7 @@ function Api-Post($url, $ruta, $cuerpo) {
   $req.Method = 'POST'
   $req.ContentType = 'application/json; charset=utf-8'
   $req.UserAgent = 'lazarillo-kit-instalador'
+  $req.KeepAlive = $false
   $req.Timeout = 120000
   $req.ReadWriteTimeout = 120000
   $req.ContentLength = $bytes.Length
@@ -277,7 +290,8 @@ $bVincular.Add_Click({
   try { Guardar-Vinculo $url $r.Datos } catch { $err2.Text = "Se vinculó pero no pude guardar la llave en esta PC: " + $_.Exception.Message; return }
   $script:clave = ""; $tClave.Text = ""
   $ok3.Text = "✓ PC vinculada a " + (Nombre-Local @{ nombre = $r.Datos.negocio; sucursal = $r.Datos.sucursal })
-  $t = "Desde ahora el kit sube los datos de este local por Lazarillo, sin Drive. Corre solo a las 08:00 y al prender."
+  $script:vinculada = $true
+  $t = "Al cerrar esta ventana hace la primera subida de los datos (unos minutos, con una barrita que muestra el avance). Después corre sola todos los días a las 08:00 y al prender, sin Drive."
   if ($r.Datos.maestros) { $t += "`n`nEsta PC también arma los maestros." }
   elseif ($r.Datos.avisoMaestros) { $t += "`n`n" + $r.Datos.avisoMaestros + "." }
   if ($r.Datos.reemplazo) { $t += "`n`nReemplazó a " + $r.Datos.reemplazo + ", que ya no sube datos." }
@@ -295,3 +309,18 @@ if (Test-Path $archivoVinculo) {
 }
 
 [void]$form.ShowDialog()
+
+# Diego 08/11: "la primera vez la vinculación debe enviar los datos, no esperar a las 8".
+# Desde el instalador, el instalador corre el kit apenas se cierra esta ventana; si se vinculó
+# suelto (VINCULAR ESTA PC.bat), la corre esta.
+if ($script:vinculada -and -not $DesdeInstalador) {
+  $ps1 = Join-Path $motor "lz_lazarillo.ps1"
+  if (Test-Path $ps1) {
+    $ch = Join-Path $env:SystemRoot "System32\conhost.exe"
+    $args1 = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", ('"' + $ps1 + '"'))
+    try {
+      if (Test-Path $ch) { Start-Process -FilePath $ch -ArgumentList (@("powershell.exe") + $args1) -WindowStyle Hidden }
+      else { Start-Process -FilePath "powershell.exe" -ArgumentList $args1 -WindowStyle Hidden }
+    } catch { }
+  }
+}
