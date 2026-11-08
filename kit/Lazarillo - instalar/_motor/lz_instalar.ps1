@@ -145,11 +145,39 @@ if (Test-Path (Join-Path $origen "lz_api.txt")) {
   } else { Paso "  Python: ok" }
 
   # Vincular (ventana). Espera a que la cierren.
-  Paso "  abro la ventana de vincular"
-  CerrarProgreso
   $vinc = Join-Path $destino "_motor\lz_vincular.ps1"
   $archVin = Join-Path $destino "_motor\lz_vinculo.txt"
-  if (Test-Path $vinc) {
+  # Reinstalar = actualizar (Diego 08/11: "cuando es la misma PC no se da cuenta"): si esta
+  # PC ya esta vinculada y la llave sigue valiendo (GET /api/kit/yo), no se abre la ventana.
+  # Solo si Lazarillo dice que la llave ya no vale (401: la desvincularon) se vuelve a vincular.
+  # Sin conexion no se puede confirmar: se deja como esta (la corrida lo vuelve a intentar).
+  # Para pasarla a otro local: C:\Lazarillo\VINCULAR ESTA PC.bat.
+  $yaVinculada = $false
+  if (Test-Path $archVin) {
+    $vUrl = $null; $vLlave = $null
+    foreach ($l in (Get-Content $archVin -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+      if ($l -match '^\s*url\s*=\s*(\S+)\s*$') { $vUrl = $matches[1].TrimEnd('/') }
+      if ($l -match '^\s*llave\s*=\s*(\S+)\s*$') { $vLlave = $matches[1] }
+    }
+    if ($vUrl -and $vLlave) {
+      Progreso "Esta PC ya esta vinculada: lo confirmo con Lazarillo (la primera vez puede tardar un minuto)..."
+      try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+      $yaVinculada = $true
+      $job = Start-Job -ScriptBlock {
+        param($u, $k)
+        try { $y = Invoke-RestMethod -Uri ($u + "/api/kit/yo") -Headers @{ Authorization = ("Kit " + $k) } -TimeoutSec 100 -DisableKeepAlive; return ("ok|" + $y.negocio) }
+        catch { $sc = 0; try { $sc = [int]$_.Exception.Response.StatusCode } catch { }; return ("error|" + $sc) }
+      } -ArgumentList $vUrl, $vLlave
+      while ($job.State -eq 'Running') { Refrescar; Start-Sleep -Milliseconds 200 }
+      $resp = [string](Receive-Job $job -ErrorAction SilentlyContinue); Remove-Job $job -Force -ErrorAction SilentlyContinue
+      if ($resp -like "ok|*") { Paso ("  ya vinculada a " + $resp.Substring(3) + ": no abro la ventana de vincular") }
+      elseif ($resp -eq "error|401") { $yaVinculada = $false; Paso "  la vinculacion anterior ya no vale (la cortaron en Lazarillo): abro la ventana" }
+      else { Paso ("  no pude confirmar la vinculacion con Lazarillo (" + $resp + "): la dejo como esta") }
+    }
+  }
+  CerrarProgreso
+  if ((-not $yaVinculada) -and (Test-Path $vinc)) {
+    Paso "  abro la ventana de vincular"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $vinc -DesdeInstalador
   }
   $repDir = Join-Path (Join-Path $destino "out") $env:COMPUTERNAME
