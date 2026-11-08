@@ -51,7 +51,7 @@ router.post('/locales', async (req, res, next) => {
   try {
     const u = await conUsuario(req, res);
     if (!u) return;
-    const locales = await kit.localesDe(u.id);
+    const locales = await kit.localesDe(u.id, req.body?.huella);
     res.set('Cache-Control', 'no-store');
     res.json({ usuario: u.display_name || u.name || u.email, locales });
   } catch (e) { next(e); }
