@@ -150,6 +150,9 @@ $fuenteTit = New-Object System.Drawing.Font("Segoe UI Semibold", 13)
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Lazarillo - Vincular esta PC"
 $form.StartPosition = 'CenterScreen'
+# Que aparezca adelante: la abre un proceso escondido (el instalador) y si no queda detrás.
+$form.TopMost = $true
+$form.Add_Shown({ $form.Activate(); $form.TopMost = $false })
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.ClientSize = New-Object System.Drawing.Size(440, 470)
