@@ -252,6 +252,143 @@ if ($destinos["kit_drive"]) {
 }
 
 # ------------------------------------------------------------
+#  V50 (08/11, Diego: "las nuevas versiones se actualizan solas del kit?"): una PC
+#  VINCULADA sin Drive (tiene lz_vinculo.txt y no tiene kit_drive) se actualiza desde
+#  Lazarillo. Pide el manifiesto (GET /api/kit/motor: ruta + sha256 de cada archivo de
+#  _motor del kit publicado en el servidor) y baja SOLO lo que es distinto.
+#  Todo o nada: baja cada archivo a .lz_nuevo, verifica su sha256 y recien cuando estan
+#  todos bien los reemplaza. Si algo falla (sin red, servidor dormido, archivo cortado)
+#  no cambia nada y sigue con la version que tiene. destinos.txt, lz_vinculo.txt y
+#  lz_api.txt son de ESTA PC: el servidor no los manda y aca tampoco se tocan.
+#  Lo que se saco del kit (una consulta o un generador) se aparta a _motor\_viejo
+#  (MOVER, no borrar), con la misma red de seguridad que la poda del Drive.
+# ------------------------------------------------------------
+function Leer-VinculoMotor {
+  $f = Join-Path $motor "lz_vinculo.txt"
+  if (-not (Test-Path $f)) { return $null }
+  $v = @{}
+  foreach ($l in (Get-Content $f -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+    if ($l -match '^\s*(url|llave)\s*=\s*(\S+)\s*$') { $v[$matches[1]] = $matches[2] }
+  }
+  if ($v["url"] -and $v["llave"]) { $v["url"] = $v["url"].TrimEnd('/'); return $v }
+  return $null
+}
+
+if ((-not $destinos["kit_drive"]) -and (Test-Path (Join-Path $motor "lz_vinculo.txt"))) {
+  $vinM = Leer-VinculoMotor
+  if (-not $vinM) {
+    Log "Kit: lz_vinculo.txt sin url o llave, no busco version nueva"
+  } else {
+    $ppAntes = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+      try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+      $hdrM = @{ "Authorization" = ("Kit " + $vinM["llave"]); "X-Lazarillo-Motor" = $MOTOR_VER }
+      $man = $null; $errM = ""
+      for ($i = 1; ($i -le 3) -and (-not $man); $i++) {
+        try {
+          $man = Invoke-RestMethod -Uri ($vinM["url"] + "/api/kit/motor") -Headers $hdrM -TimeoutSec 90 -DisableKeepAlive
+        } catch {
+          $errM = $_.Exception.Message
+          $sc = $null; try { $sc = [int]$_.Exception.Response.StatusCode } catch { }
+          if ($sc -eq 401 -or $sc -eq 404) { break }   # PC desvinculada o sin kit publicado: no insisto
+          if ($i -lt 3) { Start-Sleep -Seconds (20 * $i) }
+        }
+      }
+      if (-not $man -or -not $man.archivos) {
+        Log ("Kit: no pude consultar a Lazarillo si hay version nueva (" + $errM + "): sigo con " + $MOTOR_VER)
+      } else {
+        $faltan = New-Object System.Collections.ArrayList
+        $enKit = @{}
+        foreach ($a in @($man.archivos)) {
+          $ruta = [string]$a.ruta
+          $rel = $ruta -replace '/', [IO.Path]::DirectorySeparatorChar
+          if ((-not $ruta) -or ($ruta -match '\.\.') -or ($ruta -match '^[\\/]') -or ($ruta -match ':') -or ($ruta -match '\\')) { continue }
+          $hoja = Split-Path -Leaf $rel
+          if (($hoja -ieq "destinos.txt") -or ($hoja -ieq "lz_vinculo.txt") -or ($hoja -ieq "lz_api.txt")) { continue }
+          $enKit[$ruta.ToLower()] = $true
+          $local = Join-Path $motor $rel
+          $sha = ([string]$a.sha256).ToLower()
+          $igual = $false
+          if (Test-Path -LiteralPath $local) {
+            try { $igual = ((Get-FileHash -LiteralPath $local -Algorithm SHA256).Hash.ToLower() -eq $sha) } catch { }
+          }
+          if (-not $igual) { [void]$faltan.Add([pscustomobject]@{ ruta = $ruta; rel = $rel; local = $local; sha = $sha }) }
+        }
+        if ($faltan.Count -gt 0) {
+          $todoBien = $true
+          foreach ($f in $faltan) {
+            $tmp = $f.local + ".lz_nuevo"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f.local) | Out-Null
+            $bien = $false
+            for ($i = 1; ($i -le 3) -and (-not $bien); $i++) {
+              try {
+                Invoke-WebRequest -Uri ($vinM["url"] + "/api/kit/motor/archivo?ruta=" + [uri]::EscapeDataString($f.ruta)) `
+                  -Headers $hdrM -TimeoutSec 90 -UseBasicParsing -DisableKeepAlive -OutFile $tmp | Out-Null
+                $bien = ((Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower() -eq $f.sha)
+              } catch { }
+              if ((-not $bien) -and ($i -lt 3)) { Start-Sleep -Seconds (10 * $i) }
+            }
+            if (-not $bien) { $todoBien = $false; Log ("Kit: no pude bajar bien " + $f.ruta + " de Lazarillo"); break }
+          }
+          if ($todoBien) {
+            $nuevosL = 0
+            foreach ($f in $faltan) {
+              Move-Item -LiteralPath ($f.local + ".lz_nuevo") -Destination $f.local -Force
+              $nuevosL++
+              if ($f.ruta -ieq "lz_lazarillo.ps1") { $meCambie = $true }
+              # raiz\LAZARILLO.bat y raiz\VINCULAR ESTA PC.bat van a la raiz del kit (C:\Lazarillo)
+              if ($f.ruta -like "raiz/*") {
+                try { Copy-Item -LiteralPath $f.local -Destination (Join-Path $base (Split-Path -Leaf $f.rel)) -Force } catch { }
+              }
+            }
+            Log ("Actualice " + $nuevosL + " archivos del motor desde Lazarillo (kit " + $man.version + ")")
+            Res ("Kit: actualizado desde Lazarillo (" + $nuevosL + " archivos)")
+          } else {
+            foreach ($f in $faltan) { Remove-Item -LiteralPath ($f.local + ".lz_nuevo") -Force -ErrorAction SilentlyContinue }
+            Log ("Kit: la actualizacion desde Lazarillo quedo a medias, no cambie nada (sigo con " + $MOTOR_VER + ")")
+          }
+        }
+        # PODA: solo si el kit del servidor se ve completo (>= 20 consultas).
+        try {
+          $sqlKit = @($enKit.Keys | Where-Object { $_ -like "sql/*.sql" })
+          if ($sqlKit.Count -ge 20) {
+            foreach ($sub in @("sql", "gen")) {
+              $lDir = Join-Path $motor $sub
+              if (-not (Test-Path $lDir)) { continue }
+              foreach ($f in @(Get-ChildItem -LiteralPath $lDir -File -ErrorAction SilentlyContinue)) {
+                if ($f.Name -like "*.lz_nuevo") { continue }
+                if ($enKit.ContainsKey(($sub + "/" + $f.Name).ToLower())) { continue }
+                $vj = Join-Path (Join-Path $motor "_viejo") $sub
+                New-Item -ItemType Directory -Force -Path $vj | Out-Null
+                Move-Item -LiteralPath $f.FullName -Destination (Join-Path $vj $f.Name) -Force -ErrorAction Stop
+                Log ("Poda: " + $sub + "\" + $f.Name + " ya no esta en el kit de Lazarillo, lo aparte a _motor\_viejo")
+              }
+            }
+          }
+        } catch { Log ("Poda: no pude revisar - " + $_.Exception.Message) }
+      }
+    } catch {
+      Log ("Kit: error buscando version nueva en Lazarillo - " + $_.Exception.Message)
+    } finally {
+      $ProgressPreference = $ppAntes
+    }
+    # Igual que con el Drive: si cambie yo mismo, arranco la version nueva y salgo
+    # (sigo con el candado tomado mientras corre la hija; ver V40 arriba).
+    if ($meCambie -and (-not $YaActualice)) {
+      Log "El motor se actualizo desde Lazarillo: arranco la version nueva y salgo"
+      $ar = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $miArchivo, '-YaActualice')
+      if ($SoloExtraer) { $ar += '-SoloExtraer' }
+      if ($SinAviso)    { $ar += '-SinAviso' }
+      if ($SoloRepartir) { $ar += '-SoloRepartir' }
+      Start-Process -FilePath powershell.exe -ArgumentList $ar -WindowStyle Hidden -Wait
+      SoltarCandado
+      exit 0
+    }
+  }
+}
+
+# ------------------------------------------------------------
 #  EL NOMBRE DEL LANZADOR SE ACOMODA AL PRINCIPIO, NO AL FINAL.
 #  Antes esto corria recien al terminar la corrida, asi que si la corrida
 #  FALLABA a mitad de camino (San Justo, que no encontraba la base) los
