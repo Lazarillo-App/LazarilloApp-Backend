@@ -57,7 +57,10 @@ async function verificarUsuario(email, password) {
 // ---------------------------------------------------------------- locales
 // Locales donde el usuario es dueño o admin: cada negocio (su local principal) y cada sucursal
 // secundaria. Cada uno dice si ya tiene PC (ocupado) para que el instalador lo muestre en gris.
-async function localesDe(userId) {
+// Con la huella de la PC que pregunta (Diego, 08/11: "cuando es la misma PC no se da cuenta"):
+// si la que lo tiene es ESTA misma PC, ocupado.esta = true y el instalador lo deja elegir
+// (renueva la llave sin duplicar). La huella nunca sale en la respuesta.
+async function localesDe(userId, huella = null) {
   const accesos = await listAccessibleBusinesses(userId);
   const rolPorNegocio = new Map();
   const NIVEL = { owner: 3, admin: 2, staff: 1 };
@@ -86,11 +89,14 @@ async function localesDe(userId) {
         AND NOT COALESCE((props->>'is_main')::boolean, false)
       ORDER BY business_id, name`, [ids]);
   const { rows: pcs } = await pool.query(
-    `SELECT business_id, branch_id, pc_nombre, ultimo_contacto, maestros, esquema
+    `SELECT business_id, branch_id, pc_nombre, pc_huella, ultimo_contacto, maestros, esquema
        FROM kit_pcs WHERE revocado_en IS NULL AND business_id = ANY($1::bigint[])`, [ids]);
+  const miHuella = huella ? String(huella).trim().slice(0, 128) : null;
   const ocupado = (biz, br) => {
     const p = pcs.find((x) => Number(x.business_id) === Number(biz) && Number(x.branch_id || 0) === Number(br || 0));
-    return p ? { pc: p.pc_nombre, ultimoContacto: p.ultimo_contacto } : null;
+    if (!p) return null;
+    return { pc: p.pc_nombre, ultimoContacto: p.ultimo_contacto, maestros: !!p.maestros,
+      esta: !!(miHuella && p.pc_huella && p.pc_huella === miHuella) };
   };
 
   const out = [];
