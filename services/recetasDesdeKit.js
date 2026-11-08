@@ -106,6 +106,13 @@ async function hayNovedades(businessId, porEsquema) {
 // La pasada del reloj: de a un negocio (no cargar la base de golpe).
 async function recetasDelReloj() {
   await refrescarPdvMap({ forzar: true });
+  // Primero los maestros (artículos m6 / insumos m0) si el kit subió nuevos: así las ventas y
+  // compras de abajo ya encuentran los artículos e insumos con qué cruzarse. Nunca corta la pasada.
+  try {
+    await require('./kit/maestrosDesdeKit').maestrosDelReloj();
+  } catch (e) {
+    console.error('[recetas-kit] maestros:', e?.message || e);
+  }
   for (const [businessId, porEsquema] of destinosPorNegocio()) {
     try {
       if (enCurso.has(businessId)) continue;
