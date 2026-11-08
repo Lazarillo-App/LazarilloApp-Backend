@@ -690,7 +690,7 @@ exports.updateAssignment = async (req, res, next) => {
             }
             const { rows: rr } = await pool.query(
                 `SELECT cr.id FROM app_custom_roles cr
-                  WHERE cr.id = $1 AND cr.deleted_at IS NULL
+                  WHERE cr.id = $1 AND cr.deleted_at IS NULL AND NOT cr.es_administracion
                     AND (
                       (cr.organization_id IS NOT NULL AND cr.organization_id = CASE WHEN $2 = 'organization' THEN $3::bigint
                          ELSE (SELECT organization_id FROM app_businesses WHERE id = $3::bigint) END)
