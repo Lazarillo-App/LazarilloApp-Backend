@@ -73,6 +73,7 @@ const teamRoutes = require('./routes/teamRoutes');
 const rolesRoutes = require('./routes/rolesRoutes');
 const { requireSeccion } = require('./services/auth/permisos');
 const meRoutes = require('./routes/meRoutes');
+const superusuarioRoutes = require('./routes/superusuarioRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const placesRoutes = require('./routes/placesRoutes');
 const exposeProbe = process.env.EXPOSE_MAXI_PROBE === '1';
@@ -172,6 +173,8 @@ app.use('/admin', adminRebuildAgg);
 
 /* ----------- rutas con auth ----------- */
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
+// Super usuarios de Lazarillo: no dependen de un negocio activo (van antes del guard global).
+app.use('/api/superusuarios', authRequired, superusuarioRoutes);
 
 // Guard global de /api (después de /api/cron y /api/admin)
 app.use('/api', authRequired, loadActiveBusiness);

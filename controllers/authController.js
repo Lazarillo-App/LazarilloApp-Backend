@@ -164,7 +164,8 @@ exports.me = async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, name, display_name, email, active_business_id, role, status,
-              account_status, trial_ends_at, subscription_ends_at
+              account_status, trial_ends_at, subscription_ends_at,
+              COALESCE(es_superusuario, false) AS es_superusuario
          FROM app_users WHERE id=$1`,
       [req.user.id]
     );
