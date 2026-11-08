@@ -111,7 +111,8 @@ exports.create = async (req, res) => {
       currency = 'ARS',
       timezone = '-03:00',
       tax_id = '',
-      maxi
+      maxi,
+      perfil
     } = req.body || {};
 
     if (!name || !name.trim()) return res.status(400).json({ error: 'name_required' });
@@ -128,6 +129,11 @@ exports.create = async (req, res) => {
 
     // props base
     const props = { branding, contact, address, social, lang, currency, timezone, tax_id };
+    // Perfil del local que arma el asistente de alta (descripción, horarios,
+    // canales, qué sirve, fotos/portada y datos de Google). Solo objetos planos.
+    if (perfil && typeof perfil === 'object' && !Array.isArray(perfil)) {
+      props.perfil = JSON.parse(JSON.stringify(perfil));
+    }
 
     // MAXI credenciales (cifrar si vienen)
     if (maxi?.email && maxi?.password && maxi?.codcli) {
