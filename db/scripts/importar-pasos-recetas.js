@@ -27,6 +27,9 @@ const argValor = (n) => process.argv.find((a) => a.startsWith(`--${n}=`))?.split
 const CARPETA = process.argv[2];
 const APLICAR = process.argv.includes('--aplicar');
 const PISAR = process.argv.includes('--pisar');
+const PISAR_NOMBRE = process.argv.includes('--incluir-distintos'); // cargar aunque el nombre del archivo no se parezca al de Lazarillo
+// Entre varios textos del mismo código, los "viejo" / "copia" / "(1)" van al final.
+const viejo = (archivo) => (/(viej|copia|\(\d+\))/i.test(path.basename(archivo)) ? 1 : 0);
 const HOST = argValor('confirmo-host');
 const NEGOCIO = Number(argValor('negocio') || 147);
 const MAX_FOTOS = 6; // lo mismo que admite la pantalla de notas
@@ -158,15 +161,18 @@ async function main() {
       // Texto: si hay varios para el mismo código, el que más se parece al nombre en Lazarillo.
       const textos = g.textos.map((t) => ({ ...t, pasos: pasosDesdeTexto(decodificar(fs.readFileSync(t.archivo)), d.nombre) }))
         .filter((t) => t.pasos.length)
-        .sort((a, b) => similitud(b.nombre, d.nombre) - similitud(a.nombre, d.nombre));
+        .sort((a, b) => viejo(a.archivo) - viejo(b.archivo) || similitud(b.nombre, d.nombre) - similitud(a.nombre, d.nombre));
       if (g.textos.length > 1) obs.push(`${g.textos.length} textos, uso "${textos[0]?.nombre ?? '?'}"`);
       if (g.textos.length && !textos.length) obs.push('texto vacío');
-      const sim = similitud(nombreArchivo, d.nombre);
-      if (sim < 0.5) obs.push('NOMBRE DISTINTO');
+      // El nombre más parecido entre los archivos de ese código (a veces uno se llama "34" o "3").
+      const sim = Math.max(0, ...[...g.textos, ...g.fotos].map((x) => similitud(x.nombre, d.nombre)));
+      const distinto = sim < 0.5;
+      if (distinto) obs.push(PISAR_NOMBRE ? 'NOMBRE DISTINTO' : 'NOMBRE DISTINTO: no se carga (--incluir-distintos)');
       const tienePasos = Array.isArray(d.pasos) && d.pasos.length > 0;
       const tieneFoto = !!d.foto || (Array.isArray(d.fotos) && d.fotos.length > 0);
-      const ponerPasos = textos.length > 0 && (PISAR || !tienePasos);
-      const ponerFotos = g.fotos.length > 0 && (PISAR || !tieneFoto);
+      const vale = !distinto || PISAR_NOMBRE;
+      const ponerPasos = vale && textos.length > 0 && (PISAR || !tienePasos);
+      const ponerFotos = vale && g.fotos.length > 0 && (PISAR || !tieneFoto);
       if (textos.length && tienePasos && !PISAR) obs.push('ya tenía paso a paso: no se toca');
       if (g.fotos.length && tieneFoto && !PISAR) obs.push('ya tenía foto: no se toca');
       if (g.fotos.length > MAX_FOTOS) obs.push(`${g.fotos.length} fotos, entran ${MAX_FOTOS}`);
