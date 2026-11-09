@@ -18,6 +18,16 @@ const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 const iso = (d) => d.toISOString().slice(0, 10);
 const sumarDias = (s, n) => { const d = new Date(`${s}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return iso(d); };
 const finDeMes = (anio, mes) => iso(new Date(Date.UTC(anio, mes, 0)));
+// La hora del 22 llega como fracción del día (como la guarda Excel: "0.075" = 01:48) o ya como "23:44".
+function horaTxt(h) {
+  if (h == null || h === '') return null;
+  const s = String(h).trim();
+  if (/^\d{1,2}:\d{2}/.test(s)) return s.slice(0, 5);
+  const x = Number(s);
+  if (!Number.isFinite(x)) return null;
+  const min = Math.round((x - Math.floor(x)) * 1440) % 1440;
+  return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+}
 
 // Ventas por artículo del lugar: la principal en sales_daily_items (branch NULL), cada sucursal en
 // sales_daily_items_branch. «Todas» = las dos.
@@ -29,6 +39,51 @@ function articulosSql(businessId, sucursal) {
   if (sucursal === null) return ppal;
   if (sucursal !== undefined) return suc(sql`s.branch_id = ${sucursal}`);
   return sql`${ppal} UNION ALL ${suc(sql`true`)}`;
+}
+
+// Movimientos de stock (informes 27 y 28 que sube el kit, Diego 08/11/2026): salidas que no son venta
+// (comida de personal, BIGBOX, publicidad…), valuadas a precio de venta como en MaxiRest. Salen del
+// esquema del kit del lugar (gestion_render_origenes) y de la tabla del año del período. Las salidas
+// vienen en negativo: acá van en positivo. No tienen turno: son siempre del día o del mes entero.
+// null = el lugar no tiene informes 27/28 todavía.
+const IDENT = /^[a-z0-9_]+$/;
+async function movimientosStock({ businessId, sucursal, desde, hastaExcl }) {
+  try {
+    const origenes = await db.many(sql`
+      SELECT esquema, pdv FROM gestion_render_origenes
+       WHERE activo AND business_id = ${businessId}
+         ${sucursal === undefined ? sql`` : sucursal === null ? sql`AND branch_id IS NULL` : sql`AND branch_id = ${sucursal}`}`);
+    const anio = desde.slice(0, 4);
+    const t28 = `i28_mov_de_stock_resumido_por_remito_${anio}`;
+    const t27 = `i27_mov_de_stock_detallado_por_remito_${anio}`;
+    const conceptos = new Map(); const articulos = new Map(); let hay = false;
+    for (const o of origenes) {
+      if (!IDENT.test(o.esquema)) continue;
+      const ex = await db.one(sql`SELECT to_regclass(${`"${o.esquema}"."${t28}"`}) IS NOT NULL AS a, to_regclass(${`"${o.esquema}"."${t27}"`}) IS NOT NULL AS b`);
+      if (!ex?.a || !ex?.b) continue;
+      hay = true;
+      const q = (t) => sql.raw(`"${o.esquema}"."${t}"`);
+      const [cs, as] = await Promise.all([
+        db.many(sql`SELECT TRIM(concepto) AS concepto, COUNT(DISTINCT remito)::int AS remitos, (-SUM(precio))::float8 AS importe
+                      FROM ${q(t28)} WHERE pdv = ${o.pdv} AND fecha >= ${desde}::date AND fecha < ${hastaExcl}::date GROUP BY 1`),
+        db.many(sql`SELECT TRIM(concepto) AS concepto, TRIM(nombre) AS nombre, (-SUM(cantidad))::float8 AS cantidad, (-SUM(precio))::float8 AS importe
+                      FROM ${q(t27)} WHERE pdv = ${o.pdv} AND fecha >= ${desde}::date AND fecha < ${hastaExcl}::date GROUP BY 1, 2`),
+      ]);
+      for (const c of cs) { const x = conceptos.get(c.concepto) || { concepto: c.concepto, remitos: 0, importe: 0 }; x.remitos += c.remitos; x.importe += c.importe; conceptos.set(c.concepto, x); }
+      for (const a of as) { const k = `${a.concepto}|${a.nombre}`; const x = articulos.get(k) || { concepto: a.concepto, nombre: a.nombre, cantidad: 0, importe: 0 }; x.cantidad += a.cantidad; x.importe += a.importe; articulos.set(k, x); }
+    }
+    if (!hay) return null;
+    const porConcepto = [...conceptos.values()].map((c) => ({ ...c, importe: r2(c.importe) })).sort((a, b) => b.importe - a.importe);
+    return {
+      importe: r2(porConcepto.reduce((s, c) => s + c.importe, 0)),
+      remitos: porConcepto.reduce((s, c) => s + c.remitos, 0),
+      porConcepto,
+      articulos: [...articulos.values()].map((a) => ({ ...a, importe: r2(a.importe) })).sort((a, b) => b.importe - a.importe).slice(0, 200),
+    };
+  } catch (e) {
+    console.error('[detalle-ventas] movimientos de stock', e.message);
+    return null;
+  }
 }
 
 async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }) {
@@ -86,7 +141,7 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
                            WHERE ${lugarV} ${condTurno} AND ${enRango(dAnt, corte)}`);
       })();
 
-  const [tot, turnos, servicio, cobro, mozos, dtoTurno, dias, comp, pagos, anuladas] = await Promise.all([
+  const [tot, turnos, servicio, cobro, mozos, dtoTurno, dias, comp, pagos, anuladas, dtoTickets, dtoMozo, stock] = await Promise.all([
     db.one(sql`SELECT SUM(${imp})::float8 AS total, COUNT(DISTINCT (v.fecha::date, v.comprobant))::int AS tickets,
                       SUM(${cub})::int AS cubiertos, SUM(COALESCE(v.descuento, 0))::float8 AS descuento,
                       COUNT(DISTINCT (v.fecha::date, v.comprobant)) FILTER (WHERE COALESCE(v.descuento, 0) <> 0)::int AS con_dto
@@ -110,7 +165,8 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     compQ,
     // Pagos hechos con la caja del día (gastos varios y sueldos con caja «CAJA»; Caja mayor y Bancos no).
     db.many(sql`SELECT TRIM(COALESCE(c.concepto, '')) AS concepto, TRIM(COALESCE(c.proveedor, '')) AS proveedor,
-                       COALESCE(c."importeManual", c.importe)::float8 AS importe, to_char(c."fechaPago"::date, 'YYYY-MM-DD') AS fecha
+                       COALESCE(c."importeManual", c.importe)::float8 AS importe, to_char(c."fechaPago"::date, 'YYYY-MM-DD') AS fecha,
+                       NULLIF(TRIM(COALESCE(c."observacManual", c.observac, '')), '') AS observacion
                 FROM gestion_compras c
                 WHERE ${filtroSucursalSql('c', businessId, sucursal)} AND UPPER(TRIM(c."cajaPago")) = 'CAJA'
                   AND c."fechaPago" >= ${desde}::date AND c."fechaPago" < ${hastaExcl}::date
@@ -120,9 +176,23 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     // comprobante que anulan. Una por comprobante (una NC puede venir partida en varios cobros).
     db.many(sql`SELECT to_char(v.fecha::date, 'YYYY-MM-DD') AS fecha, TRIM(v.comprobant) AS comprobante,
                        MAX(TRIM(v.cobro)) AS anula, COALESCE(NULLIF(TRIM(v.turno), ''), '—') AS turno,
-                       MAX(TRIM(v.tipo)) AS tipo, MAX(TRIM(v.mozo)) AS mozo, (-SUM(${imp}))::float8 AS importe
+                       MAX(TRIM(v.tipo)) AS tipo, MAX(TRIM(v.mozo)) AS mozo, (-SUM(${imp}))::float8 AS importe,
+                       MAX(NULLIF(TRIM(v.hora), '')) AS hora, MAX(NULLIF(TRIM(v.mesa), '')) AS mesa
                 ${base} AND ${imp} < 0
                 GROUP BY 1, 2, 4 ORDER BY 7 DESC`),
+    // Detalle de Revisar (Diego 09/11/2026): cada ticket con descuento (el descuento va una vez por
+    // ticket) y los descuentos por mozo.
+    db.many(sql`SELECT to_char(v.fecha::date, 'YYYY-MM-DD') AS fecha, TRIM(v.comprobant) AS comprobante,
+                       COALESCE(NULLIF(TRIM(v.turno), ''), '—') AS turno, MAX(TRIM(v.mozo)) AS mozo,
+                       MAX(NULLIF(TRIM(v.mesa), '')) AS mesa, MAX(NULLIF(TRIM(v.hora), '')) AS hora,
+                       SUM(COALESCE(v.descuento, 0))::float8 AS descuento, SUM(${imp})::float8 AS cobrado
+                ${base}
+                GROUP BY 1, 2, 3 HAVING SUM(COALESCE(v.descuento, 0)) <> 0
+                ORDER BY 7 DESC LIMIT 300`),
+    db.many(sql`SELECT COALESCE(NULLIF(TRIM(v.mozo), ''), '—') AS mozo, SUM(COALESCE(v.descuento, 0))::float8 AS importe,
+                       COUNT(DISTINCT (v.fecha::date, v.comprobant)) FILTER (WHERE COALESCE(v.descuento, 0) <> 0)::int AS tickets
+                ${base} GROUP BY 1 HAVING SUM(COALESCE(v.descuento, 0)) <> 0 ORDER BY 2 DESC`),
+    movimientosStock({ businessId, sucursal, desde, hastaExcl }),
   ]);
 
   let comparacion = null;
@@ -178,12 +248,18 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     servicio: servicio.map((s) => ({ tipo: s.tipo, importe: r2(s.importe), tickets: s.tickets, cubiertos: s.cubiertos })),
     cobro: cobro.map((c) => ({ cobro: c.cobro, importe: r2(c.importe), n: c.n })),
     mozos: mozos.map((m) => ({ mozo: m.mozo, importe: r2(m.importe), tickets: m.tickets })),
-    descuentos: { importe: r2(tot?.descuento), tickets: tot?.con_dto ?? 0, porTurno: dtoTurno.map((d) => ({ turno: d.turno, importe: r2(d.importe) })) },
+    descuentos: {
+      importe: r2(tot?.descuento), tickets: tot?.con_dto ?? 0,
+      porTurno: dtoTurno.map((d) => ({ turno: d.turno, importe: r2(d.importe) })),
+      porMozo: dtoMozo.map((d) => ({ mozo: d.mozo, importe: r2(d.importe), tickets: d.tickets })),
+      detalle: dtoTickets.map((t) => ({ fecha: t.fecha, comprobante: t.comprobante, turno: t.turno, mozo: t.mozo, mesa: t.mesa, hora: horaTxt(t.hora), descuento: r2(t.descuento), cobrado: r2(t.cobrado) })),
+    },
     anulaciones: {
       importe: r2(anuladas.reduce((s, a) => s + a.importe, 0)), n: anuladas.length,
-      detalle: anuladas.map((a) => ({ fecha: a.fecha, comprobante: a.comprobante, anula: a.anula, turno: a.turno, tipo: a.tipo, mozo: a.mozo, importe: r2(a.importe) })),
+      detalle: anuladas.map((a) => ({ fecha: a.fecha, comprobante: a.comprobante, anula: a.anula, turno: a.turno, tipo: a.tipo, mozo: a.mozo, hora: horaTxt(a.hora), mesa: a.mesa, importe: r2(a.importe) })),
     },
-    pagosCaja: pagos.map((p) => ({ concepto: p.concepto, proveedor: p.proveedor, importe: r2(p.importe), fecha: p.fecha })),
+    pagosCaja: pagos.map((p) => ({ concepto: p.concepto, proveedor: p.proveedor, importe: r2(p.importe), fecha: p.fecha, observacion: p.observacion })),
+    stock,
     dias: dias.map((d) => ({ fecha: d.fecha, importe: r2(d.importe) })),
     articulos,
   };
