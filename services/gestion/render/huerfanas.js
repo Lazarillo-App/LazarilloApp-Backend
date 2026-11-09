@@ -113,7 +113,10 @@ async function revisarHuerfanas(o) {
       if (APLICAR_HUERFANAS) {
         await tx.execute(sql`
           UPDATE gestion_compras SET "importeManual" = 0,
-            "observacManual" = ${NOTA_HUERFANA} || COALESCE(' · ' || COALESCE("observacManual", observac), '')
+            -- Una fila que ya traía la nota (p. ej. migrada de gestion) no la repite.
+            "observacManual" = CASE WHEN COALESCE("observacManual", observac, '') LIKE ${NOTA_HUERFANA + '%'}
+              THEN COALESCE("observacManual", observac)
+              ELSE ${NOTA_HUERFANA} || COALESCE(' · ' || COALESCE("observacManual", observac), '') END
           WHERE business_id = ${o.businessId} AND "rowId" = ${rowId}`);
       }
     });
