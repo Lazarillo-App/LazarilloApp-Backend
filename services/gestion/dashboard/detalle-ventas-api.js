@@ -44,10 +44,12 @@ function articulosSql(businessId, sucursal) {
 // Movimientos de stock (informes 27 y 28 que sube el kit, Diego 08/11/2026): salidas que no son venta
 // (comida de personal, BIGBOX, publicidad…), valuadas a precio de venta como en MaxiRest. Salen del
 // esquema del kit del lugar (gestion_render_origenes) y de la tabla del año del período. Las salidas
-// vienen en negativo: acá van en positivo. No tienen turno: son siempre del día o del mes entero.
+// vienen en negativo: acá van en positivo. Traen el turno como texto («Mañana», «Noche», «Tarde»;
+// Diego 09/11: «se hacen dentro del turno igual que todo lo demás»): ?turno filtra por las 3 primeras
+// letras, que es como viene en el 22 («Mañ», «Noc»).
 // null = el lugar no tiene informes 27/28 todavía.
 const IDENT = /^[a-z0-9_]+$/;
-async function movimientosStock({ businessId, sucursal, desde, hastaExcl }) {
+async function movimientosStock({ businessId, sucursal, desde, hastaExcl, turno }) {
   try {
     const origenes = await db.many(sql`
       SELECT esquema, pdv FROM gestion_render_origenes
@@ -56,19 +58,23 @@ async function movimientosStock({ businessId, sucursal, desde, hastaExcl }) {
     const anio = desde.slice(0, 4);
     const t28 = `i28_mov_de_stock_resumido_por_remito_${anio}`;
     const t27 = `i27_mov_de_stock_detallado_por_remito_${anio}`;
-    const conceptos = new Map(); const articulos = new Map(); let hay = false;
+    const conceptos = new Map(); const articulos = new Map(); const turnos = new Map(); let hay = false;
+    const condTurno = turno ? sql`AND LOWER(LEFT(TRIM(turno), 3)) = LOWER(LEFT(${turno}, 3))` : sql``;
     for (const o of origenes) {
       if (!IDENT.test(o.esquema)) continue;
       const ex = await db.one(sql`SELECT to_regclass(${`"${o.esquema}"."${t28}"`}) IS NOT NULL AS a, to_regclass(${`"${o.esquema}"."${t27}"`}) IS NOT NULL AS b`);
       if (!ex?.a || !ex?.b) continue;
       hay = true;
       const q = (t) => sql.raw(`"${o.esquema}"."${t}"`);
-      const [cs, as] = await Promise.all([
+      const [cs, as, ts] = await Promise.all([
         db.many(sql`SELECT TRIM(concepto) AS concepto, COUNT(DISTINCT remito)::int AS remitos, (-SUM(precio))::float8 AS importe
-                      FROM ${q(t28)} WHERE pdv = ${o.pdv} AND fecha >= ${desde}::date AND fecha < ${hastaExcl}::date GROUP BY 1`),
+                      FROM ${q(t28)} WHERE pdv = ${o.pdv} AND fecha >= ${desde}::date AND fecha < ${hastaExcl}::date ${condTurno} GROUP BY 1`),
         db.many(sql`SELECT TRIM(concepto) AS concepto, TRIM(nombre) AS nombre, (-SUM(cantidad))::float8 AS cantidad, (-SUM(precio))::float8 AS importe
-                      FROM ${q(t27)} WHERE pdv = ${o.pdv} AND fecha >= ${desde}::date AND fecha < ${hastaExcl}::date GROUP BY 1, 2`),
+                      FROM ${q(t27)} WHERE pdv = ${o.pdv} AND fecha >= ${desde}::date AND fecha < ${hastaExcl}::date ${condTurno} GROUP BY 1, 2`),
+        db.many(sql`SELECT COALESCE(NULLIF(TRIM(turno), ''), '—') AS turno, COUNT(DISTINCT remito)::int AS remitos, (-SUM(precio))::float8 AS importe
+                      FROM ${q(t28)} WHERE pdv = ${o.pdv} AND fecha >= ${desde}::date AND fecha < ${hastaExcl}::date ${condTurno} GROUP BY 1`),
       ]);
+      for (const t of ts) { const x = turnos.get(t.turno) || { turno: t.turno, remitos: 0, importe: 0 }; x.remitos += t.remitos; x.importe += t.importe; turnos.set(t.turno, x); }
       for (const c of cs) { const x = conceptos.get(c.concepto) || { concepto: c.concepto, remitos: 0, importe: 0 }; x.remitos += c.remitos; x.importe += c.importe; conceptos.set(c.concepto, x); }
       for (const a of as) { const k = `${a.concepto}|${a.nombre}`; const x = articulos.get(k) || { concepto: a.concepto, nombre: a.nombre, cantidad: 0, importe: 0 }; x.cantidad += a.cantidad; x.importe += a.importe; articulos.set(k, x); }
     }
@@ -78,6 +84,7 @@ async function movimientosStock({ businessId, sucursal, desde, hastaExcl }) {
       importe: r2(porConcepto.reduce((s, c) => s + c.importe, 0)),
       remitos: porConcepto.reduce((s, c) => s + c.remitos, 0),
       porConcepto,
+      porTurno: [...turnos.values()].map((t) => ({ ...t, importe: r2(t.importe) })).sort((a, b) => b.importe - a.importe),
       articulos: [...articulos.values()].map((a) => ({ ...a, importe: r2(a.importe) })).sort((a, b) => b.importe - a.importe).slice(0, 200),
     };
   } catch (e) {
@@ -192,7 +199,7 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     db.many(sql`SELECT COALESCE(NULLIF(TRIM(v.mozo), ''), '—') AS mozo, SUM(COALESCE(v.descuento, 0))::float8 AS importe,
                        COUNT(DISTINCT (v.fecha::date, v.comprobant)) FILTER (WHERE COALESCE(v.descuento, 0) <> 0)::int AS tickets
                 ${base} GROUP BY 1 HAVING SUM(COALESCE(v.descuento, 0)) <> 0 ORDER BY 2 DESC`),
-    movimientosStock({ businessId, sucursal, desde, hastaExcl }),
+    movimientosStock({ businessId, sucursal, desde, hastaExcl, turno }),
   ]);
 
   let comparacion = null;
