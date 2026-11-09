@@ -1,4 +1,5 @@
 // controllers/authController.js
+const { problemaPassword, rechazarPasswordDebil } = require('../utils/passwordPolicy');
 const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -53,6 +54,7 @@ exports.register = async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'email_and_password_required' });
     }
+    if (rechazarPasswordDebil(res, password)) return;
 
     const rawEmail = normEmail(email);
 
@@ -221,9 +223,7 @@ exports.changePassword = async (req, res) => {
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ ok: false, error: 'missing_fields' });
     }
-    if (newPassword.length < 6) {
-      return res.status(400).json({ ok: false, error: 'password_too_short' });
-    }
+    if (rechazarPasswordDebil(res, newPassword)) return;
 
     const { rows } = await pool.query(
       `SELECT id, password_hash FROM app_users WHERE id = $1`,
@@ -298,6 +298,7 @@ exports.resetPassword = async (req, res) => {
   try {
     const { token = '', password = '' } = req.body || {};
     if (!token || !password) return res.status(400).json({ error: 'token_and_password_required' });
+    if (rechazarPasswordDebil(res, password)) return;
 
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const { rows } = await pool.query(

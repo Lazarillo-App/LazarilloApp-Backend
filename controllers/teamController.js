@@ -8,6 +8,7 @@
 // - Admin solo ve los assignments que él creó + el suyo propio.
 // - Nadie puede revocar a un owner ni a sí mismo.
 
+const { problemaPassword, rechazarPasswordDebil } = require('../utils/passwordPolicy');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const pool = require('../config/db');
@@ -833,9 +834,7 @@ exports.acceptInvitation = async (req, res, next) => {
             return res.status(400).json({ ok: false, error: 'missing_fields' });
         }
         const displayNameClean = String(displayName || '').trim() || null;
-        if (password.length < 6) {
-            return res.status(400).json({ ok: false, error: 'password_too_short' });
-        }
+        if (rechazarPasswordDebil(res, password)) return;
 
         const rawEmail = normEmail(email);
         const tokenHash = crypto.createHash('sha256').update(token).digest('hex');

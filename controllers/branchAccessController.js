@@ -7,6 +7,7 @@
 // aprueba asignándole rol y sector.
 'use strict';
 
+const { problemaPassword, rechazarPasswordDebil } = require('../utils/passwordPolicy');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const pool = require('../config/db');
@@ -253,9 +254,14 @@ exports.confirmAccess = async (req, res, next) => {
 
     // Email pide contraseña (como siempre); celular también — el login sin
     // contraseña queda para más adelante, por ahora toda cuenta se crea con clave.
-    if (!password || password.length < 6) {
+    if (!password) {
       await client.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'password_required' });
+    }
+    if (problemaPassword(password)) {
+      await client.query('ROLLBACK');
+      rechazarPasswordDebil(res, password);
+      return;
     }
 
     const contacto = reqRow.email || reqRow.celular;
