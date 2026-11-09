@@ -322,7 +322,35 @@ async function migrarCompras(f, src, ctx) {
   const cols = ['business_id', 'branch_id', ...cs.filter((c) => cd.includes(c))];
   const corte = await cortes(f, 'compras', 'gestion_compras', src);
   console.log(`  cortes de compras:`, Object.fromEntries(corte));
-  const setManual = CAMPOS_MANUALES.map((c) => `${q(c)} = EXCLUDED.${q(c)}`).join(', ');
+  // Primera corrida: lo corregido en gestion se copia. Al volver a correr, lo corregido EN LAZARILLO manda
+  // (gestion se apaga; acá ya se edita): gestion solo completa un campo que acá está vacío. Los casos en
+  // que los dos lados tienen una corrección distinta se listan (conflictos) y quedan como están acá.
+  const relanzar = !(await esPrimeraCorrida(f));
+  const setManual = CAMPOS_MANUALES.map((c) => (!relanzar ? `${q(c)} = EXCLUDED.${q(c)}`
+    : c === 'esBloqueado' ? `${q(c)} = gestion_compras.${q(c)} OR EXCLUDED.${q(c)}`
+      : `${q(c)} = COALESCE(gestion_compras.${q(c)}, EXCLUDED.${q(c)})`)).join(', ');
+  const conflictos = [];
+  const CAMPOS_COMPARAR = ['importeManual', 'fechaManual', 'observacManual', 'conceptoCodigoManual'];
+  const normal = (c, v) => (v == null || v === '' ? null : c === 'importeManual' ? Number(v).toFixed(2) : c === 'fechaManual' ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : String(v).trim());
+  async function anotarConflictos(filas) {
+    if (!relanzar) return;
+    const porBiz = new Map();
+    for (const x of filas) { if (!porBiz.has(x.business_id)) porBiz.set(x.business_id, []); porBiz.get(x.business_id).push(x); }
+    for (const [biz, lista] of porBiz) {
+      const conManual = lista.filter((x) => CAMPOS_COMPARAR.some((c) => x[c] != null && x[c] !== ''));
+      if (!conManual.length) continue;
+      const { rows } = await pool.query(
+        `SELECT "rowId", ${CAMPOS_COMPARAR.map(q).join(', ')} FROM gestion_compras WHERE business_id = $1 AND "rowId" = ANY($2::text[])`,
+        [biz, conManual.map((x) => x.rowId)]);
+      const aca = new Map(rows.map((r) => [r.rowId, r]));
+      for (const x of conManual) {
+        const a = aca.get(x.rowId);
+        if (!a) continue;
+        const dif = CAMPOS_COMPARAR.filter((c) => normal(c, a[c]) != null && normal(c, x[c]) != null && normal(c, a[c]) !== normal(c, x[c]));
+        if (dif.length) conflictos.push(`${biz}:${x.rowId} ${String(x.fecha ?? '').slice(0, 10)} ${dif.map((c) => `${c} gestion=${normal(c, x[c])} acá=${normal(c, a[c])}`).join(' · ')}`);
+      }
+    }
+  }
   const cuenta = { leidas: 0, historia: 0, soloDrive: 0, propias: 0, correcciones: 0, correccionesSinFila: 0, salteadas: 0, sinLugar: 0 };
   const huerfanasCorreccion = [];
   const faltantes = nuevoFaltantes();
@@ -366,6 +394,7 @@ async function migrarCompras(f, src, ctx) {
       if (!manualTambien) cuenta.salteadas -= 1;
     }
     anotarFaltantes(faltantes, faltan.filter((y) => !esSoloDrive(y.r.fecha)));
+    await anotarConflictos([...entran, ...[...porNegocio.values()].flat()]);
     await insertar('gestion_compras', cols, entran, `ON CONFLICT (business_id, "rowId") DO UPDATE SET ${setManual}`);
     // Correcciones a mano sobre lo que ya trajo el kit.
     for (const [biz, corr] of porNegocio) {
@@ -378,7 +407,11 @@ async function migrarCompras(f, src, ctx) {
       await insertar('gestion_compras', cols, conFila, `ON CONFLICT (business_id, "rowId") DO UPDATE SET ${setManual}`);
     }
   }
-  anotar(f.nombre, 'compras', cuenta);
+  anotar(f.nombre, 'compras', { ...cuenta, conflictos: conflictos.length });
+  if (conflictos.length) {
+    console.log(`    ⚠ ${conflictos.length} fila(s) corregidas distinto en gestion y acá: queda lo de acá.`);
+    for (const c of conflictos.slice(0, 30)) console.log(`      ${c}`);
+  }
   if (huerfanasCorreccion.length) console.log(`    correcciones sin fila en destino (primeras): ${huerfanasCorreccion.slice(0, 8).join(' ')}`);
   informarFaltantes(faltantes, 'compras');
 }
