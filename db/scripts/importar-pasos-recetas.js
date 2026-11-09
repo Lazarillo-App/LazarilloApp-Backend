@@ -127,8 +127,34 @@ async function destino(c, g, bizIns) {
   return rows[0] ? { ...rows[0], que: 'artículo' } : null;
 }
 
+// Cloudinary no acepta imágenes de más de 10 MB: las más grandes se achican antes a un JPG de 2400 px
+// de lado mayor (con lo que trae Windows; el script corre en la PC de la usuaria).
+const TOPE_BYTES = 9.5 * 1024 * 1024;
+function achicar(archivo) {
+  if (fs.statSync(archivo).size <= TOPE_BYTES) return archivo;
+  const salida = path.join(require('os').tmpdir(), `receta-${Date.now()}-${path.basename(archivo).replace(/\.[^.]+$/, '')}.jpg`);
+  const ps = `
+Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile($env:FOTO_IN)
+$k = [Math]::Min([double]1, [double]2400 / [Math]::Max($img.Width, $img.Height))
+$w = [int]($img.Width * $k); $h = [int]($img.Height * $k)
+$bmp = New-Object System.Drawing.Bitmap $w, $h
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+$g.DrawImage($img, 0, 0, $w, $h)
+$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+$par = New-Object System.Drawing.Imaging.EncoderParameters 1
+$par.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), 85L
+$bmp.Save($env:FOTO_OUT, $enc, $par)
+$g.Dispose(); $bmp.Dispose(); $img.Dispose()`;
+  const r = require('child_process').spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { env: { ...process.env, FOTO_IN: archivo, FOTO_OUT: salida }, encoding: 'utf8' });
+  if (r.status !== 0 || !fs.existsSync(salida)) throw new Error(`no se pudo achicar la foto: ${(r.stderr || '').trim().slice(0, 200)}`);
+  return salida;
+}
+
 async function subirFoto(cloudinary, archivo, recetaId) {
-  const r = await cloudinary.uploader.upload(archivo, {
+  const r = await cloudinary.uploader.upload(achicar(archivo), {
     folder: `lazarillo/recetas/importacion-${NEGOCIO}`,
     public_id: `receta_${recetaId}_${path.basename(archivo).replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_').slice(0, 60)}`,
     overwrite: true,
