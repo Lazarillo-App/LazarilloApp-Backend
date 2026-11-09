@@ -307,8 +307,11 @@ exports.setOnboardingFlag = async (req, res) => {
   if (!businessId) return res.status(404).json({ error: 'not_found' });
 
   const key = String(req.body?.key || '').trim();
-  if (!key) return res.status(400).json({ error: 'key_requerida' });
-  const value = req.body?.value !== false;
+  if (!key || !/^[a-z0-9_]{1,40}$/i.test(key)) return res.status(400).json({ error: 'key_requerida' });
+  // Booleano (tours vistos) o texto corto (estado y paso del asistente de alta: alta_estado,
+  // alta_paso — pedido de la usuaria 09/11: al volver a entrar se retoma donde quedó).
+  const crudo = req.body?.value;
+  const value = typeof crudo === 'string' ? crudo.trim().slice(0, 40) : crudo !== false;
 
   const { rows } = await pool.query(
     `
@@ -316,14 +319,14 @@ exports.setOnboardingFlag = async (req, res) => {
        SET props = jsonb_set(
              COALESCE(props, '{}'::jsonb),
              '{onboarding}',
-             COALESCE(props->'onboarding', '{}'::jsonb) || jsonb_build_object($2::text, $3::boolean),
+             COALESCE(props->'onboarding', '{}'::jsonb) || jsonb_build_object($2::text, $3::jsonb),
              true
            ),
            updated_at = NOW()
      WHERE id = $1
      RETURNING id, props->'onboarding' AS onboarding;
     `,
-    [businessId, key, value]
+    [businessId, key, JSON.stringify(value)]
   );
 
   if (!rows.length) return res.status(404).json({ error: 'not_found' });
