@@ -654,6 +654,39 @@ async function migrarAperturas(f, src, ctx) {
   if (borradas.length) console.log(`  ⚠ ${borradas.length} regla(s) ya migradas fueron borradas en gestion y siguen activas acá: ${borradas.slice(0, 20).join(', ')}`);
 
   const sinLugar = reglas.filter((r) => !f.pdv[r.origenPuntoDeVentaId]).length + destinos.filter((d) => !f.pdv[d.puntoDeVentaId]).length;
+
+  // Al volver a correr, una regla ya migrada se reescribe con lo de gestion: si acá la cambiaron, se
+  // perdería. Se avisan las que difieren (modo, fechas, estado o destinos/porcentajes).
+  const distintas = [];
+  if (mapaR.size) {
+    const idsDestino = [...mapaR.values()];
+    const { rows: aca } = await pool.query(
+      `SELECT r.id, r.modo, r."fechaDesde"::date::text AS desde, r."fechaHasta"::date::text AS hasta, r."extremosInclusivos" AS inc, r.estado,
+              COALESCE(string_agg(d.business_id || '/' || COALESCE(d.branch_id::text, '') || '=' || round(d.porcentaje::numeric, 4), ',' ORDER BY d.business_id, d.branch_id), '') AS dest
+         FROM gestion_reglas_apertura r LEFT JOIN gestion_destinos_regla d ON d."reglaId" = r.id
+        WHERE r.id = ANY($1::int[]) GROUP BY r.id`, [idsDestino]);
+    const porId = new Map(aca.map((x) => [x.id, x]));
+    const fecha = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10));
+    const bool = (v) => v === true || v === 't' || v === 'true'; // de Supabase llega como texto
+    for (const r of reglas) {
+      const a = porId.get(mapaR.get(String(r.id)));
+      if (!a) continue;
+      const dest = destinos.filter((x) => x.reglaId === r.id && f.pdv[x.puntoDeVentaId])
+        .map((x) => { const l = f.pdv[x.puntoDeVentaId]; return { k: `${l.businessId}/${l.branchId ?? ''}`, p: Number(x.porcentaje).toFixed(4) }; })
+        .sort((x, y) => x.k.localeCompare(y.k, undefined, { numeric: true })).map((x) => `${x.k}=${x.p}`).join(',');
+      const destAca = a.dest.split(',').filter(Boolean).map((x) => { const [k, p] = x.split('='); return `${k}=${Number(p).toFixed(4)}`; })
+        .sort((x, y) => x.localeCompare(y, undefined, { numeric: true })).join(',');
+      const cambios = [
+        a.modo !== r.modo && 'modo', fecha(a.desde) !== fecha(r.fechaDesde) && 'desde', fecha(a.hasta) !== fecha(r.fechaHasta) && 'hasta',
+        bool(a.inc) !== bool(r.extremosInclusivos) && 'extremos', a.estado !== r.estado && `estado ${r.estado}→${a.estado} acá`, destAca !== dest && 'destinos',
+      ].filter(Boolean);
+      if (cambios.length) distintas.push(`regla ${a.id} (gestion ${r.id}, ${r.nivel} ${r.entidadId}): ${cambios.join(', ')}`);
+    }
+    if (distintas.length) {
+      console.log(`  ⚠ ${distintas.length} regla(s) migradas difieren de gestion. Al aplicar se reescriben con lo de gestion (si se editaron acá, se pierde):`);
+      for (const d of distintas.slice(0, 30)) console.log(`      ${d}`);
+    }
+  }
   const mapaD = new Map();
   let nuevas = 0;
   if (APLICAR) {
@@ -689,7 +722,7 @@ async function migrarAperturas(f, src, ctx) {
       if (PAUSA_MS) await dormir(5);
     }
   }
-  anotar(f.nombre, 'reglas_apertura', { leidas: reglas.length, destinos: destinos.length, nuevas: APLICAR ? nuevas : reglas.length, sinLugar, ajenas });
+  anotar(f.nombre, 'reglas_apertura', { leidas: reglas.length, destinos: destinos.length, nuevas: APLICAR ? nuevas : reglas.filter((r) => !mapaR.has(String(r.id))).length, yaMigradas: mapaR.size, distintas: distintas.length, sinLugar, ajenas });
 
   // Lo repartido, solo para compras que existen en destino. Cada fila suma exacto: se copia tal cual.
   const cuenta = { leidas: 0, entran: 0, compraSinFila: 0, sinRegla: 0 };
