@@ -155,6 +155,37 @@ async function prepararDestino() {
     CREATE TABLE IF NOT EXISTS gestion_migracion_ids (fuente TEXT NOT NULL, tabla TEXT NOT NULL, id_origen TEXT NOT NULL, id_destino INTEGER NOT NULL, PRIMARY KEY (fuente, tabla, id_origen));
     CREATE TABLE IF NOT EXISTS gestion_migracion_cortes (fuente TEXT NOT NULL, tabla TEXT NOT NULL, lugar TEXT NOT NULL, corte DATE, PRIMARY KEY (fuente, tabla, lugar));`);
 }
+// La conexión con Render a veces se corta en corridas largas: lo que va en una transacción se reintenta entero.
+const esCorte = (e) => !e.code || /^(08|57P)/.test(e.code) || /Connection terminated|timeout|ECONNRESET/i.test(e.message ?? '');
+async function conReintento(que, fn) {
+  for (let intento = 1; ; intento += 1) {
+    let c;
+    try {
+      c = await pool.connect();
+      await c.query('BEGIN');
+      const r = await fn(c);
+      await c.query('COMMIT');
+      c.release();
+      return r;
+    } catch (e) {
+      if (c) { await c.query('ROLLBACK').catch(() => {}); c.release(true); }
+      if (!esCorte(e) || intento >= 8) throw e;
+      console.log(`    (se cortó la conexión en ${que}: reintento ${intento})`);
+      await dormir(5000 * intento);
+    }
+  }
+}
+// Consultas sueltas: reintento ante un corte (son lecturas o escrituras con ON CONFLICT).
+const consultaOriginal = pool.query.bind(pool);
+pool.query = async (...args) => {
+  for (let intento = 1; ; intento += 1) {
+    try { return await consultaOriginal(...args); } catch (e) {
+      if (!esCorte(e) || intento >= 8) throw e;
+      console.log(`    (se cortó la conexión: reintento ${intento})`);
+      await dormir(5000 * intento);
+    }
+  }
+};
 const existeTabla = async (t) => !!(await pool.query('SELECT to_regclass($1) AS r', [t])).rows[0].r;
 
 async function mapaIds(fuente, tabla) {
@@ -727,31 +758,40 @@ async function migrarAperturas(f, src, ctx) {
       const l = f.pdv[r.origenPuntoDeVentaId];
       if (!l) continue;
       // Una regla por proveedor apunta al id de allá; las de texto y los otros niveles no cambian.
-      const entidad = r.nivel === 'proveedor' && /^\d+$/.test(r.entidadId) ? String(ctx.proveedor.get(r.entidadId) ?? r.entidadId) : r.entidadId;
-      const previa = mapaR.get(String(r.id));
-      let id = previa;
-      if (previa) {
-        await pool.query('DELETE FROM gestion_distribuciones_apertura WHERE "reglaId" = $1', [previa]);
-        await pool.query('DELETE FROM gestion_destinos_regla WHERE "reglaId" = $1', [previa]);
-        await pool.query(`UPDATE gestion_reglas_apertura SET modo=$2, "fechaDesde"=$3, "fechaHasta"=$4, "extremosInclusivos"=$5, estado=$6 WHERE id=$1`,
-          [previa, r.modo, r.fechaDesde, r.fechaHasta, r.extremosInclusivos, r.estado]);
-      } else {
-        const { rows } = await pool.query(
-          `INSERT INTO gestion_reglas_apertura (organization_id, business_id, branch_id, nivel, "entidadId", modo, "fechaDesde", "fechaHasta", "extremosInclusivos", estado, "creadoPor", "creadoEn")
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-          [f.organizationId, l.businessId, l.branchId, r.nivel, entidad, r.modo, r.fechaDesde, r.fechaHasta, r.extremosInclusivos, r.estado, r.creadoPor, r.creadoEn]);
-        id = rows[0].id;
-        await guardarId(f.nombre, 'reglas_apertura', r.id, id);
-        mapaR.set(String(r.id), id);
-        nuevas += 1;
-      }
-      for (const d of destinos.filter((x) => x.reglaId === r.id)) {
-        const ld = f.pdv[d.puntoDeVentaId];
-        if (!ld) continue;
-        const { rows } = await pool.query(
-          `INSERT INTO gestion_destinos_regla ("reglaId", business_id, branch_id, porcentaje) VALUES ($1,$2,$3,$4) RETURNING id`, [id, ld.businessId, ld.branchId, d.porcentaje]);
-        mapaD.set(String(d.id), rows[0].id);
-      }
+      const entidad = r.nivel === 'proveedor' && /^d+$/.test(r.entidadId) ? String(ctx.proveedor.get(r.entidadId) ?? r.entidadId) : r.entidadId;
+      // Cada regla con sus destinos en UNA transacción: si se corta la conexión, la regla queda como
+      // estaba (nunca sin destinos) y se reintenta.
+      const { id, destinosNuevos, esNueva } = await conReintento(`regla ${r.id}`, async (c) => {
+        const previa = mapaR.get(String(r.id));
+        let rid = previa;
+        if (previa) {
+          await c.query('DELETE FROM gestion_distribuciones_apertura WHERE "reglaId" = $1', [previa]);
+          await c.query('DELETE FROM gestion_destinos_regla WHERE "reglaId" = $1', [previa]);
+          await c.query(`UPDATE gestion_reglas_apertura SET modo=$2, "fechaDesde"=$3, "fechaHasta"=$4, "extremosInclusivos"=$5, estado=$6 WHERE id=$1`,
+            [previa, r.modo, r.fechaDesde, r.fechaHasta, r.extremosInclusivos, r.estado]);
+        } else {
+          const { rows } = await c.query(
+            `INSERT INTO gestion_reglas_apertura (organization_id, business_id, branch_id, nivel, "entidadId", modo, "fechaDesde", "fechaHasta", "extremosInclusivos", estado, "creadoPor", "creadoEn")
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+            [f.organizationId, l.businessId, l.branchId, r.nivel, entidad, r.modo, r.fechaDesde, r.fechaHasta, r.extremosInclusivos, r.estado, r.creadoPor, r.creadoEn]);
+          rid = rows[0].id;
+          await c.query(
+            `INSERT INTO gestion_migracion_ids (fuente, tabla, id_origen, id_destino) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (fuente, tabla, id_origen) DO UPDATE SET id_destino = EXCLUDED.id_destino`, [f.nombre, 'reglas_apertura', String(r.id), rid]);
+        }
+        const dn = [];
+        for (const d of destinos.filter((x) => x.reglaId === r.id)) {
+          const ld = f.pdv[d.puntoDeVentaId];
+          if (!ld) continue;
+          const { rows } = await c.query(
+            `INSERT INTO gestion_destinos_regla ("reglaId", business_id, branch_id, porcentaje) VALUES ($1,$2,$3,$4) RETURNING id`, [rid, ld.businessId, ld.branchId, d.porcentaje]);
+          dn.push([String(d.id), rows[0].id]);
+        }
+        return { id: rid, destinosNuevos: dn, esNueva: !previa };
+      });
+      mapaR.set(String(r.id), id);
+      for (const [o, dst] of destinosNuevos) mapaD.set(o, dst);
+      if (esNueva) nuevas += 1;
       if (PAUSA_MS) await dormir(5);
     }
   }
