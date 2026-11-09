@@ -87,7 +87,7 @@ function descripcionFactura(p) {
 }
 
 // ── Preparar y guardar una factura ─────────────────────────────────────────────
-async function prepararFactura(cliente, { organizationId, businessId }, body) {
+async function prepararFactura(cliente, { organizationId, businessId }, body, { ticketConFecha = true } = {}) {
   const parsed = facturaSchema.safeParse(body);
   if (!parsed.success) throw rechazo('Datos inválidos', 400, { detalle: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) });
   const f = parsed.data;
@@ -115,7 +115,7 @@ async function prepararFactura(cliente, { organizationId, businessId }, body) {
   if (faltan.length) throw rechazo(`Concepto de caja inexistente: ${faltan.join(', ')}`);
   let armado;
   try {
-    armado = armarFactura(f, { proveedor: { id: proveedor.id, codigo: proveedor.codigo }, pdvs: lugares, conceptos, grupoSinConcepto });
+    armado = armarFactura(f, { proveedor: { id: proveedor.id, codigo: proveedor.codigo }, pdvs: lugares, conceptos, grupoSinConcepto, ticketConFecha });
   } catch (err) {
     throw rechazo(err instanceof Error ? err.message : 'No se pudo armar la factura');
   }
@@ -163,7 +163,9 @@ async function yaExiste(cliente, businessId, comprobante, codigo, fecha, excepto
       AND regexp_replace(UPPER(comprobante), '^NC[ABC]?', 'NC') = ${cpb}
       AND (${!esTicket(cpb)}::boolean OR fecha::date = ${fecha}::date)
       AND NOT (${!!excepto}::boolean AND origen IS NOT DISTINCT FROM ${ORIGEN_LAZARILLO} AND comprobante = ${excepto?.comprobante ?? ''}
-               AND codigo = ${excepto?.codigo ?? ''})`);
+               AND codigo = ${excepto?.codigo ?? ''}
+               -- un ticket excluye solo a sí mismo, no al de igual número de otra fecha
+               AND (${!esTicketZ(excepto?.comprobante)}::boolean OR fecha::date = ${iso(excepto?.fecha) || null}::date))`);
   return (r?.n ?? 0) > 0;
 }
 
@@ -180,6 +182,24 @@ async function guardarCarga(tx, businessId, p, usuario, previa) {
             COALESCE(${previa?.creadoEn ?? null}::timestamp, CURRENT_TIMESTAMP))`);
 }
 
+// Filtro "esta factura": comprobante + proveedor y, si es un ticket, también la fecha (un ticket con
+// el mismo número del mismo proveedor puede ser otro, de otro día). colCodigo: "codigo" en compras,
+// "codPro" en detalle.
+const esTicketZ = (cpb) => /^Z/i.test(String(cpb ?? ''));
+const deLaFactura = ({ comprobante, codigo, fecha }, colCodigo = 'codigo') => sql`
+  comprobante = ${comprobante} AND ${sql.raw(`"${colCodigo}"`)} = ${codigo}
+  AND (${!esTicketZ(comprobante)}::boolean OR fecha::date = ${iso(fecha) || null}::date)`;
+
+// ¿Hay otro ticket con el mismo número y proveedor, de otra fecha? Entonces los pagos del Panel
+// (que se guardan por número + proveedor, sin fecha) no se pueden separar entre los dos.
+async function tieneTicketHermano(cliente, businessId, { comprobante, codigo, fecha }) {
+  if (!esTicketZ(comprobante)) return false;
+  const r = await cliente.one(sql`
+    SELECT 1 AS si FROM gestion_compras WHERE business_id = ${businessId} AND comprobante = ${comprobante} AND codigo = ${codigo}
+      AND fecha::date <> ${iso(fecha)}::date LIMIT 1`);
+  return !!r;
+}
+
 async function pagosDe(cliente, businessId, comprobante, codigo, rowIds) {
   const r = await cliente.one(sql`
     SELECT
@@ -190,10 +210,10 @@ async function pagosDe(cliente, businessId, comprobante, codigo, rowIds) {
   return { ...r, total: r.maxirest + r.internos + r.lazarillo };
 }
 
-async function borrarFilas(tx, businessId, comprobante, codigo) {
-  await tx.execute(sql`DELETE FROM gestion_detalle_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND comprobante = ${comprobante} AND "codPro" = ${codigo}`);
-  await tx.execute(sql`DELETE FROM gestion_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND comprobante = ${comprobante} AND codigo = ${codigo}`);
-  await tx.execute(sql`DELETE FROM gestion_facturas_movil WHERE business_id = ${businessId} AND comprobante = ${comprobante} AND codigo = ${codigo}`);
+async function borrarFilas(tx, businessId, factura) {
+  await tx.execute(sql`DELETE FROM gestion_detalle_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND ${deLaFactura(factura, 'codPro')}`);
+  await tx.execute(sql`DELETE FROM gestion_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND ${deLaFactura(factura)}`);
+  await tx.execute(sql`DELETE FROM gestion_facturas_movil WHERE business_id = ${businessId} AND ${deLaFactura(factura)}`);
 }
 
 // La factura a la que pertenece una fila de compras, con lo cargado si es de Lazarillo.
@@ -203,7 +223,7 @@ async function facturaDeFila(cliente, businessId, rowId) {
   if (!c || !c.comprobante || !c.codigo) return null;
   const esLz = c.origen === ORIGEN_LAZARILLO;
   const cargada = esLz
-    ? await cliente.one(sql`SELECT * FROM gestion_facturas_movil WHERE business_id = ${businessId} AND comprobante = ${c.comprobante} AND codigo = ${c.codigo}`)
+    ? await cliente.one(sql`SELECT * FROM gestion_facturas_movil WHERE business_id = ${businessId} AND ${deLaFactura(c)}`)
     : null;
   return { c, esLz, cargada };
 }
@@ -216,8 +236,10 @@ async function leerFactura(cliente, businessId, rowId) {
   const filas = await cliente.many(sql`
     SELECT "rowId", comprobante, "codCga", fecha, observac, importe, "importeManual", "impInt", branch_id, "proveedorId", origen
     FROM gestion_compras
-    WHERE business_id = ${businessId} AND comprobante = ${c.comprobante} AND codigo = ${c.codigo}
-      AND ${esLz ? sql`origen = ${ORIGEN_LAZARILLO}` : sql`origen IS DISTINCT FROM ${ORIGEN_LAZARILLO}`}
+    WHERE business_id = ${businessId}
+      -- Las de Lazarillo, con fecha si es ticket; las de MaxiRest como siempre (su número de ticket ya
+      -- trae la fecha y la fecha del renglón del 25 es la de carga).
+      AND ${esLz ? sql`${deLaFactura(c)} AND origen = ${ORIGEN_LAZARILLO}` : sql`comprobante = ${c.comprobante} AND codigo = ${c.codigo} AND origen IS DISTINCT FROM ${ORIGEN_LAZARILLO}`}
     ORDER BY "rowId"`);
   if (!filas.length) return null;
   const totalFilas = r2(filas.reduce((a, f) => a + Number(f.importeManual ?? f.importe ?? 0), 0));
@@ -231,8 +253,8 @@ async function leerFactura(cliente, businessId, rowId) {
   const lineas = await cliente.many(sql`
     SELECT codigo, nombre, medida, cantidad, "totalIns", tasa, "impNtTot", "codCga", "compraId"
     FROM gestion_detalle_compras
-    WHERE business_id = ${businessId} AND comprobante = ${c.comprobante} AND "codPro" = ${c.codigo}
-      ${esLz ? sql`AND origen = ${ORIGEN_LAZARILLO}` : sql``}
+    WHERE business_id = ${businessId}
+      ${esLz ? sql`AND ${deLaFactura(c, 'codPro')} AND origen = ${ORIGEN_LAZARILLO}` : sql`AND comprobante = ${c.comprobante} AND "codPro" = ${c.codigo}`}
     ORDER BY "rowId"`);
   const n = (v) => (v == null ? null : Number(v));
   const leido = facturaDesdeFilas(
@@ -339,11 +361,17 @@ async function editarFactura({ organizationId, businessId, usuario, rowId, body 
     const fa = await facturaDeFila(tx, businessId, rowId);
     if (!fa) throw rechazo('No existe la factura', 404);
     if (!fa.esLz) throw rechazo('Es de MaxiRest: se modifica en MaxiRest', 403);
-    const p = await prepararFactura(tx, ctx, body);
-    const comprobante = p.armado.filas[0].comprobante;
-    const antes = { comprobante: fa.c.comprobante, codigo: fa.c.codigo };
+    const antes = { comprobante: fa.c.comprobante, codigo: fa.c.codigo, fecha: fa.c.fecha };
     const filasAntes = await tx.many(sql`
-      SELECT "rowId" FROM gestion_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND comprobante = ${antes.comprobante} AND codigo = ${antes.codigo}`);
+      SELECT "rowId" FROM gestion_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND ${deLaFactura(antes)}`);
+    // Un ticket cargado antes de que la fecha fuera parte de su clave conserva la clave vieja: así sus
+    // correcciones y pagos siguen en las mismas filas.
+    let p = await prepararFactura(tx, ctx, body);
+    if (filasAntes.length && !filasAntes.some((x) => p.armado.filas.some((y) => y.rowId === x.rowId))) {
+      const viejo = await prepararFactura(tx, ctx, body, { ticketConFecha: false });
+      if (filasAntes.some((x) => viejo.armado.filas.some((y) => y.rowId === x.rowId))) p = viejo;
+    }
+    const comprobante = p.armado.filas[0].comprobante;
     const nuevos = new Set(p.armado.filas.map((x) => x.rowId));
     const sacadas = filasAntes.map((x) => x.rowId).filter((id) => !nuevos.has(id));
     const cambiaClave = comprobante !== antes.comprobante || p.proveedorCodigo !== antes.codigo;
@@ -355,9 +383,9 @@ async function editarFactura({ organizationId, businessId, usuario, rowId, body 
     if (await yaExiste(tx, businessId, comprobante, p.proveedorCodigo, p.f.fecha, antes)) throw rechazo('Ya hay otra factura con ese proveedor y número', 409);
     const correcciones = await tx.many(sql`
       SELECT "rowId", "importeManual", "fechaManual", "observacManual", "conceptoCodigoManual" FROM gestion_compras
-      WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND comprobante = ${antes.comprobante} AND codigo = ${antes.codigo}
+      WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND ${deLaFactura(antes)}
         AND ("importeManual" IS NOT NULL OR "fechaManual" IS NOT NULL OR "observacManual" IS NOT NULL OR "conceptoCodigoManual" IS NOT NULL)`);
-    await borrarFilas(tx, businessId, antes.comprobante, antes.codigo);
+    await borrarFilas(tx, businessId, antes);
     await insertarArmado(tx, businessId, p);
     ids.push(...p.armado.filas.map((x) => x.rowId));
     let perdidas = 0;
@@ -368,7 +396,7 @@ async function editarFactura({ organizationId, businessId, usuario, rowId, body 
         WHERE business_id = ${businessId} AND "rowId" = ${c.rowId}`);
     }
     await guardarCarga(tx, businessId, p, usuario, fa.cargada);
-    const costos = await pasarFacturaACostos(tx, ctx, p, { ...antes, fecha: iso(fa.c.fecha) });
+    const costos = await pasarFacturaACostos(tx, ctx, p, { comprobante: antes.comprobante, codigo: antes.codigo, fecha: iso(fa.c.fecha) });
     const lugar = p.lugares.find((l) => l.id === p.armado.filas[0].puntoDeVentaId)?.nombre ?? null;
     await registrarActividad(tx, {
       organizationId, businessId, tipo: 'factura', accion: 'editada', usuario, refId: p.armado.filas[0].rowId,
@@ -386,14 +414,19 @@ async function borrarFactura({ organizationId, businessId, usuario, rowId, conPa
     if (!fa) throw rechazo('No existe la factura', 404);
     if (!fa.esLz) throw rechazo('Es de MaxiRest: se borra en MaxiRest', 403);
     const filas = await tx.many(sql`
-      SELECT "rowId", importe FROM gestion_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND comprobante = ${fa.c.comprobante} AND codigo = ${fa.c.codigo}`);
+      SELECT "rowId", importe FROM gestion_compras WHERE business_id = ${businessId} AND origen = ${ORIGEN_LAZARILLO} AND ${deLaFactura(fa.c)}`);
     const ids = filas.map((x) => x.rowId);
     const pagos = await pagosDe(tx, businessId, fa.c.comprobante, fa.c.codigo, ids);
     if (pagos.total && !conPagos) throw rechazo('La factura tiene pagos', 409, { tienePagos: pagos });
+    // Los pagos del Panel se guardan por número + proveedor: si hay otro ticket con el mismo número, no
+    // se sabe cuáles son de este. Mejor anular el pago a mano que borrar los del otro ticket.
+    if (pagos.lazarillo && await tieneTicketHermano(tx, businessId, fa.c)) {
+      throw rechazo('Hay otro ticket con el mismo número y proveedor, de otra fecha, y los pagos no se pueden separar: anulá el pago desde Pagos a proveedores y después borrá el ticket.', 409);
+    }
     const total = filas.reduce((a, f) => a + Number(f.importe ?? 0), 0);
     if (pagos.internos) await tx.execute(sql`DELETE FROM gestion_aplicaciones_pago_interno WHERE compra_business_id = ${businessId} AND "compraRowId" = ANY(${ids}::text[])`);
     if (pagos.lazarillo) await tx.execute(sql`DELETE FROM gestion_aplicaciones_pago_proveedor WHERE business_id = ${businessId} AND comprobante = ${fa.c.comprobante} AND "codPro" = ${fa.c.codigo}`);
-    await borrarFilas(tx, businessId, fa.c.comprobante, fa.c.codigo);
+    await borrarFilas(tx, businessId, fa.c);
     await sacarFacturaDeCostos(tx, { businessId }, { comprobante: fa.c.comprobante, codigo: fa.c.codigo, fecha: iso(fa.c.fecha) });
     await registrarActividad(tx, {
       organizationId, businessId, tipo: 'factura', accion: 'eliminada', usuario,
@@ -439,13 +472,16 @@ async function buscarFilaFactura({ businessId, sp }) {
   const pdvId = Number(sp.get('pdvId'));
   const comprobante = sp.get('comprobante')?.trim();
   const codPro = sp.get('codPro')?.trim();
+  const fecha = /^\d{4}-\d{2}-\d{2}$/.test(sp.get('fecha') ?? '') ? sp.get('fecha') : null;
   if (!Number.isInteger(pdvId) || !comprobante || !codPro) throw rechazo('Datos inválidos');
   const lugar = (await obtenerLugares(db, businessId)).find((l) => l.id === pdvId);
   if (!lugar) throw rechazo('Datos inválidos');
   const c = await db.one(sql`
     SELECT "rowId" FROM gestion_compras
     WHERE business_id = ${businessId} AND branch_id IS NOT DISTINCT FROM ${lugar.branchId}::bigint AND comprobante = ${comprobante} AND codigo = ${codPro}
-    ORDER BY "rowId" LIMIT 1`);
+      -- Un ticket repetido de otro día: con ?fecha= el de esa fecha; si no, el más reciente.
+      AND (${!fecha}::boolean OR ${!esTicketZ(comprobante)}::boolean OR fecha::date = ${fecha}::date)
+    ORDER BY fecha DESC NULLS LAST, "rowId" LIMIT 1`);
   if (!c) throw rechazo('No encontré la factura', 404);
   return { rowId: c.rowId };
 }

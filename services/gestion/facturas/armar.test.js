@@ -78,3 +78,20 @@ describe("armarFactura", () => {
     expect(comprobanteDe("Ticket", "12", "5").detalle).toBe("Tic 0012-00000005");
   });
 });
+
+describe("tickets con el mismo número (bug heredado de gestion, 2026-11-09)", () => {
+  const tic = (fecha) => facturaSchema.parse({
+    proveedorId: 92, tipo: "Ticket", prefijo: "1", numero: "5", fecha,
+    registros: [{ tipo: "concepto", conceptoCodigo: "1", nombre: "Almacen", neto: 100, alicuota: 0, impInt: 0, puntoDeVentaId: 1 }],
+  });
+  const id = (f, conFecha) => armarFactura(f, { ...ctx, ticketConFecha: conFecha }).filas[0].rowId;
+  it("con fecha en la clave, dos días distintos dan filas distintas", () => {
+    expect(id(tic("2026-03-10"), true) === id(tic("2026-03-12"), true)).toBe(false);
+  });
+  it("sin fecha (tickets cargados antes) la clave es la de siempre", () => {
+    expect(id(tic("2026-03-10"), false)).toBe(id(tic("2026-03-12"), false));
+  });
+  it("una factura A no cambia su clave", () => {
+    expect(id(factura, true)).toBe(id(factura, false));
+  });
+});

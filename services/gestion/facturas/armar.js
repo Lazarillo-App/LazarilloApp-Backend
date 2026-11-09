@@ -113,8 +113,12 @@ function armarFactura(
     if (l == null) throw new Error(`PDV ${pdv} desconocido`);
     return l;
   };
+  // Un ticket se identifica también por su fecha (el mismo número del mismo proveedor puede repetirse
+  // otro día). ctx.ticketConFecha lo decide quien arma: los tickets cargados antes de este cambio
+  // conservan su clave sin fecha, para no perder correcciones ni pagos al editarlos.
+  const conFecha = !!ctx.ticketConFecha && cpb.letra === "Z";
   const claveFila = (pdv, cga) =>
-    `lz-${hash(`${local(pdv)}|${pdv}|${cpb.comprobante}|${ctx.proveedor.codigo}|${cga}`)}`;
+    `lz-${hash(`${local(pdv)}|${pdv}|${cpb.comprobante}|${ctx.proveedor.codigo}|${cga}${conFecha ? `|${f.fecha}` : ""}`)}`;
 
   const filas = new Map ();
   // cga null = sin concepto: clave "0:<rubro>" (las que tienen concepto no cambian su rowId).
