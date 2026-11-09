@@ -15,7 +15,8 @@
 //       PRUEBA (solo lee, no sube nada): qué receta le toca a cada archivo y qué hay que revisar.
 //   node db/scripts/importar-pasos-recetas.js "<carpeta>" --aplicar --confirmo-host=<host de DATABASE_URL> [--negocio=147] [--pisar]
 //       Carga. Sin --pisar NO toca una receta que ya tiene paso a paso o foto (completa solo lo que falta).
-//       Una receta que todavía no existe no se crea: se informa.
+//       Una receta que todavía no existe no se crea, salvo con --crear-recetas: se crea SIN ingredientes
+//       (solo paso a paso y foto) y el precio del elaborado queda como estaba.
 'use strict';
 
 require('dotenv').config({ quiet: true });
@@ -27,6 +28,7 @@ const argValor = (n) => process.argv.find((a) => a.startsWith(`--${n}=`))?.split
 const CARPETA = process.argv[2];
 const APLICAR = process.argv.includes('--aplicar');
 const PISAR = process.argv.includes('--pisar');
+const CREAR = process.argv.includes('--crear-recetas'); // si el artículo/elaborado no tiene receta, crearla vacía para el paso a paso
 const PISAR_NOMBRE = process.argv.includes('--incluir-distintos'); // cargar aunque el nombre del archivo no se parezca al de Lazarillo
 // Entre varios textos del mismo código, los "viejo" / "copia" / "(1)" van al final.
 const viejo = (archivo) => (/(viej|copia|\(\d+\))/i.test(path.basename(archivo)) ? 1 : 0);
@@ -153,6 +155,31 @@ $g.Dispose(); $bmp.Dispose(); $img.Dispose()`;
   return salida;
 }
 
+// Receta sin ingredientes (solo paso a paso / foto). En un elaborado, el precio y el costo de receta
+// se dejan como estaban, por si algún disparador de la base los recalcula con la receta vacía ($0).
+async function crearRecetaVacia(c, d) {
+  await c.query('BEGIN');
+  try {
+    let snap = null;
+    if (d.que === 'elaborado') {
+      snap = (await c.query('SELECT precio_ref, costo_receta FROM insumos WHERE id = $1', [d.id])).rows[0];
+    }
+    const col = d.que === 'elaborado' ? 'insumo_id' : 'article_id';
+    const { rows } = await c.query(
+      `INSERT INTO recetas (${col}, business_id, nombre, porciones, porcentaje_venta, costo_total, pasos, fotos, active, origen, created_at, updated_at)
+       VALUES ($1, $2, $3, 1, 0, 0, '[]'::jsonb, '[]'::jsonb, TRUE, 'manual', NOW(), NOW()) RETURNING id`,
+      [d.id, NEGOCIO, d.nombre]);
+    if (snap) {
+      await c.query('UPDATE insumos SET precio_ref = $2, costo_receta = $3 WHERE id = $1', [d.id, snap.precio_ref, snap.costo_receta]);
+    }
+    await c.query('COMMIT');
+    return rows[0].id;
+  } catch (e) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw e;
+  }
+}
+
 async function subirFoto(cloudinary, archivo, recetaId) {
   const r = await cloudinary.uploader.upload(achicar(archivo), {
     folder: `lazarillo/recetas/importacion-${NEGOCIO}`,
@@ -173,7 +200,7 @@ async function main() {
   const c = await pool.connect();
   const cloudinary = APLICAR ? require('../../config/cloudinary') : null;
   const filas = [];
-  const cuenta = { cargadas: 0, conPasos: 0, conFoto: 0, revisar: 0, noEncontradas: 0, sinReceta: 0, yaTenian: 0 };
+  const cuenta = { creadas: 0, cargadas: 0, conPasos: 0, conFoto: 0, revisar: 0, noEncontradas: 0, sinReceta: 0, yaTenian: 0 };
   try {
     if (!APLICAR) await c.query('BEGIN READ ONLY');
     const bizIns = await bizInsumos(c, NEGOCIO);
@@ -182,7 +209,23 @@ async function main() {
       const nombreArchivo = g.textos[0]?.nombre || g.fotos[0]?.nombre || '';
       const obs = [];
       if (!d) { cuenta.noEncontradas += 1; filas.push({ codigo: g.clave, archivo: nombreArchivo, lazarillo: '—', estado: `NO ENCONTRADO (${g.tipo === 'E' ? 'no hay insumo con ese código' : 'no hay artículo con ese código'})` }); continue; }
-      if (!d.receta_id) { cuenta.sinReceta += 1; filas.push({ codigo: g.clave, archivo: nombreArchivo, lazarillo: d.nombre, estado: `${d.que} SIN RECETA: no se carga` }); continue; }
+      if (!d.receta_id) {
+        // Solo si hay algo para cargar y el nombre coincide: si no, no se crea una receta vacía de más.
+        const hayTexto = g.textos.some((t) => pasosDesdeTexto(decodificar(fs.readFileSync(t.archivo)), d.nombre).length);
+        const coincide = PISAR_NOMBRE || Math.max(0, ...[...g.textos, ...g.fotos].map((x) => similitud(x.nombre, d.nombre))) >= 0.5;
+        if (CREAR && !((hayTexto || g.fotos.length) && coincide)) {
+          cuenta.sinReceta += 1;
+          filas.push({ codigo: g.clave, archivo: nombreArchivo, lazarillo: d.nombre, estado: `${d.que} SIN RECETA: no se crea`, revisar: coincide ? 'no hay pasos ni fotos para cargar' : 'NOMBRE DISTINTO' });
+          continue;
+        }
+        if (!CREAR) { cuenta.sinReceta += 1; filas.push({ codigo: g.clave, archivo: nombreArchivo, lazarillo: d.nombre, estado: `${d.que} SIN RECETA: no se carga (--crear-recetas)` }); continue; }
+        // Receta nueva SIN ingredientes, solo para guardar el paso a paso y la foto (pedido de la usuaria
+        // 2026-11-09). El precio del elaborado queda como estaba: el costo se arma cuando carguen ingredientes.
+        d.receta_id = APLICAR ? await crearRecetaVacia(c, d) : 'nueva';
+        d.pasos = []; d.foto = null; d.fotos = [];
+        cuenta.creadas += 1;
+        obs.push('receta nueva, sin ingredientes');
+      }
 
       // Texto: si hay varios para el mismo código, el que más se parece al nombre en Lazarillo.
       const textos = g.textos.map((t) => ({ ...t, pasos: pasosDesdeTexto(decodificar(fs.readFileSync(t.archivo)), d.nombre) }))
@@ -242,7 +285,7 @@ async function main() {
   if (sueltos.length) console.log(`\nArchivos con nombre sin código (no se usan, cargalos a mano si hace falta): ${sueltos.join(' | ')}`);
   const verbo = APLICAR ? 'Se cargaron' : 'Se cargarían';
   console.log(`\n${grupos.length} recetas en la carpeta. ${verbo}: ${APLICAR ? cuenta.cargadas : cuenta.conPasos + cuenta.conFoto ? `${cuenta.conPasos} paso a paso y ${cuenta.conFoto} con foto` : 0}${APLICAR ? ` (${cuenta.conPasos} paso a paso, ${cuenta.conFoto} con foto)` : ''}.`);
-  console.log(`No encontradas: ${cuenta.noEncontradas} · sin receta en Lazarillo: ${cuenta.sinReceta} · ya tenían todo: ${cuenta.yaTenian} · para revisar: ${cuenta.revisar}`);
+  console.log(`Recetas nuevas (sin ingredientes): ${cuenta.creadas} · no encontradas: ${cuenta.noEncontradas} · sin receta en Lazarillo: ${cuenta.sinReceta} · ya tenían todo: ${cuenta.yaTenian} · para revisar: ${cuenta.revisar}`);
   await pool.end();
 }
 
