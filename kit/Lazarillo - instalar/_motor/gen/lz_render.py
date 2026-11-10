@@ -18,6 +18,8 @@ Dentro de cada esquema (nombres: ver NOMBRES; en el Drive van los originales):
         i25_compras_detalle_de_compras_<año>, i80_compras_detalle_de_pagos_<año>,
         i11_compras_por_insumo_anual_<año>, i12_ventas_por_articulo_ranking_detallado_por_dia_<año>,
         i71_cta_por_comprobante_<año> (por año del comprobante)
+        i27_mov_de_stock_detallado_por_remito_<año>, i28_mov_de_stock_resumido_por_remito_<año>
+        (el 22 lleva además cod_dto y nom_dto: tipo de descuento de cada venta, solo en Render)
         i000_nomina  empleados, foto del dia (sin la columna 'clave' = contraseña de MaxiRest)
     maestros (uno por organizacion, sin pdv)
         m6_listado_de_articulos     (con rubro, subrubro, descripcion y discontinuado)
@@ -55,7 +57,11 @@ ORGS = {
 }
 
 ANUALES = [('22', 'inf_22'), ('14', 'inf_14'), ('25', 'inf_25'),
-           ('80', 'inf_80'), ('11', 'inf_11'), ('12', 'inf_12')]
+           ('80', 'inf_80'), ('11', 'inf_11'), ('12', 'inf_12'),
+           # 27 y 28 (Diego, 08/11/2026: "hace el cambio de render 27-28"): movimientos de
+           # stock por remito (detallado y resumido). Los usa el detalle de ventas del
+           # celular (pestaña Revisar). Salen de gen27 igual que el Excel del MEGA.
+           ('27', 'inf_27'), ('28', 'inf_28')]
 CLAVE_NOMINA = 'clave'          # contraseña de MaxiRest de cada empleado: no se sube
 
 # NOMBRES (Diego, 21/10): "quiero que uses los nombres originales que siempre use".
@@ -73,6 +79,8 @@ NOMBRES = {
     'inf_11':  ('11 - COMPRAS POR INSUMO ANUAL',                      'i11_compras_por_insumo_anual'),
     'inf_12':  ('12 - ventas por articulo ranking detallado por dia', 'i12_ventas_por_articulo_ranking_detallado_por_dia'),
     'inf_71':  ('71 - CTA POR COMPROBANTE',                           'i71_cta_por_comprobante'),
+    'inf_27':  ('27 - MOV DE STOCK ANUAL - Detallado por remito',     'i27_mov_de_stock_detallado_por_remito'),
+    'inf_28':  ('28 - MOV DE STOCK ANUAL - RESUMIDO POR REMITO',      'i28_mov_de_stock_resumido_por_remito'),
     'nomina':  ('000 - nomina',                                       'i000_nomina'),
     'articulos':           ('6 - listado de articulos',                 'm6_listado_de_articulos'),
     'insumos':             ('0 - LISTADO DE INSUMOS CON DISCONTINUADOS', 'm0_listado_de_insumos_con_discontinuados'),
@@ -529,6 +537,54 @@ def _leer_xlsx(ruta):
         return pd.read_excel(io.BytesIO(f.read()), engine='openpyxl')
 
 
+# ------------------------------------------------------------ tipo de descuento en el 22
+# Diego, 10/11/2026: «el 22 que sume la columna del código del tipo y el nombre del tipo a Render».
+# SOLO para Render (y su copia en Informes Lazarillo): el Excel del 22 de MaxiRest no cambia.
+# El código sale de la cabecera de cada venta (20_ventas_cab.tsv, cod_dto) y el nombre del maestro
+# de descuentos (19_descuentos.tsv). Va en todas las filas de la venta (también las de pago partido);
+# sin descuento cargado (código 0) las dos columnas quedan vacías.
+_CPB22 = {'7': 'FCB', '9': 'NCB', 'B': 'TIC', '6': 'FCA', 'A': 'FCA', '8': 'NCA'}   # igual que inf22_pdv
+_RE_CPB22 = re.compile(r'^\s*([A-Za-z_]{1,3})\s*(\d{3,4})\s*-\s*(\d+)\s*$')
+
+
+def con_tipo_descuento(B, df):
+    import pandas as pd
+    if not B.endswith(('/', '\\')):
+        B += os.sep
+    rd = lambda f: pd.read_csv(B + f, sep='\t', dtype=str, keep_default_na=False)
+    cab = rd('20_ventas_cab.tsv')
+    try:
+        dtos = rd('19_descuentos.tsv')
+        nombres = {str(c).strip(): str(n).strip() for c, n in zip(dtos['codigo'], dtos['nombre'])}
+    except Exception:
+        nombres = {}
+    cab = cab[cab['cod_suc'].str.strip() == '0'] if 'cod_suc' in cab.columns else cab
+    tipo = {}
+    for cc, pre, num, cd in zip(cab['cod_cpb'], cab['prefijo'], cab['numero'], cab['cod_dto']):
+        try:
+            k = (_CPB22.get(cc.strip(), cc.strip()).upper(), int(pre), int(num))
+        except ValueError:
+            continue
+        if k not in tipo:                       # como el informe: el primero si se repite
+            tipo[k] = cd.strip()
+    cods, noms, actual = [], [], None
+    for comp, turno, cobro in zip(df['COMPROBANT'], df['TURNO'], df['COD_COBRO']):
+        m = _RE_CPB22.match(str(comp)) if isinstance(comp, str) else None
+        if m:
+            actual = tipo.get((m.group(1).upper(), int(m.group(2)), int(m.group(3))))
+        elif isinstance(comp, str) and comp.strip():
+            actual = None                        # «FECHA: …», «TOTALES …»
+        elif not (str(turno).strip() or str(cobro).strip()):
+            actual = None                        # fila en blanco
+        c = actual if actual not in (None, '', '0') else None
+        cods.append(c)
+        noms.append(nombres.get(c) if c else None)
+    df = df.copy()
+    df['COD_DTO'] = cods
+    df['NOM_DTO'] = noms
+    return df
+
+
 # ------------------------------------------------------------ informes de un PDV
 def armar_informes(B, anio, generados, log_tmp):
     """Devuelve {tabla: [(anio_o_None, DataFrame)]}. 'generados' = {(cod, año): ruta}
@@ -550,6 +606,11 @@ def armar_informes(B, anio, generados, log_tmp):
             except Exception as e:
                 faltas.append('%s %d: %s' % (cod, a, e))
         if len(partes) == len(anios):
+            if cod == '22':
+                try:
+                    partes = [(a, con_tipo_descuento(B, d)) for a, d in partes]
+                except Exception as e:
+                    faltas.append('22 tipo de descuento: %s' % e)
             out[tabla] = partes
     # 71: acumulativo, se corta a los ultimos 2 años (por fecha del comprobante o del cobro)
     try:
