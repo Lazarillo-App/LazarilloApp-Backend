@@ -191,7 +191,7 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     // ticket) y los descuentos por mozo.
     db.many(sql`SELECT to_char(v.fecha::date, 'YYYY-MM-DD') AS fecha, TRIM(v.comprobant) AS comprobante,
                        COALESCE(NULLIF(TRIM(v.turno), ''), '—') AS turno, MAX(TRIM(v.mozo)) AS mozo,
-                       MAX(NULLIF(TRIM(v.mesa), '')) AS mesa, MAX(NULLIF(TRIM(v.hora), '')) AS hora, MAX(NULLIF(TRIM(v.tipo), '')) AS tipo,
+                       MAX(NULLIF(TRIM(v.mesa), '')) AS mesa, MAX(NULLIF(TRIM(v.hora), '')) AS hora,
                        SUM(COALESCE(v.descuento, 0))::float8 AS descuento, SUM(${imp})::float8 AS cobrado,
                        NULLIF(TRIM(MAX(v."nomDto")), '') AS tipo
                 ${base}
