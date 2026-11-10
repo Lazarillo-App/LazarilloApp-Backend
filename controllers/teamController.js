@@ -155,6 +155,15 @@ exports.listMembers = async (req, res, next) => {
          WHERE ua.user_id = $1
            AND ua.revoked_at IS NULL
            AND ua.role IN ('owner', 'admin')
+        UNION
+        -- Organizaciones de los negocios que poseo (mismo criterio que
+        -- getEffectiveRoleOnScope: owner de un negocio de la org = owner de la org).
+        -- Sin esto, quien invitaba a alguien a nivel organización no lo veía
+        -- después en su equipo (Diego 10/11/2026, invitación de Lautaro a CONTENEDORES).
+        SELECT DISTINCT 'organization'::text AS scope_type, b.organization_id AS scope_id
+          FROM app_businesses b
+         WHERE b.owner_id = $1
+           AND b.organization_id IS NOT NULL
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
              ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
