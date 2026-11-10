@@ -154,6 +154,49 @@ async function syncComprasDeNegocio(businessId, { dryRun = false } = {}) {
   return { ok: true, porPdv, dryRun };
 }
 
+// La fecha de una compra es la de la FACTURA, nunca la de carga (Diego 10/11/2026: «siempre debe
+// tomar fecha de factura»). El 25 trae en cada renglón la fecha en que se CARGÓ en MaxiRest (en 2026,
+// 2 de cada 3 facturas difieren, hasta semanas); la de la factura está en la cabecera (informe 14,
+// gestion_compras). Se busca por proveedor + comprobante en el mismo negocio y sucursal. Si la
+// cabecera todavía no llegó, queda la de carga y se corrige sola en la próxima corrida (el upsert
+// actualiza la fecha). La clave de la compra no lleva fecha: cambiarla nunca duplica.
+const diaISO = (v) => {
+  if (v instanceof Date) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())}`;
+  }
+  return String(v ?? '').slice(0, 10);
+};
+async function aplicarFechaDeFactura(businessId, branchId, porFactura) {
+  if (!porFactura.size) return 0;
+  const { rows } = await pool.query(
+    `SELECT DISTINCT TRIM(codigo) AS codigo, UPPER(TRIM(comprobante)) AS comprobante, fecha::date::text AS fecha
+       FROM gestion_compras
+      WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $2::bigint AND comprobante IS NOT NULL`,
+    [businessId, branchId ?? null]
+  );
+  const porClave = new Map();
+  for (const r of rows) {
+    const k = `${r.codigo}|${r.comprobante}`;
+    if (!porClave.has(k)) porClave.set(k, []);
+    porClave.get(k).push(r.fecha);
+  }
+  const dias = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 86_400_000;
+  let cambiadas = 0;
+  for (const f of porFactura.values()) {
+    const [tipo, n1, n2] = String(f.numero).split('-');
+    const comp = `${String(tipo).trim().toUpperCase()}${String(Number(n1)).padStart(4, '0')}${String(Number(n2)).padStart(8, '0')}`;
+    const fechas = porClave.get(`${String(f.proveedor ?? '').trim()}|${comp}`);
+    if (!fechas || !fechas.length) continue;
+    const carga = diaISO(f.items[0]?.fecha);
+    // Si el mismo número aparece en más de una fecha (tickets), la más cercana a la carga.
+    const elegida = fechas.reduce((m, x) => (dias(x, carga) < dias(m, carga) ? x : m), fechas[0]);
+    if (elegida !== carga) cambiadas++;
+    for (const it of f.items) it.fecha = elegida;
+  }
+  return cambiadas;
+}
+
 async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap, { dryRun }) {
   const filas = await obtenerFilasI25(pdv, schema);
   const pagosResultado = await syncPagosDeNegocio(businessId, pdv, schema, branchId, { dryRun });
@@ -211,6 +254,8 @@ async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap
       sucursal: branchId,      // purchasesStore lo guarda como purchase_items.branch_id
     });
   }
+  const fechasDeFactura = await aplicarFechaDeFactura(businessId, branchId, porFactura);
+
   // Una factura que ya entró por el Panel no se vuelve a sumar: mientras se cargue en los dos lados,
   // gana la del Panel, igual que en el import de gestion. Se compara por número y proveedor (y fecha
   // en tickets, que repiten número), en todo el negocio.
@@ -244,7 +289,7 @@ async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap
   }
 
   if (dryRun) {
-    return { pdv, branchId, facturas: facturas.length, salteadasPanel, items: filas.length, sinInsumo, pagos: pagosResultado };
+    return { pdv, branchId, facturas: facturas.length, salteadasPanel, fechasDeFactura, items: filas.length, sinInsumo, pagos: pagosResultado };
   }
 
   const resultadoCompras = await upsertPurchasesBatch(businessId, facturas, insumoMap, branchId);
@@ -254,6 +299,7 @@ async function syncComprasDePdv(businessId, { pdv, schema, branchId }, insumoMap
     branchId,
     facturas: facturas.length,
     salteadasPanel,
+    fechasDeFactura,
     items: filas.length,
     sinInsumo,
     compras: resultadoCompras,
