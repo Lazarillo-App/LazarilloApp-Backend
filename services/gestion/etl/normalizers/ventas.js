@@ -214,6 +214,8 @@ async function normalizeVentas(
             ${data.COD_SUC},
             ${data.NOMBRESUC},
             ${data.CUPON},
+            ${data.COD_DTO ?? null},
+            ${data.NOM_DTO ?? null},
             ${businessId}::bigint,
             ${branchId}::bigint
           )`;
@@ -223,7 +225,7 @@ async function normalizeVentas(
           INSERT INTO gestion_ventas (
             "rowId", turno, comprobant, hora, tipo, mesa, mozo, cub, cobro, "codCobro",
             importe, "importeTrabajado", total, descuento, "cliNombre", "cliRazon", "cliCut",
-            fecha, "codSuc", "nombreSuc", cupon, business_id, branch_id
+            fecha, "codSuc", "nombreSuc", cupon, "codDto", "nomDto", business_id, branch_id
           )
           VALUES ${sql.join(rowValues)}
           ON CONFLICT (business_id, "rowId") DO UPDATE SET
@@ -246,7 +248,10 @@ async function normalizeVentas(
             fecha             = EXCLUDED.fecha,
             "codSuc"          = EXCLUDED."codSuc",
             "nombreSuc"       = EXCLUDED."nombreSuc",
-            cupon             = EXCLUDED.cupon
+            cupon             = EXCLUDED.cupon,
+            -- Si el archivo no trae el tipo de descuento (Excel viejo, kit sin actualizar), queda el que había.
+            "codDto"          = COALESCE(EXCLUDED."codDto", gestion_ventas."codDto"),
+            "nomDto"          = COALESCE(EXCLUDED."nomDto", gestion_ventas."nomDto")
             -- branch_id NO se toca (ver gestion_compras en compras.js: en Lazarillo null es
             -- el negocio principal, no "sin asignar").
         `;
