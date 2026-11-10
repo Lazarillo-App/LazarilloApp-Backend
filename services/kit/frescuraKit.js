@@ -43,29 +43,56 @@ async function ultimaFecha(schema, prefijo, pdvs) {
   return null;
 }
 
-// { subida: ISO | null, ventas, compras } o null si el negocio no sube por el kit.
+// Nombre de cada sucursal para el pulso: la principal (branchId null) con el nombre de su
+// sucursal is_main (o el del negocio); las secundarias, el suyo.
+async function nombresSucursales(businessId) {
+  const { rows } = await pool.query(
+    `SELECT b.id, b.name, COALESCE((b.props->>'is_main')::boolean, false) AS is_main, n.name AS negocio
+       FROM app_businesses n LEFT JOIN app_branches b ON b.business_id = n.id
+      WHERE n.id = $1`, [businessId]);
+  const m = new Map();
+  for (const r of rows) {
+    if (r.id != null && !r.is_main) m.set(Number(r.id), r.name);
+    if (r.is_main) m.set(null, r.name);
+    if (!m.has(null) && r.negocio) m.set('negocio', r.negocio);
+  }
+  if (!m.has(null)) m.set(null, m.get('negocio') || null);
+  return m;
+}
+
+// { subida, ventas, compras, sucursales: [{ pdv, branchId, nombre, subida, ventas, compras }] }
+// o null si el negocio no sube por el kit. Diego, 10/11/2026: "¿no debería cada sucursal tener
+// su propio pulso?" — cada PC (pdv) se juzga sola; los campos de arriba (la subida MÁS NUEVA)
+// quedan por compatibilidad, pero esconden una PC caída si la otra sube: el front usa sucursales.
 async function frescuraKit(businessId) {
   const id = Number(businessId);
   const c = cache.get(id);
   if (c && Date.now() - c.t < CACHE_MS) return c.v;
   await refrescarPdvMap();
-  const porEsquema = {};
-  for (const p of pdvsDeNegocio(id)) (porEsquema[p.schema] ||= []).push(p.pdv);
-  if (!Object.keys(porEsquema).length) { cache.set(id, { t: Date.now(), v: null }); return null; }
-  let subida = null, ventas = null, compras = null;
-  for (const [schema, pdvs] of Object.entries(porEsquema)) {
-    if (!RE_NOMBRE.test(schema)) continue;
-    if (await existe(schema, '_cargas')) {
-      const { rows } = await pool.query(`SELECT MAX(cargado) AS s FROM "${schema}"._cargas WHERE pdv = ANY($1::text[])`, [pdvs]);
-      const s = rows[0]?.s ? new Date(rows[0].s) : null;
-      if (s && (!subida || s > subida)) subida = s;
+  const destinos = pdvsDeNegocio(id).filter((p) => RE_NOMBRE.test(p.schema));
+  if (!destinos.length) { cache.set(id, { t: Date.now(), v: null }); return null; }
+  let nombres = new Map();
+  try { nombres = await nombresSucursales(id); } catch (e) { console.warn('[pulso] nombres', e.message); }
+  const conCargas = new Map();
+  const sucursales = [];
+  for (const { pdv, schema, branchId } of destinos) {
+    if (!conCargas.has(schema)) conCargas.set(schema, await existe(schema, '_cargas'));
+    let subida = null;
+    if (conCargas.get(schema)) {
+      const { rows } = await pool.query(`SELECT MAX(cargado) AS s FROM "${schema}"._cargas WHERE pdv = $1`, [pdv]);
+      subida = rows[0]?.s ? new Date(rows[0].s).toISOString() : null;
     }
-    const v = await ultimaFecha(schema, 'i12', pdvs);
-    if (v && (!ventas || v > ventas)) ventas = v;
-    const k = await ultimaFecha(schema, 'i25', pdvs);
-    if (k && (!compras || k > compras)) compras = k;
+    sucursales.push({
+      pdv,
+      branchId: branchId ?? null,
+      nombre: nombres.get(branchId ?? null) || pdv,
+      subida,
+      ventas: await ultimaFecha(schema, 'i12', [pdv]),
+      compras: await ultimaFecha(schema, 'i25', [pdv]),
+    });
   }
-  const v = { subida: subida ? subida.toISOString() : null, ventas, compras };
+  const max = (k) => sucursales.reduce((a, x) => (x[k] && (!a || x[k] > a) ? x[k] : a), null);
+  const v = { subida: max('subida'), ventas: max('ventas'), compras: max('compras'), sucursales };
   cache.set(id, { t: Date.now(), v });
   return v;
 }

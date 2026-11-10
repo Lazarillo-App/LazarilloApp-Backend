@@ -21,6 +21,9 @@
 //     el kit por última vez y hasta qué fecha llega lo que subió (services/kit/frescuraKit.js).
 //     El front juzga el punto por la SUBIDA y por si la app ya tomó todo, no por la fecha del
 //     último dato (un local puede no tener compras hace semanas y estar al día).
+//   - kit.sucursales (Diego, 10/11: "¿no debería cada sucursal tener su propio pulso?" y "¿no
+//     debería ser una única subida?"): una fila por PC/sucursal con su subida, hasta dónde llega
+//     lo que subió (ventas i12 / compras i25) y hasta dónde llegó Recetas en esa sucursal.
 // Fechas futuras (tickets cargados a propósito más adelante) no cuentan: tope mañana.
 
 const express = require('express');
@@ -69,6 +72,28 @@ router.get('/', requireBusinessAccess, async (req, res, next) => {
     const actualizando = recetasEnCurso(businessId) || (conBalance && await balanceActualizando());
     let kit = null;
     try { kit = await frescuraKit(businessId); } catch (e) { console.warn('[pulso] kit', e.message); }
+    // Por sucursal (Diego, 10/11): a cada PC del kit se le suma hasta dónde llegó Recetas en SU
+    // sucursal (branch_id; la principal es NULL), para avisar si la app no tomó lo que subió.
+    if (kit?.sucursales?.length) {
+      const { rows: porSuc } = await pool.query(
+        `SELECT branch_id, MAX(v) AS ventas, MAX(c) AS compras FROM (
+           SELECT branch_id, to_char(MAX(day), 'YYYY-MM-DD') AS v, NULL AS c FROM sales_daily_items
+            WHERE business_id = $1 AND day <= now() + interval '1 day' GROUP BY branch_id
+           UNION ALL
+           SELECT branch_id, NULL, to_char(MAX(fecha)::date, 'YYYY-MM-DD') FROM purchases
+            WHERE business_id = $1 AND fecha <= now() + interval '1 day' GROUP BY branch_id
+         ) t GROUP BY branch_id`,
+        [businessId]
+      );
+      const rec = new Map(porSuc.map((x) => [x.branch_id == null ? null : Number(x.branch_id), x]));
+      kit = {
+        ...kit,
+        sucursales: kit.sucursales.map((x) => {
+          const r = rec.get(x.branchId ?? null);
+          return { ...x, recetas: { ventas: r?.ventas || null, compras: r?.compras || null } };
+        }),
+      };
+    }
     res.set('Cache-Control', 'no-store');
     res.json({ recetas, balance, kit, actualizando });
   } catch (e) {
