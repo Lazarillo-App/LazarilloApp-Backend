@@ -71,7 +71,7 @@ if ($SoloExtraer -and $SinAviso -and (-not $YaActualice) -and (-not $SoloReparti
     $pruebas++
   }
   if ($con -eq "ok") {
-    if (Test-Path (Join-Path $motor "lz_vinculo.txt")) { Log "Conexion: llego a Lazarillo (PC vinculada: sube por Lazarillo, sin Drive), sigo" }
+    if (Test-Path (Join-Path $motor "lz_vinculo.txt")) { Log "Conexion: llego a Lazarillo (PC vinculada: sube y se actualiza por Lazarillo), sigo" }
     else { Log "Conexion: llego al servidor de Render, sigo" }
   } elseif ($con -ne "sin_config") {
     $motivo = if ($con -eq "sin_dns") { "no encuentra el servidor (sin internet o sin DNS)" } else { "el servidor de Render no responde" }
@@ -161,11 +161,31 @@ function Sync-KitMotorRapido {
 }
 
 # ------------------------------------------------------------
+#  V51 (10/11, Diego: "aunque esté el Drive, cuando el kit esté instalado, ¿no
+#  debería actualizar siempre desde el kit? Que solo use el Drive para guardar los
+#  informes"). Una PC VINCULADA (lz_vinculo.txt con url y llave) se actualiza SOLO
+#  desde Lazarillo, tenga o no Drive: no copia nada del kit del Drive, no poda por lo
+#  que ve en el Drive (eso apartó lz_render.py el 10/11) y no le cambia el nombre al
+#  lanzador del Drive. El Drive le queda solo para guardar informes, datos y logs.
+# ------------------------------------------------------------
+$vinculada = $false
+try {
+  $vf = Join-Path $motor "lz_vinculo.txt"
+  if (Test-Path $vf) {
+    $vt = @(Get-Content $vf -Encoding UTF8 -ErrorAction Stop)
+    $vinculada = (@($vt | Where-Object { $_ -match '^\s*url\s*=\s*\S+' }).Count -gt 0) -and
+                 (@($vt | Where-Object { $_ -match '^\s*llave\s*=\s*\S+' }).Count -gt 0)
+  }
+} catch { $vinculada = $false }
+if ($vinculada -and $destinos["kit_drive"]) { Log "Kit: PC vinculada - se actualiza desde Lazarillo; el Drive queda solo para guardar informes" }
+
+# ------------------------------------------------------------
 #  AUTOACTUALIZACION: si en el kit del Drive hay una version mas nueva
 #  de algun archivo del motor, la trae. Asi puedo corregir los tres PDV
 #  desde aca sin que Diego toque nada. destinos.txt nunca se pisa.
+#  (Solo PC sin vincular, ver V51 arriba.)
 # ------------------------------------------------------------
-if ($destinos["kit_drive"]) {
+if ($destinos["kit_drive"] -and (-not $vinculada)) {
   $motorDrive = Join-Path $destinos["kit_drive"] "_motor"
   if (Test-Path $motorDrive) {
     $nuevos = 0
@@ -274,7 +294,8 @@ function Leer-VinculoMotor {
   return $null
 }
 
-if ((-not $destinos["kit_drive"]) -and (Test-Path (Join-Path $motor "lz_vinculo.txt"))) {
+# V51: toda PC vinculada, tenga Drive o no.
+if (Test-Path (Join-Path $motor "lz_vinculo.txt")) {
   $vinM = Leer-VinculoMotor
   if (-not $vinM) {
     Log "Kit: lz_vinculo.txt sin url o llave, no busco version nueva"
@@ -417,7 +438,7 @@ if ($SoloRepartir) {
 }
 
 RenombrarLanzador $base
-if ($destinos["kit_drive"]) { RenombrarLanzador $destinos["kit_drive"] }
+if ($destinos["kit_drive"] -and (-not $vinculada)) { RenombrarLanzador $destinos["kit_drive"] }
 
 # ------------------------------------------------------------
 #  PASO 0 - ordenar la carpeta
