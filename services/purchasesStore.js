@@ -3,7 +3,7 @@
 
 const pool = require('../config/db');
 const { propagarCostoInsumo } = require('./costoRecetaService');
-const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo, RATIO_PRECIO_SOSPECHOSO } = require('./precioCosteoInsumos');
+const { getModoCosteo, getConImpuestos, calcularPreciosPorModo, aplicarPreciosCosteo, RATIO_PRECIO_SOSPECHOSO } = require('./precioCosteoInsumos');
 
 // Un código de MaxiRest puede coincidir por pura casualidad numérica con el
 // codigo_maxi de un insumo real (confirmado con decenas de casos: gastos
@@ -59,7 +59,8 @@ function facturaKeyPanel({ letra, prefijo, numero, codigo, fecha }) {
 // businessId; los insumos pueden vivir en otro negocio (insumosBizId, el principal de la org).
 async function actualizarPreciosDeInsumos(client, { businessId, insumosBizId = businessId, insumoIds }) {
   const modoCosteo = await getModoCosteo(insumosBizId, client);
-  const precios = await calcularPreciosPorModo(client, businessId, insumoIds, modoCosteo);
+  const conImpuestos = await getConImpuestos(insumosBizId, client);
+  const precios = await calcularPreciosPorModo(client, businessId, insumoIds, modoCosteo, { conImpuestos });
   if (!precios) return 0;
   const idsActualizados = await aplicarPreciosCosteo(client, insumosBizId, precios);
   // El precio del insumo cambió: propagar en cascada a las recetas que lo usan

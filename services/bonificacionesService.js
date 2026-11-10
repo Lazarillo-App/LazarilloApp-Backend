@@ -6,6 +6,7 @@
 // Nunca pisa el costo crudo: es la lógica de bonificación actualizándose a sí misma.
 
 const { propagarCostoInsumo } = require('./costoRecetaService');
+const { getConImpuestos, importeSql } = require('./precioCosteoInsumos');
 
 async function getOrgBizIds(bizId, db) {
   const { rows } = await db.query(
@@ -26,6 +27,8 @@ async function getOrgBizIds(bizId, db) {
  */
 async function recalcularBonificaciones(bizId, insumoIds, client) {
   const orgBizIds = await getOrgBizIds(bizId, client);
+  const conImp = await getConImpuestos(bizId, client);
+  const importeExpr = importeSql('pi', conImp);
 
   // Insumos con bonificación aceptada (opcionalmente filtrados por los tocados en el import)
   const filtroIds = Array.isArray(insumoIds) && insumoIds.length
@@ -49,7 +52,7 @@ async function recalcularBonificaciones(bizId, insumoIds, client) {
          p.factura_key,
          SUM(CASE WHEN pi.precio_total > 0 THEN pi.cantidad ELSE 0 END) AS facturadas,
          SUM(CASE WHEN pi.precio_total = 0 THEN pi.cantidad ELSE 0 END) AS bonificadas,
-         SUM(pi.precio_total)                                           AS importe_total
+         SUM(${importeExpr}) AS importe_total
        FROM purchases p
        JOIN purchase_items pi ON pi.purchase_id = p.id
       WHERE pi.insumo_id = $1 AND pi.business_id = ANY($2::int[])
@@ -91,7 +94,9 @@ async function recalcularBonificaciones(bizId, insumoIds, client) {
     } else {
       // La bonificación dejó de venir → volver a precio de lista + apagar flag
       const { rows: listaRows } = await client.query(
-        `SELECT pi_ult.precio AS precio_lista
+        `SELECT ${conImp
+                ? `pi_ult.precio + (COALESCE(pi_ult.iva_total_item, 0) + COALESCE(pi_ult.imp_int_total, 0)) / NULLIF(pi_ult.cantidad, 0)`
+                : 'pi_ult.precio'} AS precio_lista
            FROM purchase_items pi_ult
           WHERE pi_ult.insumo_id = $1 AND pi_ult.business_id = ANY($2::int[]) AND pi_ult.precio > 0
           ORDER BY pi_ult.fecha DESC, pi_ult.id DESC LIMIT 1`,

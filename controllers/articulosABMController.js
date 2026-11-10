@@ -829,6 +829,7 @@ exports.getConfigCosteo = async (req, res, next) => {
       ok: true,
       config: {
         precio_costeo_insumos: props.precio_costeo_insumos || 'ultima_compra',
+        costo_con_impuestos: props.costo_con_impuestos !== false,
       },
     });
   } catch (e) { next(e); }
@@ -843,21 +844,39 @@ exports.saveConfigCosteo = async (req, res, next) => {
   const bizId = getBusinessId(req);
   if (!Number.isFinite(bizId)) return res.status(400).json({ ok: false, error: 'businessId inválido' });
 
-  const { modo } = req.body || {};
+  const { modo, con_impuestos } = req.body || {};
   const MODOS_VALIDOS = ['ultima_compra', 'promedio_30', 'precio_db'];
   if (!MODOS_VALIDOS.includes(modo)) {
     return res.status(400).json({ ok: false, error: `Modo inválido. Opciones: ${MODOS_VALIDOS.join(', ')}` });
   }
+  // Costo con o sin impuestos (IVA + internos). Opcional: si no viene, queda como estaba.
+  const conImp = typeof con_impuestos === 'boolean' ? con_impuestos : null;
 
   try {
     await pool.query(
       `UPDATE app_businesses
-          SET props = COALESCE(props, '{}'::jsonb) || jsonb_build_object('precio_costeo_insumos', $1),
+          SET props = COALESCE(props, '{}'::jsonb) || jsonb_build_object('precio_costeo_insumos', $1::text)
+                      || CASE WHEN $3::boolean IS NULL THEN '{}'::jsonb
+                              ELSE jsonb_build_object('costo_con_impuestos', $3::boolean) END,
               updated_at = NOW()
         WHERE id = $2`,
-      [modo, bizId]
+      [modo, bizId, conImp]
     );
-    return res.json({ ok: true, modo });
+    res.json({ ok: true, modo, con_impuestos: conImp, recalculando: true });
+    // Aplicar el criterio nuevo YA a precios y recetas (antes recién se aplicaba con la
+    // próxima compra que entrara). En segundo plano: puede tardar unos segundos.
+    setImmediate(async () => {
+      try {
+        const { recalcularCostosDeNegocio, negociosConInsumos } = require('../services/recalculoCostos');
+        for (const insBiz of await negociosConInsumos(bizId)) {
+          const r = await recalcularCostosDeNegocio(insBiz);
+          console.log(`[saveConfigCosteo] recálculo negocio ${insBiz}`, JSON.stringify(r));
+        }
+      } catch (e) {
+        console.error('[saveConfigCosteo] recálculo falló:', e.message);
+      }
+    });
+    return;
   } catch (e) {
     console.error('[saveConfigCosteo]', e.message);
     next(e);
@@ -900,10 +919,10 @@ exports.alertasVentas = async (req, res, next) => {
     next(e);
   }
 };
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 // GET /businesses/:id/articles/batches
 // Lista lotes de artículos Y rubros importados manualmente
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 exports.listBatchesArticulos = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -952,9 +971,9 @@ exports.listBatchesArticulos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 // GET /businesses/:id/articles/batches/:batchId/preview
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 exports.previewBatchArticulos = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -996,9 +1015,9 @@ exports.previewBatchArticulos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 // DELETE /businesses/:id/articles/batches/:batchId
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 exports.deleteBatchArticulos = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -1295,12 +1314,12 @@ exports.searchPadrino = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 // PUT /businesses/:id/articles/rubros/rename
 // Body: { old: string, new: string }
 // Renombra el "rubro" UI (que en DB es maxi_articles.subrubro y app_articles.rubro).
 // Afecta todas las filas del negocio que tenían el nombre viejo.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 exports.renombrarRubro = async (req, res, next) => {
   const bizId = getBusinessId(req);
   const oldName = String(req.body?.old ?? '').trim();
@@ -1349,13 +1368,13 @@ exports.renombrarRubro = async (req, res, next) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 // PUT /businesses/:id/articles/subrubros/rename
 // Body: { old: string, new: string, rubro?: string }
 // Renombra el "subrubro" UI (maxi_articles.categoria y app_articles.subrubro).
 // El parámetro opcional "rubro" limita el rename a un rubro padre específico
 // (útil si el mismo subrubro existe bajo varios rubros).
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 exports.renombrarSubrubro = async (req, res, next) => {
   const bizId = getBusinessId(req);
   const oldName = String(req.body?.old ?? '').trim();
