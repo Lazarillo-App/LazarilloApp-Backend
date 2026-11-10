@@ -29,6 +29,9 @@ const ventaRowSchema = z.object({
   COD_SUC: excelText,
   NOMBRESUC: excelText,
   CUPON: excelText,
+  // Tipo de descuento (solo en el 22 que sube el kit a Render, desde 10/11/2026).
+  COD_DTO: excelText,
+  NOM_DTO: excelText,
 });
 
 module.exports = { ventaRowSchema };
