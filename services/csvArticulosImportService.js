@@ -41,8 +41,23 @@ function parseNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Un CSV puede venir en UTF-8 (lo normal hoy) o en la codificación de Windows (Excel viejo). XLSX
+// asume la de Windows y rompía los acentos de un UTF-8 ("Fainá" → "FainÃ¡"): se decodifica acá.
+function leerLibro(filePath) {
+  const buf = fs.readFileSync(filePath);
+  const esPlanilla = (buf[0] === 0x50 && buf[1] === 0x4b) || (buf[0] === 0xd0 && buf[1] === 0xcf); // xlsx (zip) / xls
+  if (esPlanilla) return XLSX.read(buf, { type: 'buffer', raw: true, cellDates: true });
+  let texto;
+  if (buf[0] === 0xff && buf[1] === 0xfe) texto = buf.subarray(2).toString('utf16le');
+  else if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) texto = buf.subarray(3).toString('utf8');
+  else {
+    try { texto = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { texto = buf.toString('latin1'); }
+  }
+  return XLSX.read(texto, { type: 'string', raw: true, cellDates: true });
+}
+
 function parseFile(filePath) {
-  const wb = XLSX.readFile(filePath, { type: 'file', raw: true, cellDates: true });
+  const wb = leerLibro(filePath);
   const sheetName = wb.SheetNames[0];
   if (!sheetName) throw new Error('El archivo no contiene hojas');
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { raw: true, defval: null });
@@ -370,4 +385,104 @@ async function importPaired({
   }
 }
 
-module.exports = { importPaired };
+// ── Import de un solo archivo de artículos (tabla de Artículos y alta manual) ──
+// La ruta /articles/import-csv llamaba a esta función, que no existía (fallaba siempre). Reglas
+// (pedido de la usuaria, 2026-11-09): si el archivo trae código se usa; si no, se toma nombre y
+// precio y el código se asigna solo (negativo, como un artículo creado a mano, siguiendo al menor
+// que ya tenga el negocio para no pisar ninguno). Rubro/subrubro pueden venir como texto o código.
+const CAMPOS_ARTICULO = ['codigo', 'nombre', 'precio', 'rubro', 'subrubro'];
+
+// El front manda { campo: columna }; resolverCampo espera { columna: campo }. Se aceptan los dos.
+function normalizarMapeo(mapeo) {
+  if (!mapeo || typeof mapeo !== 'object') return {};
+  const claves = Object.keys(mapeo);
+  const esCampoAColumna = claves.length && claves.every((k) => CAMPOS_ARTICULO.includes(k));
+  if (!esCampoAColumna) return mapeo;
+  const out = {};
+  for (const [campo, col] of Object.entries(mapeo)) if (col) out[col] = campo;
+  return out;
+}
+
+async function importArticulosFromFile({ businessId, filePath, mapeo = {} }) {
+  const m = normalizarMapeo(mapeo);
+  const targetBizId = await resolveTargetBizId(businessId);
+  const client = await pool.connect();
+  let txOpen = false;
+  try {
+    const rows = parseFile(filePath);
+    const { rows: nombresRubro } = await client.query(
+      `SELECT codigo, nombre, destino FROM articulo_rubros WHERE business_id = $1`, [targetBizId]).catch(() => ({ rows: [] }));
+    const rubroPorCod = new Map(nombresRubro.filter((r) => r.destino === 'categoria').map((r) => [Number(r.codigo), r.nombre]));
+    const subPorCod = new Map(nombresRubro.filter((r) => r.destino === 'subrubro').map((r) => [Number(r.codigo), r.nombre]));
+    const texto = (v, porCod) => {
+      const s = cleanStr(v);
+      if (!s) return null;
+      return /^\d+$/.test(s) ? (porCod.get(Number(s)) || `Rubro ${s}`) : s;
+    };
+
+    const { rows: minRow } = await client.query(
+      `SELECT LEAST(COALESCE(MIN(articulo_id), 0), 0) AS m FROM maxi_articles WHERE business_id = $1`, [targetBizId]);
+    let nextManual = Number(minRow[0]?.m || 0) - 1;
+
+    const items = [];
+    const errors = [];
+    const vistos = new Set();
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const nombre = cleanStr(resolverCampo(row, m, 'nombre', ['nombre', 'name', 'descripcion', 'descripción', 'denominacion', 'articulo', 'artículo', 'producto']));
+      if (!nombre) { errors.push({ row: i + 2, error: 'Sin nombre' }); continue; }
+      let cod = safeInt(resolverCampo(row, m, 'codigo', ['codigo', 'código', 'cod', 'cod_art', 'articulo_id', 'art_id', 'code', 'sku', 'id']));
+      if (cod == null || cod === 0) cod = nextManual--;
+      if (vistos.has(cod)) { errors.push({ row: i + 2, error: `Código repetido en el archivo: ${cod}` }); continue; }
+      vistos.add(cod);
+      const precio = parseNum(resolverCampo(row, m, 'precio', ['precio', 'precio1', 'price', 'precio_venta', 'pvp', 'importe'])) ?? 0;
+      const rubro = texto(resolverCampo(row, m, 'rubro', ['rubro', 'categoria', 'categoría', 'familia', 'grupo']), rubroPorCod) || 'Sin categoría';
+      const subrubro = texto(resolverCampo(row, m, 'subrubro', ['subrubro', 'subcategoria', 'subcategoría', 'subfamilia']), subPorCod) || 'Sin subrubro';
+      items.push({ articulo_id: cod, nombre: nombre.slice(0, 200), categoria: rubro, subrubro, precio });
+    }
+
+    const CHUNK = 200;
+    const batchId = `csv-art-${Date.now()}`;
+    let inserted = 0, updated = 0;
+    await client.query('BEGIN');
+    txOpen = true;
+    for (let i = 0; i < items.length; i += CHUNK) {
+      const chunk = items.slice(i, i + CHUNK);
+      const values = [];
+      const params = [];
+      let p = 1;
+      for (const it of chunk) {
+        values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},'{}'::jsonb,NOW(),$${p + 6},'csv')`);
+        params.push(targetBizId, it.articulo_id, it.nombre, it.categoria, it.subrubro, it.precio, batchId);
+        p += 7;
+      }
+      const res = await client.query(
+        `INSERT INTO maxi_articles
+           (business_id, articulo_id, nombre, categoria, subrubro, precio, raw, updated_at, upload_batch_id, origen)
+         VALUES ${values.join(',')}
+         ON CONFLICT (business_id, articulo_id) DO UPDATE SET
+           nombre = EXCLUDED.nombre, categoria = EXCLUDED.categoria, subrubro = EXCLUDED.subrubro,
+           precio = EXCLUDED.precio, upload_batch_id = EXCLUDED.upload_batch_id,
+           origen = COALESCE(maxi_articles.origen, EXCLUDED.origen), updated_at = NOW()
+         RETURNING (xmax = 0) AS is_insert`, params);
+      for (const r of res.rows) { if (r.is_insert) inserted++; else updated++; }
+    }
+    await client.query('COMMIT');
+    txOpen = false;
+    const total = items.length + errors.length;
+    return {
+      ok: true, batchId, target_business_id: targetBizId,
+      summary: { inserted, updated, failed: errors.length, total },
+      articulos: { inserted, updated, failed: errors.length, total },
+      errors: errors.slice(0, 20),
+    };
+  } catch (e) {
+    if (txOpen) { try { await client.query('ROLLBACK'); } catch { /* nada */ } }
+    throw e;
+  } finally {
+    client.release();
+    try { fs.unlinkSync(filePath); } catch { /* ya no está */ }
+  }
+}
+
+module.exports = { importPaired, importArticulosFromFile, parseFile, normalizarMapeo };
