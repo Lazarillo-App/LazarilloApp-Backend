@@ -210,18 +210,23 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
 
   // Re-facturación de cada anulación (Diego 10/11/2026: «generalmente se re-factura con otro ticket y
   // es el que sigue el comprobante»): el ticket de la misma mesa, el mismo día, entre 5 minutos antes
-  // y 90 después de la nota de crédito, que no sea otra anulación; el más cercano en hora. Las
-  // pasadas de la medianoche (antes de las 6) cuentan como del mismo turno.
+  // y 90 después de la nota de crédito, que no sea otra anulación; el más cercano en hora. Si no hay,
+  // el comprobante siguiente (mismo tipo y punto de venta, número + 1) dentro de los 30 minutos,
+  // aunque tenga otra mesa: al pasar de salón a take away o rehacer un pedido cambia el número de
+  // mesa (Diego 10/11/2026: «Sin re facturar me está mostrando algunas re facturadas con otro
+  // importe»). Las pasadas de la medianoche (antes de las 6) cuentan como del mismo turno.
   const refact = new Map();
   if (anuladas.length) {
     const fechas = [...new Set(anuladas.map((a) => a.fecha))];
     const tks = await db.many(sql`
       SELECT to_char(v.fecha::date, 'YYYY-MM-DD') AS fecha, TRIM(v.comprobant) AS comprobante,
-             MAX(NULLIF(TRIM(v.mesa), '')) AS mesa, MAX(NULLIF(TRIM(v.hora), '')) AS hora,
+             MAX(NULLIF(TRIM(v.mesa), '')) AS mesa, MAX(NULLIF(TRIM(v.hora), '')) AS hora, MAX(NULLIF(TRIM(v.tipo), '')) AS tipo,
              SUM(${imp})::float8 AS importe, string_agg(DISTINCT NULLIF(TRIM(v.cobro), ''), ', ') AS cobro
         FROM gestion_ventas v
        WHERE ${lugarV} AND v.fecha::date = ANY(${fechas}::date[]) AND v.comprobant IS NOT NULL
        GROUP BY 1, 2`);
+    // «FCB 0006-00015951» → «FCB 0006-00015952» (mismo ancho de número).
+    const siguiente = (c) => { const x = /^(.*-)(\d+)$/.exec(String(c || '').trim()); return x ? x[1] + String(Number(x[2]) + 1).padStart(x[2].length, '0') : null; };
     const minutos = (h) => { const t = horaTxt(h); if (!t) return null; const m = Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5)); return m < 360 ? m + 1440 : m; };
     for (const a of anuladas) {
       const ref = minutos(a.hora);
@@ -234,8 +239,15 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
         if (m == null || m < ref - 5 || m > ref + 90) continue;
         if (!mejor || Math.abs(m - ref) < Math.abs(mejor.m - ref)) mejor = { ...t, m };
       }
+      let por = 'mesa';
+      if (!mejor) {
+        const sig = siguiente(a.anula);
+        const t = sig && tks.find((x) => x.fecha === a.fecha && x.comprobante === sig && x.importe > 0 && !/^NC/i.test(x.cobro || ''));
+        const m = t ? minutos(t.hora) : null;
+        if (t && m != null && m >= ref - 5 && m <= ref + 30) { mejor = { ...t, m }; por = 'siguiente'; }
+      }
       refact.set(`${a.fecha}|${a.comprobante}`, mejor
-        ? { comprobante: mejor.comprobante, importe: r2(mejor.importe), cobro: mejor.cobro, minutos: mejor.m - ref }
+        ? { comprobante: mejor.comprobante, importe: r2(mejor.importe), cobro: mejor.cobro, minutos: mejor.m - ref, por, mesa: mejor.mesa, tipo: mejor.tipo }
         : null);
     }
   }
