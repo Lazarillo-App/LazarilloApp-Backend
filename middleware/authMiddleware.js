@@ -43,13 +43,11 @@ async function authRequired(req, res, next) {
     }
 
     // ─── Rol de PLATAFORMA (no de negocio) ───
-    // Si el JWT trae role='app_admin' (superuser de Anthropic), lo respetamos.
+    // Se lee SIEMPRE de la base, no del token (10/11): si a alguien le quitan el rol app_admin
+    // desde el panel, lo pierde en el acto y no a los 7 días cuando vence su token.
     // El rol de negocio se resuelve en loadActiveBusiness a partir de user_assignments.
     let platformRole = null;
-    if (payload.role === 'app_admin') {
-      platformRole = 'app_admin';
-    } else {
-      // Verificar en DB por si lo subimos después de emitir el token
+    {
       const { rows } = await pool.query(
         `SELECT role FROM app_users WHERE id = $1 LIMIT 1`,
         [uidNum]

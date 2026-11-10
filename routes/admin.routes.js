@@ -127,4 +127,21 @@ r.put('/soporte/config', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Super-admins: todos ven la lista; dar/quitar el rol solo la cuenta de control y con código
+// que llega a su mail (10/11).
+const superadmins = require('../services/superadminControlService');
+const responder = (res, out) => {
+  if (out.error) return res.status(out.status || 400).json({ ok: false, error: out.error, quedan: out.quedan });
+  res.json(out);
+};
+r.get('/superadmins', async (req, res, next) => {
+  try { res.json({ ok: true, ...(await superadmins.listar(req.user.id)) }); } catch (e) { next(e); }
+});
+r.post('/superadmins/codigo', async (req, res, next) => {
+  try { responder(res, await superadmins.pedirCodigo(req.user.id, req.body?.accion, req.body?.email)); } catch (e) { next(e); }
+});
+r.post('/superadmins/confirmar', async (req, res, next) => {
+  try { responder(res, await superadmins.confirmar(req.user.id, req.body?.accion, req.body?.email, req.body?.codigo)); } catch (e) { next(e); }
+});
+
 module.exports = r;
