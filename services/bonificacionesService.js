@@ -28,7 +28,7 @@ async function getOrgBizIds(bizId, db) {
 async function recalcularBonificaciones(bizId, insumoIds, client) {
   const orgBizIds = await getOrgBizIds(bizId, client);
   const conImp = await getConImpuestos(bizId, client);
-  const importe = importeSql('pi', conImp);
+  const importeExpr = importeSql('pi', conImp);
 
   // Insumos con bonificación aceptada (opcionalmente filtrados por los tocados en el import)
   const filtroIds = Array.isArray(insumoIds) && insumoIds.length
@@ -52,7 +52,7 @@ async function recalcularBonificaciones(bizId, insumoIds, client) {
          p.factura_key,
          SUM(CASE WHEN pi.precio_total > 0 THEN pi.cantidad ELSE 0 END) AS facturadas,
          SUM(CASE WHEN pi.precio_total = 0 THEN pi.cantidad ELSE 0 END) AS bonificadas,
-         SUM(${importe}) AS importe_total
+         SUM(${importeExpr}) AS importe_total
        FROM purchases p
        JOIN purchase_items pi ON pi.purchase_id = p.id
       WHERE pi.insumo_id = $1 AND pi.business_id = ANY($2::int[])
