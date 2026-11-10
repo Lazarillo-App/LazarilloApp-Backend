@@ -148,7 +148,7 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
                            WHERE ${lugarV} ${condTurno} AND ${enRango(dAnt, corte)}`);
       })();
 
-  const [tot, turnos, servicio, cobro, mozos, dtoTurno, dias, comp, pagos, anuladas, dtoTickets, dtoMozo, stock] = await Promise.all([
+  const [tot, turnos, servicio, cobro, mozos, dtoTurno, dias, comp, pagos, anuladas, dtoTickets, dtoMozo, stock, dtoTipo] = await Promise.all([
     db.one(sql`SELECT SUM(${imp})::float8 AS total, COUNT(DISTINCT (v.fecha::date, v.comprobant))::int AS tickets,
                       SUM(${cub})::int AS cubiertos, SUM(COALESCE(v.descuento, 0))::float8 AS descuento,
                       COUNT(DISTINCT (v.fecha::date, v.comprobant)) FILTER (WHERE COALESCE(v.descuento, 0) <> 0)::int AS con_dto
@@ -192,7 +192,8 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     db.many(sql`SELECT to_char(v.fecha::date, 'YYYY-MM-DD') AS fecha, TRIM(v.comprobant) AS comprobante,
                        COALESCE(NULLIF(TRIM(v.turno), ''), '—') AS turno, MAX(TRIM(v.mozo)) AS mozo,
                        MAX(NULLIF(TRIM(v.mesa), '')) AS mesa, MAX(NULLIF(TRIM(v.hora), '')) AS hora,
-                       SUM(COALESCE(v.descuento, 0))::float8 AS descuento, SUM(${imp})::float8 AS cobrado
+                       SUM(COALESCE(v.descuento, 0))::float8 AS descuento, SUM(${imp})::float8 AS cobrado,
+                       NULLIF(TRIM(MAX(v."nomDto")), '') AS tipo
                 ${base}
                 GROUP BY 1, 2, 3 HAVING SUM(COALESCE(v.descuento, 0)) <> 0
                 ORDER BY 7 DESC LIMIT 300`),
@@ -200,6 +201,11 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
                        COUNT(DISTINCT (v.fecha::date, v.comprobant)) FILTER (WHERE COALESCE(v.descuento, 0) <> 0)::int AS tickets
                 ${base} GROUP BY 1 HAVING SUM(COALESCE(v.descuento, 0)) <> 0 ORDER BY 2 DESC`),
     movimientosStock({ businessId, sucursal, desde, hastaExcl, turno }),
+    // Descuentos por tipo (Diego 10/11/2026): el nombre del descuento de MaxiRest que el kit sube con
+    // el 22 desde esa fecha; lo anterior queda «Sin tipo».
+    db.many(sql`SELECT COALESCE(NULLIF(TRIM(MAX(v."nomDto")), ''), 'Sin tipo') AS tipo,
+                       SUM(COALESCE(v.descuento, 0))::float8 AS importe
+                ${base} GROUP BY v.fecha::date, v.comprobant HAVING SUM(COALESCE(v.descuento, 0)) <> 0`),
   ]);
 
   // Re-facturación de cada anulación (Diego 10/11/2026: «generalmente se re-factura con otro ticket y
@@ -290,8 +296,13 @@ async function obtenerDetalleVentas({ organizationId, businessId, sucursal, sp }
     descuentos: {
       importe: r2(tot?.descuento), tickets: tot?.con_dto ?? 0,
       porTurno: dtoTurno.map((d) => ({ turno: d.turno, importe: r2(d.importe) })),
+      porTipo: (() => {
+        const m = new Map();
+        for (const t of dtoTipo) { const x = m.get(t.tipo) || { tipo: t.tipo, importe: 0, tickets: 0 }; x.importe += t.importe; x.tickets += 1; m.set(t.tipo, x); }
+        return [...m.values()].map((x) => ({ ...x, importe: r2(x.importe) })).sort((a, b) => b.importe - a.importe);
+      })(),
       porMozo: dtoMozo.map((d) => ({ mozo: d.mozo, importe: r2(d.importe), tickets: d.tickets })),
-      detalle: dtoTickets.map((t) => ({ fecha: t.fecha, comprobante: t.comprobante, turno: t.turno, mozo: t.mozo, mesa: t.mesa, hora: horaTxt(t.hora), descuento: r2(t.descuento), cobrado: r2(t.cobrado) })),
+      detalle: dtoTickets.map((t) => ({ fecha: t.fecha, comprobante: t.comprobante, turno: t.turno, mozo: t.mozo, mesa: t.mesa, hora: horaTxt(t.hora), descuento: r2(t.descuento), cobrado: r2(t.cobrado), tipo: t.tipo })),
     },
     anulaciones: {
       importe: r2(anuladas.reduce((s, a) => s + a.importe, 0)), n: anuladas.length,
