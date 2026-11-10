@@ -27,7 +27,8 @@ async function getOrgBizIds(bizId, db) {
  */
 async function recalcularBonificaciones(bizId, insumoIds, client) {
   const orgBizIds = await getOrgBizIds(bizId, client);
-  const importe = importeSql('pi', await getConImpuestos(bizId, client));
+  const conImp = await getConImpuestos(bizId, client);
+  const importe = importeSql('pi', conImp);
 
   // Insumos con bonificación aceptada (opcionalmente filtrados por los tocados en el import)
   const filtroIds = Array.isArray(insumoIds) && insumoIds.length
@@ -93,7 +94,9 @@ async function recalcularBonificaciones(bizId, insumoIds, client) {
     } else {
       // La bonificación dejó de venir → volver a precio de lista + apagar flag
       const { rows: listaRows } = await client.query(
-        `SELECT pi_ult.precio AS precio_lista
+        `SELECT ${conImp
+                ? `pi_ult.precio + (COALESCE(pi_ult.iva_total_item, 0) + COALESCE(pi_ult.imp_int_total, 0)) / NULLIF(pi_ult.cantidad, 0)`
+                : 'pi_ult.precio'} AS precio_lista
            FROM purchase_items pi_ult
           WHERE pi_ult.insumo_id = $1 AND pi_ult.business_id = ANY($2::int[]) AND pi_ult.precio > 0
           ORDER BY pi_ult.fecha DESC, pi_ult.id DESC LIMIT 1`,
