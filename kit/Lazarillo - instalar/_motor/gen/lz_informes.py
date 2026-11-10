@@ -178,6 +178,9 @@ def _generar(cod, B, destino, anio):
     if cod in ('12','12M','12N'):
         gen12 = _gen('gen12')
         return len(gen12.generar_12(B, anio, salida=destino, variante=cod))
+    if cod == '12T':   # 12 por turno, solo para Lazarillo (lo pide lz_render, no va al Drive/MEGA)
+        gen12 = _gen('gen12')
+        return len(gen12.generar_12t(B, anio, salida=destino))
     if cod == '12PRO':
         gen12pro = _gen('gen12pro')
         return len(gen12pro.generar_12pro(B, anio, destino))

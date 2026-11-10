@@ -61,7 +61,9 @@ ANUALES = [('22', 'inf_22'), ('14', 'inf_14'), ('25', 'inf_25'),
            # 27 y 28 (Diego, 08/11/2026: "hace el cambio de render 27-28"): movimientos de
            # stock por remito (detallado y resumido). Los usa el detalle de ventas del
            # celular (pestaña Revisar). Salen de gen27 igual que el Excel del MEGA.
-           ('27', 'inf_27'), ('28', 'inf_28')]
+           ('27', 'inf_27'), ('28', 'inf_28'),
+           # 12T (Diego, 10/11/2026): el 12 por turno (Mañana / Noche), solo para Lazarillo.
+           ('12T', 'inf_12t')]
 CLAVE_NOMINA = 'clave'          # contraseña de MaxiRest de cada empleado: no se sube
 
 # NOMBRES (Diego, 21/10): "quiero que uses los nombres originales que siempre use".
@@ -78,6 +80,7 @@ NOMBRES = {
     'inf_80':  ('80 - compras - detalle de pagos',                    'i80_compras_detalle_de_pagos'),
     'inf_11':  ('11 - COMPRAS POR INSUMO ANUAL',                      'i11_compras_por_insumo_anual'),
     'inf_12':  ('12 - ventas por articulo ranking detallado por dia', 'i12_ventas_por_articulo_ranking_detallado_por_dia'),
+    'inf_12t': ('12T - ventas por articulo por turno',                'i12t_ventas_por_articulo_por_turno'),
     'inf_71':  ('71 - CTA POR COMPROBANTE',                           'i71_cta_por_comprobante'),
     'inf_27':  ('27 - MOV DE STOCK ANUAL - Detallado por remito',     'i27_mov_de_stock_detallado_por_remito'),
     'inf_28':  ('28 - MOV DE STOCK ANUAL - RESUMIDO POR REMITO',      'i28_mov_de_stock_resumido_por_remito'),

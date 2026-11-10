@@ -56,3 +56,46 @@ def generar_12(B, anio, salida=None, hasta=None, variante='12'):
         for c in ws['I'][1:]: c.number_format = 'mm-dd-yy'
         wb.save(salida)
     return out
+
+
+# 12T (Diego, 10/11/2026: "no se pueden extraer filtradas por turno también? así le damos esa
+# info a Lazarillo"). El 12 partido por turno, SOLO para Lazarillo (sube a Render como
+# i12t_ventas_por_articulo_por_turno_<año>; no va al MEGA ni a Transaccionales). Una fila por
+# artículo + día + turno, con las mismas líneas que el 12 (todo, sin filtros): la suma de los
+# turnos da exactamente el 12. Turno '1' = Mañana, '2' = Noche. Las líneas SIN turno no son
+# tickets de salón: son facturas manuales (los movimientos de stock de BigBox que se cierran por
+# stock y se facturan juntos) y van a Noche "por el momento, después vemos" (Diego, 10/11).
+# Un turno distinto de 1/2 (no apareció en el Bar) sale como "Turno <n>".
+TURNOS_12T = {'1': 'Mañana', '2': 'Noche', '': 'Noche'}
+
+def generar_12t(B, anio, salida=None, hasta=None):
+    it = pd.read_csv(B+"22_ventas_items.tsv", sep="\t", dtype=str, keep_default_na=False)
+    ar = pd.read_csv(B+"09_articulos.tsv",    sep="\t", dtype=str, keep_default_na=False)
+    for c in ['cantidad','precio']: it[c+'_d'] = D(it[c])
+    it['f'] = pd.to_datetime(it['fecha'], errors='coerce')
+    w = it[(it.f >= f"{anio}-01-01") & (it.f < f"{anio+1}-01-01")]
+    if hasta is not None:  w = w[w.f <= str(hasta)]
+    w = w.copy()
+    w['V'] = w.cantidad_d * w.precio_d
+    t = w.turno.astype(str).str.strip()
+    w['TURNO'] = [TURNOS_12T.get(x, 'Turno ' + x) for x in t]
+
+    g = w.groupby(['cod_art','f','TURNO'], as_index=False).agg(U=('cantidad_d','sum'), V=('V','sum'))
+    g['CODIGO'] = g.cod_art.astype(int)
+    g = g.sort_values(['CODIGO','f','TURNO']).reset_index(drop=True)
+    nom = dict(zip(ar.codigo, ar.nombre))
+
+    out = pd.DataFrame({
+        'CODIGO'  : g.CODIGO.values,
+        'NOMBRE'  : [(nom.get(k) or 'ARTICULOS INEXISTENTES')[:30].ljust(30) for k in g.cod_art],
+        'TURNO'   : g.TURNO.values,
+        'UNIDADES': r2(g.U, 3),
+        'IMPORTE' : r2(g.V),
+        'FECHA'   : g.f.values,
+    })
+    if salida:
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Hoja1'
+        for fila in dataframe_to_rows(out, index=False, header=True): ws.append(fila)
+        for c in ws['F'][1:]: c.number_format = 'mm-dd-yy'
+        wb.save(salida)
+    return out
