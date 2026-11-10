@@ -291,6 +291,8 @@ const PORT = process.env.PORT || 4000;
     require('./services/tareasUnicas/recalculoCostoConImpuestos').programar();
     // Unificar el costo de tabla y modal (desperdicio + mermas, recetas de todas las sucursales). 10/11/2026.
     require('./services/tareasUnicas/unificarCostosRecetas').programar();
+    // Costo por local (insumo_costos_local). 10/11/2026.
+    require('./services/tareasUnicas/costosPorLocal').programar();
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);

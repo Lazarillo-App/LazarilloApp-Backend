@@ -210,6 +210,11 @@ exports.listar = async (req, res) => {
           rc.receta_unidad_peso,
           rc.receta_porciones,
           rc.receta_costo_unitario,
+          -- Costo por local (insumo_costos_local): { "<business_id>": precio }. El modal de receta
+          -- costea con el del local de la receta, igual que el servidor (propagarCostoInsumo).
+          (SELECT json_object_agg(icl.business_id, icl.precio)
+             FROM insumo_costos_local icl
+            WHERE icl.insumo_id = i.id) AS costos_locales,
           CASE
             WHEN i.costo_preferido IS NOT NULL THEN i.costo_preferido
             WHEN rc.receta_updated_at IS NULL THEN 'compra'
