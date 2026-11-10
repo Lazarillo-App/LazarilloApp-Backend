@@ -20,7 +20,9 @@ const { getModoCosteo, getConImpuestos, calcularPreciosPorModo, aplicarPreciosCo
 const { propagarCostoInsumo } = require('../costoRecetaService');
 const { recalcularBonificaciones } = require('../bonificacionesService');
 
-const NOMBRE = 'recalculo_costo_con_impuestos_20261110';
+// v2: la primera pasada falló en el negocio 147 (error en bonificacionesService, ya corregido).
+// Recalcular todo de nuevo es idempotente; el respaldo original no se pisa (CREATE IF NOT EXISTS).
+const NOMBRE = 'recalculo_costo_con_impuestos_20261110_v2';
 
 async function tomarMarca() {
   await pool.query(`CREATE TABLE IF NOT EXISTS lz_tareas_unicas (
