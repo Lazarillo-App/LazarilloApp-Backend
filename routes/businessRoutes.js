@@ -382,6 +382,7 @@ router.get('/:id/config', async (req, res, next) => {
         compras_alerta_semanas: Number(props.compras_alerta_semanas ?? 4),
         ventas_alerta_dias: Number(props.ventas_alerta_dias ?? 30),
         precio_costeo_insumos: props.precio_costeo_insumos || 'ultima_compra',
+        costo_con_impuestos: props.costo_con_impuestos !== false,
         redondeo_precios: props.redondeo_precios ?? null,
         redondeo_mostrar_modal: props.redondeo_mostrar_modal ?? true,
         desperdicio_global_pct: Number(props.desperdicio_global_pct ?? 5),
