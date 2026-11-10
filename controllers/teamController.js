@@ -320,6 +320,10 @@ exports.createInvitation = async (req, res, next) => {
         if (!email || !rawScopes.length || !role || !alias?.trim()) {
             return res.status(400).json({ ok: false, error: 'missing_fields' });
         }
+        // Email bien formado: algo@dominio.tld (Diego 10/11/2026, invitaciones a «...@gmail» sin .com).
+        if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(String(email).trim())) {
+            return res.status(400).json({ ok: false, error: 'invalid_email' });
+        }
         if (!isValidRole(role)) {
             return res.status(400).json({ ok: false, error: 'invalid_role' });
         }
