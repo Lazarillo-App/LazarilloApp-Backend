@@ -15,7 +15,7 @@
 'use strict';
 
 const pool = require('../config/db');
-const { getModoCosteo, getConImpuestos, calcularPreciosPorModo, aplicarPreciosCosteo } = require('./precioCosteoInsumos');
+const { getModoCosteo, getConImpuestos, calcularPreciosPorModo, aplicarPreciosCosteo, guardarCostosLocales } = require('./precioCosteoInsumos');
 const { propagarCostoInsumo, getOrgBizIds } = require('./costoRecetaService');
 
 /**
@@ -32,6 +32,7 @@ async function recalcularCostosDeNegocio(insBiz) {
     let preciosActualizados = 0;
     let insumosConPrecio = 0;
     const precios = new Map();
+    const preciosPorLocal = new Map();   // local → Map(insumo → precio)
     if (modo !== 'precio_db') {
       const { rows } = await client.query(
         `SELECT pi.business_id AS compra_biz, pi.insumo_id, MAX(pi.fecha) AS ult
@@ -52,6 +53,7 @@ async function recalcularCostosDeNegocio(insBiz) {
       for (const [compraBiz, ids] of porCompra) {
         const p = await calcularPreciosPorModo(client, compraBiz, ids, modo, { conImpuestos });
         if (!p) continue;
+        preciosPorLocal.set(compraBiz, p);
         for (const [id, precio] of p) {
           const f = ultima.get(`${id}|${compraBiz}`) || 0;
           const prev = elegido.get(id);
@@ -64,6 +66,13 @@ async function recalcularCostosDeNegocio(insBiz) {
 
     await client.query('BEGIN');
     if (precios.size) preciosActualizados = (await aplicarPreciosCosteo(client, insBiz, precios)).length;
+    // Costo por local: se rehace entero para los insumos de este negocio. Con "precio fijo"
+    // (precio_db) no hay costo por compras: se borra y todas las recetas usan precio_ref.
+    await client.query(
+      `DELETE FROM insumo_costos_local WHERE insumo_id IN (SELECT id FROM insumos WHERE business_id = $1)`,
+      [insBiz]
+    );
+    for (const [local, p] of preciosPorLocal) await guardarCostosLocales(client, local, p);
 
     // 2. Propagar TODOS los insumos simples que están en alguna receta activa de la
     //    organización (no solo los que cambiaron de precio): así cada receta queda con el

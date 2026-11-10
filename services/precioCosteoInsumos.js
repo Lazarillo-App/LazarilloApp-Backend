@@ -284,7 +284,28 @@ async function aplicarPreciosCosteo(client, businessId, precios) {
   return rows.map((r) => Number(r.id));
 }
 
+// Costo POR LOCAL (Diego 10/11/2026, tabla insumo_costos_local): el precio que calcularPreciosPorModo
+// dio para las compras de UN local queda guardado para ese local, y las recetas de ese local se
+// costean con él (propagarCostoInsumo). precio_ref sigue siendo el precio "del grupo" (respaldo
+// para los locales que no compraron ese insumo, y lo que muestra la tabla de Insumos).
+async function guardarCostosLocales(client, localBizId, precios) {
+  if (!precios || !precios.size) return 0;
+  const ids = [...precios.keys()];
+  const valores = ids.map((id) => precios.get(id));
+  const { rowCount } = await client.query(
+    `INSERT INTO insumo_costos_local (insumo_id, business_id, precio, updated_at)
+     SELECT v.insumo_id, $3, v.precio, NOW()
+       FROM UNNEST($1::int[], $2::numeric[]) AS v(insumo_id, precio)
+      WHERE v.precio > 0
+     ON CONFLICT (insumo_id, business_id)
+       DO UPDATE SET precio = EXCLUDED.precio, updated_at = NOW()`,
+    [ids, valores, Number(localBizId)]
+  );
+  return rowCount;
+}
+
 module.exports = {
+  guardarCostosLocales,
   MODOS_VALIDOS, MODO_DEFAULT, getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo,
   RATIO_PRECIO_SOSPECHOSO, getConImpuestos, importeSql,
 };

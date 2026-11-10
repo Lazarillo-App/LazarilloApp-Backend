@@ -143,7 +143,7 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   // y la unidad base en la que está expresado.
   const { rows: insRows } = await db.query(
     `SELECT i.id, i.precio_ref, i.unidad_med, i.contenido_envase, i.unidad_envase,
-            i.desperdicio_pct_override, i.costo_preferido,
+            i.desperdicio_pct_override, i.costo_preferido, i.bonif_aceptada,
             r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
             EXISTS (
               SELECT 1 FROM recetas re
@@ -220,6 +220,18 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
     [insumoId]
   );
   const mermasPorId = new Map(mermasRows.map((m) => [Number(m.id), m]));
+
+  // Costo POR LOCAL (insumo_costos_local): cada receta usa el precio de las compras de SU local;
+  // si ese local no compró el insumo, precio_ref (el del grupo). No aplica a elaborados (su costo
+  // sale de su receta) ni a insumos con bonificación aceptada (su precio_ref ya es el costo real).
+  const preciosLocales = new Map();
+  if (!sinFactor && ins.bonif_aceptada !== true) {
+    const { rows: locRows } = await db.query(
+      `SELECT business_id, precio FROM insumo_costos_local WHERE insumo_id = $1 AND precio > 0`,
+      [insumoId]
+    );
+    for (const l of locRows) preciosLocales.set(Number(l.business_id), Number(l.precio));
+  }
   const factorMermaItem = (it) => {
     if (sinFactor) return 1;
     const pct = ins.desperdicio_pct_override != null
@@ -261,10 +273,15 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
     `SELECT nombre, contenido, unidad FROM insumo_equivalencias WHERE insumo_id = $1`,
     [insumoId]
   );
-  const costoPorUnidadBase = costoPorGrBase > 0 ? costoPorGrBase : precioRef;
+  const precioRefGrupo = precioRef;
 
   // 2. Actualizar costo_unitario de cada item (convertido a su unidad)
   for (const it of items) {
+    // Precio de ESTE local (o el del grupo si el local no lo compró). Se sombrea precioRef /
+    // costoPorUnidadBase a propósito: el resto del cálculo de abajo queda igual.
+    const precioLocal = preciosLocales.get(Number(it.business_id));
+    const precioRef = precioLocal != null ? precioLocal : precioRefGrupo;
+    const costoPorUnidadBase = costoPorGrBase > 0 ? costoPorGrBase : precioRef;
     // ATENCIÓN: la unidad del item se usa primero para buscar equivalencias por
     // NOMBRE (ej. "cucharon"), así que esa búsqueda debe ir con el string crudo.
     // canonicalUnit() recién se aplica si no matcheó ninguna equivalencia.

@@ -3,7 +3,7 @@
 
 const pool = require('../config/db');
 const { propagarCostoInsumo } = require('./costoRecetaService');
-const { getModoCosteo, getConImpuestos, calcularPreciosPorModo, aplicarPreciosCosteo, RATIO_PRECIO_SOSPECHOSO } = require('./precioCosteoInsumos');
+const { getModoCosteo, getConImpuestos, calcularPreciosPorModo, aplicarPreciosCosteo, guardarCostosLocales, RATIO_PRECIO_SOSPECHOSO } = require('./precioCosteoInsumos');
 
 // Un código de MaxiRest puede coincidir por pura casualidad numérica con el
 // codigo_maxi de un insumo real (confirmado con decenas de casos: gastos
@@ -63,13 +63,13 @@ async function actualizarPreciosDeInsumos(client, { businessId, insumosBizId = b
   const precios = await calcularPreciosPorModo(client, businessId, insumoIds, modoCosteo, { conImpuestos });
   if (!precios) return 0;
   const idsActualizados = await aplicarPreciosCosteo(client, insumosBizId, precios);
-  // El precio del insumo cambió: propagar en cascada a las recetas que lo usan
-  // (y de ahí a elaborados que las usan a su vez). Sin esto, costo_total quedaba
-  // congelado hasta que alguien reabría y volvía a guardar cada receta a mano.
-  for (const insumoId of idsActualizados) {
-    await propagarCostoInsumo(insumoId, insumosBizId, client);
-    if (Number(insumosBizId) !== Number(businessId)) await propagarCostoInsumo(insumoId, businessId, client);
-  }
+  // Costo por local: el precio de estas compras queda como el del local que compró.
+  await guardarCostosLocales(client, businessId, precios);
+  // El precio cambió (del grupo y/o del local): propagar en cascada a las recetas que lo usan
+  // (y de ahí a elaborados que las usan a su vez). propagarCostoInsumo ya recorre las recetas
+  // de TODOS los locales de la organización, cada una con su precio.
+  const aPropagar = new Set([...idsActualizados, ...precios.keys()].map(Number));
+  for (const insumoId of aPropagar) await propagarCostoInsumo(insumoId, insumosBizId, client);
   return idsActualizados.length;
 }
 
