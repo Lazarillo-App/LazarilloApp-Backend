@@ -919,10 +919,10 @@ exports.alertasVentas = async (req, res, next) => {
     next(e);
   }
 };
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /businesses/:id/articles/batches
 // Lista lotes de artículos Y rubros importados manualmente
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 exports.listBatchesArticulos = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -971,9 +971,9 @@ exports.listBatchesArticulos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /businesses/:id/articles/batches/:batchId/preview
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 exports.previewBatchArticulos = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -1015,9 +1015,9 @@ exports.previewBatchArticulos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE /businesses/:id/articles/batches/:batchId
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 exports.deleteBatchArticulos = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -1314,12 +1314,12 @@ exports.searchPadrino = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /businesses/:id/articles/rubros/rename
 // Body: { old: string, new: string }
 // Renombra el "rubro" UI (que en DB es maxi_articles.subrubro y app_articles.rubro).
 // Afecta todas las filas del negocio que tenían el nombre viejo.
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 exports.renombrarRubro = async (req, res, next) => {
   const bizId = getBusinessId(req);
   const oldName = String(req.body?.old ?? '').trim();
@@ -1368,13 +1368,13 @@ exports.renombrarRubro = async (req, res, next) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /businesses/:id/articles/subrubros/rename
 // Body: { old: string, new: string, rubro?: string }
 // Renombra el "subrubro" UI (maxi_articles.categoria y app_articles.subrubro).
 // El parámetro opcional "rubro" limita el rename a un rubro padre específico
 // (útil si el mismo subrubro existe bajo varios rubros).
-// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 exports.renombrarSubrubro = async (req, res, next) => {
   const bizId = getBusinessId(req);
   const oldName = String(req.body?.old ?? '').trim();
