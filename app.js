@@ -184,6 +184,8 @@ app.use('/api', requireActiveAccount);
 app.use('/api/me', meRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/places', placesRoutes);
+// Chat de Anthony "Que lo haga Lazarillo" (menú guiado → mensaje por mail al equipo).
+app.use('/api/soporte', require('./routes/soporteRoutes'));
 
 // rutas con auth
 app.use('/api/team', teamRoutes);

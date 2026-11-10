@@ -101,4 +101,17 @@ r.post('/businesses/:id/sync-sales',
   ensureFn('adminSyncSales', salesSync.adminSyncSales)
 );
 
+// Chat de Anthony: mails que reciben, WhatsApp y menú/respuestas (editable por super-admin).
+const soporte = require('../services/soporteService');
+r.get('/soporte/config', async (_req, res, next) => {
+  try { res.json({ ok: true, config: await soporte.leerConfig() }); } catch (e) { next(e); }
+});
+r.put('/soporte/config', async (req, res, next) => {
+  try {
+    const out = await soporte.guardarConfig(req.body?.config, req.user?.id);
+    if (out.error) return res.status(400).json({ ok: false, error: out.error });
+    res.json({ ok: true, config: out.config });
+  } catch (e) { next(e); }
+});
+
 module.exports = r;
