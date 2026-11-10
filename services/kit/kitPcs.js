@@ -89,6 +89,18 @@ async function localesDe(userId, huella = null) {
       WHERE business_id = ANY($1::bigint[])
         AND NOT COALESCE((props->>'is_main')::boolean, false)
       ORDER BY business_id, name`, [ids]);
+  // La principal se muestra con el nombre de su sucursal principal (Diego 10/11: "CONTAINER FC
+  // debería llamarse CONTAINER FC Ramos"); sus datos siguen siendo branch_id NULL. Si la
+  // principal se llama igual que el negocio (Palermo suites), no se repite.
+  const { rows: principales } = await pool.query(
+    `SELECT business_id, name FROM app_branches
+      WHERE business_id = ANY($1::bigint[]) AND COALESCE((props->>'is_main')::boolean, false)
+      ORDER BY business_id, id`, [ids]);
+  const nombrePrincipal = (n) => {
+    const p = principales.find((x) => Number(x.business_id) === Number(n.id));
+    const nom = p && String(p.name || '').trim();
+    return nom && nom.toLowerCase() !== String(n.name || '').trim().toLowerCase() ? nom : null;
+  };
   const { rows: pcs } = await pool.query(
     `SELECT business_id, branch_id, pc_nombre, pc_huella, ultimo_contacto, maestros, esquema
        FROM kit_pcs WHERE revocado_en IS NULL AND business_id = ANY($1::bigint[])`, [ids]);
@@ -102,7 +114,7 @@ async function localesDe(userId, huella = null) {
 
   const out = [];
   for (const n of negocios) {
-    out.push({ businessId: Number(n.id), branchId: null, nombre: n.name, sucursal: null,
+    out.push({ businessId: Number(n.id), branchId: null, nombre: n.name, sucursal: nombrePrincipal(n),
       organizacion: n.org || null, rol: rolPorNegocio.get(Number(n.id)), pos: 'maxirest',
       ocupado: ocupado(n.id, null) });
     for (const s of sucursales.filter((x) => Number(x.business_id) === Number(n.id))) {
@@ -262,9 +274,11 @@ async function vincular(usuario, op) {
 async function pcPorLlave(llave) {
   if (!llave || !String(llave).startsWith(PREFIJO)) return null;
   const { rows } = await pool.query(
-    `SELECT p.*, b.name AS negocio, br.name AS sucursal
+    `SELECT p.*, b.name AS negocio, COALESCE(br.name, CASE WHEN lower(trim(mb.name)) <> lower(trim(b.name)) THEN mb.name END) AS sucursal
        FROM kit_pcs p JOIN app_businesses b ON b.id = p.business_id
        LEFT JOIN app_branches br ON br.id = p.branch_id
+       LEFT JOIN app_branches mb ON p.branch_id IS NULL AND mb.business_id = p.business_id
+                                AND COALESCE((mb.props->>'is_main')::boolean, false)
       WHERE p.llave_hash = $1 AND p.revocado_en IS NULL LIMIT 1`, [hashLlave(llave)]);
   return rows[0] || null;
 }
@@ -280,10 +294,13 @@ async function tocar(pcId, motorVer) {
 // ---------------------------------------------------------------- app (Configuración › Conexiones)
 async function listarPcs(businessId) {
   const { rows } = await pool.query(
-    `SELECT p.id, p.branch_id, br.name AS sucursal, p.pdv, p.esquema, p.pos, p.pc_nombre, p.maestros,
+    `SELECT p.id, p.branch_id, COALESCE(br.name, CASE WHEN lower(trim(mb.name)) <> lower(trim(b.name)) THEN mb.name END) AS sucursal, p.pdv, p.esquema, p.pos, p.pc_nombre, p.maestros,
             p.creado_en, u.email AS creado_por, p.ultimo_contacto, p.ultima_carga, p.ultima_carga_detalle,
             p.motor_ver, p.revocado_en, p.revocado_motivo
-       FROM kit_pcs p LEFT JOIN app_branches br ON br.id = p.branch_id
+       FROM kit_pcs p JOIN app_businesses b ON b.id = p.business_id
+       LEFT JOIN app_branches br ON br.id = p.branch_id
+       LEFT JOIN app_branches mb ON p.branch_id IS NULL AND mb.business_id = p.business_id
+                                AND COALESCE((mb.props->>'is_main')::boolean, false)
        LEFT JOIN app_users u ON u.id = p.creado_por
       WHERE p.business_id = $1 AND (p.revocado_en IS NULL OR p.revocado_en > now() - interval '30 days')
       ORDER BY p.revocado_en NULLS FIRST, p.creado_en DESC`, [businessId]);
