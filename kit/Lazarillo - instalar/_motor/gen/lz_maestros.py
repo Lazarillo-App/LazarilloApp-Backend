@@ -174,7 +174,14 @@ def main(A, OUT):
     # Render (articulos con rubro/subrubro, insumos con rubro, conceptos con rubro,
     # rubros, subrubros y proveedores). Si falla, no cambia nada del resto.
     try:
-        import lz_render
+        try:
+            import lz_render
+        except ModuleNotFoundError as e0:
+            if getattr(e0, 'name', 'lz_render') != 'lz_render':
+                raise
+            # mismo rescate que lz_informes (10/11/2026): "lz_render (N).py" del Drive
+            from lz_informes import _gen
+            lz_render = _gen('lz_render')
         lr, okr = lz_render.subir_maestros(A, hechos)
         log.extend(lr)
         lz_render.avisar_drive('maestros', lr, okr)
