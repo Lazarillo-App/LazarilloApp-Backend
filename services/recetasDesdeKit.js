@@ -37,11 +37,17 @@ async function correrRecetas(businessId, origen = 'pulso') {
     if (!tomado) { console.log(`[recetas-kit] ${origen} ${businessId}: ya corriendo en otro lado, se saltea`); return { saltado: true }; }
     const t0 = Date.now();
     await refrescarPdvMap(); // negocios nuevos del kit vinculado (kit_pcs)
-    const ventas = await syncVentasDeNegocio(businessId);
-    const compras = await syncComprasDeNegocio(businessId);
+    // Ventas y compras van por separado: si una falla, la otra igual se actualiza (antes un error
+    // en ventas del 204 dejaba también las compras sin actualizar).
+    const errores = [];
+    let ventas = null; let compras = null;
+    try { ventas = await syncVentasDeNegocio(businessId); } catch (e) { errores.push(`ventas: ${e?.message || e}`); }
+    try { compras = await syncComprasDeNegocio(businessId); } catch (e) { errores.push(`compras: ${e?.message || e}`); }
+    if (errores.length) console.error(`[recetas-kit] ${origen} ${businessId}: ${errores.join(' · ')}`);
     console.log(`[recetas-kit] ${origen} ${businessId} ${Date.now() - t0}ms`,
       JSON.stringify({ ventas: resumir(ventas), compras: resumir(compras) }).slice(0, 600));
-    return { ventas, compras };
+    if (errores.length && !ventas && !compras) throw new Error(errores.join(' · '));
+    return { ventas, compras, errores };
   } finally {
     if (tomado) await client.query('SELECT pg_advisory_unlock($1)', [CANDADO_RECETAS + businessId]).catch(() => {});
     client.release();
