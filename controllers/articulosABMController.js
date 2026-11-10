@@ -862,7 +862,21 @@ exports.saveConfigCosteo = async (req, res, next) => {
         WHERE id = $2`,
       [modo, bizId, conImp]
     );
-    return res.json({ ok: true, modo, con_impuestos: conImp });
+    res.json({ ok: true, modo, con_impuestos: conImp, recalculando: true });
+    // Aplicar el criterio nuevo YA a precios y recetas (antes recién se aplicaba con la
+    // próxima compra que entrara). En segundo plano: puede tardar unos segundos.
+    setImmediate(async () => {
+      try {
+        const { recalcularCostosDeNegocio, negociosConInsumos } = require('../services/recalculoCostos');
+        for (const insBiz of await negociosConInsumos(bizId)) {
+          const r = await recalcularCostosDeNegocio(insBiz);
+          console.log(`[saveConfigCosteo] recálculo negocio ${insBiz}`, JSON.stringify(r));
+        }
+      } catch (e) {
+        console.error('[saveConfigCosteo] recálculo falló:', e.message);
+      }
+    });
+    return;
   } catch (e) {
     console.error('[saveConfigCosteo]', e.message);
     next(e);
