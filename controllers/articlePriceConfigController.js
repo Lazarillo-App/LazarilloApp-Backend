@@ -26,8 +26,22 @@ exports.getRecetasCostos = async (req, res, next) => {
     const alertaMs = alertaSemanas * 7 * 24 * 60 * 60 * 1000;
     const rubrosExcluidos = new Set(rubrosExcluidosDe(bizRows[0]?.props));
 
+    // ?insumoId=N → solo los artículos cuyas recetas usan ese insumo, directo o a través de
+    // elaborados (en cascada). La tabla lo pide al cambiar una merma, en vez de recargar
+    // los costos de todo el negocio (navegación más fluida, Diego 11/11).
+    const soloInsumo = Number(req.query?.insumoId);
+    const filtrarPorInsumo = Number.isFinite(soloInsumo) && soloInsumo > 0;
+
     const { rows } = await pool.query(
-      `SELECT
+      `WITH RECURSIVE afectados(insumo_id) AS (
+         SELECT $2::int WHERE $2::int IS NOT NULL
+         UNION
+         SELECT re.insumo_id
+           FROM receta_items rie
+           JOIN recetas re ON re.id = rie.receta_id AND re.active = TRUE AND re.insumo_id IS NOT NULL
+           JOIN afectados a ON a.insumo_id = rie.insumo_id
+       )
+       SELECT
          r.article_id,
          r.costo_total,
          r.porciones,
@@ -50,8 +64,12 @@ exports.getRecetasCostos = async (req, res, next) => {
        LEFT JOIN insumos i ON i.id = ri.insumo_id
        WHERE r.business_id = $1
          AND r.active = TRUE
-         AND ri.tipo_costo != 'nulo'`,
-      [bizId]
+         AND ri.tipo_costo != 'nulo'
+         AND ($2::int IS NULL OR r.id IN (
+               SELECT rif.receta_id FROM receta_items rif
+                WHERE rif.insumo_id IN (SELECT insumo_id FROM afectados)
+             ))`,
+      [bizId, filtrarPorInsumo ? soloInsumo : null]
     );
 
     const costos = {};
