@@ -113,7 +113,16 @@ exports.listEquipo = async (req, res, next) => {
     const uid = req.user?.id;
     if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_params' });
     const sectores = await sectoresQueConduce(uid, bizId);
-    if (!sectores.length) return res.status(403).json({ ok: false, error: 'forbidden' });
+    if (!sectores.length) {
+      // «Ver como › Jefe de cocina» (dueño/admin): todo lo que espera el OK de algún jefe. Solo lectura
+      // del lado del front (la vista previa corta las escrituras).
+      if (req.query?.vista === 'jefe' && (await requireAdminOrOwner(uid, bizId))) {
+        const proposals = await consultarPropuestas(
+          `p.business_id = $1 AND p.status IN ('pending','in_revision') AND ${SQL_ESPERA_JEFE}`, [bizId]);
+        return res.json({ ok: true, proposals });
+      }
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
     const proposals = await consultarPropuestas(
       `p.business_id = $1 AND p.status IN ('pending','in_revision') AND p.jefe_ok_at IS NULL
          AND p.sector_id = ANY($2::int[]) AND p.created_by_user_id <> $3`,
