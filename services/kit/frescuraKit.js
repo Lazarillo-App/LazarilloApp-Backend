@@ -77,16 +77,23 @@ async function frescuraKit(businessId) {
   const sucursales = [];
   for (const { pdv, schema, branchId } of destinos) {
     if (!conCargas.has(schema)) conCargas.set(schema, await existe(schema, '_cargas'));
-    let subida = null;
+    let subida = null; let subidaRecetas = null;
     if (conCargas.get(schema)) {
-      const { rows } = await pool.query(`SELECT MAX(cargado) AS s FROM "${schema}"._cargas WHERE pdv = $1`, [pdv]);
+      // subidaRecetas: la última subida de lo que lee Recetas (12, 25 y 80), para avisar si Recetas
+      // no la leyó todavía (Diego, 11/11: el aviso por lo que pasó, no por fechas de compras).
+      const { rows } = await pool.query(
+        `SELECT MAX(cargado) AS s,
+                MAX(cargado) FILTER (WHERE tabla LIKE 'i12\\_%' OR tabla LIKE 'i25\\_%' OR tabla LIKE 'i80\\_%') AS r
+           FROM "${schema}"._cargas WHERE pdv = $1`, [pdv]);
       subida = rows[0]?.s ? new Date(rows[0].s).toISOString() : null;
+      subidaRecetas = rows[0]?.r ? new Date(rows[0].r).toISOString() : null;
     }
     sucursales.push({
       pdv,
       branchId: branchId ?? null,
       nombre: nombres.get(branchId ?? null) || pdv,
       subida,
+      subidaRecetas,
       ventas: await ultimaFecha(schema, 'i12', [pdv]),
       compras: await ultimaFecha(schema, 'i25', [pdv]),
     });
