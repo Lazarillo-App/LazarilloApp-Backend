@@ -196,3 +196,4 @@ exports.completar = async (req, res) => {
 };
 exports._handleDe = handleDe;
 exports._plataformaDe = plataformaDe;
+exports.bajarImagen = bajarImagen;
