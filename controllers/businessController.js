@@ -236,6 +236,14 @@ exports.update = async (req, res) => {
         : (BOOL_CONFIG_KEYS.has(key) ? !!incoming[key] : Number(incoming[key]));
     }
   }
+  // Rubros de insumo que NO generan la alerta de "sin compra" (ej. Especias, que se
+  // compran cada muchos meses). Lista de códigos de rubro (insumos.rubro), como texto.
+  if (incoming.alertas_rubros_excluidos !== undefined) {
+    const lista = Array.isArray(incoming.alertas_rubros_excluidos) ? incoming.alertas_rubros_excluidos : [];
+    configPatch.alertas_rubros_excluidos = [...new Set(
+      lista.map((v) => String(v ?? '').trim()).filter(Boolean)
+    )].slice(0, 300);
+  }
   const hasConfigPatch = Object.keys(configPatch).length > 0;
 
   // Construir patch sin eliminar nulls — necesitamos poder borrar campos (ej: logo_url: null)
