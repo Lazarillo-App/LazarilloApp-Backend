@@ -10,7 +10,8 @@
 'use strict';
 
 const pool = require('../config/db');
-const { createSyncNotificationForBusinessUsers } = require('./notificationService');
+const { createSyncNotification, createSyncNotificationForBusinessUsers } = require('./notificationService');
+const { jefesDelSector } = require('./jefeCocina');
 const { logAudit } = require('./audit/auditLog');
 
 async function snapshotReceta(articleId, bizId) {
@@ -159,7 +160,7 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
   if (existingRows.length) {
     const { rows } = await pool.query(
       `UPDATE receta_proposals
-          SET payload_after = $1::jsonb, updated_at = NOW()
+          SET payload_after = $1::jsonb, jefe_ok_at = NULL, jefe_ok_by = NULL, updated_at = NOW()
         WHERE id = $2
         RETURNING *`,
       [JSON.stringify(bodyEnriquecido), existingRows[0].id]
@@ -186,14 +187,29 @@ async function createOrUpdateProposal({ bizId, articleId = null, insumoId = null
     // type 'ui_action' (siempre permitido) + kind en metadata — mismo criterio
     // defensivo que safeType() usa como fallback, sin arriesgar un tipo nuevo
     // contra un CHECK de DB que no podemos confirmar desde acá.
-    createSyncNotificationForBusinessUsers({
-      businessId: bizId,
-      type: 'ui_action',
-      title: 'Receta propuesta para revisar',
-      message: `${nombreParaAviso || 'Un miembro del equipo'} propuso cambios en una receta. Andá a Configuración > Aprobaciones para revisarlos.`,
-      metadata: { kind: 'receta_proposal', proposal_id: row.id },
-      onlyAdmins: true,
-    }).catch((e) => console.error('[recetaProposals] error notificando propuesta:', e?.message));
+    // Sector con jefe de cocina (Diego 11/11/2026): el aviso va al jefe; al admin le llega con su OK.
+    const jefes = await jefesDelSector(bizId, sectorId);
+    if (jefes.length && !jefes.includes(Number(uid))) {
+      for (const jefeId of jefes) {
+        createSyncNotification({
+          businessId: bizId,
+          userId: jefeId,
+          type: 'ui_action',
+          title: 'Cambio de tu equipo para revisar',
+          message: `${nombreParaAviso || 'Alguien de tu equipo'} propuso cambios en una receta. Está en Pendientes, esperando tu OK.`,
+          metadata: { kind: 'receta_proposal_jefe', proposal_id: row.id },
+        }).catch((e) => console.error('[recetaProposals] error avisando al jefe:', e?.message));
+      }
+    } else {
+      createSyncNotificationForBusinessUsers({
+        businessId: bizId,
+        type: 'ui_action',
+        title: 'Receta propuesta para revisar',
+        message: `${nombreParaAviso || 'Un miembro del equipo'} propuso cambios en una receta. Andá a Configuración > Aprobaciones para revisarlos.`,
+        metadata: { kind: 'receta_proposal', proposal_id: row.id },
+        onlyAdmins: true,
+      }).catch((e) => console.error('[recetaProposals] error notificando propuesta:', e?.message));
+    }
   }
 
   // Historial de actividad: antes esto no quedaba registrado para nada — un Staff

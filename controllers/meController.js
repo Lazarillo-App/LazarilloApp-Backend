@@ -78,6 +78,18 @@ exports.getAccess = async (req, res, next) => {
       if (b.role === 'admin') {
         try { b.permisos = await getPermisos(uid, b.id); } catch (e) { console.warn('[getAccess permisos]', e.message); }
       }
+      // Subrol de Staff (jefe de cocina, Diego 11/11/2026).
+      b.subrol = null;
+      if (b.role === 'staff') {
+        try {
+          const { rows: sr } = await pool.query(
+            `SELECT subrol FROM user_assignments WHERE user_id = $1 AND scope_type = 'business' AND scope_id = $2
+                AND role = 'staff' AND revoked_at IS NULL AND subrol IS NOT NULL LIMIT 1`,
+            [uid, b.id]
+          );
+          b.subrol = sr[0]?.subrol || null;
+        } catch (e) { console.warn('[getAccess subrol]', e.message); }
+      }
     }
 
     // Orgs donde tengo assignment directo (no contar las que llegan por owner_id de un biz)
