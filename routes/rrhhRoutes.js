@@ -8,6 +8,13 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const ctrl = require('../controllers/rrhhController');
 
+// Staff: sin RRHH por ahora (usuaria 10/11). Va a haber distintos niveles de staff con permisos
+// propios; hasta definirlos, el módulo queda solo para dueño y admin (incluye roles a medida).
+router.use((req, res, next) => {
+  if (req.businessRole === 'staff') return res.status(403).json({ error: 'forbidden_staff' });
+  next();
+});
+
 // Config del módulo (empleados + puestos + fechas + espacios con turnos)
 router.get('/config', ctrl.getConfig);
 router.put('/config', ctrl.putConfig);
