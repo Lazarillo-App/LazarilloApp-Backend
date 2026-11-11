@@ -565,26 +565,39 @@ exports.getRecetasAlertas = async (req, res, next) => {
     // Rubros de los insumos que se usan en recetas de artículo (para elegir en la
     // configuración cuáles no alertan). Incluye los ya excluidos.
     const { rows: rubrosRows } = await pool.query(
-      `SELECT TRIM(i.rubro) AS codigo,
-              COALESCE(MAX(ir.nombre), TRIM(i.rubro)) AS nombre,
-              COUNT(DISTINCT i.id)::int AS insumos
-         FROM receta_items ri
-         JOIN recetas r ON r.id = ri.receta_id AND r.business_id = $1 AND r.active = TRUE
-          AND r.article_id IS NOT NULL
-         JOIN insumos i ON i.id = ri.insumo_id AND i.es_elaborado IS NOT TRUE
-         LEFT JOIN insumo_rubros ir ON ir.business_id = i.business_id AND ir.codigo::text = i.rubro
-        WHERE ri.tipo_costo != 'nulo'
-          AND COALESCE(TRIM(i.rubro), '') <> ''
-        GROUP BY TRIM(i.rubro)
+      `WITH ins AS (
+         SELECT DISTINCT i.id, TRIM(i.rubro) AS codigo, i.business_id, i.rubro
+           FROM receta_items ri
+           JOIN recetas r ON r.id = ri.receta_id AND r.business_id = $1 AND r.active = TRUE
+            AND r.article_id IS NOT NULL
+           JOIN insumos i ON i.id = ri.insumo_id AND i.es_elaborado IS NOT TRUE
+          WHERE ri.tipo_costo != 'nulo'
+            AND COALESCE(TRIM(i.rubro), '') <> ''
+       ), ult AS (
+         SELECT ins.*, (SELECT MAX(pi.fecha) FROM purchase_items pi
+                         WHERE pi.insumo_id = ins.id AND pi.precio > 0) AS fecha_ultima
+           FROM ins
+       )
+       SELECT u.codigo,
+              COALESCE(MAX(ir.nombre), u.codigo) AS nombre,
+              COUNT(DISTINCT u.id)::int AS insumos,
+              -- mismo criterio que el ⚠ de la tabla: sin compra o compra más vieja que el umbral
+              COUNT(DISTINCT u.id) FILTER (
+                WHERE u.fecha_ultima IS NULL
+                   OR u.fecha_ultima < CURRENT_DATE - ($2 || ' weeks')::interval
+              )::int AS en_alerta
+         FROM ult u
+         LEFT JOIN insumo_rubros ir ON ir.business_id = u.business_id AND ir.codigo::text = u.rubro
+        GROUP BY u.codigo
         ORDER BY 2 ASC`,
-      [bizId]
+      [bizId, alertaSemanas]
     );
 
     return res.json({
       ok: true,
       alertaSemanas,
       rubrosExcluidos,
-      rubrosEnRecetas: rubrosRows.map(r => ({ codigo: r.codigo, nombre: r.nombre, insumos: r.insumos })),
+      rubrosEnRecetas: rubrosRows.map(r => ({ codigo: r.codigo, nombre: r.nombre, insumos: r.insumos, enAlerta: r.en_alerta })),
       total: rows.length,
       insumos: rows.map(r => ({
         insumoId: Number(r.insumo_id),
