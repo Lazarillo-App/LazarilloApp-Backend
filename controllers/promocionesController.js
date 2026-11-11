@@ -40,7 +40,7 @@ async function resolveArticuloInfo(client, storageBizId, artId) {
         WHERE business_id = $1 AND articulo_id = $2 LIMIT 1`,
       [storageBizId, artId]
     );
-    if (rows.length) return rows[0];
+    if (rows.length) return { ...rows[0], costo: await costoRecetaArticulo(client, storageBizId, artId) };
   } else {
     const { rows } = await client.query(
       `SELECT name AS nombre, rubro AS categoria, subrubro, price AS precio, 0 AS costo
@@ -48,9 +48,25 @@ async function resolveArticuloInfo(client, storageBizId, artId) {
         WHERE business_id = $1 AND id = $2 LIMIT 1`,
             [storageBizId, artId]
     );
-    if (rows.length) return rows[0];
+    if (rows.length) return { ...rows[0], costo: await costoRecetaArticulo(client, storageBizId, artId) };
   }
   return null;
+}
+
+// Costo del artículo = costo de SU receta (costo_total ÷ porciones), como el modal (calcCosto.js).
+// Sin receta → 0. Nunca el precio de venta (Diego 11/11/2026).
+async function costoRecetaArticulo(client, bizId, artId) {
+  const { rows } = await client.query(
+    `SELECT costo_total / NULLIF(porciones, 0) AS costo
+       FROM recetas
+      WHERE article_id = $1 AND active = TRUE AND es_promo IS NOT TRUE
+        AND (business_id = $2 OR business_id IN (
+              SELECT b2.id FROM app_businesses b1 JOIN app_businesses b2 ON b2.organization_id = b1.organization_id
+               WHERE b1.id = $2))
+      ORDER BY (business_id = $2) DESC, updated_at DESC LIMIT 1`,
+    [artId, bizId]
+  );
+  return Number(rows[0]?.costo) || 0;
 }
 
 /**
@@ -113,7 +129,7 @@ exports.crearPromocion = async (req, res, next) => {
     let costoTotal = 0;
     for (const ci of compInfos) {
       // Costo del componente: su costo de receta si existe, sino su precio de DB (artículo sin receta)
-      const costoComp = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
+      const costoComp = (Number(ci.costo) || 0);
       costoTotal += costoComp * ci.cantidad;
     }
     // Insumos propios
@@ -182,8 +198,8 @@ exports.crearPromocion = async (req, res, next) => {
     // 9. Insertar items: primero los artículos componentes, luego los insumos
     let orden = 0;
     for (const ci of compInfos) {
-      // Costo del componente: costo de receta si existe, sino precio (misma jerarquía que el total)
-      const costoComp = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
+      // Costo del componente: costo de su receta (sin receta → 0, nunca el precio de venta)
+      const costoComp = (Number(ci.costo) || 0);
       await client.query(
         `INSERT INTO receta_items
            (receta_id, article_ref_id, cantidad, unidad, costo_unitario,
@@ -353,10 +369,10 @@ exports.actualizarPromocion = async (req, res, next) => {
     const rubroCategoria = compInfos[0].categoria || 'Promociones';
     const rubroSubrubro = compInfos[0].subrubro || 'Promociones';
 
-    // 3. Costo total (componente: costo receta si existe, sino precio DB)
+    // 3. Costo total (componente: costo de su receta; sin receta → 0)
     let costoTotal = 0;
     for (const ci of compInfos) {
-      const costoComp = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
+      const costoComp = (Number(ci.costo) || 0);
       costoTotal += costoComp * ci.cantidad;
     }
     const insumosNorm = (Array.isArray(insumos) ? insumos : [])
@@ -379,7 +395,7 @@ exports.actualizarPromocion = async (req, res, next) => {
     await client.query(`DELETE FROM receta_items WHERE receta_id = $1`, [recetaId]);
     let orden = 0;
     for (const ci of compInfos) {
-      const costoUnit = (Number(ci.costo) || 0) || (Number(ci.precio) || 0);
+      const costoUnit = (Number(ci.costo) || 0);
       await client.query(
         `INSERT INTO receta_items
            (receta_id, article_ref_id, cantidad, unidad, costo_unitario,
