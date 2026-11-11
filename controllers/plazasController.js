@@ -176,7 +176,7 @@ exports.vista = async (req, res, next) => {
         ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, num(req.query.articleId) || null]);
     const ids = prods.map((p) => p.article_id);
     const { rows: items } = ids.length ? await pool.query(
-      `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id,
+      `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones,
               COALESCE(i.nombre, ri.nombre_insumo_maxi, ma2.nombre, 'Ingrediente') AS nombre
          FROM recetas r
          JOIN receta_items ri ON ri.receta_id = r.id
@@ -184,8 +184,9 @@ exports.vista = async (req, res, next) => {
          LEFT JOIN maxi_articles ma2 ON ma2.articulo_id = ri.article_ref_id AND ma2.business_id = r.business_id
         WHERE r.business_id = $1 AND r.article_id = ANY($2::int[]) AND COALESCE(r.active, TRUE)
         ORDER BY ri.orden, ri.id`, [bizId, ids]) : { rows: [] };
-    const { rows: cols } = await pool.query('SELECT ref, color FROM despacho_colores WHERE business_id = $1', [bizId]);
-    const colorDe = new Map(cols.map((c) => [c.ref, Number(c.color)]));
+    const { rows: cols } = await pool.query('SELECT ref, color, mostrar FROM despacho_colores WHERE business_id = $1', [bizId]);
+    const colorDe = new Map(cols.filter((c) => c.color != null).map((c) => [c.ref, Number(c.color)]));
+    const mostrarDe = new Map(cols.filter((c) => c.mostrar).map((c) => [c.ref, c.mostrar]));
 
     const productos = prods.map((p) => {
       const layout = p.layout || {};
@@ -196,11 +197,13 @@ exports.vista = async (req, res, next) => {
           key: `r:${it.item_id}`, ref, nombre: it.nombre,
           cantidad: it.cantidad != null ? Number(it.cantidad) : null, unidad: it.unidad || '',
           color: colorDe.has(ref) ? colorDe.get(ref) : colorPorDefecto(ref, it.nombre),
+          obs: it.observaciones ? String(it.observaciones).trim() : '',
+          mostrar: mostrarDe.get(ref) || 'peso',
           oculto: ocultos.has(`r:${it.item_id}`), extra: false,
         };
       });
       const extras = (Array.isArray(layout.extras) ? layout.extras : []).map((x) => ({
-        key: String(x.id), ref: null, nombre: String(x.texto || ''), cantidad: null, unidad: '',
+        key: String(x.id), ref: null, nombre: String(x.texto || ''), cantidad: null, unidad: '', obs: '', mostrar: 'peso',
         color: Number.isFinite(Number(x.color)) ? Number(x.color) : 12, oculto: false, extra: true,
       }));
       const todos = [...base, ...extras];
@@ -235,20 +238,26 @@ exports.guardarFicha = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/** PUT /businesses/:businessId/plazas/colores  { ref, color } — color de un ingrediente en todas las plazas. */
+/** PUT /businesses/:businessId/plazas/colores  { ref, color?, mostrar? } — color y qué mostrar (peso | obs) de un ingrediente, en todas las plazas. */
 exports.guardarColor = async (req, res, next) => {
   try {
     const bizId = num(req.businessId);
     const ref = String(req.body?.ref || '').slice(0, 80);
-    const color = num(req.body?.color);
-    if (!ref || color == null || color < 0 || color >= PALETA_N) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
+    // Se puede mandar el color, qué mostrar ('peso' | 'obs'), o los dos; lo que no viene se conserva.
+    const color = req.body?.color == null ? null : num(req.body.color);
+    const mostrar = req.body?.mostrar == null ? null : String(req.body.mostrar);
+    const colorOk = color == null || (color >= 0 && color < PALETA_N);
+    const mostrarOk = mostrar == null || ['peso', 'obs'].includes(mostrar);
+    if (!ref || (color == null && mostrar == null) || !colorOk || !mostrarOk) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
     if (!esGestor(req)) {
       const conduce = await sectoresQueConduce(req.user?.id, bizId);
       if (!conduce.length) return res.status(403).json({ ok: false, error: 'forbidden' });
     }
     await pool.query(
-      `INSERT INTO despacho_colores (business_id, ref, color) VALUES ($1, $2, $3)
-       ON CONFLICT (business_id, ref) DO UPDATE SET color = EXCLUDED.color`, [bizId, ref, color]);
+      `INSERT INTO despacho_colores (business_id, ref, color, mostrar) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (business_id, ref) DO UPDATE SET color = COALESCE(EXCLUDED.color, despacho_colores.color),
+                                                    mostrar = COALESCE(EXCLUDED.mostrar, despacho_colores.mostrar)`,
+      [bizId, ref, color, mostrar]);
     res.json({ ok: true });
   } catch (e) { next(e); }
 };
