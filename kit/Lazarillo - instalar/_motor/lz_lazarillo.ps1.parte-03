@@ -588,7 +588,7 @@ $lzInf = Join-Path $motor "gen\lz_informes.py"
 # intentos con pausas de 30/60 s, por si el Drive todavia lo esta bajando.
 function Asegurar-DelKit($ruta, $que) {
   if (Test-Path $ruta) { return }
-  if (-not $destinos["kit_drive"]) { return }
+  if ((-not $destinos["kit_drive"]) -or $vinculada) { return }   # V51: la vinculada se arregla desde Lazarillo
   $mDrv = Join-Path $destinos["kit_drive"] "_motor"
   for ($k = 1; $k -le 3; $k++) {
     $null = Sync-KitMotorRapido -motorDrive $mDrv -motorLocal $motor

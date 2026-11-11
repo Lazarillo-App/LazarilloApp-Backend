@@ -44,7 +44,7 @@ New-Item -ItemType Directory -Force -Path $pcDir | Out-Null
 # NUMERO DE VERSION: se sube DE A UNO cada vez que se empuja un cambio del
 # motor a las PC. Diego lo lee de un vistazo en _VERSION.txt y en el cartel
 # final, y asi sabe si esa PC ya tiene el cambio sin mirar fechas.
-$MOTOR_VER = "V50"
+$MOTOR_VER = "V51"
 
 $miArchivo = $MyInvocation.MyCommand.Path
 $version   = $MOTOR_VER + " - " + (Get-Item $miArchivo).LastWriteTime.ToString('dd/MM/yyyy HH:mm')

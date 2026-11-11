@@ -49,6 +49,25 @@ async function getModoCosteo(businessId, runner = pool) {
   return MODOS_VALIDOS.includes(modo) ? modo : MODO_DEFAULT;
 }
 
+// Costo con o sin impuestos (app_businesses.props.costo_con_impuestos, Configuración > Insumos).
+// Por defecto CON impuestos (Diego 10/11/2026): el costo de un insumo es lo que se paga por él,
+// sea factura A o Z — neto + IVA + impuestos internos del renglón. Las percepciones no entran:
+// son de la factura entera, no del insumo. Las Z traen IVA e internos en 0 (ya vienen adentro).
+async function getConImpuestos(businessId, runner = pool) {
+  const { rows } = await runner.query(
+    `SELECT props->>'costo_con_impuestos' AS v FROM app_businesses WHERE id = $1`,
+    [businessId]
+  );
+  return rows[0]?.v !== 'false';
+}
+
+// Importe de un renglón de purchase_items (alias `a`) según el criterio de arriba.
+function importeSql(a, conImpuestos) {
+  return conImpuestos
+    ? `(${a}.precio_total + COALESCE(${a}.iva_total_item, 0) + COALESCE(${a}.imp_int_total, 0))`
+    : `${a}.precio_total`;
+}
+
 // Para un conjunto de insumos con compras recién cargadas, calcula el precio
 // que corresponde asignarles a precio_ref según el modo de costeo del negocio:
 //   - 'ultima_compra' (default): precio de la compra más reciente.
@@ -56,9 +75,11 @@ async function getModoCosteo(businessId, runner = pool) {
 //   - 'precio_db': no se toca — el precio de referencia queda como un valor
 //     fijo del sistema, ajeno a lo que entra por compras (devuelve null).
 // `runner` puede ser el pool o un client de una transacción en curso.
-async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
+async function calcularPreciosPorModo(runner, businessId, insumoIds, modo, { conImpuestos } = {}) {
   if (modo === 'precio_db') return null;
   if (!insumoIds?.length) return new Map();
+  const conImp = conImpuestos ?? await getConImpuestos(businessId, runner);
+  const importe = importeSql('pi', conImp);
 
   if (modo === 'promedio_30') {
     // Promedio ponderado por cantidad (importe total ÷ unidades totales) de
@@ -66,7 +87,7 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
     // promedio por fila, que pesaría igual una compra de 2 unidades que una
     // de 200 y seguiría ignorando las líneas en $0.
     const { rows } = await runner.query(
-      `SELECT insumo_id, ROUND((SUM(precio_total) / NULLIF(SUM(cantidad), 0))::numeric, 4) AS precio
+      `SELECT insumo_id, ROUND((SUM(${importe}) / NULLIF(SUM(pi.cantidad), 0))::numeric, 4) AS precio
          FROM purchase_items pi
         WHERE business_id = $1
           AND insumo_id = ANY($2::int[])
@@ -84,7 +105,7 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
                AND EXISTS (SELECT 1 FROM receta_items ri WHERE ri.receta_id = r.id)
           )
         GROUP BY insumo_id
-        HAVING SUM(precio_total) > 0`,
+        HAVING SUM(${importe}) > 0`,
       [businessId, insumoIds]
     );
     const resultadoPromedio = new Map(rows.map((r) => [Number(r.insumo_id), Number(r.precio)]));
@@ -105,7 +126,7 @@ async function calcularPreciosPorModo(runner, businessId, insumoIds, modo) {
   const { rows } = await runner.query(
     `SELECT pi.insumo_id, p.factura_key, p.proveedor_id,
             MAX(p.fecha) AS fecha, MAX(p.id) AS pid,
-            SUM(pi.precio_total) AS importe, SUM(pi.cantidad) AS unidades
+            SUM(${importe}) AS importe, SUM(pi.cantidad) AS unidades
        FROM purchase_items pi
        JOIN purchases p ON p.id = pi.purchase_id
       WHERE pi.business_id = $1 AND pi.insumo_id = ANY($2::int[])
@@ -263,7 +284,28 @@ async function aplicarPreciosCosteo(client, businessId, precios) {
   return rows.map((r) => Number(r.id));
 }
 
+// Costo POR LOCAL (Diego 10/11/2026, tabla insumo_costos_local): el precio que calcularPreciosPorModo
+// dio para las compras de UN local queda guardado para ese local, y las recetas de ese local se
+// costean con él (propagarCostoInsumo). precio_ref sigue siendo el precio "del grupo" (respaldo
+// para los locales que no compraron ese insumo, y lo que muestra la tabla de Insumos).
+async function guardarCostosLocales(client, localBizId, precios) {
+  if (!precios || !precios.size) return 0;
+  const ids = [...precios.keys()];
+  const valores = ids.map((id) => precios.get(id));
+  const { rowCount } = await client.query(
+    `INSERT INTO insumo_costos_local (insumo_id, business_id, precio, updated_at)
+     SELECT v.insumo_id, $3, v.precio, NOW()
+       FROM UNNEST($1::int[], $2::numeric[]) AS v(insumo_id, precio)
+      WHERE v.precio > 0
+     ON CONFLICT (insumo_id, business_id)
+       DO UPDATE SET precio = EXCLUDED.precio, updated_at = NOW()`,
+    [ids, valores, Number(localBizId)]
+  );
+  return rowCount;
+}
+
 module.exports = {
+  guardarCostosLocales,
   MODOS_VALIDOS, MODO_DEFAULT, getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo,
-  RATIO_PRECIO_SOSPECHOSO,
+  RATIO_PRECIO_SOSPECHOSO, getConImpuestos, importeSql,
 };

@@ -124,7 +124,9 @@ def _gen(nombre):
     except ModuleNotFoundError as e:
         if getattr(e, 'name', nombre) != nombre:
             raise
-    lugares = [AQUI] + [d for d in [_kit_gen_drive()] if d and os.path.isdir(d)]
+    # 10/11/2026: también _motor\_viejo\gen, donde la poda aparta lo que no ve en el Drive.
+    viejo = os.path.join(os.path.dirname(AQUI), '_viejo', 'gen')
+    lugares = [AQUI] + [d for d in [_kit_gen_drive(), viejo] if d and os.path.isdir(d)]
     patron = _re.compile(r'^' + _re.escape(nombre) + r' \(\d+\)\.py$', _re.I)
     candidatos = []
     for d in lugares:
@@ -178,6 +180,9 @@ def _generar(cod, B, destino, anio):
     if cod in ('12','12M','12N'):
         gen12 = _gen('gen12')
         return len(gen12.generar_12(B, anio, salida=destino, variante=cod))
+    if cod == '12T':   # 12 por turno, solo para Lazarillo (lo pide lz_render, no va al Drive/MEGA)
+        gen12 = _gen('gen12')
+        return len(gen12.generar_12t(B, anio, salida=destino))
     if cod == '12PRO':
         gen12pro = _gen('gen12pro')
         return len(gen12pro.generar_12pro(B, anio, destino))
@@ -471,7 +476,10 @@ def main(B, OUT, anio, sufijo='', extras=(), solo=None):
     # En el reintento corto (solo=...) no se sube: se sube en la corrida completa.
     if not solo:
         try:
-            import lz_render
+            # 10/11/2026: con "import lz_render" a secas, las dos PC de FC no subieron a Render
+            # ("No module named 'lz_render'"): el Drive les dejó el archivo con otro nombre y la
+            # poda apartó el bueno. _gen() lo busca como "lz_render (N).py" acá y en el Drive.
+            lz_render = _gen('lz_render')
             lr, okr = lz_render.subir_informes(B, OUT, anio, generados)
             log.extend(lr)
             lz_render.avisar_drive('informes', lr, okr)

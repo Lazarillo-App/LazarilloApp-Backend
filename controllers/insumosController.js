@@ -9,6 +9,7 @@ const {
   normalizarInsumosRubros,
 } = require('../services/maxiSuppliesService');
 const { recalcularCostoRecetas } = require('../services/costoRecetaService');
+const { getConImpuestos, importeSql } = require('../services/precioCosteoInsumos');
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 const { autoAssignNewInsumos } = require('../services/autoAssignNewInsumos');
@@ -190,6 +191,7 @@ exports.listar = async (req, res) => {
     // values de dataRes, calculado sobre su propio array.
     const orgBizIds = await getOrgBizIds(businessId);
     const orgIdx = params.length + 1;
+    const importeUlt = importeSql('pi_ult', await getConImpuestos(businessId));
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -208,6 +210,11 @@ exports.listar = async (req, res) => {
           rc.receta_unidad_peso,
           rc.receta_porciones,
           rc.receta_costo_unitario,
+          -- Costo por local (insumo_costos_local): { "<business_id>": precio }. El modal de receta
+          -- costea con el del local de la receta, igual que el servidor (propagarCostoInsumo).
+          (SELECT json_object_agg(icl.business_id, icl.precio)
+             FROM insumo_costos_local icl
+            WHERE icl.insumo_id = i.id) AS costos_locales,
           CASE
             WHEN i.costo_preferido IS NOT NULL THEN i.costo_preferido
             WHEN rc.receta_updated_at IS NULL THEN 'compra'
@@ -247,7 +254,7 @@ exports.listar = async (req, res) => {
             -- promediado real, e "última compra (auto)" terminaba costeando la receta más
             -- caro que la compra que le dio origen.
             (SELECT CASE WHEN SUM(pi_ult.cantidad) > 0
-                     THEN ROUND((SUM(pi_ult.precio_total) / SUM(pi_ult.cantidad))::numeric, 4)
+                     THEN ROUND((SUM(${importeUlt}) / SUM(pi_ult.cantidad))::numeric, 4)
                      ELSE NULL END
              FROM purchase_items pi_ult
              JOIN purchases p_ult ON p_ult.id = pi_ult.purchase_id
@@ -3606,6 +3613,7 @@ exports.estadoBonificacion = async (req, res) => {
     // Compras org-wide: el costo de reposición mira el último comprobante de
     // CUALQUIER negocio de la org (las compras son per-business, el costo es único).
     const orgBizIds = await getOrgBizIds(businessId);
+    const importeCosto = importeSql('pi', await getConImpuestos(businessId));
     // Último comprobante del insumo (agrupado por factura_key + proveedor)
     const { rows: compRows } = await pool.query(
       `SELECT
@@ -3614,7 +3622,7 @@ exports.estadoBonificacion = async (req, res) => {
          MAX(p.fecha)                                                   AS fecha,
          SUM(CASE WHEN pi.precio_total > 0 THEN pi.cantidad ELSE 0 END) AS facturadas,
          SUM(CASE WHEN pi.precio_total = 0 THEN pi.cantidad ELSE 0 END) AS bonificadas,
-         SUM(pi.precio_total)                                           AS importe_total
+         SUM(${importeCosto}) AS importe_total
        FROM purchases p
        JOIN purchase_items pi ON pi.purchase_id = p.id
       WHERE pi.insumo_id = $1 AND pi.business_id = ANY($2::int[])
@@ -3761,6 +3769,7 @@ exports.aplicarBonificacion = async (req, res) => {
     // per-business (viven en el subnegocio, ej. 204) pero el costo del insumo es
     // único por org. Buscar solo en el principal (147) da 0 filas → "no tiene compras".
     const orgBizIds = await getOrgBizIds(businessId);
+    const importeCosto = importeSql('pi', await getConImpuestos(businessId, client));
     // Traer el último comprobante (factura_key) del insumo, con sus totales.
     // Agrupamos por factura_key + proveedor_id (spec §3.1), no por purchase_id,
     // para tolerar comprobantes cargados partidos por sucursal.
@@ -3771,7 +3780,7 @@ exports.aplicarBonificacion = async (req, res) => {
          MAX(p.fecha)                                                   AS fecha,
          SUM(CASE WHEN pi.precio_total > 0 THEN pi.cantidad ELSE 0 END) AS facturadas,
          SUM(CASE WHEN pi.precio_total = 0 THEN pi.cantidad ELSE 0 END) AS bonificadas,
-         SUM(pi.precio_total)                                           AS importe_total
+         SUM(${importeCosto}) AS importe_total
        FROM purchases p
        JOIN purchase_items pi ON pi.purchase_id = p.id
       WHERE pi.insumo_id = $1 AND pi.business_id = ANY($2::int[])

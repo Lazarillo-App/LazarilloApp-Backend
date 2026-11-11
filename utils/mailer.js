@@ -75,6 +75,39 @@ async function sendEmail(to, subject, html, opts = {}) {
     };
   }
 
+  // Camino 1: API web de Resend (HTTPS). El plan gratis de Render corta las
+  // conexiones SMTP salientes ("Connection timeout" en testing, 10/11/2026); la API
+  // va por el puerto 443 como cualquier página. Con Resend, la contraseña SMTP es la
+  // misma API key, así que no hace falta configurar nada nuevo. Si la API falla por
+  // red o responde error, se sigue con SMTP como antes (Diego 10/11/2026: «opción
+  // nueva gratis y si falla usa el código actual»). Con adjuntos va directo a SMTP.
+  const usaApiResend = /resend\.com$/i.test(String(SMTP_HOST || '').trim())
+    && typeof fetch === 'function' && !(opts.attachments && opts.attachments.length);
+  if (usaApiResend) {
+    try {
+      const r = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${SMTP_PASS}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: opts.from || SMTP_FROM,
+          to: recipients,
+          subject,
+          html,
+          ...(opts.text ? { text: opts.text } : {}),
+          ...(opts.replyTo ? { reply_to: opts.replyTo } : {}),
+        }),
+        signal: AbortSignal.timeout(20000),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data?.id) {
+        return { accepted: recipients, rejected: [], messageId: data.id, simulated: false };
+      }
+      console.error(`[mailer] ⚠️ API Resend respondió ${r.status}: ${data?.message || data?.name || 'sin detalle'} — pruebo por SMTP`);
+    } catch (e) {
+      console.error('[mailer] ⚠️ API Resend no respondió:', e.message, '— pruebo por SMTP');
+    }
+  }
+
   try {
     const info = await tx.sendMail({
       from: opts.from || SMTP_FROM,

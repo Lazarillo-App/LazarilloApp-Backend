@@ -8,7 +8,7 @@ const path = require('path');
 const { generateBatchId } = require('./purchasesStore');
 const { recalcularBonificaciones } = require('./bonificacionesService');
 const { propagarCostoInsumo } = require('./costoRecetaService');
-const { getModoCosteo, calcularPreciosPorModo, aplicarPreciosCosteo } = require('./precioCosteoInsumos');
+const { getModoCosteo, getConImpuestos, calcularPreciosPorModo, aplicarPreciosCosteo, guardarCostosLocales } = require('./precioCosteoInsumos');
 
 /**
  * Columnas esperadas del informe de MaxiRest:
@@ -442,10 +442,12 @@ async function importPurchasesToDatabase({ businessId, userId, filePath, origina
     // viven los insumos); las compras en sí pueden estar en dataBizId (un
     // subnegocio con las mismas credenciales de Maxi).
     const modoCosteo = await getModoCosteo(credsBizId, client);
-    const preciosPorModo = await calcularPreciosPorModo(client, dataBizId, insumoIdsTocados, modoCosteo);
+    const preciosPorModo = await calcularPreciosPorModo(client, dataBizId, insumoIdsTocados, modoCosteo, { conImpuestos: await getConImpuestos(credsBizId, client) });
     const idsActualizadosPorCompra = preciosPorModo
       ? await aplicarPreciosCosteo(client, credsBizId, preciosPorModo)
       : [];
+    // Costo por local: el precio de estas compras queda como el del local que compró (dataBizId).
+    if (preciosPorModo) await guardarCostosLocales(client, dataBizId, preciosPorModo);
     // Mismo shape que antes ({ id }) — lo consume propagarCambiosImportEnBackground.
     const insumosActualizadosRows = idsActualizadosPorCompra.map((id) => ({ id }));
     const preciosActualizados = insumosActualizadosRows.length;

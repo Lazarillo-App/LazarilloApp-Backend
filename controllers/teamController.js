@@ -155,6 +155,15 @@ exports.listMembers = async (req, res, next) => {
          WHERE ua.user_id = $1
            AND ua.revoked_at IS NULL
            AND ua.role IN ('owner', 'admin')
+        UNION
+        -- Organizaciones de los negocios que poseo (mismo criterio que
+        -- getEffectiveRoleOnScope: owner de un negocio de la org = owner de la org).
+        -- Sin esto, quien invitaba a alguien a nivel organización no lo veía
+        -- después en su equipo (Diego 10/11/2026, invitación de Lautaro a CONTENEDORES).
+        SELECT DISTINCT 'organization'::text AS scope_type, b.organization_id AS scope_id
+          FROM app_businesses b
+         WHERE b.owner_id = $1
+           AND b.organization_id IS NOT NULL
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
              ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
@@ -311,8 +320,21 @@ exports.createInvitation = async (req, res, next) => {
         if (!email || !rawScopes.length || !role || !alias?.trim()) {
             return res.status(400).json({ ok: false, error: 'missing_fields' });
         }
+        // Email bien formado: algo@dominio.tld (Diego 10/11/2026, invitaciones a «...@gmail» sin .com).
+        if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(String(email).trim())) {
+            return res.status(400).json({ ok: false, error: 'invalid_email' });
+        }
         if (!isValidRole(role)) {
             return res.status(400).json({ ok: false, error: 'invalid_role' });
+        }
+
+        // Rol a medida (Diego 10/11/2026: «Agregar a otro negocio» tiene que ofrecer
+        // los roles como Gerente). Igual que en updateAssignment: solo con rol admin,
+        // solo lo asigna el dueño y tiene que ser un rol de ese negocio u organización.
+        const tocaRolMedida = Object.prototype.hasOwnProperty.call(req.body || {}, 'customRoleId');
+        const customRoleId = tocaRolMedida && req.body.customRoleId != null ? Number(req.body.customRoleId) : null;
+        if (customRoleId != null && (role !== 'admin' || !Number.isFinite(customRoleId))) {
+            return res.status(400).json({ ok: false, error: 'custom_role_requires_admin' });
         }
 
         // Normalizar + validar cada scope, sin duplicados
@@ -364,6 +386,22 @@ exports.createInvitation = async (req, res, next) => {
         for (const s of scopes) {
             const r = await assertManagerOnScope(uid, s.scopeType, s.scopeId, res);
             if (!r) return;
+            if (tocaRolMedida && r !== 'owner') {
+                return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
+            }
+            if (customRoleId != null) {
+                const { rows: rr } = await pool.query(
+                    `SELECT cr.id FROM app_custom_roles cr
+                      WHERE cr.id = $1 AND cr.deleted_at IS NULL AND NOT cr.es_administracion
+                        AND (
+                          (cr.organization_id IS NOT NULL AND cr.organization_id = CASE WHEN $2 = 'organization' THEN $3::bigint
+                             ELSE (SELECT organization_id FROM app_businesses WHERE id = $3::bigint) END)
+                          OR (cr.business_id IS NOT NULL AND $2 = 'business' AND cr.business_id = $3::bigint)
+                        )`,
+                    [customRoleId, s.scopeType, s.scopeId]
+                );
+                if (!rr.length) return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
+            }
         }
 
         const rawEmail = normEmail(email);
@@ -451,26 +489,29 @@ exports.createInvitation = async (req, res, next) => {
                       alias = $1,
                       granted_by_user_id = $2,
                       sector_ids = $3,
+                      custom_role_id = CASE WHEN $5 THEN $6::bigint ELSE custom_role_id END,
                       updated_at = NOW()
                 WHERE id = $4`,
-                        [aliasEfectivo, uid, scopeSectorIds, assignmentId]
+                        [aliasEfectivo, uid, scopeSectorIds, assignmentId, tocaRolMedida, customRoleId]
                     );
                 } else {
                     // Ya estaba activo: actualizar alias y sector por las dudas
                     await client.query(
                         `UPDATE user_assignments
-                  SET alias = $1, sector_ids = $2, updated_at = NOW()
+                  SET alias = $1, sector_ids = $2,
+                      custom_role_id = CASE WHEN $4 THEN $5::bigint ELSE custom_role_id END,
+                      updated_at = NOW()
                 WHERE id = $3`,
-                        [aliasEfectivo, scopeSectorIds, assignmentId]
+                        [aliasEfectivo, scopeSectorIds, assignmentId, tocaRolMedida, customRoleId]
                     );
                 }
             } else {
                 const { rows: newAssign } = await client.query(
                     `INSERT INTO user_assignments
-               (user_id, scope_type, scope_id, role, alias, granted_by_user_id, sector_ids)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+               (user_id, scope_type, scope_id, role, alias, granted_by_user_id, sector_ids, custom_role_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING id`,
-                    [userId, s.scopeType, s.scopeId, role, aliasEfectivo, uid, scopeSectorIds]
+                    [userId, s.scopeType, s.scopeId, role, aliasEfectivo, uid, scopeSectorIds, customRoleId]
                 );
                 assignmentId = newAssign[0].id;
             }
@@ -484,7 +525,7 @@ exports.createInvitation = async (req, res, next) => {
                 entityType: 'team_member',
                 entityId: assignmentId,
                 action: 'create',
-                diff: { after: { email: rawEmail, role, alias: alias.trim(), scopeType: s.scopeType, scopeId: s.scopeId } },
+                diff: { after: { email: rawEmail, role, alias: alias.trim(), scopeType: s.scopeType, scopeId: s.scopeId, ...(customRoleId != null ? { customRoleId } : {}) } },
                 metadata: { is_new_user: isNewUser },
             });
         }

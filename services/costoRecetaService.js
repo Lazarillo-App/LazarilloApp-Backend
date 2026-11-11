@@ -143,7 +143,13 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
   // y la unidad base en la que está expresado.
   const { rows: insRows } = await db.query(
     `SELECT i.id, i.precio_ref, i.unidad_med, i.contenido_envase, i.unidad_envase,
-            r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso
+            i.desperdicio_pct_override, i.costo_preferido, i.bonif_aceptada,
+            r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
+            EXISTS (
+              SELECT 1 FROM recetas re
+               WHERE re.insumo_id = i.id AND re.active = TRUE
+                 AND EXISTS (SELECT 1 FROM receta_items rie WHERE rie.receta_id = re.id)
+            ) AS es_elaborado
        FROM insumos i
        LEFT JOIN recetas r ON r.insumo_id = i.id AND r.business_id = $2 AND r.active = TRUE
       WHERE i.id = $1`,
@@ -190,18 +196,71 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
       : canonicalUnit(String(ins.unidad_med || 'u').toLowerCase().trim());
   }
 
-  // 1. Items que usan este insumo (en cualquier receta ACTIVA del biz)
+  // Negocios de la misma organización: una receta de una sucursal (ej. FC) usa los
+  // insumos del negocio principal, así que un cambio de precio tiene que llegar a las
+  // recetas de TODOS los locales, no solo a las del negocio que se pasó (antes las
+  // recetas de las sucursales quedaban con el costo viejo hasta abrirlas y guardarlas).
+  const orgIds = await getOrgBizIds(bizId, db);
+
+  // Desperdicio y mermas — mismo cálculo que el modal de receta (calcFactorMerma en
+  // RecetaModal/calcCosto.js), para que el costo guardado sea el mismo que muestra el
+  // modal y abrir/cerrar una receta no lo cambie:
+  //   factor = (1 + desperdicio%/100) × Π(peso_inicial / peso_final de cada merma del ítem)
+  //   desperdicio% = override del insumo, o el desperdicio global del negocio de la receta (5 por defecto).
+  //   Un elaborado de verdad no lleva factor: ya trae la merma de sus propios ingredientes.
+  const sinFactor = ins.es_elaborado && ins.costo_preferido !== 'compra';
+  const { rows: despRows } = await db.query(
+    `SELECT id, COALESCE(NULLIF(props->>'desperdicio_global_pct', '')::numeric, 5) AS pct
+       FROM app_businesses WHERE id = ANY($1::int[])`,
+    [orgIds]
+  );
+  const desperdicioPorNegocio = new Map(despRows.map((d) => [Number(d.id), Number(d.pct) || 0]));
+  const { rows: mermasRows } = await db.query(
+    `SELECT id, peso_inicial, peso_final FROM insumo_mermas WHERE insumo_id = $1`,
+    [insumoId]
+  );
+  const mermasPorId = new Map(mermasRows.map((m) => [Number(m.id), m]));
+
+  // Costo POR LOCAL (insumo_costos_local): cada receta usa el precio de las compras de SU local;
+  // si ese local no compró el insumo, precio_ref (el del grupo). No aplica a elaborados (su costo
+  // sale de su receta) ni a insumos con bonificación aceptada (su precio_ref ya es el costo real).
+  const preciosLocales = new Map();
+  if (!sinFactor && ins.bonif_aceptada !== true) {
+    const { rows: locRows } = await db.query(
+      `SELECT business_id, precio FROM insumo_costos_local WHERE insumo_id = $1 AND precio > 0`,
+      [insumoId]
+    );
+    for (const l of locRows) preciosLocales.set(Number(l.business_id), Number(l.precio));
+  }
+  const factorMermaItem = (it) => {
+    if (sinFactor) return 1;
+    const pct = ins.desperdicio_pct_override != null
+      ? Number(ins.desperdicio_pct_override)
+      : (desperdicioPorNegocio.get(Number(it.business_id)) ?? 5);
+    let f = 1 + ((Number.isFinite(pct) ? pct : 0) / 100);
+    const ids = Array.isArray(it.merma_ids) && it.merma_ids.length
+      ? it.merma_ids
+      : (it.merma_id != null ? [it.merma_id] : []);
+    for (const id of ids) {
+      const m = mermasPorId.get(Number(id));
+      const pi = Number(m?.peso_inicial), pf = Number(m?.peso_final);
+      if (pi > 0 && pf > 0) f *= pi / pf;
+    }
+    return Number.isFinite(f) && f > 0 ? f : 1;
+  };
+
+  // 1. Items que usan este insumo (en cualquier receta ACTIVA de la organización)
   // r.active=TRUE es crítico acá: una receta borrada/reemplazada (active=false) puede
   // seguir teniendo receta_items colgando con costo_total viejo/absurdo. Sin este
   // filtro, la cascada la "revive" cada vez que corre y pisa el precio_ref del insumo
   // dueño de esa receta con ese dato muerto — pasó con "Barril Irish" (precio real por
   // última compra ~$2.700/L, terminaba en ~$3.000.000/L por una receta #1327 inactiva).
   const { rows: items } = await db.query(
-    `SELECT ri.id, ri.receta_id, ri.unidad
+    `SELECT ri.id, ri.receta_id, ri.unidad, ri.merma_id, ri.merma_ids, r.business_id
        FROM receta_items ri
        JOIN recetas r ON r.id = ri.receta_id
-      WHERE ri.insumo_id = $1 AND r.business_id = $2 AND r.active = TRUE`,
-    [insumoId, bizId]
+      WHERE ri.insumo_id = $1 AND r.business_id = ANY($2::int[]) AND r.active = TRUE`,
+    [insumoId, orgIds]
   );
   if (!items.length) return;
 
@@ -214,10 +273,15 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
     `SELECT nombre, contenido, unidad FROM insumo_equivalencias WHERE insumo_id = $1`,
     [insumoId]
   );
-  const costoPorUnidadBase = costoPorGrBase > 0 ? costoPorGrBase : precioRef;
+  const precioRefGrupo = precioRef;
 
   // 2. Actualizar costo_unitario de cada item (convertido a su unidad)
   for (const it of items) {
+    // Precio de ESTE local (o el del grupo si el local no lo compró). Se sombrea precioRef /
+    // costoPorUnidadBase a propósito: el resto del cálculo de abajo queda igual.
+    const precioLocal = preciosLocales.get(Number(it.business_id));
+    const precioRef = precioLocal != null ? precioLocal : precioRefGrupo;
+    const costoPorUnidadBase = costoPorGrBase > 0 ? costoPorGrBase : precioRef;
     // ATENCIÓN: la unidad del item se usa primero para buscar equivalencias por
     // NOMBRE (ej. "cucharon"), así que esa búsqueda debe ir con el string crudo.
     // canonicalUnit() recién se aplica si no matcheó ninguna equivalencia.
@@ -268,6 +332,7 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
       const factor = factorConversion(unidadBase, unidadItem);
       nuevoCosto = factor > 0 ? precioRef / factor : precioRef;
     }
+    nuevoCosto *= factorMermaItem(it);
     await db.query(
       `UPDATE receta_items SET costo_unitario = $1, updated_at = NOW() WHERE id = $2`,
       [Number(nuevoCosto.toFixed(6)), it.id]
@@ -290,13 +355,24 @@ async function propagarCostoInsumo(insumoId, bizId, db, depth = 0) {
         [
           Number((Number(rec.costo_unitario) || 0).toFixed(6)),
           Number((Number(rec.costo_total) || 0).toFixed(3)),
-          rec.insumo_id, bizId,
+          rec.insumo_id, Number(rec.business_id) || bizId,
         ]
       );
-      // Propagar hacia arriba (recetas que usan este elaborado)
-      await propagarCostoInsumo(rec.insumo_id, bizId, db, depth + 1);
+      // Propagar hacia arriba (recetas que usan este elaborado, en toda la organización)
+      await propagarCostoInsumo(rec.insumo_id, Number(rec.business_id) || bizId, db, depth + 1);
     }
   }
 }
 
-module.exports = { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo };
+// Negocios de la organización de `bizId` (el propio si no tiene organización).
+async function getOrgBizIds(bizId, db = pool) {
+  const { rows } = await db.query(
+    `SELECT id FROM app_businesses
+      WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1)`,
+    [bizId]
+  );
+  const ids = rows.map((r) => Number(r.id)).filter(Boolean);
+  return ids.length ? ids : [Number(bizId)];
+}
+
+module.exports = { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo, getOrgBizIds };

@@ -74,7 +74,7 @@ if ($destinos["informes"] -and ($destinos["informes"] -match '^\s*(?i:no|n|0|fal
     # ADENTRO de esta misma corrida: reviso de nuevo el kit del Drive y repito
     # SOLO los informes que fallaron, con pausas cortas, unos minutos como mucho.
     $intentoInf = 1
-    while (($LASTEXITCODE -ne 0) -and ($intentoInf -le 3) -and $destinos["kit_drive"]) {
+    while (($LASTEXITCODE -ne 0) -and ($intentoInf -le 3) -and $destinos["kit_drive"] -and (-not $vinculada)) {
       $infTxt = Join-Path $salidaInf "_informes.txt"
       $fallidos = @()
       if (Test-Path $infTxt) {
@@ -552,9 +552,9 @@ try {
   if ($barridos -gt 0) { Log "Barrido: saque $barridos cosas mias que ya no van" }
 } catch { }
 
-# el lanzador lleva la version en el nombre, aca y en el kit del Drive
+# el lanzador lleva la version en el nombre, aca y en el kit del Drive (V51: la vinculada no toca el del Drive)
 RenombrarLanzador $base
-if ($destinos["kit_drive"]) { RenombrarLanzador $destinos["kit_drive"] }
+if ($destinos["kit_drive"] -and (-not $vinculada)) { RenombrarLanzador $destinos["kit_drive"] }
 
 # marca del dia: con esto la corrida automatica no se repite si la PC se
 # prende y apaga varias veces (ver "YA CORRIO HOY" al principio).

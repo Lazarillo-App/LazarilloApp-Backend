@@ -115,24 +115,25 @@ END $$;
 -- Borra filas inválidas (no deberían existir en agregados)
 DELETE FROM sales_daily_items WHERE article_id IS NULL OR day IS NULL;
 
--- Rehacer PK correcta
+-- PK: solo si la tabla no tiene ninguna (base nueva). Antes la rehacía en CADA arranque como
+-- (business_id, day, article_id) y deshacía la 086, que la pasa a (id) para que dos sucursales
+-- del mismo negocio puedan vender el mismo artículo el mismo día (FC RAMOS + FC SAN JUSTO, 204).
 DO $$
 DECLARE pk text;
 BEGIN
   SELECT tc.constraint_name INTO pk
   FROM information_schema.table_constraints tc
   WHERE tc.table_name='sales_daily_items' AND tc.constraint_type='PRIMARY KEY';
-  IF pk IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE sales_daily_items DROP CONSTRAINT %I', pk);
-  END IF;
 
   ALTER TABLE sales_daily_items
     ALTER COLUMN business_id SET NOT NULL,
     ALTER COLUMN day         SET NOT NULL,
     ALTER COLUMN article_id  SET NOT NULL;
 
-  ALTER TABLE sales_daily_items
-    ADD CONSTRAINT sales_daily_items_pkey PRIMARY KEY (business_id, day, article_id);
+  IF pk IS NULL THEN
+    ALTER TABLE sales_daily_items
+      ADD CONSTRAINT sales_daily_items_pkey PRIMARY KEY (business_id, day, article_id);
+  END IF;
 END $$;
 
 -- Índices

@@ -289,6 +289,12 @@ const PORT = process.env.PORT || 4000;
     await runMigrations();
     console.log('✅ Migraciones ejecutadas');
     app.listen(PORT, () => console.log(`🚀 http://localhost:${PORT}`));
+    // Recalcular una sola vez los costos con impuestos (10/11/2026). Corre en un solo servicio.
+    require('./services/tareasUnicas/recalculoCostoConImpuestos').programar();
+    // Unificar el costo de tabla y modal (desperdicio + mermas, recetas de todas las sucursales). 10/11/2026.
+    require('./services/tareasUnicas/unificarCostosRecetas').programar();
+    // Costo por local (insumo_costos_local). 10/11/2026.
+    require('./services/tareasUnicas/costosPorLocal').programar();
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);
