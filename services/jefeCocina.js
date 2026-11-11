@@ -5,16 +5,17 @@
 'use strict';
 
 const pool = require('../config/db');
+const { sqlEsJefe } = require('./auth/permisos');
 
 const SUBROLES = ['jefe'];
 
 // Sectores que conduce uid en el negocio ([] si no es jefe).
 async function sectoresQueConduce(uid, bizId) {
   const { rows } = await pool.query(
-    `SELECT COALESCE(sector_ids, '{}'::int[]) AS sector_ids
-       FROM user_assignments
-      WHERE user_id = $1 AND scope_type = 'business' AND scope_id = $2
-        AND role = 'staff' AND subrol = 'jefe' AND revoked_at IS NULL
+    `SELECT COALESCE(ua.sector_ids, '{}'::int[]) AS sector_ids
+       FROM user_assignments ua
+      WHERE ua.user_id = $1 AND ua.scope_type = 'business' AND ua.scope_id = $2
+        AND ua.revoked_at IS NULL AND ${sqlEsJefe('ua')}
       LIMIT 1`,
     [uid, bizId]
   );
@@ -25,9 +26,9 @@ async function sectoresQueConduce(uid, bizId) {
 async function jefesDelSector(bizId, sectorId) {
   if (!sectorId) return [];
   const { rows } = await pool.query(
-    `SELECT DISTINCT user_id FROM user_assignments
-      WHERE scope_type = 'business' AND scope_id = $1 AND role = 'staff' AND subrol = 'jefe'
-        AND revoked_at IS NULL AND sector_ids @> ARRAY[$2::int]`,
+    `SELECT DISTINCT ua.user_id FROM user_assignments ua
+      WHERE ua.scope_type = 'business' AND ua.scope_id = $1 AND ${sqlEsJefe('ua')}
+        AND ua.revoked_at IS NULL AND ua.sector_ids @> ARRAY[$2::int]`,
     [bizId, sectorId]
   );
   return rows.map((r) => Number(r.user_id));
@@ -38,11 +39,11 @@ async function jefesDelSector(bizId, sectorId) {
 const SQL_ESPERA_JEFE = `(
   p.jefe_ok_at IS NULL AND p.sector_id IS NOT NULL
   AND EXISTS (SELECT 1 FROM user_assignments j
-               WHERE j.scope_type = 'business' AND j.scope_id = p.business_id AND j.role = 'staff'
-                 AND j.subrol = 'jefe' AND j.revoked_at IS NULL AND j.sector_ids @> ARRAY[p.sector_id::int])
+               WHERE j.scope_type = 'business' AND j.scope_id = p.business_id AND ${sqlEsJefe('j')}
+                 AND j.revoked_at IS NULL AND j.sector_ids @> ARRAY[p.sector_id::int])
   AND NOT EXISTS (SELECT 1 FROM user_assignments j2
                WHERE j2.scope_type = 'business' AND j2.scope_id = p.business_id AND j2.user_id = p.created_by_user_id
-                 AND j2.role = 'staff' AND j2.subrol = 'jefe' AND j2.revoked_at IS NULL
+                 AND ${sqlEsJefe('j2')} AND j2.revoked_at IS NULL
                  AND j2.sector_ids @> ARRAY[p.sector_id::int])
 )`;
 

@@ -34,9 +34,9 @@ router.post('/groups', blockStaffWrite, ctrl.groups_create);
 router.put('/groups/:id', blockStaffWrite, ctrl.groups_update);
 router.delete('/groups/:id', blockStaffWrite, ctrl.groups_remove);
 
-router.post('/groups/:id/items/bulk', blockStaffWrite, ctrl.groups_addMultiple);
+router.post('/groups/:id/items/bulk', blockStaffWrite.salvo('mover_agrupacion'), ctrl.groups_addMultiple);
 router.put('/groups/:id/items', blockStaffWrite, ctrl.groups_replaceItems);
-router.post('/groups/:id/items', blockStaffWrite, ctrl.groups_addItem);
+router.post('/groups/:id/items', blockStaffWrite.salvo('mover_agrupacion'), ctrl.groups_addItem);
 router.delete('/groups/:id/items/:insumoId', blockStaffWrite, ctrl.groups_removeItem);
 
 router.get('/groups/:id/exclusions', ctrl.groups_getExclusions);
