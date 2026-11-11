@@ -2831,6 +2831,36 @@ exports.mermas_remove = async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // Reemplazo opcional (Diego 11/11): las recetas que tenían esta merma pasan a otra
+    // merma del MISMO insumo en vez de quedar sin merma.
+    const reemplazoRaw = req.body?.reemplazoId ?? req.query?.reemplazoId;
+    const reemplazoId = reemplazoRaw != null && reemplazoRaw !== '' ? Number(reemplazoRaw) : null;
+    if (reemplazoId != null) {
+      if (!Number.isFinite(reemplazoId) || reemplazoId === mermaId) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'Merma de reemplazo inválida' });
+      }
+      const { rows: rem } = await client.query(
+        `SELECT id FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`, [reemplazoId, insumoId]
+      );
+      if (!rem.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'La merma de reemplazo no es de este insumo' });
+      }
+      // Agrega la de reemplazo a las filas que tenían la borrada (sin duplicarla si ya estaba);
+      // el UPDATE de abajo después saca la borrada.
+      await client.query(
+        `UPDATE receta_items
+            SET merma_ids = CASE
+                  WHEN $2::int = ANY(COALESCE(merma_ids, ARRAY[]::int[])) THEN merma_ids
+                  ELSE COALESCE(merma_ids, CASE WHEN merma_id IS NULL THEN ARRAY[]::int[] ELSE ARRAY[merma_id] END) || $2::int
+                END
+          WHERE insumo_id = $3
+            AND (merma_id = $1 OR $1 = ANY(COALESCE(merma_ids, ARRAY[]::int[])))`,
+        [mermaId, reemplazoId, insumoId]
+      );
+    }
+
     // Antes de borrarla, sacarla de las recetas que la tenían elegida. Si no, esas filas
     // quedaban con su costo inflado por el factor de la merma (la tabla mostraba un costo
     // altísimo hasta volver a guardar la receta) y con un id que ya no existe.
@@ -2867,13 +2897,54 @@ exports.mermas_remove = async (req, res) => {
     });
 
     await client.query('COMMIT');
-    return res.json({ ok: true, deleted: mermaId, recetasAfectadas: [...new Set(afectados.map(r => r.receta_id))].length });
+    return res.json({ ok: true, deleted: mermaId, reemplazoId, recetasAfectadas: [...new Set(afectados.map(r => r.receta_id))].length });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => { });
     console.error('mermas_remove error:', e);
     return res.status(500).json({ ok: false, error: e.message });
   } finally {
     client.release();
+  }
+};
+
+// GET /insumos/:id/mermas/:mermaId/uso
+// Recetas activas de la organización que tienen esta merma elegida — para avisar antes de
+// borrarla y ofrecer reemplazarla por otra.
+exports.mermasUso = async (req, res) => {
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const mermaId = Number(req.params.mermaId);
+    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+    if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
+      return res.status(400).json({ ok: false, error: 'ID inválido' });
+    }
+    if (!(await assertInsumoBiz(insumoId, bizId))) {
+      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    }
+    const orgBizIds = await getOrgBizIds(bizId);
+    const { rows } = await pool.query(
+      `SELECT DISTINCT r.id AS receta_id,
+              COALESCE(NULLIF(r.nombre, ''), ma.nombre, ie.nombre, '(sin nombre)') AS titulo
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+         LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
+         LEFT JOIN insumos ie ON ie.id = r.insumo_id
+        WHERE ri.insumo_id = $1
+          AND r.business_id = ANY($2)
+          AND r.active = TRUE
+          AND (ri.merma_id = $3 OR $3 = ANY(COALESCE(ri.merma_ids, ARRAY[]::int[])))
+        ORDER BY titulo`,
+      [insumoId, orgBizIds, mermaId]
+    );
+    return res.json({
+      ok: true,
+      total: rows.length,
+      recetas: rows.map(r => ({ recetaId: Number(r.receta_id), titulo: r.titulo })),
+    });
+  } catch (e) {
+    console.error('mermasUso error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 };
 
