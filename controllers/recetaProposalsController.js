@@ -11,7 +11,8 @@ const pool = require('../config/db');
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { writeArticleReceta, writeElaboradoReceta } = require('../services/recetaWrite');
 const { crearPropuestaDiscontinuarInsumo } = require('../services/recetaProposals');
-const { createSyncNotification } = require('../services/notificationService');
+const { createSyncNotification, createSyncNotificationForBusinessUsers } = require('../services/notificationService');
+const { SQL_ESPERA_JEFE, sectoresQueConduce, puedeDecidirComoJefe } = require('../services/jefeCocina');
 const { logAudit } = require('../services/audit/auditLog');
 
 async function requireAdminOrOwner(uid, bizId) {
@@ -55,43 +56,116 @@ exports.listProposals = async (req, res, next) => {
     const statusParam = String(req.query.status || 'pending,in_revision')
       .split(',').map(s => s.trim()).filter(Boolean);
 
-    const { rows } = await pool.query(
-      `SELECT p.*,
-              u.name AS created_by_name, u.email AS created_by_email,
-              r.nombre AS receta_nombre_actual,
-              s.nombre AS sector_nombre,
-              i.nombre AS insumo_nombre,
-              ma.nombre AS articulo_nombre
-         FROM receta_proposals p
-         LEFT JOIN app_users u ON u.id = p.created_by_user_id
-         LEFT JOIN recetas r ON r.id = p.receta_id
-         LEFT JOIN sectores s ON s.id = p.sector_id
-         LEFT JOIN insumos i ON i.id = p.insumo_id AND i.business_id = p.business_id
-         LEFT JOIN maxi_articles ma ON ma.articulo_id = p.article_id AND ma.business_id = p.business_id
-        WHERE p.business_id = $1 AND p.status = ANY($2::text[])
-        ORDER BY p.created_at DESC`,
-      [bizId, statusParam]
-    );
-
-    // Avisar cuando hay más de una propuesta pendiente abierta sobre la misma receta/destino.
-    const countByTarget = new Map();
-    for (const r of rows) {
-      const key = r.receta_id ? `r:${r.receta_id}` : (r.article_id ? `a:${r.article_id}` : `i:${r.insumo_id}`);
-      countByTarget.set(key, (countByTarget.get(key) || 0) + 1);
-    }
-    const proposals = rows.map(r => {
-      const key = r.receta_id ? `r:${r.receta_id}` : (r.article_id ? `a:${r.article_id}` : `i:${r.insumo_id}`);
-      return {
-        ...r,
-        concurrentes: countByTarget.get(key),
-        costo_antes: computeCostoAprox(r.payload_before),
-        costo_despues: computeCostoAprox(r.payload_after),
-      };
-    });
-
+    // En un sector con jefe de cocina, el admin la ve recién con el OK del jefe (Diego 11/11/2026).
+    const proposals = await consultarPropuestas(`p.business_id = $1 AND p.status = ANY($2::text[]) AND NOT ${SQL_ESPERA_JEFE}`, [bizId, statusParam]);
     return res.json({ ok: true, proposals });
   } catch (e) {
     console.error('[listProposals]', e);
+    next(e);
+  }
+};
+
+async function consultarPropuestas(where, params) {
+  const { rows } = await pool.query(
+    `SELECT p.*,
+            u.name AS created_by_name, u.email AS created_by_email,
+            r.nombre AS receta_nombre_actual,
+            s.nombre AS sector_nombre,
+            i.nombre AS insumo_nombre,
+            ma.nombre AS articulo_nombre,
+            COALESCE(jo.name, jo.email) AS jefe_ok_por
+       FROM receta_proposals p
+       LEFT JOIN app_users u ON u.id = p.created_by_user_id
+       LEFT JOIN app_users jo ON jo.id = p.jefe_ok_by
+       LEFT JOIN recetas r ON r.id = p.receta_id
+       LEFT JOIN sectores s ON s.id = p.sector_id
+       LEFT JOIN insumos i ON i.id = p.insumo_id AND i.business_id = p.business_id
+       LEFT JOIN maxi_articles ma ON ma.articulo_id = p.article_id AND ma.business_id = p.business_id
+      WHERE ${where}
+      ORDER BY p.created_at DESC`,
+    params
+  );
+
+  // Avisar cuando hay más de una propuesta pendiente abierta sobre la misma receta/destino.
+  const countByTarget = new Map();
+  for (const r of rows) {
+    const key = r.receta_id ? `r:${r.receta_id}` : (r.article_id ? `a:${r.article_id}` : `i:${r.insumo_id}`);
+    countByTarget.set(key, (countByTarget.get(key) || 0) + 1);
+  }
+  return rows.map(r => {
+    const key = r.receta_id ? `r:${r.receta_id}` : (r.article_id ? `a:${r.article_id}` : `i:${r.insumo_id}`);
+    return {
+      ...r,
+      concurrentes: countByTarget.get(key),
+      costo_antes: computeCostoAprox(r.payload_before),
+      costo_despues: computeCostoAprox(r.payload_after),
+    };
+  });
+}
+
+/**
+ * GET /businesses/:businessId/receta-proposals/equipo
+ * Jefe de cocina: lo de su equipo (sus sectores) que espera su OK. 403 si no es jefe.
+ */
+exports.listEquipo = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const uid = req.user?.id;
+    if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+    const sectores = await sectoresQueConduce(uid, bizId);
+    if (!sectores.length) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const proposals = await consultarPropuestas(
+      `p.business_id = $1 AND p.status IN ('pending','in_revision') AND p.jefe_ok_at IS NULL
+         AND p.sector_id = ANY($2::int[]) AND p.created_by_user_id <> $3`,
+      [bizId, sectores, uid]
+    );
+    return res.json({ ok: true, proposals });
+  } catch (e) {
+    console.error('[listEquipo]', e);
+    next(e);
+  }
+};
+
+/**
+ * POST /businesses/:businessId/receta-proposals/:id/jefe-ok
+ * El jefe de cocina da el OK: la propuesta pasa al admin (sigue 'pending', no se aplica nada).
+ */
+exports.jefeOk = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const id = Number(req.params.id);
+    const uid = req.user?.id;
+    if (!bizId || !id) return res.status(400).json({ ok: false, error: 'invalid_params' });
+    const proposal = await loadPendingProposal(id, bizId);
+    if (!proposal) return res.status(404).json({ ok: false, error: 'proposal_not_found' });
+    if (!(await puedeDecidirComoJefe(uid, bizId, proposal))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    if (proposal.status !== 'pending') return res.status(409).json({ ok: false, error: 'proposal_not_pending' });
+
+    const { rows } = await pool.query(
+      `UPDATE receta_proposals SET jefe_ok_at = NOW(), jefe_ok_by = $1, updated_at = NOW()
+        WHERE id = $2 AND jefe_ok_at IS NULL RETURNING *`,
+      [uid, id]
+    );
+    if (!rows.length) return res.status(409).json({ ok: false, error: 'ya_tiene_ok' });
+
+    createSyncNotificationForBusinessUsers({
+      businessId: bizId,
+      type: 'ui_action',
+      title: 'Receta propuesta para revisar',
+      message: `${req.user?.name || req.user?.email || 'El jefe de cocina'} dio el OK a un cambio de su equipo. Andá a Configuración > Aprobaciones para revisarlo.`,
+      metadata: { kind: 'receta_proposal', proposal_id: id },
+      onlyAdmins: true,
+    }).catch(() => {});
+
+    logAudit(null, {
+      userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
+      diff: { before: { estado: 'pendiente' }, after: { estado: 'pendiente', ok_jefe: true } },
+      metadata: { decision: 'jefe_ok', propuestoPorUserId: proposal.created_by_user_id },
+    }).catch((e) => console.error('[jefeOk] audit log:', e?.message));
+
+    return res.json({ ok: true, proposal: rows[0] });
+  } catch (e) {
+    console.error('[jefeOk]', e);
     next(e);
   }
 };
@@ -304,12 +378,12 @@ exports.rejectProposal = async (req, res, next) => {
     const id = Number(req.params.id);
     const uid = req.user?.id;
     if (!bizId || !id) return res.status(400).json({ ok: false, error: 'invalid_params' });
-    if (!(await requireAdminOrOwner(uid, bizId))) {
-      return res.status(403).json({ ok: false, error: 'forbidden' });
-    }
-
     const proposal = await loadPendingProposal(id, bizId);
     if (!proposal) return res.status(404).json({ ok: false, error: 'proposal_not_found' });
+    // También el jefe de cocina, sobre lo de su equipo que todavía no tiene su OK.
+    if (!(await requireAdminOrOwner(uid, bizId)) && !(await puedeDecidirComoJefe(uid, bizId, proposal))) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
     if (proposal.payload_after?.tipo === 'insumo_nuevo') {
       await pool.query(`UPDATE insumos SET estado = 'rechazado', updated_at = NOW() WHERE id = $1 AND business_id = $2`, [proposal.insumo_id, bizId]);
     }
@@ -364,14 +438,15 @@ exports.requestRevision = async (req, res, next) => {
     const id = Number(req.params.id);
     const uid = req.user?.id;
     if (!bizId || !id) return res.status(400).json({ ok: false, error: 'invalid_params' });
-    if (!(await requireAdminOrOwner(uid, bizId))) {
-      return res.status(403).json({ ok: false, error: 'forbidden' });
-    }
     const comment = (req.body?.comment || '').trim();
     if (!comment) return res.status(400).json({ ok: false, error: 'comment_requerido' });
 
     const proposal = await loadPendingProposal(id, bizId);
     if (!proposal) return res.status(404).json({ ok: false, error: 'proposal_not_found' });
+    // También el jefe de cocina, sobre lo de su equipo que todavía no tiene su OK.
+    if (!(await requireAdminOrOwner(uid, bizId)) && !(await puedeDecidirComoJefe(uid, bizId, proposal))) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
 
     const { rows } = await pool.query(
       `UPDATE receta_proposals

@@ -9,6 +9,7 @@
 // - Nadie puede revocar a un owner ni a sí mismo.
 
 const { problemaPassword, rechazarPasswordDebil } = require('../utils/passwordPolicy');
+const { SUBROLES } = require('../services/jefeCocina');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const pool = require('../config/db');
@@ -94,7 +95,7 @@ exports.listMembers = async (req, res, next) => {
         SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
                b.id AS scope_id, 'owner'::text AS role,
                u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
-               NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre,
+               NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol,
                u.created_at, u.updated_at,
                u.email, u.name, u.account_status,
                u.invitation_expires_at, u.invitation_accepted_at,
@@ -117,7 +118,7 @@ exports.listMembers = async (req, res, next) => {
         SELECT * FROM (
           SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
                  ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
-                 ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre,
+                 ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol,
                  ua.created_at, ua.updated_at,
                  u.email, u.name, u.account_status,
                  u.invitation_expires_at, u.invitation_accepted_at,
@@ -167,7 +168,7 @@ exports.listMembers = async (req, res, next) => {
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
              ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
-             ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre,
+             ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol,
              ua.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -184,7 +185,7 @@ exports.listMembers = async (req, res, next) => {
       SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
              b.id AS scope_id, 'owner'::text AS role,
              u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
-             NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre,
+             NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol,
              u.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -672,9 +673,13 @@ exports.updateAssignment = async (req, res, next) => {
         const sectorIds = Array.isArray(req.body?.sectorIds)
             ? [...new Set(req.body.sectorIds.map(Number).filter(Number.isFinite))]
             : undefined;
+        // subrol de Staff: 'jefe' (jefe de cocina) o null (staff común). Diego 11/11/2026.
+        const tocaSubrol = Object.prototype.hasOwnProperty.call(req.body || {}, 'subrol');
+        const subrol = tocaSubrol && req.body.subrol ? String(req.body.subrol) : null;
+        if (subrol && !SUBROLES.includes(subrol)) return res.status(400).json({ ok: false, error: 'invalid_subrol' });
 
         if (!assignmentId) return res.status(400).json({ ok: false, error: 'invalid_id' });
-        if (alias == null && role == null && sectorIds === undefined && !tocaRolMedida) {
+        if (alias == null && role == null && sectorIds === undefined && !tocaRolMedida && !tocaSubrol) {
             return res.status(400).json({ ok: false, error: 'nothing_to_update' });
         }
         if (role && !isValidRole(role) && role !== 'owner') {
@@ -769,6 +774,15 @@ exports.updateAssignment = async (req, res, next) => {
             sets.push(`sector_ids = $${i++}`);
             params.push(sectorIds.length ? sectorIds : null);
         }
+        if (tocaSubrol || (role != null && role !== 'staff')) {
+            // El subrol solo existe en Staff: al pasar a otro rol se suelta.
+            if (subrol && finalRole !== 'staff') {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ ok: false, error: 'subrol_requires_staff' });
+            }
+            sets.push(`subrol = $${i++}`);
+            params.push(finalRole === 'staff' ? subrol : null);
+        }
         sets.push(`updated_at = NOW()`);
         params.push(assignmentId);
 
@@ -785,8 +799,8 @@ exports.updateAssignment = async (req, res, next) => {
             entityId: assignmentId,
             action: 'update',
             diff: {
-                before: { alias: a.alias, role: a.role, custom_role_id: a.custom_role_id ?? null },
-                after: { alias: updated[0].alias, role: updated[0].role, custom_role_id: updated[0].custom_role_id ?? null },
+                before: { alias: a.alias, role: a.role, custom_role_id: a.custom_role_id ?? null, subrol: a.subrol ?? null },
+                after: { alias: updated[0].alias, role: updated[0].role, custom_role_id: updated[0].custom_role_id ?? null, subrol: updated[0].subrol ?? null },
             },
         });
 
