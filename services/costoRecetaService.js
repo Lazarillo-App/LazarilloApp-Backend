@@ -375,4 +375,39 @@ async function getOrgBizIds(bizId, db = pool) {
   return ids.length ? ids : [Number(bizId)];
 }
 
-module.exports = { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo, getOrgBizIds };
+/**
+ * Recalcula todas las recetas de un negocio cuando cambia su desperdicio global (Diego 11/11/2026:
+ * «al cambiar el % de desperdicio global en configuración, ¿no debería recalcular todas las recetas
+ * del negocio?» — la tabla quedaba con el costo viejo y el modal ya mostraba el nuevo).
+ * El desperdicio se aplica al costo de cada ingrediente (propagarCostoInsumo), así que se vuelve a
+ * propagar cada insumo que usan las recetas activas del negocio; eso recalcula sus recetas y, en
+ * cascada, los elaborados y las recetas que los usan. Un recálculo por negocio a la vez.
+ */
+const recalculandoNegocio = new Set();
+async function recalcularRecetasDeNegocio(businessId, db = pool) {
+  const biz = Number(businessId);
+  if (!biz || recalculandoNegocio.has(biz)) return { ok: false, motivo: 'en_curso' };
+  recalculandoNegocio.add(biz);
+  const t0 = Date.now();
+  try {
+    const { rows } = await db.query(
+      `SELECT DISTINCT ri.insumo_id, i.business_id
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id AND r.active = TRUE
+         JOIN insumos i ON i.id = ri.insumo_id
+        WHERE r.business_id = $1 AND ri.insumo_id IS NOT NULL`,
+      [biz]
+    );
+    let errores = 0;
+    for (const r of rows) {
+      try { await propagarCostoInsumo(Number(r.insumo_id), Number(r.business_id), db); }
+      catch (e) { errores++; console.warn('[recalcularRecetasDeNegocio] insumo', r.insumo_id, e.message); }
+    }
+    console.log(`[recalcularRecetasDeNegocio] negocio ${biz}: ${rows.length} insumos, ${errores} errores, ${Date.now() - t0} ms`);
+    return { ok: true, insumos: rows.length, errores };
+  } finally {
+    recalculandoNegocio.delete(biz);
+  }
+}
+
+module.exports = { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo, getOrgBizIds, recalcularRecetasDeNegocio };
