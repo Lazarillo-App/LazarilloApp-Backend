@@ -77,7 +77,7 @@ function requireSeccion(seccion) {
 // ── Staff y sus subroles (Diego 11/11/2026) ──────────────────────────────────────────────
 // Qué puede hacer un Staff. Por defecto NO (clave ausente = false); el dueño habilita en Roles.
 // aprobar_equipo convierte al subrol en «jefe» de sus sectores (da el OK antes del admin).
-const STAFF_KEYS = ['ver_precio', 'ver_costo_pct', 'ver_objetivo', 'ver_sugerido', 'mover_agrupacion', 'aprobar_equipo'];
+const STAFF_KEYS = ['ver_precio', 'ver_costo_pct', 'ver_objetivo', 'ver_sugerido', 'mover_agrupacion', 'ver_menu', 'aprobar_equipo'];
 // El subrol que se crea solo la primera vez (se puede editar o borrar).
 const JEFE_DEFAULT = { ver_precio: true, ver_costo_pct: true, aprobar_equipo: true };
 

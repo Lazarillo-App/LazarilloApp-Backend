@@ -158,7 +158,8 @@ exports.remove = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/** GET /businesses/:businessId/plazas/:id/vista — tarjetas armadas. */
+/** GET /businesses/:businessId/plazas/:id/vista[?articleId=] — tarjetas armadas (o solo la de ese producto,
+ *  para refrescar una tarjeta después de editar su receta sin recargar la plaza). */
 exports.vista = async (req, res, next) => {
   try {
     const bizId = num(req.businessId);
@@ -171,7 +172,8 @@ exports.vista = async (req, res, next) => {
          FROM plaza_productos pp
          LEFT JOIN maxi_articles ma ON ma.articulo_id = pp.article_id AND ma.business_id = $2
          LEFT JOIN plaza_fichas f ON f.plaza_id = pp.plaza_id AND f.article_id = pp.article_id
-        WHERE pp.plaza_id = $1 ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId]);
+        WHERE pp.plaza_id = $1 AND ($3::int IS NULL OR pp.article_id = $3)
+        ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, num(req.query.articleId) || null]);
     const ids = prods.map((p) => p.article_id);
     const { rows: items } = ids.length ? await pool.query(
       `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id,
