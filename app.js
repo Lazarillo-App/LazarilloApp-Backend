@@ -295,6 +295,8 @@ const PORT = process.env.PORT || 4000;
     require('./services/tareasUnicas/unificarCostosRecetas').programar();
     // Costo por local (insumo_costos_local). 10/11/2026.
     require('./services/tareasUnicas/costosPorLocal').programar();
+    // Recetas con el desperdicio viejo (el cambio de % no recalculaba). 11/11/2026.
+    require('./services/tareasUnicas/recalculoDesperdicio').programar();
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);

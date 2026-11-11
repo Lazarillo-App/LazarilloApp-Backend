@@ -23,7 +23,7 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 /* ───────────────── helpers ───────────────── */
 const slugify = (s = '') => {
   const out = String(s)
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)+/g, '')
@@ -296,7 +296,24 @@ exports.update = async (req, res) => {
       }
     }
   }
-  return res.json({ business: saved });
+  res.json({ business: saved });
+  // El desperdicio global entra en el costo de cada receta del negocio: al cambiarlo se
+  // recalculan ya (antes las recetas quedaban con el % viejo y el pie del modal mostraba
+  // otro costo que la fila del ingrediente hasta volver a guardar — Diego 11/11, Heineken).
+  if (configPatch.desperdicio_global_pct !== undefined) {
+    setImmediate(async () => {
+      try {
+        const { recalcularCostosDeNegocio, negociosConInsumos } = require('../services/recalculoCostos');
+        for (const insBiz of await negociosConInsumos(businessId)) {
+          const r = await recalcularCostosDeNegocio(insBiz);
+          console.log(`[update desperdicio] recálculo negocio ${insBiz}`, JSON.stringify(r));
+        }
+      } catch (e) {
+        console.error('[update desperdicio] recálculo falló:', e.message);
+      }
+    });
+  }
+  return undefined;
 };
 
 // PATCH /businesses/:id/onboarding — flags de tours/tutoriales ya vistos
