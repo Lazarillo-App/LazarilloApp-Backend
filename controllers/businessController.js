@@ -23,7 +23,7 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 /* ───────────────── helpers ───────────────── */
 const slugify = (s = '') => {
   const out = String(s)
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)+/g, '')
@@ -281,6 +281,17 @@ exports.update = async (req, res) => {
   );
 
   const saved = attachBranding(rows[0]);
+
+  // Cambió el desperdicio global: el costo de cada ingrediente lo lleva adentro, así que se
+  // recalculan todas las recetas del negocio (en segundo plano, sin demorar la respuesta).
+  if (configPatch.desperdicio_global_pct !== undefined) {
+    const { recalcularRecetasDeNegocio } = require('../services/costoRecetaService');
+    setImmediate(() => {
+      recalcularRecetasDeNegocio(businessId)
+        .then(() => { try { invalidateCacheForBiz(businessId); } catch { /* sin caché */ } })
+        .catch((e) => console.error('[update] recálculo por desperdicio:', e.message));
+    });
+  }
 
   //solo borrar si pisarTodo=true
   if (configPatch.articulos_costo_ideal !== undefined) {
