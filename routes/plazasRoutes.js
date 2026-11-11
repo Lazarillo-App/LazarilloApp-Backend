@@ -9,6 +9,7 @@ router.get('/articulos', ctrl.articulos);
 router.put('/colores', ctrl.guardarColor);
 router.post('/', ctrl.create);
 router.get('/:id/vista', ctrl.vista);
+router.put('/:id/fichas/:articleId/item', ctrl.editarItem);
 router.put('/:id/fichas/:articleId', ctrl.guardarFicha);
 router.put('/:id', ctrl.update);
 router.delete('/:id', ctrl.remove);

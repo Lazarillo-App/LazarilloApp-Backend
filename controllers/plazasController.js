@@ -11,6 +11,39 @@
 
 const pool = require('../config/db');
 const { sectoresQueConduce } = require('../services/jefeCocina');
+const { recalcularCostoRecetas } = require('../services/costoRecetaService');
+const { createOrUpdateProposal, snapshotReceta } = require('../services/recetaProposals');
+const { normalizarCantidadUnidad, canonicalUnit } = require('../services/unidades');
+const { logAudit } = require('../services/audit/auditLog');
+
+// ── Unidades de un ingrediente (panel «En esta receta» de la plaza, Diego 11/11/2026) ──
+// Cada unidad se mide en su familia (peso en gr, volumen en ml, unidades en u) para poder pasar
+// la cantidad de una a otra (75 g → 1,5 dip si el dip es 50 g) y el costo unitario en proporción.
+const FAMILIA = { gr: ['peso', 1], kg: ['peso', 1000], lb: ['peso', 453.59], ml: ['vol', 1], lt: ['vol', 1000], oz: ['vol', 30], u: ['u', 1] };
+function tamanoUnidad(unidad, equivalencias) {
+  const raw = String(unidad || '').trim().toLowerCase();
+  const eq = (equivalencias || []).find((e) => String(e.nombre || '').trim().toLowerCase() === raw);
+  if (eq) {
+    const base = FAMILIA[canonicalUnit(eq.unidad)];
+    return base ? { familia: base[0], valor: (Number(eq.contenido) || 0) * base[1] } : null;
+  }
+  const base = FAMILIA[canonicalUnit(raw)];
+  return base ? { familia: base[0], valor: base[1] } : null;
+}
+function unidadesDe(unidadActual, equivalencias) {
+  const t = tamanoUnidad(unidadActual, equivalencias);
+  const fisicas = !t ? [] : t.familia === 'peso' ? ['gr', 'kg'] : t.familia === 'vol' ? ['ml', 'lt'] : ['u'];
+  const lista = fisicas.map((n) => ({ nombre: n, familia: t.familia, valor: FAMILIA[n][1] }));
+  for (const e of equivalencias || []) {
+    const te = tamanoUnidad(e.nombre, equivalencias);
+    lista.push({ nombre: e.nombre, detalle: `${Number(e.contenido).toLocaleString('es-AR', { maximumFractionDigits: 2 })} ${e.unidad}`,
+      familia: te?.familia || null, valor: te?.valor || null });
+  }
+  if (unidadActual && !lista.some((u) => u.nombre.toLowerCase() === String(unidadActual).toLowerCase())) {
+    lista.unshift({ nombre: unidadActual, familia: t?.familia || null, valor: t?.valor || null });
+  }
+  return lista;
+}
 
 const PALETA_N = 13; // colores de la paleta del front (VistaPlaza.PALETA)
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
@@ -207,6 +240,11 @@ exports.vista = async (req, res, next) => {
          LEFT JOIN maxi_articles ma2 ON ma2.articulo_id = ri.article_ref_id AND ma2.business_id = r.business_id
         WHERE r.business_id = $1 AND r.article_id = ANY($2::int[]) AND COALESCE(r.active, TRUE)
         ORDER BY ri.orden, ri.id`, [bizId, ids]) : { rows: [] };
+    const insIds = [...new Set(items.map((it) => it.insumo_id).filter(Boolean))];
+    const { rows: eqRows } = insIds.length ? await pool.query(
+      'SELECT insumo_id, nombre, contenido, unidad FROM insumo_equivalencias WHERE insumo_id = ANY($1::int[]) ORDER BY nombre', [insIds]) : { rows: [] };
+    const eqsDe = new Map();
+    for (const e of eqRows) { if (!eqsDe.has(e.insumo_id)) eqsDe.set(e.insumo_id, []); eqsDe.get(e.insumo_id).push(e); }
     const { rows: cols } = await pool.query('SELECT ref, color, mostrar, alias FROM despacho_colores WHERE business_id = $1', [bizId]);
     const colorDe = new Map(cols.filter((c) => c.color != null).map((c) => [c.ref, Number(c.color)]));
     const mostrarDe = new Map(cols.filter((c) => c.mostrar).map((c) => [c.ref, c.mostrar]));
@@ -234,6 +272,8 @@ exports.vista = async (req, res, next) => {
           obs: it.observaciones ? String(it.observaciones).trim() : '',
           mostrar: mostrarDe.get(ref) || 'peso',
           alias: aliasDe.get(ref) || '',
+          editable: !!it.insumo_id,
+          unidades: it.insumo_id ? unidadesDe(it.unidad, eqsDe.get(it.insumo_id)) : [],
           oculto: ocultos.has(key), extra: false,
         };
       });
@@ -252,6 +292,121 @@ exports.vista = async (req, res, next) => {
     res.json({ ok: true, plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre },
       puedeArmar: await puedeArmar(req, plaza), productos });
   } catch (e) { next(e); }
+};
+
+/** PUT /businesses/:businessId/plazas/:id/fichas/:articleId/item  { key, cantidad, unidad, observaciones }
+ *  Edita UN ingrediente de la receta desde la plaza (Diego 11/11/2026).
+ *  Dueño/admin: se guarda directo (UPDATE puntual del renglón + recálculo de costo, mismo patrón que
+ *  usoInsumoCambiarCantidad). Staff (cocinero/jefe del sector): queda como PROPUESTA en el circuito
+ *  de aprobación existente (receta completa con ese cambio, mismo formato que el modal de receta).
+ *  Cambio de unidad: el costo unitario se pasa en proporción (75 g → 1,5 dip de 50 g cuesta lo mismo);
+ *  entre familias distintas (g ↔ u) no se puede: hay que hacerlo desde el modal de receta. */
+exports.editarItem = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const bizId = num(req.businessId);
+    const plaza = await cargarPlaza(num(req.params.id), bizId);
+    if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await puedeVer(req, plaza))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const articleId = num(req.params.articleId);
+    const { rowCount: enPlaza } = await client.query('SELECT 1 FROM plaza_productos WHERE plaza_id = $1 AND article_id = $2', [plaza.id, articleId]);
+    if (!enPlaza) return res.status(404).json({ ok: false, error: 'producto_no_esta_en_la_plaza' });
+    const { rows: rec } = await client.query(
+      'SELECT id FROM recetas WHERE business_id = $1 AND article_id = $2 AND active = TRUE LIMIT 1', [bizId, articleId]);
+    if (!rec.length) return res.status(404).json({ ok: false, error: 'sin_receta' });
+    const recetaId = rec[0].id;
+
+    // Mismo armado de claves que la vista (por ingrediente; #2 si se repite).
+    const { rows: items } = await client.query(
+      `SELECT ri.*, COALESCE(i.nombre, ri.nombre_insumo_maxi, ma2.nombre, 'Ingrediente') AS nombre_vista
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+         LEFT JOIN insumos i ON i.id = ri.insumo_id
+         LEFT JOIN maxi_articles ma2 ON ma2.articulo_id = ri.article_ref_id AND ma2.business_id = r.business_id
+        WHERE ri.receta_id = $1 ORDER BY ri.orden, ri.id`, [recetaId]);
+    const usadas = new Map();
+    const conClave = items.map((it) => {
+      const ref = it.insumo_id ? `i:${it.insumo_id}` : it.article_ref_id ? `a:${it.article_ref_id}` : `n:${String(it.nombre_vista).toLowerCase()}`;
+      const n = (usadas.get(ref) || 0) + 1; usadas.set(ref, n);
+      return { it, key: n === 1 ? ref : `${ref}#${n}` };
+    });
+    const objetivo = conClave.find((x) => x.key === String(req.body?.key || ''));
+    if (!objetivo) return res.status(404).json({ ok: false, error: 'ingrediente_no_encontrado' });
+    const it = objetivo.it;
+    if (!it.insumo_id) return res.status(400).json({ ok: false, error: 'solo_insumos' });
+
+    const cantidad = req.body?.cantidad != null ? Number(req.body.cantidad) : Number(it.cantidad);
+    if (!Number.isFinite(cantidad) || cantidad <= 0) return res.status(400).json({ ok: false, error: 'cantidad_invalida' });
+    const unidad = String(req.body?.unidad || it.unidad || '').trim().slice(0, 40);
+    const observaciones = req.body?.observaciones != null ? (String(req.body.observaciones).trim().slice(0, 500) || null) : it.observaciones;
+
+    let costoUnitario = Number(it.costo_unitario) || 0;
+    if (unidad.toLowerCase() !== String(it.unidad || '').toLowerCase()) {
+      const { rows: eqs } = await client.query('SELECT nombre, contenido, unidad FROM insumo_equivalencias WHERE insumo_id = $1', [it.insumo_id]);
+      const antes = tamanoUnidad(it.unidad, eqs);
+      const despues = tamanoUnidad(unidad, eqs);
+      if (!antes || !despues || antes.familia !== despues.familia || !(antes.valor > 0) || !(despues.valor > 0)) {
+        // El texto va en `error` porque es lo que el front muestra (http() de apiBusinesses).
+        return res.status(400).json({ ok: false, code: 'unidad_incompatible',
+          error: `No se puede pasar de ${it.unidad} a ${unidad} desde acá: cambiala desde el modal de receta.` });
+      }
+      costoUnitario = costoUnitario * (despues.valor / antes.valor);
+    }
+    const norm = normalizarCantidadUnidad(cantidad, unidad, costoUnitario);
+
+    // ── Staff: propuesta (la receta real no cambia hasta que se apruebe) ──
+    if (req.businessRole === 'staff') {
+      const before = await snapshotReceta(articleId, bizId);
+      const { rows: recFull } = await client.query('SELECT * FROM recetas WHERE id = $1', [recetaId]);
+      const r = recFull[0];
+      const body = {
+        nombre: r.nombre, descripcion: r.descripcion, porciones: r.porciones, porcentajeVenta: r.porcentaje_venta,
+        rendimientoUnidad: r.rendimiento_unidad, rendimientoPeso: r.rendimiento_peso, unidadPeso: r.unidad_peso,
+        notas: r.notas, foto: r.foto, fotos: r.fotos, notasUpdatedAt: r.notas_updated_at,
+        metodoCoccion: r.metodo_coccion, temperatura: r.temperatura, tiempoMin: r.tiempo_min, pasos: r.pasos,
+        almacenamientoFreezer: r.almacenamiento_freezer, almacenamientoHeladera: r.almacenamiento_heladera,
+        items: items.map((x) => {
+          const esEste = x.id === it.id;
+          return {
+            supplyId: x.article_ref_id ? null : (x.insumo_id || x.supply_id || null),
+            articleRefId: x.article_ref_id || null,
+            cantidad: esEste ? norm.cantidad : Number(x.cantidad),
+            unidad: esEste ? norm.unidad : x.unidad,
+            costoUnitario: esEste ? norm.costoUnitario : Number(x.costo_unitario) || 0,
+            notas: x.notas, observaciones: esEste ? observaciones : x.observaciones,
+            merma: x.merma, pedido: x.pedido, tipoCosto: x.tipo_costo, orden: x.orden,
+            mermaIds: Array.isArray(x.merma_ids) && x.merma_ids.length ? x.merma_ids : (x.merma_id != null ? [x.merma_id] : []),
+            secreto: x.secreto === true, fotosUrls: Array.isArray(x.fotos_urls) ? x.fotos_urls : [],
+          };
+        }),
+      };
+      const proposal = await createOrUpdateProposal({
+        bizId, articleId, uid: req.user?.id, body, snapshotBefore: before,
+        nombreParaAviso: req.user?.name || req.user?.email,
+      });
+      return res.json({ ok: true, pending: true, proposalId: proposal?.id || null });
+    }
+
+    // ── Dueño/admin: directo ──
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE receta_items SET cantidad = $1, unidad = $2, costo_unitario = $3, observaciones = $4, updated_at = NOW() WHERE id = $5`,
+      [norm.cantidad, norm.unidad || null, Number(norm.costoUnitario.toFixed(6)), observaciones, it.id]);
+    await recalcularCostoRecetas([recetaId], client);
+    await logAudit(client, {
+      userId: req.user?.id || null, businessId: bizId, entityType: 'receta_item_plaza', entityId: it.id, action: 'update',
+      diff: { before: { cantidad: Number(it.cantidad), unidad: it.unidad, observaciones: it.observaciones },
+              after: { cantidad: norm.cantidad, unidad: norm.unidad, observaciones } },
+      metadata: { plazaId: plaza.id, articleId, recetaId },
+    });
+    await client.query('COMMIT');
+    res.json({ ok: true, pending: false });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { /* sin transacción abierta */ }
+    next(e);
+  } finally {
+    client.release();
+  }
 };
 
 /** PUT /businesses/:businessId/plazas/:id/fichas/:articleId  { orden, ocultos, extras } */
