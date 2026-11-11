@@ -97,7 +97,54 @@ async function recalcularCostoReceta(recetaId, db = pool) {
       Number(costoTotalConMerma.toFixed(4)),
     ]
   );
+  // Si es la receta de un ARTÍCULO (no promo), las promos que lo usan como componente
+  // toman su nuevo costo (antes quedaban congeladas con el valor de cuando se armaron).
+  if (upd[0] && upd[0].article_id && !upd[0].es_promo) {
+    try { await actualizarComponentesDePromos({ articleId: Number(upd[0].article_id) }, db); }
+    catch (e) { console.warn('[recalcularCostoReceta] promos del artículo', upd[0].article_id, e.message); }
+  }
   return upd[0] ? { ...upd[0], _unidad_costo_unitario: unidadCostoUnitario } : null;
+}
+
+/**
+ * Costo de los artículos que arman una promo (receta_items con article_ref_id) = costo REAL de
+ * la receta del artículo (costo_total ÷ porciones), igual que el modal (calcCosto.js). Si el
+ * artículo no tiene receta, 0 — nunca su precio de venta (Diego 11/11/2026: el costo de las
+ * promos salía igual al «$ Sin Promo» porque se guardaba el precio de venta).
+ * Prefiere la receta del mismo negocio que la promo; si no hay, la más nueva de la misma organización
+ * (los códigos de artículo se repiten entre organizaciones).
+ * Después recalcula el total de cada promo tocada.
+ * @param {{articleId?: number, businessId?: number}} filtro  sin filtro = todas las promos
+ */
+async function actualizarComponentesDePromos(filtro = {}, db = pool) {
+  const params = [];
+  let where = 'r.active = TRUE AND r.es_promo = TRUE AND ri.article_ref_id IS NOT NULL';
+  if (filtro.articleId) { params.push(Number(filtro.articleId)); where += ` AND ri.article_ref_id = $${params.length}`; }
+  if (filtro.businessId) { params.push(Number(filtro.businessId)); where += ` AND r.business_id = $${params.length}`; }
+  const { rows } = await db.query(
+    `WITH nuevo AS (
+       SELECT ri.id, ri.receta_id,
+              COALESCE((
+                SELECT c.costo_total / NULLIF(c.porciones, 0)
+                  FROM recetas c
+                 WHERE c.article_id = ri.article_ref_id AND c.active = TRUE
+                   AND c.es_promo IS NOT TRUE
+                   AND (c.business_id = r.business_id OR c.business_id IN (SELECT b2.id FROM app_businesses b1 JOIN app_businesses b2 ON b2.organization_id = b1.organization_id WHERE b1.id = r.business_id))
+                 ORDER BY (c.business_id = r.business_id) DESC, c.updated_at DESC
+                 LIMIT 1), 0) AS costo
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+        WHERE ${where})
+     UPDATE receta_items ri
+        SET costo_unitario = ROUND(n.costo::numeric, 4), updated_at = NOW()
+       FROM nuevo n
+      WHERE ri.id = n.id AND ri.costo_unitario IS DISTINCT FROM ROUND(n.costo::numeric, 4)
+     RETURNING ri.receta_id`,
+    params
+  );
+  const promos = [...new Set(rows.map((x) => Number(x.receta_id)))];
+  for (const id of promos) await recalcularCostoReceta(id, db);
+  return { items: rows.length, promos: promos.length };
 }
 
 /**
@@ -410,4 +457,4 @@ async function recalcularRecetasDeNegocio(businessId, db = pool) {
   }
 }
 
-module.exports = { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo, getOrgBizIds, recalcularRecetasDeNegocio };
+module.exports = { recalcularCostoReceta, recalcularCostoRecetas, propagarCostoInsumo, getOrgBizIds, recalcularRecetasDeNegocio, actualizarComponentesDePromos };
