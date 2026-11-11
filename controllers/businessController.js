@@ -23,7 +23,7 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 /* ───────────────── helpers ───────────────── */
 const slugify = (s = '') => {
   const out = String(s)
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)+/g, '')
