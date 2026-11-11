@@ -151,17 +151,23 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
 
   // Nombres de opción ya usados en «depende de la compra» (Reposición, Nuevo elemento…), los más usados
   // primero: se ofrecen al escribir una opción nueva (Diego 11/11/2026: no escribir siempre lo mismo).
+  // Con cada nombre va el concepto con el que más se usó: al elegirlo se completa solo (Diego 11/11/2026).
   const etiquetas = await db.many(sql`
-    SELECT TRIM(etiqueta) AS etiqueta, COUNT(*)::int AS usos
-      FROM insumo_rubro_conceptos
-     WHERE organization_id = ${organizationId} AND NULLIF(TRIM(etiqueta), '') IS NOT NULL
-     GROUP BY TRIM(etiqueta)
-     ORDER BY usos DESC, TRIM(etiqueta)`);
+    WITH x AS (
+      SELECT TRIM(etiqueta) AS etiqueta, concepto::text AS concepto, COUNT(*)::int AS n
+        FROM insumo_rubro_conceptos
+       WHERE organization_id = ${organizationId} AND NULLIF(TRIM(etiqueta), '') IS NOT NULL
+       GROUP BY TRIM(etiqueta), concepto)
+    SELECT etiqueta, SUM(n)::int AS usos,
+           (ARRAY_AGG(concepto ORDER BY n DESC, concepto))[1] AS concepto
+      FROM x GROUP BY etiqueta
+     ORDER BY usos DESC, etiqueta`);
 
   return {
     anio: year, importe: r2(grupos.reduce((s, g) => s + g.importe, 0)), grupos,
     rubrosInsumo: rubrosInsumo.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')),
     etiquetasUsadas: etiquetas.map((e) => e.etiqueta),
+    conceptoPorEtiqueta: Object.fromEntries(etiquetas.map((e) => [e.etiqueta, e.concepto])),
   };
 }
 
