@@ -75,12 +75,20 @@ router.get('/', requireBusinessAccess, async (req, res, next) => {
     // Por sucursal (Diego, 10/11): a cada PC del kit se le suma hasta dónde llegó Recetas en SU
     // sucursal (branch_id; la principal es NULL), para avisar si la app no tomó lo que subió.
     if (kit?.sucursales?.length) {
+      // leidoVentas / leidoCompras (Diego, 11/11): CUÁNDO pasó Recetas por última vez por esa
+      // sucursal (cada pasada reescribe las ventas y re-sincroniza las compras del kit). El front avisa
+      // si la PC subió después y Recetas no la leyó — no compara fechas de compra (una factura
+      // cargada al día siguiente de su fecha daba un falso "no tomó lo último").
       const { rows: porSuc } = await pool.query(
-        `SELECT branch_id, MAX(v) AS ventas, MAX(c) AS compras FROM (
-           SELECT branch_id, to_char(MAX(day), 'YYYY-MM-DD') AS v, NULL AS c FROM sales_daily_items
+        `SELECT branch_id, MAX(v) AS ventas, MAX(c) AS compras, MAX(lv) AS leido_ventas, MAX(lc) AS leido_compras FROM (
+           SELECT branch_id, to_char(MAX(day), 'YYYY-MM-DD') AS v, NULL AS c,
+                  MAX(updated_at) FILTER (WHERE source = 'maxi') AS lv, NULL::timestamptz AS lc
+             FROM sales_daily_items
             WHERE business_id = $1 AND day <= now() + interval '1 day' GROUP BY branch_id
            UNION ALL
-           SELECT branch_id, NULL, to_char(MAX(fecha)::date, 'YYYY-MM-DD') FROM purchases
+           SELECT branch_id, NULL, to_char(MAX(fecha)::date, 'YYYY-MM-DD'),
+                  NULL::timestamptz, MAX(synced_at) FILTER (WHERE source = 'maxi')
+             FROM purchases
             WHERE business_id = $1 AND fecha <= now() + interval '1 day' GROUP BY branch_id
          ) t GROUP BY branch_id`,
         [businessId]
@@ -90,7 +98,16 @@ router.get('/', requireBusinessAccess, async (req, res, next) => {
         ...kit,
         sucursales: kit.sucursales.map((x) => {
           const r = rec.get(x.branchId ?? null);
-          return { ...x, recetas: { ventas: r?.ventas || null, compras: r?.compras || null } };
+          const iso = (d) => (d ? new Date(d).toISOString() : null);
+          return {
+            ...x,
+            recetas: {
+              ventas: r?.ventas || null,
+              compras: r?.compras || null,
+              leidoVentas: iso(r?.leido_ventas),
+              leidoCompras: iso(r?.leido_compras),
+            },
+          };
         }),
       };
     }
