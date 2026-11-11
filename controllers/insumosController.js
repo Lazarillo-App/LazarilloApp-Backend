@@ -8,7 +8,7 @@ const {
   fetchMaxiInsumosRubros,
   normalizarInsumosRubros,
 } = require('../services/maxiSuppliesService');
-const { recalcularCostoRecetas } = require('../services/costoRecetaService');
+const { recalcularCostoRecetas, propagarCostoInsumo } = require('../services/costoRecetaService');
 const { getConImpuestos, importeSql } = require('../services/precioCosteoInsumos');
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
@@ -2817,34 +2817,63 @@ exports.mermas_update = async (req, res) => {
 
 // DELETE /insumos/:id/mermas/:mermaId
 exports.mermas_remove = async (req, res) => {
+  const bizId = getBusinessId(req);
+  const insumoId = Number(req.params.id);
+  const mermaId = Number(req.params.mermaId);
+  if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+  if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
+    return res.status(400).json({ ok: false, error: 'ID inválido' });
+  }
+  if (!(await assertInsumoBiz(insumoId, bizId))) {
+    return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+  }
+  const client = await pool.connect();
   try {
-    const bizId = getBusinessId(req);
-    const insumoId = Number(req.params.id);
-    const mermaId = Number(req.params.mermaId);
-    if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
-    if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
-      return res.status(400).json({ ok: false, error: 'ID inválido' });
-    }
-    if (!(await assertInsumoBiz(insumoId, bizId))) {
-      return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
-    }
-    const { rowCount } = await pool.query(
+    await client.query('BEGIN');
+
+    // Antes de borrarla, sacarla de las recetas que la tenían elegida. Si no, esas filas
+    // quedaban con su costo inflado por el factor de la merma (la tabla mostraba un costo
+    // altísimo hasta volver a guardar la receta) y con un id que ya no existe.
+    const { rows: afectados } = await client.query(
+      `UPDATE receta_items
+          SET merma_ids = NULLIF(array_remove(COALESCE(merma_ids, ARRAY[]::int[]), $1::int), ARRAY[]::int[]),
+              merma_id  = (NULLIF(array_remove(COALESCE(merma_ids, ARRAY[]::int[]), $1::int), ARRAY[]::int[]))[1],
+              updated_at = NOW()
+        WHERE insumo_id = $2
+          AND (merma_id = $1 OR $1 = ANY(COALESCE(merma_ids, ARRAY[]::int[])))
+       RETURNING receta_id`,
+      [mermaId, insumoId]
+    );
+
+    const { rowCount } = await client.query(
       `DELETE FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
       [mermaId, insumoId]
     );
-    if (!rowCount) return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+    }
 
-    await logAudit(null, {
+    // Recalcular el costo de cada fila que usa este insumo (ya sin la merma) y de sus
+    // recetas, en cascada hacia los elaborados que lo usan.
+    if (afectados.length) await propagarCostoInsumo(insumoId, bizId, client);
+
+    await logAudit(client, {
       userId: req.user?.id || null, businessId: bizId,
       entityType: 'merma', entityId: mermaId,
       action: 'delete',
       diff: { after: { insumoId } },
+      metadata: { recetasAfectadas: [...new Set(afectados.map(r => r.receta_id))].length },
     });
 
-    return res.json({ ok: true, deleted: mermaId });
+    await client.query('COMMIT');
+    return res.json({ ok: true, deleted: mermaId, recetasAfectadas: [...new Set(afectados.map(r => r.receta_id))].length });
   } catch (e) {
+    await client.query('ROLLBACK').catch(() => { });
     console.error('mermas_remove error:', e);
     return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 
