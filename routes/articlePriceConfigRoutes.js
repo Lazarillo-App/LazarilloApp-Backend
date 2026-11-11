@@ -35,4 +35,8 @@ router.delete('/:businessId/article-price-config', blockStaffWrite, ctrl.deleteP
 // Body: { configs: [ { scope, scopeId, objetivo?, precioManual?, articleIds? } ] }
 router.post('/:businessId/article-price-config/bulk', blockStaffWrite, ctrl.bulkSavePriceConfig);
 
+// GET /api/businesses/:businessId/promos-reglas
+// Promos atadas al precio de sus artículos (% off y llevás N pagás M) con sus componentes.
+router.get('/:businessId/promos-reglas', require('../controllers/promoReglasController').listar);
+
 module.exports = router;
