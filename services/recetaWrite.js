@@ -270,6 +270,21 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
       [esPromo, receta.id]
     );
 
+    // Regla de precio de la promo (Diego 11/11/2026): solo si el modal la manda (otros caminos que
+    // guardan recetas no la tocan). 'margen' o vacío = lo de siempre.
+    if (body && Object.prototype.hasOwnProperty.call(body, 'promoRegla')) {
+      const regla = ['off', 'nxm', 'margen'].includes(body.promoRegla) ? body.promoRegla : null;
+      const num = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
+      const entero = (v) => { const n = num(v); return n != null && n > 0 ? Math.round(n) : null; };
+      await client.query(
+        `UPDATE recetas SET promo_regla = $2, promo_off_pct = $3, promo_llevas = $4, promo_pagas = $5 WHERE id = $1`,
+        [receta.id, regla,
+          regla === 'off' ? num(body.promoOffPct) : null,
+          regla === 'nxm' ? entero(body.promoLlevas) : null,
+          regla === 'nxm' ? entero(body.promoPagas) : null]
+      );
+    }
+
     const recetaCostos = await recalcularCostoReceta(receta.id, client);
     const costoTotalDB = Number(recetaCostos?.costo_total) || costoTotal;
 
