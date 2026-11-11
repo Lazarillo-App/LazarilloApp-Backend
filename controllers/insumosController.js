@@ -28,10 +28,15 @@ function sendError(res, status, message) {
   return res.status(status).json({ ok: false, error: message });
 }
 
+// La agrupación puede ser de cualquier negocio de la MISMA organización: los insumos viven en
+// el negocio principal y «Mover a VARIOS» desde un subnegocio (ej. Container FC → VARIOS de
+// Container Bar) daba 404 «No se pudo mover el rubro» (Diego 11/11/2026).
 async function assertGroup(executor, bizId, groupId) {
+  const orgIds = await getOrgBizIds(bizId, executor);
+  const ids = (orgIds && orgIds.length ? orgIds : [bizId]).map(Number);
   const r = await executor.query(
-    'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
-    [groupId, bizId]
+    'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = ANY($2::int[])',
+    [groupId, ids]
   );
   return (r.rowCount || 0) > 0;
 }
