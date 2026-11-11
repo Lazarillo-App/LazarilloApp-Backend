@@ -83,7 +83,21 @@ router.post('/:id/reemplazar', ctrl.reemplazarInsumo);
 
 /* ================== DESPERDICIO ================== */
 
-router.put('/:id/desperdicio-override', blockStaffWrite, ctrl.setDesperdicioOverride);
+// Al cambiar el desperdicio propio del insumo, recalcular ya las recetas que lo usan (antes quedaban
+// con el costo viejo hasta que alguien las abría y guardaba). Corre después de responder.
+router.put('/:id/desperdicio-override', blockStaffWrite, (req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode !== 200) return;
+    const insumoId = Number(req.params.id);
+    const bizId = require('../utils/getBusinessId')(req);
+    if (!Number.isFinite(insumoId) || !bizId) return;
+    const pool = require('../config/db');
+    const { propagarCostoInsumo } = require('../services/costoRecetaService');
+    propagarCostoInsumo(insumoId, bizId, pool)
+      .catch((e) => console.error('[desperdicio-override] recálculo:', e.message));
+  });
+  return ctrl.setDesperdicioOverride(req, res, next);
+});
 
 /* ================== MERMAS ================== */
 
