@@ -16,6 +16,23 @@ const { recalcularCostoReceta, propagarCostoInsumo } = require('./costoRecetaSer
 const { normalizarCantidadUnidad } = require('./unidades');
 const { logAudit } = require('./audit/auditLog');
 
+// Mermas elegidas en una fila: se quedan solo las que existen (y son de ese insumo).
+// Una merma borrada mientras la receta estaba abierta hacía fallar todo el guardado
+// con "violates foreign key constraint receta_items_merma_id_fkey".
+async function mermasExistentes(client, ids, insumoId) {
+  if (!ids.length) return ids;
+  const { rows } = await client.query(
+    `SELECT id FROM insumo_mermas WHERE id = ANY($1::int[])${insumoId ? ' AND insumo_id = $2' : ''}`,
+    insumoId ? [ids, insumoId] : [ids]
+  );
+  const ok = new Set(rows.map(r => Number(r.id)));
+  const filtrados = ids.filter(id => ok.has(Number(id)));
+  if (filtrados.length !== ids.length) {
+    console.warn(`[recetaWrite] mermas inexistentes descartadas: ${ids.filter(id => !ok.has(Number(id))).join(',')}`);
+  }
+  return filtrados;
+}
+
 /**
  * POST /businesses/:businessId/articles/:articleId/receta — lógica real.
  */
@@ -176,9 +193,10 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
       const notasItem = (item.notas || '').trim() || null;
       const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
       const merma = item.merma !== false;
-      const mermaIds = Array.isArray(item.mermaIds)
+      const mermaIds = await mermasExistentes(client, Array.isArray(item.mermaIds)
         ? item.mermaIds.map(Number).filter(Number.isFinite)
-        : (item.mermaId != null ? [Number(item.mermaId)] : []);
+        : (item.mermaId != null ? [Number(item.mermaId)] : []),
+        Number(item.supplyId) > 0 ? Number(item.supplyId) : null);
       const mermaId = mermaIds.length ? mermaIds[0] : null;
       const pedido = item.pedido !== false;
       const secreto = item.secreto === true;
@@ -531,9 +549,9 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
       if (!insumoCheck.length) continue;
 
       const merma = item.merma !== false;
-      const mermaIds = Array.isArray(item.mermaIds)
+      const mermaIds = await mermasExistentes(client, Array.isArray(item.mermaIds)
         ? item.mermaIds.map(Number).filter(Number.isFinite)
-        : (item.mermaId != null ? [Number(item.mermaId)] : []);
+        : (item.mermaId != null ? [Number(item.mermaId)] : []), supplyId);
       const mermaId = mermaIds.length ? mermaIds[0] : null;
       const pedido = item.pedido !== false;
       const secreto = item.secreto === true;
