@@ -113,7 +113,9 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
       nombre: it.nombre,
       importe: r2(it.importe),
       detalle: [...it.nombres.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n),
-      comprobantes: [...it.cpb.values()].map((c) => ({ ...c, importe: r2(c.importe), insumos: [...c.insumos] })).sort((a, b) => Math.abs(b.importe) - Math.abs(a.importe)).slice(0, MAX_CPB),
+      comprobantes: [...it.cpb.values()].map((c) => ({ ...c, importe: r2(c.importe), insumos: [...c.insumos] }))
+        // Por fecha de compra, la más nueva primero (Diego 11/11/2026); a igual fecha, el mayor importe.
+        .sort((a, b) => String(b.fecha ?? '').localeCompare(String(a.fecha ?? '')) || Math.abs(b.importe) - Math.abs(a.importe)).slice(0, MAX_CPB),
       cantidadComprobantes: it.cpb.size,
       editar: it.editar,
       ...(it.opciones ? { opciones: it.opciones } : {}),
