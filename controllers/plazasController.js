@@ -112,7 +112,30 @@ async function guardarProductos(plazaId, articleIds) {
     await pool.query(
       `INSERT INTO plaza_productos (plaza_id, article_id, orden) SELECT $1, x.id, x.ord FROM unnest($2::int[]) WITH ORDINALITY AS x(id, ord)`,
       [plazaId, ids]);
+    await congelarOrden(plazaId);
   }
+}
+
+// El orden de armado es propio de la plaza (Diego 11/11/2026): al sumar un producto se copia el
+// orden que tiene hoy su receta y desde ahí la receta (que se ordena por costo) ya no lo mueve.
+// Los productos que ya tenían ficha no se tocan.
+async function congelarOrden(plazaId) {
+  await pool.query(
+    `INSERT INTO plaza_fichas (plaza_id, article_id, layout, updated_at)
+     SELECT pp.plaza_id, pp.article_id,
+            jsonb_build_object(
+              'orden', COALESCE((
+                SELECT jsonb_agg(CASE WHEN ri.insumo_id IS NOT NULL THEN 'i:' || ri.insumo_id
+                                      WHEN ri.article_ref_id IS NOT NULL THEN 'a:' || ri.article_ref_id
+                                      ELSE 'n:' || lower(COALESCE(ri.nombre_insumo_maxi, 'Ingrediente')) END
+                                 ORDER BY ri.orden, ri.id)
+                  FROM recetas r JOIN receta_items ri ON ri.receta_id = r.id
+                 WHERE r.business_id = p.business_id AND r.article_id = pp.article_id AND COALESCE(r.active, TRUE)), '[]'::jsonb),
+              'ocultos', '[]'::jsonb, 'extras', '[]'::jsonb),
+            NOW()
+       FROM plaza_productos pp JOIN plazas p ON p.id = pp.plaza_id
+      WHERE pp.plaza_id = $1
+     ON CONFLICT (plaza_id, article_id) DO NOTHING`, [plazaId]);
 }
 
 /** POST /businesses/:businessId/plazas  { sectorId, nombre, articleIds } */
@@ -191,17 +214,27 @@ exports.vista = async (req, res, next) => {
 
     const productos = prods.map((p) => {
       const layout = p.layout || {};
-      const ocultos = new Set(Array.isArray(layout.ocultos) ? layout.ocultos : []);
-      const base = items.filter((it) => it.article_id === p.article_id).map((it) => {
-        const ref = it.insumo_id ? `i:${it.insumo_id}` : it.article_ref_id ? `a:${it.article_ref_id}` : `n:${String(it.nombre).toLowerCase()}`;
+      const propios = items.filter((it) => it.article_id === p.article_id);
+      // El renglón se identifica por el INGREDIENTE, no por el id del renglón de la receta (que
+      // cambia cada vez que se guarda la receta). Las claves viejas r:<id> se traducen.
+      const refDe = (it) => (it.insumo_id ? `i:${it.insumo_id}` : it.article_ref_id ? `a:${it.article_ref_id}` : `n:${String(it.nombre).toLowerCase()}`);
+      const viejas = new Map(propios.map((it) => [`r:${it.item_id}`, refDe(it)]));
+      const traducir = (lista) => (Array.isArray(lista) ? lista.map((k) => viejas.get(String(k)) || String(k)) : []);
+      const ocultos = new Set(traducir(layout.ocultos));
+      const usadas = new Map();
+      const base = propios.map((it) => {
+        const ref = refDe(it);
+        const n = (usadas.get(ref) || 0) + 1;   // mismo ingrediente dos veces en la receta
+        usadas.set(ref, n);
+        const key = n === 1 ? ref : `${ref}#${n}`;
         return {
-          key: `r:${it.item_id}`, ref, nombre: it.nombre,
+          key, ref, nombre: it.nombre,
           cantidad: it.cantidad != null ? Number(it.cantidad) : null, unidad: it.unidad || '',
           color: colorDe.has(ref) ? colorDe.get(ref) : colorPorDefecto(ref, it.nombre),
           obs: it.observaciones ? String(it.observaciones).trim() : '',
           mostrar: mostrarDe.get(ref) || 'peso',
           alias: aliasDe.get(ref) || '',
-          oculto: ocultos.has(`r:${it.item_id}`), extra: false,
+          oculto: ocultos.has(key), extra: false,
         };
       });
       const extras = (Array.isArray(layout.extras) ? layout.extras : []).map((x) => ({
@@ -209,9 +242,11 @@ exports.vista = async (req, res, next) => {
         color: Number.isFinite(Number(x.color)) ? Number(x.color) : 12, oculto: false, extra: true,
       }));
       const todos = [...base, ...extras];
-      const orden = Array.isArray(layout.orden) ? layout.orden.map(String) : [];
+      const orden = traducir(layout.orden);
       const pos = new Map(orden.map((k, i) => [k, i]));
-      todos.sort((a, b) => (pos.has(a.key) ? pos.get(a.key) : 1e6 + todos.indexOf(a)) - (pos.has(b.key) ? pos.get(b.key) : 1e6 + todos.indexOf(b)));
+      // Lo que no está en el orden guardado (ingrediente nuevo en la receta) va al final, en el orden de la receta.
+      const lugar = new Map(todos.map((r, i) => [r.key, pos.has(r.key) ? pos.get(r.key) : 1e6 + i]));
+      todos.sort((a, b) => lugar.get(a.key) - lugar.get(b.key));
       return { articleId: p.article_id, nombre: p.nombre, renglones: todos };
     });
     res.json({ ok: true, plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre },
@@ -227,7 +262,7 @@ exports.guardarFicha = async (req, res, next) => {
     if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
     if (!(await puedeArmar(req, plaza))) return res.status(403).json({ ok: false, error: 'forbidden' });
     const articleId = num(req.params.articleId);
-    const str = (a) => (Array.isArray(a) ? a.map(String).filter((x) => x.length <= 40).slice(0, 200) : []);
+    const str = (a) => (Array.isArray(a) ? a.map(String).filter((x) => x.length <= 120).slice(0, 200) : []);
     const extras = (Array.isArray(req.body?.extras) ? req.body.extras : []).slice(0, 30).map((x) => ({
       id: String(x.id || '').slice(0, 40), texto: String(x.texto || '').slice(0, 60), color: Math.max(0, Math.min(PALETA_N - 1, Number(x.color) || 0)),
     })).filter((x) => x.id.startsWith('x:'));
