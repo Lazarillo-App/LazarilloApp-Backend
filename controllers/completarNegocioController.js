@@ -29,6 +29,26 @@ function extractJSON(txt) {
   return null;
 }
 
+// Páginas de plataformas (menús digitales, delivery, links): Google a veces las da como
+// "sitio web" del local. Su ícono es el de la plataforma (ej. el de Waitry, usuaria 11/11),
+// así que de ahí no se toman favicons; solo imágenes que no sean de la plataforma.
+const PLATAFORMAS = ['waitry', 'fu.do', 'fudo', 'pedidosya', 'rappi', 'ubereats', 'linktr.ee', 'linkin.bio', 'beacons.ai',
+  'instagram.com', 'facebook.com', 'wa.me', 'whatsapp', 'google.', 'goo.gl', 'maps.app', 'mercadopago', 'bit.ly',
+  'tiktok.com', 'menu.club', 'cartadigital', 'meniu', 'tuucarta', 'menutech'];
+function plataformaDe(url) {
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return ''; }
+  return PLATAFORMAS.find((p) => host.includes(p)) || '';
+}
+// Archivo de imagen que es la marca de la plataforma (ej. ".../waitry-logo.png").
+const esMarcaDePlataforma = (img, plataforma) => {
+  if (!plataforma) return false;
+  const clave = plataforma.split('.')[0];
+  let archivo = '';
+  try { archivo = new URL(img).pathname.split('/').pop().toLowerCase(); } catch { return false; }
+  return archivo.includes(clave) || /favicon|apple-touch|android-chrome/.test(archivo);
+};
+
 const limpiaUrl = (u) => {
   const s = String(u || '').trim();
   return /^https?:\/\/[^\s"']+$/i.test(s) ? s : '';
@@ -74,11 +94,19 @@ async function leerWeb(url) {
     const meta = (k) => { for (const m of metas) { const n = (attr(m, 'name') || attr(m, 'property')).toLowerCase(); if (n === k) return attr(m, 'content'); } return ''; };
     const desc = meta('og:description') || meta('description');
     if (desc && desc.length >= 25) out.descripcion = desc.replace(/\s+/g, ' ').slice(0, 400);
-    // Logos: apple-touch-icon / íconos grandes → <img> con "logo" → og:image
+    // Logos: apple-touch-icon / íconos grandes → <img> con "logo" → og:image.
+    // En una página de plataforma (Waitry, Fudo…) los íconos son de la plataforma: se
+    // saltean y primero va og:image, que suele ser la imagen del local.
+    const plataforma = plataformaDe(base);
     const links = html.match(/<link\b[^>]*>/gi) || [];
-    for (const l of links) { const rel = attr(l, 'rel').toLowerCase(); if (/apple-touch-icon|icon/.test(rel)) { const h = abs(attr(l, 'href')); if (h && !/\.ico(\?|$)/i.test(h)) out.logos.push(h); } }
+    const og = meta('og:image');
+    if (plataforma && og) out.logos.push(abs(og));
+    if (!plataforma) {
+      for (const l of links) { const rel = attr(l, 'rel').toLowerCase(); if (/apple-touch-icon|icon/.test(rel)) { const h = abs(attr(l, 'href')); if (h && !/\.ico(\?|$)/i.test(h)) out.logos.push(h); } }
+    }
     for (const im of (html.match(/<img\b[^>]*>/gi) || [])) { if (/logo/i.test(im)) { const h = abs(attr(im, 'src') || attr(im, 'data-src')); if (h && !h.startsWith('data:')) out.logos.push(h); } }
-    const og = meta('og:image'); if (og) out.logos.push(abs(og));
+    if (!plataforma && og) out.logos.push(abs(og));
+    out.logos = out.logos.filter((h) => !esMarcaDePlataforma(h, plataforma));
     // Redes: primer link que no sea de "compartir"
     const hrefs = (html.match(/href\s*=\s*["'][^"']+["']/gi) || []).map((h) => h.replace(/^href\s*=\s*["']|["']$/gi, ''));
     const red = (re) => hrefs.find((h) => re.test(h) && !/sharer|share\?|intent|\/p\/|\/reel\/|\/posts?\//i.test(h)) || '';
@@ -119,10 +147,13 @@ exports.completar = async (req, res) => {
 
     // 1) La web del local (gratis)
     const webLocal = limpiaUrl(web);
+    // Si el "sitio web" que dio Google es el Instagram o el Facebook del local, es su red.
+    if (/instagram\.com/i.test(webLocal) && handleDe(webLocal, 'instagram')) out.instagram = webLocal;
+    if (/facebook\.com/i.test(webLocal) && handleDe(webLocal, 'facebook')) out.facebook = webLocal;
     if (webLocal) {
       const w = await leerWeb(webLocal);
       if (falta.includes('descripcion') && w.descripcion) { out.descripcion = w.descripcion; out.descripcionFuente = 'web'; }
-      for (const k of ['instagram', 'facebook', 'tiktok']) if (falta.includes(k)) out[k] = w[k];
+      for (const k of ['instagram', 'facebook', 'tiktok']) if (falta.includes(k) && !out[k]) out[k] = w[k];
       cands.push(...w.logos);
     }
 
@@ -149,7 +180,8 @@ exports.completar = async (req, res) => {
       const fb = handleDe(out.facebook, 'facebook');
       if (fb) cands.push(`https://graph.facebook.com/${fb}/picture?type=large`);
       if (ig) cands.push(`https://unavatar.io/instagram/${ig}?fallback=false`);
-      const w2 = out.web || webLocal;
+      // Favicon solo de una web propia: el de una plataforma es su marca, no la del local.
+      const w2 = [out.web, webLocal].find((u) => u && !plataformaDe(u)) || '';
       let dom = ''; try { dom = new URL(w2).hostname.replace(/^www\./, ''); } catch { /* sin web */ }
       if (dom) cands.push(`https://www.google.com/s2/favicons?domain=${dom}&sz=256`);
       const unicos = [...new Set(cands)].slice(0, 8);
@@ -163,3 +195,4 @@ exports.completar = async (req, res) => {
   }
 };
 exports._handleDe = handleDe;
+exports._plataformaDe = plataformaDe;
