@@ -502,7 +502,7 @@ exports.guardarFicha = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/** PUT /businesses/:businessId/plazas/colores  { ref, color?, mostrar?, alias? } — color, qué mostrar (peso | obs) y alias de un ingrediente, en todas las plazas. */
+/** PUT /businesses/:businessId/plazas/colores  { ref, color?, mostrar?, alias? } — color, qué mostrar (peso | obs | ambos) y alias de un ingrediente, en todas las plazas. */
 exports.guardarColor = async (req, res, next) => {
   try {
     const bizId = num(req.businessId);
@@ -514,7 +514,8 @@ exports.guardarColor = async (req, res, next) => {
     const tocaAlias = req.body?.alias !== undefined && req.body?.alias !== null;
     const alias = tocaAlias ? String(req.body.alias).trim().slice(0, 60) : null;
     const colorOk = color == null || (color >= 0 && color < PALETA_N);
-    const mostrarOk = mostrar == null || ['peso', 'obs'].includes(mostrar);
+    // 'ambos' = peso y, en otro renglón, la observación (Diego 12/11/2026).
+    const mostrarOk = mostrar == null || ['peso', 'obs', 'ambos'].includes(mostrar);
     if (!ref || (color == null && mostrar == null && !tocaAlias) || !colorOk || !mostrarOk) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
     if (!esGestor(req)) {
       const conduce = await sectoresQueConduce(req.user?.id, bizId);
