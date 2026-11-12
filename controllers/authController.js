@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { sendEmail } = require('../utils/mailer');
+const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret';
 
@@ -174,6 +175,53 @@ exports.me = async (req, res) => {
     res.json(rows[0] || null);
   } catch (e) {
     res.status(500).json({ error: 'internal' });
+  }
+};
+
+/* PUT /api/auth/me/email — cambiar el email (= usuario de ingreso) pidiendo la contraseña
+   actual (Diego 12/11/2026). Queda el aviso en la campana del negocio activo. */
+exports.changeEmail = async (req, res) => {
+  try {
+    const nuevo = normEmail(req.body?.email || '');
+    const password = String(req.body?.password || '');
+    if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(nuevo)) return res.status(400).json({ error: 'invalid_email' });
+    if (!password) return res.status(400).json({ error: 'password_required' });
+
+    const { rows } = await pool.query(
+      `SELECT id, email, password_hash, role, active_business_id,
+              COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), split_part(email, '@', 1)) AS nombre
+         FROM app_users WHERE id = $1 LIMIT 1`,
+      [req.user.id]
+    );
+    const u = rows[0];
+    if (!u) return res.status(404).json({ error: 'user_not_found' });
+    if (!u.password_hash || !(await bcrypt.compare(password, u.password_hash))) {
+      return res.status(400).json({ error: 'wrong_password' }); // 400 y no 401: el front cierra sesión ante un 401
+    }
+    if (nuevo === normEmail(u.email)) return res.status(400).json({ error: 'same_email' });
+
+    const { rows: ex } = await pool.query('SELECT 1 FROM app_users WHERE email = $1 AND id <> $2 LIMIT 1', [nuevo, u.id]);
+    if (ex[0]) return res.status(409).json({ error: 'email_in_use' });
+
+    const { rows: up } = await pool.query(
+      `UPDATE app_users SET email = $1, updated_at = NOW() WHERE id = $2
+       RETURNING id, name, display_name, email, active_business_id, role, status`,
+      [nuevo, u.id]
+    );
+
+    if (u.active_business_id) {
+      avisarAlEquipoSinEsperar({
+        businessId: u.active_business_id, actorUserId: u.id, type: 'usuario_email',
+        title: `Email cambiado: ${u.nombre}`, message: `${u.email} → ${nuevo}`,
+        metadata: { kind: 'usuario_email', antes: u.email, despues: nuevo }, incluirActor: true,
+      });
+    }
+    // El token lleva el email: se devuelve uno nuevo para que la sesión quede al día.
+    return res.json({ ok: true, user: up[0], token: signToken(up[0]) });
+  } catch (e) {
+    if (e?.code === '23505') return res.status(409).json({ error: 'email_in_use' });
+    console.error('[changeEmail]', e.message);
+    return res.status(500).json({ error: 'internal' });
   }
 };
 
