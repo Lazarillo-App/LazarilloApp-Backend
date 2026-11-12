@@ -463,7 +463,58 @@ async function createUiNotification({
 };
 
 
+/**
+ * Aviso al equipo de gestión de un negocio cuando alguien crea, borra o discontinúa un
+ * artículo o insumo (Diego 12/11/2026: «un usuario creó el artículo y no aparece en
+ * notificaciones»). Antes estas acciones solo se avisaban en la sesión de quien las hacía.
+ *
+ * Destinatarios: dueño del negocio + owner/admin asignados al negocio o a su organización
+ * (user_assignments) + owner/manager de app_memberships. No le llega a quien hizo la acción
+ * (ya la ve en su pantalla). Un solo INSERT … SELECT, sin un pedido por persona.
+ * metadata.actor_user_id / actor_nombre → el panel separa «Mías» de «Del equipo».
+ */
+async function avisarAlEquipo({ businessId, actorUserId = null, type, title, message = null, metadata = {} }) {
+  const bid = Number(businessId);
+  if (!Number.isFinite(bid) || bid <= 0) return { created: 0 };
+  const ttl = String(title || '').trim();
+  if (!ttl) return { created: 0 };
+  const actor = Number(actorUserId) || null;
+  let actorNombre = null;
+  if (actor) {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), split_part(email, '@', 1)) AS n FROM app_users WHERE id = $1`,
+      [actor]
+    );
+    actorNombre = rows[0]?.n || null;
+  }
+  const meta = { ...(metadata || {}), actor_user_id: actor, actor_nombre: actorNombre };
+  const { rowCount } = await pool.query(
+    `INSERT INTO sync_notifications (business_id, user_id, type, title, message, metadata, created_at, read)
+     SELECT $1, uid, $2, $3, $4, $5::jsonb, NOW(), false
+       FROM (
+         SELECT owner_id AS uid FROM app_businesses WHERE id = $1
+         UNION
+         SELECT m.user_id FROM app_memberships m WHERE m.business_id = $1 AND m.role IN ('owner','manager')
+         UNION
+         SELECT ua.user_id FROM user_assignments ua
+          WHERE ua.revoked_at IS NULL AND ua.role IN ('admin','owner')
+            AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
+              OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
+       ) x
+      WHERE uid IS NOT NULL AND uid <> COALESCE($6::int, -1)`,
+    [bid, safeType(type), ttl, message == null ? null : String(message), JSON.stringify(meta), actor]
+  );
+  return { created: rowCount };
+}
+
+/** Igual que avisarAlEquipo pero sin bloquear la respuesta ni romperla si falla. */
+function avisarAlEquipoSinEsperar(args) {
+  avisarAlEquipo(args).catch((e) => console.error('[avisarAlEquipo]', args?.type, e?.message));
+}
+
 module.exports = {
+  avisarAlEquipo,
+  avisarAlEquipoSinEsperar,
   createSyncNotification,
   createSyncNotificationForBusinessUsers,
   notifySalesImportOverlap,

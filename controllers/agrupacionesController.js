@@ -1,5 +1,6 @@
 // controllers/agrupacionesController.js
 const pool = require('../config/db');
+const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
 const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 /* ========================= Helpers ========================= */
@@ -90,7 +91,7 @@ const TOP20_NAME = 'Top 20';
 const normName = (s) =>
   String(s || '')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .trim();
 
@@ -708,6 +709,22 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     );
 
     invalidateCacheForBiz(businessId);
+    // Discontinuar = mover a Discontinuados: avisar al equipo de gestión (Diego 12/11/2026).
+    if (isDiscontinuadosName(agNombre)) {
+      const yaEstaban = new Set(base.map((a) => Number(a?.id)));
+      const nuevos = incoming.filter((a) => !yaEstaban.has(Number(a?.id)));
+      if (nuevos.length) {
+        const nombres = nuevos.map((a) => String(a?.nombre || '').trim()).filter(Boolean);
+        avisarAlEquipoSinEsperar({
+          businessId: requestBusinessId, actorUserId: req.user?.id, type: 'discontinue',
+          title: nuevos.length === 1
+            ? `${nombres[0] || `Artículo #${nuevos[0].id}`} discontinuado`
+            : `${nuevos.length} artículos discontinuados`,
+          message: nuevos.length > 1 && nombres.length ? nombres.slice(0, 5).join(', ') + (nombres.length > 5 ? '…' : '') : null,
+          metadata: { kind: 'discontinue', scope: 'articulo', ids: nuevos.map((a) => Number(a.id)) },
+        });
+      }
+    }
     return res.json(rows[0]);
   } catch (e) {
     console.error('agregarArticulosAgrupacion error:', {

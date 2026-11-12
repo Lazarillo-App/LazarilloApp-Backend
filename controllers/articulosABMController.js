@@ -3,6 +3,7 @@
 'use strict';
 
 const pool = require('../config/db');
+const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
 const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 const { logAudit } = require('../services/audit/auditLog');
 const { schemaDeNegocio } = require('../services/maxiPdvMap');
@@ -57,6 +58,12 @@ async function resolveStorageBizId(bizId) {
 // GET /businesses/:id/rubros
 // Devuelve categorias + subrubros del negocio (de app_articles)
 // ─────────────────────────────────────────────────────────────
+// «Rubro › Subrubro» para el detalle del aviso de alta (si vino en el body).
+function rubroDelAviso(b) {
+  const r = [b?.rubro, b?.subrubro].map((x) => (x == null ? '' : String(x).trim())).filter(Boolean);
+  return r.length ? r.join(' › ') : null;
+}
+
 exports.getRubros = async (req, res, next) => {
   try {
     const bizId = getBusinessId(req);
@@ -333,6 +340,12 @@ exports.crearArticulo = async (req, res, next) => {
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
     console.log(`[crearArticulo] Artículo manual creado: id=${newId} "${nombre}" biz=${bizId}`);
+    avisarAlEquipoSinEsperar({
+      businessId: bizId, actorUserId: req.user?.id, type: 'articulo_create',
+      title: `Artículo nuevo: ${nombre.trim()}`,
+      message: [rubroDelAviso(req.body), skuFinal].filter(Boolean).join(' · ') || null,
+      metadata: { kind: 'articulo_create', scope: 'articulo', ids: [newId] },
+    });
     return res.status(201).json({ ok: true, articulo, sku: skuFinal });
 
   } catch (e) {
@@ -748,8 +761,8 @@ exports.eliminarArticulo = async (req, res, next) => {
     await client.query('BEGIN');
 
     // Borrar de app_articles
-    const { rowCount } = await client.query(
-      `DELETE FROM app_articles WHERE id = $1 AND business_id = $2`, [articleId, storageBizId]
+    const { rowCount, rows: borrados } = await client.query(
+      `DELETE FROM app_articles WHERE id = $1 AND business_id = $2 RETURNING name`, [articleId, storageBizId]
     );
     if (!rowCount) {
       await client.query('ROLLBACK');
@@ -798,6 +811,11 @@ exports.eliminarArticulo = async (req, res, next) => {
     invalidateCacheForBiz(bizId);
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
+    avisarAlEquipoSinEsperar({
+      businessId: bizId, actorUserId: req.user?.id, type: 'articulo_delete',
+      title: `Artículo eliminado: ${borrados[0]?.name || `#${articleId}`}`,
+      metadata: { kind: 'articulo_delete', scope: 'articulo', ids: [articleId] },
+    });
     return res.json({ ok: true, deleted: articleId });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
