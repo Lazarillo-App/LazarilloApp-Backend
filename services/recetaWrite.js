@@ -261,13 +261,15 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
         `INSERT INTO receta_items
            (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
             observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
-            merma_id, merma_ids, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+            merma_id, merma_ids, secreto, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
          RETURNING *`,
         [
           receta.id, supplyId, cantidad, unidad, costoUnitario, notasItem,
           observaciones, fotosUrls, merma, pedido, tipoCosto, orden,
           mermaId, mermaIds.length ? mermaIds : null,
+          // «Oculto» (antes «Secreto»): antes no se guardaba en los insumos de recetas de artículo.
+          secreto,
         ]
       );
       savedItems.push({

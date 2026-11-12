@@ -275,7 +275,7 @@ exports.vista = async (req, res, next) => {
         ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, num(req.query.articleId) || null]);
     const ids = prods.map((p) => p.article_id);
     const { rows: items } = ids.length ? await pool.query(
-      `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones,
+      `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones, ri.secreto,
               COALESCE(i.nombre, ri.nombre_insumo_maxi, ma2.nombre, 'Ingrediente') AS nombre
          FROM recetas r
          JOIN receta_items ri ON ri.receta_id = r.id
@@ -317,7 +317,9 @@ exports.vista = async (req, res, next) => {
           alias: aliasDe.get(ref) || '',
           editable: !!it.insumo_id,
           unidades: it.insumo_id ? unidadesDe(it.unidad, eqsDe.get(it.insumo_id)) : [],
-          oculto: ocultos.has(key), extra: false,
+          // Oculto = el «Oculto» del renglón en su receta (Diego 12/11/2026: el tablero es un atajo
+          // visual de la receta). Los ocultos viejos de la ficha solo quedan para renglones sin insumo.
+          oculto: it.secreto === true || (!it.insumo_id && !it.article_ref_id && ocultos.has(key)), extra: false,
         };
       });
       const extras = (Array.isArray(layout.extras) ? layout.extras : []).map((x) => ({
@@ -450,6 +452,33 @@ exports.editarItem = async (req, res, next) => {
   } finally {
     client.release();
   }
+};
+
+/** PUT /businesses/:businessId/plazas/:id/ocultar  { ref, oculto }
+ *  Ojito del tablero (Diego 12/11/2026): ocultar un ingrediente lo oculta en TODAS las recetas de la
+ *  organización que lo usan, y queda guardado en cada receta como ingrediente oculto (receta_items.secreto,
+ *  el mismo que respeta la Vista Cocina). Solo cambia la vista: el costo no se toca. */
+exports.ocultar = async (req, res, next) => {
+  try {
+    const bizId = num(req.businessId);
+    const plaza = await cargarPlaza(num(req.params.id), bizId);
+    if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await puedeArmar(req, plaza))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const m = String(req.body?.ref || '').match(/^([ia]):(-?\d+)$/);
+    if (!m) return res.status(400).json({ ok: false, error: 'ref_invalida' });
+    const oculto = req.body?.oculto === true;
+    const col = m[1] === 'i' ? 'insumo_id' : 'article_ref_id';
+    const { rowCount } = await pool.query(
+      `UPDATE receta_items ri SET secreto = $1, updated_at = NOW()
+         FROM recetas r
+        WHERE ri.receta_id = r.id AND r.active = TRUE AND ri.${col} = $2
+          AND r.business_id IN (SELECT id FROM app_businesses
+                                 WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $3)
+                                 UNION SELECT $3::int)
+          AND COALESCE(ri.secreto, FALSE) <> $1`,
+      [oculto, Number(m[2]), bizId]);
+    res.json({ ok: true, renglones: rowCount });
+  } catch (e) { next(e); }
 };
 
 /** PUT /businesses/:businessId/plazas/:id/fichas/:articleId  { orden, ocultos, extras } */

@@ -92,4 +92,18 @@ function normalizarCantidadUnidad(cantidad, unidad, costoUnitario) {
   return { cantidad: cant, unidad: uNorm, costoUnitario: costo };
 }
 
-module.exports = { factorConversion, normalizarCantidadUnidad, canonicalUnit };
+// Tamaño de una unidad (o de una equivalencia del insumo) en su familia: peso en gr, volumen en ml,
+// unidades en u. Sirve para comparar cantidades entre unidades (75 gr = 1 «dip y medio» de 75 gr).
+const FAMILIA = { gr: ['peso', 1], kg: ['peso', 1000], lb: ['peso', 453.59], ml: ['vol', 1], lt: ['vol', 1000], oz: ['vol', 30], u: ['u', 1] };
+function tamanoUnidad(unidad, equivalencias = []) {
+  const raw = String(unidad || '').trim().toLowerCase();
+  const eq = (equivalencias || []).find((e) => String(e.nombre || '').trim().toLowerCase() === raw);
+  if (eq) {
+    const base = FAMILIA[canonicalUnit(eq.unidad)];
+    return base ? { familia: base[0], valor: (Number(eq.contenido) || 0) * base[1] } : null;
+  }
+  const base = FAMILIA[canonicalUnit(raw)];
+  return base ? { familia: base[0], valor: base[1] } : null;
+}
+
+module.exports = { factorConversion, normalizarCantidadUnidad, canonicalUnit, tamanoUnidad };

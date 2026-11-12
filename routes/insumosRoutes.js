@@ -113,6 +113,7 @@ router.post('/:id/mermas/:mermaId/aplicar', blockStaffWrite, ctrl.mermasAplicar)
 router.get('/:id/equivalencias', ctrl.equivalencias_list);
 router.post('/:id/equivalencias', blockStaffWrite, ctrl.equivalencias_create);
 router.put('/:id/equivalencias/:eqId', blockStaffWrite, ctrl.equivalencias_update);
+router.post('/:id/equivalencias/:eqId/aplicar', blockStaffWrite, ctrl.equivalencias_aplicar);
 router.delete('/:id/equivalencias/:eqId', blockStaffWrite, ctrl.equivalencias_remove);
 
 /* ================== BONIFICACIONES ================== */
