@@ -24,6 +24,19 @@
 'use strict';
 
 const pool = require('../config/db');
+const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
+
+/* ── Avisos (regla «todo ABM queda en Notificaciones», Diego 12/11/2026) ──
+   Los graba el servidor en el mismo endpoint que hace el cambio; le llegan al equipo de
+   gestión del negocio y a quien lo hizo (ya leído, en «Mías»). */
+const nombreEmp = (e) => [e?.nombre, e?.apellido].filter(Boolean).join(' ').trim() || 'Empleado';
+const ddmmaaaa = (iso) => (iso ? `${String(iso).slice(8, 10)}/${String(iso).slice(5, 7)}/${String(iso).slice(0, 4)}` : '');
+function avisarRrhh(req, type, title, message = null, metadata = {}, extra = {}) {
+  avisarAlEquipoSinEsperar({
+    businessId: req.businessId, actorUserId: req.user?.id || null, type, title, message,
+    metadata: { kind: type, scope: 'rrhh', ...metadata }, incluirActor: !!req.user?.id, ...extra,
+  });
+}
 const { PDV_MAP } = require('../services/maxiPdvMap');
 const { getEffectiveRole, listAccessibleBusinesses } = require('../services/auth/accessControl');
 
@@ -391,6 +404,18 @@ async function getConfig(req, res) {
   let sync = null;
   try {
     sync = await sincronizarNomina(await nominaDe(req.businessId));
+    if (sync && (sync.altas?.length || sync.bajas?.length)) {
+      const partes = [];
+      if (sync.altas.length) partes.push(`${sync.altas.length} ${sync.altas.length === 1 ? 'alta' : 'altas'}`);
+      if (sync.bajas.length) partes.push(`${sync.bajas.length} ${sync.bajas.length === 1 ? 'baja' : 'bajas'}`);
+      const nombres = [...sync.altas.map((n) => `+ ${n}`), ...sync.bajas.map((n) => `− ${n}`)];
+      // automático: sin autor, le llega a todo el equipo
+      avisarAlEquipoSinEsperar({
+        businessId: req.businessId, type: 'rrhh_nomina', title: `Nómina sincronizada con MaxiRest: ${partes.join(' · ')}`,
+        message: nombres.slice(0, 8).join(' · ') + (nombres.length > 8 ? ` y ${nombres.length - 8} más` : ''),
+        metadata: { kind: 'rrhh_nomina', scope: 'rrhh' },
+      });
+    }
   } catch (e) {
     console.error('[rrhh.getConfig sync nómina]', e.message);
     sync = { error: true };
@@ -581,6 +606,13 @@ async function putConfig(req, res) {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
   client.release();
+  {
+    const que = [Array.isArray(espacios) && 'espacios y turnos', Array.isArray(puestos) && 'referencias', Array.isArray(fechas) && 'fechas especiales'].filter(Boolean);
+    if (que.length) {
+      avisarRrhh(req, 'rrhh_config', `Cronogramas: cambios en ${que.join(' y ')}`, avisos.length ? avisos.join(' ') : null,
+        {}, { clave: `rrhh_config:${bizId}:${branchId || 0}:${que.join(',')}:${req.user?.id || 0}` });
+    }
+  }
   try {
     return res.json({ ok: true, avisos, config: await leerConfig(bizId, branchId) });
   } catch (e) {
@@ -670,6 +702,9 @@ async function importarNomina(req, res) {
       );
       importados += ins.rowCount;
     }
+    if (importados) {
+      avisarRrhh(req, 'rrhh_nomina', `Nómina importada: ${importados} ${importados === 1 ? 'empleado' : 'empleados'}`, 'Desde MaxiRest');
+    }
     return res.json({
       ok: true, importados, elegidos: elegidos.length,
       existentes: elegidos.length - importados,
@@ -698,11 +733,45 @@ async function crearEmpleado(req, res) {
       [nominaId, nombre, String(req.body?.apellido || '').trim() || null,
         req.body?.sector || null, fechaAlta, dni]
     );
+    avisarRrhh(req, 'rrhh_empleado_alta', `Alta: ${nombreEmp(rows[0])}`,
+      ['Nómina', rows[0].fechaAlta ? `desde ${ddmmaaaa(rows[0].fechaAlta)}` : null, rows[0].dni ? `DNI ${rows[0].dni}` : null].filter(Boolean).join(' · '),
+      { ids: [rows[0].id] });
     return res.json({ ok: true, empleado: rows[0] });
   } catch (e) {
     console.error('[rrhh.crearEmpleado]', e);
     return res.status(500).json({ ok: false, error: 'internal' });
   }
+}
+
+// Un aviso por guardado: baja / reactivación / No aplica tienen título propio; el resto de
+// los cambios de datos van como «Empleado editado» con el antes → después.
+function avisarCambioEmpleado(req, a, d, b) {
+  if (!a || !d) return;
+  const quien = nombreEmp(d);
+  const meta = { ids: [d.id] };
+  if (a.activo && d.activo === false) {
+    avisarRrhh(req, 'rrhh_empleado_baja', `Baja: ${quien}${d.fechaBaja ? ` (${ddmmaaaa(d.fechaBaja)})` : ''}`, 'Nómina', meta);
+    return;
+  }
+  if (a.activo === false && d.activo) {
+    avisarRrhh(req, 'rrhh_empleado_reactivar', `Reactivado: ${quien}`, 'Nómina', meta);
+    return;
+  }
+  if (!!a.noAplica !== !!d.noAplica) {
+    avisarRrhh(req, 'rrhh_empleado_no_aplica', d.noAplica ? `No aplica a cronogramas: ${quien}` : `Vuelve a cronogramas: ${quien}`, 'Nómina', meta);
+    return;
+  }
+  if (b.silenciarBaja === true) {
+    avisarRrhh(req, 'rrhh_empleado_edit', `Sigue activo: ${quien}`, 'No se sugiere la baja por 8 semanas', meta);
+    return;
+  }
+  const cambios = [];
+  const par = (rot, x, y) => { if ((x || '') !== (y || '')) cambios.push(`${rot}: ${x || '—'} → ${y || '—'}`); };
+  par('Nombre', nombreEmp(a), quien);
+  par('Sector', a.sector, d.sector);
+  par('Alta', ddmmaaaa(a.fechaAlta), ddmmaaaa(d.fechaAlta));
+  par('DNI', a.dni, d.dni);
+  if (cambios.length) avisarRrhh(req, 'rrhh_empleado_edit', `Empleado editado: ${quien}`, cambios.join(' · '), meta);
 }
 
 // PATCH /api/businesses/:bizId/rrhh/empleados/:id
@@ -718,6 +787,12 @@ async function editarEmpleado(req, res) {
     const nominaId = await nominaDe(req.businessId);
     const yaLoTiene = await dniRepetido(nominaId, dni, id);
     if (yaLoTiene) return res.status(409).json({ ok: false, error: 'dni_repetido', message: `Ese DNI ya lo tiene ${yaLoTiene}.` });
+    // cómo estaba, para que el aviso diga qué cambió
+    const { rows: antes } = await pool.query(
+      `SELECT nombre, apellido, sector, activo, no_aplica_crono AS "noAplica",
+              to_char(fecha_alta,'YYYY-MM-DD') AS "fechaAlta", dni
+         FROM rrhh_empleados WHERE id=$1 AND business_id=$2`, [id, nominaId]
+    );
     const { rows } = await pool.query(
       `UPDATE rrhh_empleados SET
          nombre   = COALESCE($3, nombre),
@@ -752,6 +827,7 @@ async function editarEmpleado(req, res) {
         dni === undefined ? null : dni]
     );
     if (!rows[0]) return res.status(404).json({ ok: false, error: 'not_found' });
+    avisarCambioEmpleado(req, antes[0], rows[0], b);
     return res.json({ ok: true, empleado: rows[0] });
   } catch (e) {
     console.error('[rrhh.editarEmpleado]', e);
@@ -812,7 +888,9 @@ async function vincularNomina(req, res) {
        ON CONFLICT (business_id) DO UPDATE SET origen_business_id = EXCLUDED.origen_business_id, created_at = now()`,
       [bizId, raiz]
     );
-    return res.json({ ok: true, compartidaCon: { id: raiz, nombre: await nombreNegocio(raiz) } });
+    const nombreOrigen = await nombreNegocio(raiz);
+    avisarRrhh(req, 'rrhh_nomina', `Nómina compartida con ${nombreOrigen}`, 'Las altas, bajas y cambios se ven en los dos negocios');
+    return res.json({ ok: true, compartidaCon: { id: raiz, nombre: nombreOrigen } });
   } catch (e) {
     console.error('[rrhh.vincularNomina]', e);
     return res.status(500).json({ ok: false, error: 'internal' });
@@ -830,6 +908,7 @@ async function desvincularNomina(req, res) {
       return res.status(409).json({ ok: false, error: 'tiene_cronogramas', message: 'Este negocio ya tiene cronogramas con esa gente: no se puede dejar de compartir.' });
     }
     const { rowCount } = await pool.query('DELETE FROM rrhh_nomina_vinculo WHERE business_id=$1', [bizId]);
+    if (rowCount) avisarRrhh(req, 'rrhh_nomina', 'Dejó de compartir la nómina', 'Este negocio vuelve a tener nómina propia');
     return res.json({ ok: true, eliminado: rowCount > 0 });
   } catch (e) {
     console.error('[rrhh.desvincularNomina]', e);
@@ -924,6 +1003,7 @@ async function getSemana(req, res) {
  */
 async function putSemana(req, res) {
   const bizId = req.businessId;
+  let semanaNueva = false; let espacioNombre = '';
   const semana = asInt(req.params.semana);
   const b = req.body || {};
   const espacioId = asInt(b.espacioId);
@@ -957,7 +1037,7 @@ async function putSemana(req, res) {
     await client.query('BEGIN');
 
     const { rows: esp } = await client.query(
-      'SELECT 1 FROM rrhh_espacios WHERE id=$1 AND business_id=$2', [espacioId, bizId]
+      'SELECT nombre FROM rrhh_espacios WHERE id=$1 AND business_id=$2', [espacioId, bizId]
     );
     if (!esp.length) {
       await client.query('ROLLBACK');
@@ -970,10 +1050,12 @@ async function putSemana(req, res) {
        VALUES ($1,$2,$3,$4)
        ON CONFLICT (business_id, espacio_id, semana)
          DO UPDATE SET fecha_inicio = EXCLUDED.fecha_inicio
-       RETURNING id`,
+       RETURNING id, (xmax = 0) AS nueva`,
       [bizId, espacioId, semana, fechaInicio]
     );
     const semanaId = up.rows[0].id;
+    semanaNueva = !!up.rows[0].nueva;
+    espacioNombre = esp[0]?.nombre || '';
 
     await client.query('DELETE FROM rrhh_filas WHERE semana_id=$1', [semanaId]);
 
@@ -1024,6 +1106,17 @@ async function putSemana(req, res) {
     });
   }
   client.release();
+  {
+    const nro = String(semana).slice(4);
+    const totalCeldas = turnos.reduce((a, t) => a + (Array.isArray(t.filas) ? t.filas : []).reduce((x, f) => x + (Array.isArray(f.celdas) ? f.celdas.length : 0), 0), 0);
+    // el autoguardado manda la semana entera cada pocos segundos: un solo aviso por persona,
+    // espacio y semana cada 30 minutos (se renueva, no se repite)
+    avisarRrhh(req, 'rrhh_cronograma',
+      `${semanaNueva ? 'Semana creada' : 'Cronograma editado'}: ${espacioNombre} · semana ${nro}`,
+      `${totalCeldas} ${totalCeldas === 1 ? 'turno cargado' : 'turnos cargados'} · desde ${ddmmaaaa(fechaInicio)}`,
+      { espacioId, semana },
+      { clave: `rrhh_crono:${bizId}:${espacioId}:${semana}:${req.user?.id || 0}` });
+  }
   try {
     return res.json({ ok: true, semana: await leerSemana(bizId, espacioId, semana) });
   } catch (e) {
@@ -1040,10 +1133,12 @@ async function borrarSemana(req, res) {
     return res.status(400).json({ ok: false, error: 'semana_y_espacioId_requeridos' });
   }
   try {
+    const { rows: espB } = await pool.query('SELECT nombre FROM rrhh_espacios WHERE id=$1 AND business_id=$2', [espacioId, req.businessId]);
     const { rowCount } = await pool.query(
       'DELETE FROM rrhh_semanas WHERE business_id=$1 AND espacio_id=$2 AND semana=$3',
       [req.businessId, espacioId, semana]
     );
+    if (rowCount) avisarRrhh(req, 'rrhh_cronograma', `Semana borrada: ${espB[0]?.nombre || ''} · semana ${String(semana).slice(4)}`, null, { espacioId, semana });
     return res.json({ ok: true, deleted: rowCount > 0 });
   } catch (e) {
     console.error('[rrhh.borrarSemana]', e);
