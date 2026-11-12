@@ -49,7 +49,8 @@ const movimientosEmpleado = (cliente, { organizationId, businessId, branchId, co
          COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") AS cod,
          TRIM(COALESCE(cc.nombre, c.concepto)) AS concepto,
          COALESCE(c."importeManual", c.importe)::float8 AS importe,
-         c.origen, c."cajaPago" AS medio, c."rowId" AS "rowId"
+         c.origen, c."cajaPago" AS medio, c."rowId" AS "rowId",
+         NULLIF(TRIM(COALESCE(c."observacManual", c.observac, '')), '') AS observacion
   FROM gestion_compras c
   LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId} AND cc.codigo = COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")
   WHERE c.business_id = ${businessId} AND c.comprobante IS NULL AND c."proveedorId" IS NULL AND c.codigo = ${codigo}
@@ -133,7 +134,7 @@ async function crearCarga({ organizationId, businessId, usuario, body }) {
         INSERT INTO gestion_compras (business_id, branch_id, "rowId", comprobante, "codCga", concepto, fecha, codigo, proveedor, observac, importe, "importeTrabajado",
                                      "conceptoCodigo", "proveedorTextoNormalizado", periodo, "fechaPago", "cajaPago", origen, "esBloqueado")
         VALUES (${businessId}, ${branchDe.get(f.puntoDeVentaId)}::bigint, ${f.rowId}, NULL, ${cod}, ${nom}, ${c.fechaPago}::timestamp, ${c.codigo}, ${emp.nombre},
-                ${c.tipo === 'sueldo' ? 'Liquidación (Lazarillo)' : 'Adelanto (Lazarillo)'}, ${f.importe}::numeric, ${f.importe}::numeric,
+                ${c.tipo === 'sueldo' ? 'Liquidación (Lazarillo)' : (c.observacion || 'Adelanto (Lazarillo)')}, ${f.importe}::numeric, ${f.importe}::numeric,
                 ${cod}, ${normalizarProveedorTexto(emp.nombre)}, ${periodo}::timestamp, ${c.fechaPago}::timestamp, ${f.medio}, ${ORIGEN_LAZARILLO}, ${f.bloqueada})`);
     }
     await registrarActividad(tx, {
