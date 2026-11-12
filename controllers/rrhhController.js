@@ -818,7 +818,7 @@ async function leerSemana(bizId, espacioId, semana) {
     [semanaId]
   );
   const celdas = await pool.query(
-    `SELECT c.fila_id AS "filaId", c.dia, c.empleado_id AS "empleadoId", c.puesto, c.horas
+    `SELECT c.fila_id AS "filaId", c.dia, c.empleado_id AS "empleadoId", c.puesto, c.horas, c.entrada
      FROM rrhh_celdas c JOIN rrhh_filas f ON f.id = c.fila_id
      WHERE f.semana_id=$1 ORDER BY c.fila_id, c.dia`,
     [semanaId]
@@ -827,7 +827,7 @@ async function leerSemana(bizId, espacioId, semana) {
   for (const c of celdas.rows) {
     if (!celdasPorFila.has(c.filaId)) celdasPorFila.set(c.filaId, []);
     celdasPorFila.get(c.filaId).push({
-      dia: c.dia, empleadoId: c.empleadoId, puesto: c.puesto, horas: Number(c.horas),
+      dia: c.dia, empleadoId: c.empleadoId, puesto: c.puesto, horas: Number(c.horas), entrada: c.entrada || null,
     });
   }
   const porTurno = new Map();
@@ -947,12 +947,14 @@ async function putSemana(req, res) {
           if (dia == null || dia < 0 || dia > 6 || !empleadoId) continue;
           const horas = Number(c.horas);
           await client.query(
-            `INSERT INTO rrhh_celdas (fila_id, dia, empleado_id, puesto, horas)
-             VALUES ($1,$2,$3,$4,$5)
+            `INSERT INTO rrhh_celdas (fila_id, dia, empleado_id, puesto, horas, entrada)
+             VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (fila_id, dia) DO UPDATE
-               SET empleado_id=EXCLUDED.empleado_id, puesto=EXCLUDED.puesto, horas=EXCLUDED.horas`,
+               SET empleado_id=EXCLUDED.empleado_id, puesto=EXCLUDED.puesto, horas=EXCLUDED.horas, entrada=EXCLUDED.entrada`,
             [filaId, dia, empleadoId, c.puesto || null,
-              Number.isFinite(horas) && horas > 0 ? horas : 8]
+              Number.isFinite(horas) && horas > 0 ? horas : 8,
+              // hora de entrada propia ('HH:MM'); vacía = la del turno
+              /^([01]\d|2[0-3]):[0-5]\d$/.test(String(c.entrada || '')) ? c.entrada : null]
           );
         }
       }
