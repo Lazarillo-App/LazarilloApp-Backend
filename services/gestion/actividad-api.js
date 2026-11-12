@@ -56,7 +56,8 @@ async function guardarNota({ businessId, userId, body }) {
 }
 
 // ── Tareas (to-do) del cajón de Notas: de cada usuario en cada negocio (Diego 12/11/2026). ──
-// Pendientes todas (las más viejas arriba, en el orden en que se anotaron) + las últimas 50 hechas.
+// Pendientes todas (las más viejas arriba, en el orden en que se anotaron) + las hechas de los últimos
+// 60 días: pasado eso desaparecen de la lista (Diego 12/11/2026). No se borran de la tabla.
 const fila = (t) => ({
   id: Number(t.id), texto: t.texto,
   creadaEn: new Date(t.creadaEn).toISOString(),
@@ -69,8 +70,8 @@ async function listarTareas({ businessId, userId }) {
       WHERE user_id = ${userId} AND business_id = ${businessId} AND "hechaEn" IS NULL)
     UNION ALL
     (SELECT id, texto, "creadaEn", "hechaEn" FROM gestion_tareas_usuario
-      WHERE user_id = ${userId} AND business_id = ${businessId} AND "hechaEn" IS NOT NULL
-      ORDER BY "hechaEn" DESC LIMIT 50)`);
+      WHERE user_id = ${userId} AND business_id = ${businessId} AND "hechaEn" >= CURRENT_TIMESTAMP - INTERVAL '60 days'
+      ORDER BY "hechaEn" DESC LIMIT 500)`);
   const pendientes = filas.filter((t) => !t.hechaEn).sort((a, b) => new Date(a.creadaEn) - new Date(b.creadaEn) || a.id - b.id);
   const hechas = filas.filter((t) => t.hechaEn).sort((a, b) => new Date(b.hechaEn) - new Date(a.hechaEn));
   return { pendientes: pendientes.map(fila), hechas: hechas.map(fila) };
