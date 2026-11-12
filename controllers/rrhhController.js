@@ -218,7 +218,41 @@ async function sincronizarNomina(bizId) {
       if (e.activo) bajas.push(`${e.nombre || ''} ${e.apellido || ''}`.trim());
     }
   }
+  // Fecha de alta y DNI desde la réplica (fecha_ing / nro_doc), una sola consulta y sin pisar
+  // lo cargado a mano (Diego 12/11/2026).
+  await pool.query(
+    `UPDATE rrhh_empleados e
+        SET fecha_alta = COALESCE(e.fecha_alta, r.alta),
+            dni = COALESCE(e.dni, r.dni)
+       FROM (SELECT DISTINCT ON (TRIM(codigo)) TRIM(codigo) AS codigo, fecha_ing::date AS alta,
+                    NULLIF(regexp_replace(COALESCE(nro_doc, ''), '\\D', '', 'g'), '') AS dni
+               FROM ${origen.schema}.i000_nomina
+              WHERE pdv = $2 AND codigo IS NOT NULL
+              ORDER BY TRIM(codigo), (fecha_baja IS NULL) DESC) r
+      WHERE e.business_id = $1 AND e.codigo_maxi = r.codigo
+        AND ((e.fecha_alta IS NULL AND r.alta IS NOT NULL) OR (e.dni IS NULL AND r.dni IS NOT NULL))`,
+    [bizId, origen.pdv]
+  ).catch((e) => console.warn('[rrhh.sincronizarNomina] alta/dni:', e.message));
   return { altas, bajas };
+}
+
+// fechaAlta 'YYYY-MM-DD' → fecha; '' → borrar; otra cosa → no tocar (undefined).
+const fechaAltaDe = (v) => (v === '' ? '' : typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
+// DNI: solo dígitos (se aceptan puntos y espacios al tipear); '' → borrar; undefined → no tocar.
+const dniDe = (v) => {
+  if (v == null) return undefined;
+  const d = String(v).replace(/\D/g, '');
+  return d === '' ? '' : d;
+};
+// El DNI va a ser la clave de cada persona: no puede repetirse dentro de la nómina.
+async function dniRepetido(nominaId, dni, exceptoId = null) {
+  if (!dni) return null;
+  const { rows } = await pool.query(
+    `SELECT TRIM(CONCAT(nombre, ' ', COALESCE(apellido, ''))) AS nombre FROM rrhh_empleados
+      WHERE business_id = $1 AND dni = $2 AND id IS DISTINCT FROM $3 LIMIT 1`,
+    [nominaId, dni, exceptoId]
+  );
+  return rows[0]?.nombre || null;
 }
 
 /* ───────────────────────── config ───────────────────────── */
@@ -274,6 +308,7 @@ async function leerConfig(bizId, branchId = null) {
     pool.query(
       `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
               to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja",
+              to_char(fecha_alta,'YYYY-MM-DD') AS "fechaAlta", dni,
               no_aplica_crono AS "noAplica",
               COALESCE(baja_sug_silenciada > (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date - $2::int, false) AS "bajaSilenciada"
        FROM rrhh_empleados WHERE business_id=$1 ORDER BY nombre, apellido`, [nominaId, VENTANA_DIAS]
@@ -578,7 +613,7 @@ async function listarNominaMaxirest(req, res) {
   if (!origen) {
     return res.status(400).json({
       ok: false, error: 'sin_replica',
-      message: 'Este negocio no tiene nómina de MaxiRest en la réplica.',
+      message: 'Este negocio no está integrado con tu PDV: su nómina no entra sola.',
     });
   }
   try {
@@ -614,7 +649,7 @@ async function importarNomina(req, res) {
   if (!origen) {
     return res.status(400).json({
       ok: false, error: 'sin_replica',
-      message: 'Este negocio no tiene nómina de MaxiRest en la réplica.',
+      message: 'Este negocio no está integrado con tu PDV: su nómina no entra sola.',
     });
   }
   const filtro = Array.isArray(req.body?.codigos)
@@ -650,12 +685,18 @@ async function crearEmpleado(req, res) {
   const nombre = String(req.body?.nombre || '').trim();
   if (!nombre) return res.status(400).json({ ok: false, error: 'nombre_required' });
   try {
+    const nominaId = await nominaDe(req.businessId);
+    const dni = dniDe(req.body?.dni) || null;
+    const fechaAlta = fechaAltaDe(req.body?.fechaAlta) || null;
+    const yaLoTiene = await dniRepetido(nominaId, dni);
+    if (yaLoTiene) return res.status(409).json({ ok: false, error: 'dni_repetido', message: `Ese DNI ya lo tiene ${yaLoTiene}.` });
     const { rows } = await pool.query(
-      `INSERT INTO rrhh_empleados (business_id, nombre, apellido, sector, activo, origen)
-       VALUES ($1,$2,$3,$4,TRUE,'manual')
-       RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen`,
-      [await nominaDe(req.businessId), nombre, String(req.body?.apellido || '').trim() || null,
-        req.body?.sector || null]
+      `INSERT INTO rrhh_empleados (business_id, nombre, apellido, sector, activo, origen, fecha_alta, dni)
+       VALUES ($1,$2,$3,$4,TRUE,'manual',$5,$6)
+       RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
+                 to_char(fecha_alta,'YYYY-MM-DD') AS "fechaAlta", dni`,
+      [nominaId, nombre, String(req.body?.apellido || '').trim() || null,
+        req.body?.sector || null, fechaAlta, dni]
     );
     return res.json({ ok: true, empleado: rows[0] });
   } catch (e) {
@@ -671,7 +712,12 @@ async function editarEmpleado(req, res) {
   const b = req.body || {};
   // Baja: fechaBaja 'YYYY-MM-DD' o vacía (= hoy en Argentina). Reactivar la borra.
   const fechaBaja = typeof b.fechaBaja === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.fechaBaja) ? b.fechaBaja : null;
+  const fechaAlta = fechaAltaDe(b.fechaAlta);
+  const dni = dniDe(b.dni);
   try {
+    const nominaId = await nominaDe(req.businessId);
+    const yaLoTiene = await dniRepetido(nominaId, dni, id);
+    if (yaLoTiene) return res.status(409).json({ ok: false, error: 'dni_repetido', message: `Ese DNI ya lo tiene ${yaLoTiene}.` });
     const { rows } = await pool.query(
       `UPDATE rrhh_empleados SET
          nombre   = COALESCE($3, nombre),
@@ -686,19 +732,24 @@ async function editarEmpleado(req, res) {
          no_aplica_crono = COALESCE($8, no_aplica_crono),
          baja_sug_silenciada = CASE
            WHEN $9::boolean IS TRUE THEN (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
-           ELSE baja_sug_silenciada END
+           ELSE baja_sug_silenciada END,
+         fecha_alta = CASE WHEN $10::text IS NULL THEN fecha_alta ELSE NULLIF($10, '')::date END,
+         dni        = CASE WHEN $11::text IS NULL THEN dni ELSE NULLIF($11, '') END
        WHERE id=$1 AND business_id=$2
        RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
                  to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja",
+                 to_char(fecha_alta,'YYYY-MM-DD') AS "fechaAlta", dni,
                  no_aplica_crono AS "noAplica"`,
-      [id, await nominaDe(req.businessId),
+      [id, nominaId,
         typeof b.nombre === 'string' && b.nombre.trim() ? b.nombre.trim() : null,
         typeof b.apellido === 'string' ? b.apellido.trim() : null,
         typeof b.sector === 'string' ? b.sector : null,
         typeof b.activo === 'boolean' ? b.activo : null,
         fechaBaja,
         typeof b.noAplica === 'boolean' ? b.noAplica : null,
-        b.silenciarBaja === true]
+        b.silenciarBaja === true,
+        fechaAlta === undefined ? null : fechaAlta,
+        dni === undefined ? null : dni]
     );
     if (!rows[0]) return res.status(404).json({ ok: false, error: 'not_found' });
     return res.json({ ok: true, empleado: rows[0] });
