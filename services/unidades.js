@@ -27,6 +27,8 @@ const UNIT_ALIASES = {
   // más abajo sigue cubriendo igual. "p" en cambio es simplemente "u"/"porción" con
   // otro nombre: no hace falta ningún puente de peso para convertirlo.
   porcion: 'u', porciones: 'u', 'porción': 'u', 'porciónes': 'u', p: 'u',
+  // «media porción» (Diego 12/11): solo otro nombre de la unidad de rendimiento.
+  media_porcion: 'u', 'media porcion': 'u', 'media porción': 'u', 'medias porciones': 'u',
   oz: 'oz', onza: 'oz', onzas: 'oz',
   lb: 'lb', libra: 'lb', libras: 'lb',
 };
