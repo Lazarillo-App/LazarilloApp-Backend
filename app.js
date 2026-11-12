@@ -64,6 +64,7 @@ const kitAppRoutes = require('./routes/kitAppRoutes');
 const branchesRouter = require("./routes/branchesRoutes");
 const sectoresRoutes = require('./routes/sectoresRoutes');
 const sectoresByIdRoutes = require('./routes/sectoresByIdRoutes');
+const plazasRoutes = require('./routes/plazasRoutes');
 const branchAccessRoutes = require('./routes/branchAccessRoutes');
 const accessRequestsByIdRoutes = require('./routes/accessRequestsByIdRoutes');
 const publicAccessRoutes = require('./routes/publicAccessRoutes');
@@ -202,6 +203,7 @@ app.use('/api/insumos', insumosElaboradosRoutes);
 app.use("/api/businesses/:bizId/branches", branchesRouter);
 app.use('/api/businesses/:businessId/sectores', sectoresRoutes);
 app.use('/api/sectores', sectoresByIdRoutes);
+app.use('/api/businesses/:businessId/plazas', plazasRoutes);
 app.use('/api/businesses/:businessId/receta-proposals', recetaProposalsRoutes);
 app.use('/api/businesses/:businessId', branchAccessRoutes);
 app.use('/api/access-requests', accessRequestsByIdRoutes);
@@ -291,10 +293,14 @@ const PORT = process.env.PORT || 4000;
     app.listen(PORT, () => console.log(`🚀 http://localhost:${PORT}`));
     // Recalcular una sola vez los costos con impuestos (10/11/2026). Corre en un solo servicio.
     require('./services/tareasUnicas/recalculoCostoConImpuestos').programar();
+    // Recetas al día con el desperdicio global guardado (una sola vez, 11/11/2026).
+    require('./services/tareasUnicas/recalculoDesperdicio').programar();
     // Unificar el costo de tabla y modal (desperdicio + mermas, recetas de todas las sucursales). 10/11/2026.
     require('./services/tareasUnicas/unificarCostosRecetas').programar();
     // Costo por local (insumo_costos_local). 10/11/2026.
     require('./services/tareasUnicas/costosPorLocal').programar();
+    // Costo de las promos = costo de la receta de sus artículos, no su precio de venta. 11/11/2026.
+    require('./services/tareasUnicas/costoPromosComponentes').programar();
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);

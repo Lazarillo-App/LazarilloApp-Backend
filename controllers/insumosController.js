@@ -8,7 +8,7 @@ const {
   fetchMaxiInsumosRubros,
   normalizarInsumosRubros,
 } = require('../services/maxiSuppliesService');
-const { recalcularCostoRecetas } = require('../services/costoRecetaService');
+const { recalcularCostoRecetas, propagarCostoInsumo } = require('../services/costoRecetaService');
 const { getConImpuestos, importeSql } = require('../services/precioCosteoInsumos');
 const { upsertFromMaxi } = require('../repos/insumosRepo');
 const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
@@ -28,10 +28,15 @@ function sendError(res, status, message) {
   return res.status(status).json({ ok: false, error: message });
 }
 
+// La agrupación puede ser de cualquier negocio de la MISMA organización: los insumos viven en
+// el negocio principal y «Mover a VARIOS» desde un subnegocio (ej. Container FC → VARIOS de
+// Container Bar) daba 404 «No se pudo mover el rubro» (Diego 11/11/2026).
 async function assertGroup(executor, bizId, groupId) {
+  const orgIds = await getOrgBizIds(bizId, executor);
+  const ids = (orgIds && orgIds.length ? orgIds : [bizId]).map(Number);
   const r = await executor.query(
-    'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = $2',
-    [groupId, bizId]
+    'SELECT 1 FROM insumo_groups WHERE id = $1 AND business_id = ANY($2::int[])',
+    [groupId, ids]
   );
   return (r.rowCount || 0) > 0;
 }
@@ -2817,6 +2822,100 @@ exports.mermas_update = async (req, res) => {
 
 // DELETE /insumos/:id/mermas/:mermaId
 exports.mermas_remove = async (req, res) => {
+  const bizId = getBusinessId(req);
+  const insumoId = Number(req.params.id);
+  const mermaId = Number(req.params.mermaId);
+  if (!bizId) return res.status(400).json({ ok: false, error: 'Negocio requerido' });
+  if (!Number.isFinite(insumoId) || !Number.isFinite(mermaId)) {
+    return res.status(400).json({ ok: false, error: 'ID inválido' });
+  }
+  if (!(await assertInsumoBiz(insumoId, bizId))) {
+    return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Reemplazo opcional (Diego 11/11): las recetas que tenían esta merma pasan a otra
+    // merma del MISMO insumo en vez de quedar sin merma.
+    const reemplazoRaw = req.body?.reemplazoId ?? req.query?.reemplazoId;
+    const reemplazoId = reemplazoRaw != null && reemplazoRaw !== '' ? Number(reemplazoRaw) : null;
+    if (reemplazoId != null) {
+      if (!Number.isFinite(reemplazoId) || reemplazoId === mermaId) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'Merma de reemplazo inválida' });
+      }
+      const { rows: rem } = await client.query(
+        `SELECT id FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`, [reemplazoId, insumoId]
+      );
+      if (!rem.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'La merma de reemplazo no es de este insumo' });
+      }
+      // Agrega la de reemplazo a las filas que tenían la borrada (sin duplicarla si ya estaba);
+      // el UPDATE de abajo después saca la borrada.
+      await client.query(
+        `UPDATE receta_items
+            SET merma_ids = CASE
+                  WHEN $2::int = ANY(COALESCE(merma_ids, ARRAY[]::int[])) THEN merma_ids
+                  ELSE COALESCE(merma_ids, CASE WHEN merma_id IS NULL THEN ARRAY[]::int[] ELSE ARRAY[merma_id] END) || $2::int
+                END
+          WHERE insumo_id = $3
+            AND (merma_id = $1 OR $1 = ANY(COALESCE(merma_ids, ARRAY[]::int[])))`,
+        [mermaId, reemplazoId, insumoId]
+      );
+    }
+
+    // Antes de borrarla, sacarla de las recetas que la tenían elegida. Si no, esas filas
+    // quedaban con su costo inflado por el factor de la merma (la tabla mostraba un costo
+    // altísimo hasta volver a guardar la receta) y con un id que ya no existe.
+    const { rows: afectados } = await client.query(
+      `UPDATE receta_items
+          SET merma_ids = NULLIF(array_remove(COALESCE(merma_ids, ARRAY[]::int[]), $1::int), ARRAY[]::int[]),
+              merma_id  = (NULLIF(array_remove(COALESCE(merma_ids, ARRAY[]::int[]), $1::int), ARRAY[]::int[]))[1],
+              updated_at = NOW()
+        WHERE insumo_id = $2
+          AND (merma_id = $1 OR $1 = ANY(COALESCE(merma_ids, ARRAY[]::int[])))
+       RETURNING receta_id`,
+      [mermaId, insumoId]
+    );
+
+    const { rowCount } = await client.query(
+      `DELETE FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
+      [mermaId, insumoId]
+    );
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
+    }
+
+    // Recalcular el costo de cada fila que usa este insumo (ya sin la merma) y de sus
+    // recetas, en cascada hacia los elaborados que lo usan.
+    if (afectados.length) await propagarCostoInsumo(insumoId, bizId, client);
+
+    await logAudit(client, {
+      userId: req.user?.id || null, businessId: bizId,
+      entityType: 'merma', entityId: mermaId,
+      action: 'delete',
+      diff: { after: { insumoId } },
+      metadata: { recetasAfectadas: [...new Set(afectados.map(r => r.receta_id))].length },
+    });
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, deleted: mermaId, reemplazoId, recetasAfectadas: [...new Set(afectados.map(r => r.receta_id))].length });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => { });
+    console.error('mermas_remove error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+};
+
+// GET /insumos/:id/mermas/:mermaId/uso
+// Recetas activas de la organización que tienen esta merma elegida — para avisar antes de
+// borrarla y ofrecer reemplazarla por otra.
+exports.mermasUso = async (req, res) => {
   try {
     const bizId = getBusinessId(req);
     const insumoId = Number(req.params.id);
@@ -2828,22 +2927,28 @@ exports.mermas_remove = async (req, res) => {
     if (!(await assertInsumoBiz(insumoId, bizId))) {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
-    const { rowCount } = await pool.query(
-      `DELETE FROM insumo_mermas WHERE id = $1 AND insumo_id = $2`,
-      [mermaId, insumoId]
+    const orgBizIds = await getOrgBizIds(bizId);
+    const { rows } = await pool.query(
+      `SELECT DISTINCT r.id AS receta_id,
+              COALESCE(NULLIF(r.nombre, ''), ma.nombre, ie.nombre, '(sin nombre)') AS titulo
+         FROM receta_items ri
+         JOIN recetas r ON r.id = ri.receta_id
+         LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
+         LEFT JOIN insumos ie ON ie.id = r.insumo_id
+        WHERE ri.insumo_id = $1
+          AND r.business_id = ANY($2)
+          AND r.active = TRUE
+          AND (ri.merma_id = $3 OR $3 = ANY(COALESCE(ri.merma_ids, ARRAY[]::int[])))
+        ORDER BY titulo`,
+      [insumoId, orgBizIds, mermaId]
     );
-    if (!rowCount) return res.status(404).json({ ok: false, error: 'Merma no encontrada' });
-
-    await logAudit(null, {
-      userId: req.user?.id || null, businessId: bizId,
-      entityType: 'merma', entityId: mermaId,
-      action: 'delete',
-      diff: { after: { insumoId } },
+    return res.json({
+      ok: true,
+      total: rows.length,
+      recetas: rows.map(r => ({ recetaId: Number(r.receta_id), titulo: r.titulo })),
     });
-
-    return res.json({ ok: true, deleted: mermaId });
   } catch (e) {
-    console.error('mermas_remove error:', e);
+    console.error('mermasUso error:', e);
     return res.status(500).json({ ok: false, error: e.message });
   }
 };

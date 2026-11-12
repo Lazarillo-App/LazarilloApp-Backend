@@ -388,6 +388,7 @@ router.get('/:id/config', async (req, res, next) => {
         desperdicio_global_pct: Number(props.desperdicio_global_pct ?? 5),
         divisa: props.divisa || 'ARS',
         notificar_alta_articulo_insumo: props.notificar_alta_articulo_insumo ?? true,
+        alertas_rubros_excluidos: Array.isArray(props.alertas_rubros_excluidos) ? props.alertas_rubros_excluidos.map(String) : [],
       },
     });
   } catch (e) { next(e); }

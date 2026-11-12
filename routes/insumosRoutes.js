@@ -34,9 +34,9 @@ router.post('/groups', blockStaffWrite, ctrl.groups_create);
 router.put('/groups/:id', blockStaffWrite, ctrl.groups_update);
 router.delete('/groups/:id', blockStaffWrite, ctrl.groups_remove);
 
-router.post('/groups/:id/items/bulk', blockStaffWrite, ctrl.groups_addMultiple);
+router.post('/groups/:id/items/bulk', blockStaffWrite.salvo('mover_agrupacion'), ctrl.groups_addMultiple);
 router.put('/groups/:id/items', blockStaffWrite, ctrl.groups_replaceItems);
-router.post('/groups/:id/items', blockStaffWrite, ctrl.groups_addItem);
+router.post('/groups/:id/items', blockStaffWrite.salvo('mover_agrupacion'), ctrl.groups_addItem);
 router.delete('/groups/:id/items/:insumoId', blockStaffWrite, ctrl.groups_removeItem);
 
 router.get('/groups/:id/exclusions', ctrl.groups_getExclusions);
@@ -83,7 +83,21 @@ router.post('/:id/reemplazar', ctrl.reemplazarInsumo);
 
 /* ================== DESPERDICIO ================== */
 
-router.put('/:id/desperdicio-override', blockStaffWrite, ctrl.setDesperdicioOverride);
+// Al cambiar el desperdicio propio del insumo, recalcular ya las recetas que lo usan (antes quedaban
+// con el costo viejo hasta que alguien las abría y guardaba). Corre después de responder.
+router.put('/:id/desperdicio-override', blockStaffWrite, (req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode !== 200) return;
+    const insumoId = Number(req.params.id);
+    const bizId = require('../utils/getBusinessId')(req);
+    if (!Number.isFinite(insumoId) || !bizId) return;
+    const pool = require('../config/db');
+    const { propagarCostoInsumo } = require('../services/costoRecetaService');
+    propagarCostoInsumo(insumoId, bizId, pool)
+      .catch((e) => console.error('[desperdicio-override] recálculo:', e.message));
+  });
+  return ctrl.setDesperdicioOverride(req, res, next);
+});
 
 /* ================== MERMAS ================== */
 
@@ -91,6 +105,7 @@ router.get('/:id/mermas', ctrl.mermas_list);
 router.post('/:id/mermas', blockStaffWrite, ctrl.mermas_create);
 router.put('/:id/mermas/:mermaId', blockStaffWrite, ctrl.mermas_update);
 router.delete('/:id/mermas/:mermaId', blockStaffWrite, ctrl.mermas_remove);
+router.get('/:id/mermas/:mermaId/uso', ctrl.mermasUso);
 router.get('/:id/mermas/:mermaId/aplicar-preview', ctrl.mermasAplicarPreview);
 router.post('/:id/mermas/:mermaId/aplicar', blockStaffWrite, ctrl.mermasAplicar);
 

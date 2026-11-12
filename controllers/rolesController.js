@@ -4,7 +4,7 @@
 // tiene). Solo el dueño los crea, edita o borra. Se apoyan en el rol admin: Dueño y
 // Staff son fijos y no pasan por acá.
 const pool = require('../config/db');
-const { normalizarRol, SECCIONES } = require('../services/auth/permisos');
+const { normalizarRol, SECCIONES, limpiarStaff, JEFE_DEFAULT } = require('../services/auth/permisos');
 
 const scopeDe = (req) => {
   const orgId = Number(req.business?.organization_id);
@@ -39,6 +39,7 @@ async function listar(scope) {
               WHERE ua.custom_role_id = cr.id AND ua.revoked_at IS NULL AND ua.role = 'admin') AS personas
        FROM app_custom_roles cr
       WHERE cr.${scope.col} = $1 AND cr.deleted_at IS NULL AND NOT cr.es_administracion
+        AND COALESCE(cr.base_role, 'admin') = 'admin' AND NOT cr.es_staff_base
       ORDER BY cr.nombre`,
     [scope.id]
   );
@@ -64,11 +65,98 @@ async function administracionDe(scope) {
   return rows[0] ? { ...normalizarRol(rows[0]), id: 'admin', ajustada: true, personas } : { id: 'admin', ajustada: false, personas };
 }
 
+// ── Staff y sus subroles (Diego 11/11/2026) ──────────────────────────────────────────────
+// La primera vez se crea «Jefe de cocina» (OK al equipo + precio + % de costo). Si después lo
+// borran no vuelve (cuenta cualquier subrol que haya existido, borrado o no).
+async function staffDe(scope) {
+  const { rows: alguna } = await pool.query(
+    `SELECT 1 FROM app_custom_roles WHERE ${scope.col} = $1 AND base_role = 'staff' AND NOT es_staff_base LIMIT 1`, [scope.id]);
+  if (!alguna.length) {
+    await pool.query(
+      `INSERT INTO app_custom_roles (${scope.col}, nombre, base_role, permisos_staff) VALUES ($1, 'Jefe de cocina', 'staff', $2::jsonb)`,
+      [scope.id, JSON.stringify(JEFE_DEFAULT)]);
+  }
+  const { rows: base } = await pool.query(
+    `SELECT permisos_staff FROM app_custom_roles WHERE ${scope.col} = $1 AND es_staff_base AND deleted_at IS NULL LIMIT 1`, [scope.id]);
+  const { rows } = await pool.query(
+    `SELECT cr.id, cr.nombre, cr.permisos_staff,
+            (SELECT COUNT(DISTINCT ua.user_id)::int FROM user_assignments ua
+              WHERE ua.custom_role_id = cr.id AND ua.revoked_at IS NULL AND ua.role = 'staff') AS personas
+       FROM app_custom_roles cr
+      WHERE cr.${scope.col} = $1 AND cr.deleted_at IS NULL AND cr.base_role = 'staff' AND NOT cr.es_staff_base
+      ORDER BY cr.created_at, cr.id`, [scope.id]);
+  return {
+    base: limpiarStaff(base[0]?.permisos_staff, { base: true }),
+    subroles: rows.map((r) => ({ id: Number(r.id), nombre: r.nombre, permisos: limpiarStaff(r.permisos_staff), personas: r.personas })),
+  };
+}
+
 exports.list = async (req, res, next) => {
   try {
     if (!['owner', 'admin'].includes(req.businessRole)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const scope = scopeDe(req);
-    res.json({ ok: true, roles: await listar(scope), administracion: await administracionDe(scope) });
+    res.json({ ok: true, roles: await listar(scope), administracion: await administracionDe(scope), staff: await staffDe(scope) });
+  } catch (e) { next(e); }
+};
+
+// POST /api/roles/staff — subrol nuevo (dueño o admin; nace sin permisos extra).
+exports.createStaff = async (req, res, next) => {
+  try {
+    if (!['owner', 'admin'].includes(req.businessRole)) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const nombre = String(req.body?.nombre || '').trim().slice(0, 60);
+    if (!nombre) return res.status(400).json({ ok: false, error: 'nombre_requerido' });
+    if (reservado(nombre)) return res.status(409).json({ ok: false, error: 'nombre_reservado' });
+    const scope = scopeDe(req);
+    const { rows: dup } = await pool.query(
+      `SELECT 1 FROM app_custom_roles WHERE ${scope.col} = $1 AND deleted_at IS NULL AND NOT es_administracion AND NOT es_staff_base AND LOWER(nombre) = LOWER($2)`,
+      [scope.id, nombre]);
+    if (dup.length) return res.status(409).json({ ok: false, error: 'nombre_repetido' });
+    const permisos = limpiarStaff(req.body?.permisos);
+    const { rows } = await pool.query(
+      `INSERT INTO app_custom_roles (${scope.col}, nombre, base_role, permisos_staff, created_by) VALUES ($1, $2, 'staff', $3::jsonb, $4) RETURNING id`,
+      [scope.id, nombre, JSON.stringify(permisos), req.user?.id ?? null]);
+    res.status(201).json({ ok: true, subrol: { id: Number(rows[0].id), nombre, permisos, personas: 0 } });
+  } catch (e) { next(e); }
+};
+
+// PUT /api/roles/staff/base — lo que puede el Staff sin subrol (solo el dueño).
+exports.setStaffBase = async (req, res, next) => {
+  try {
+    if (!soloDuenio(req, res)) return;
+    const scope = scopeDe(req);
+    const permisos = limpiarStaff(req.body?.permisos, { base: true });
+    const { rowCount } = await pool.query(
+      `UPDATE app_custom_roles SET permisos_staff = $1::jsonb, updated_at = NOW() WHERE ${scope.col} = $2 AND es_staff_base AND deleted_at IS NULL`,
+      [JSON.stringify(permisos), scope.id]);
+    if (!rowCount) {
+      await pool.query(
+        `INSERT INTO app_custom_roles (${scope.col}, nombre, base_role, es_staff_base, permisos_staff, created_by) VALUES ($1, 'Staff', 'staff', TRUE, $2::jsonb, $3)`,
+        [scope.id, JSON.stringify(permisos), req.user?.id ?? null]);
+    }
+    res.json({ ok: true, staff: await staffDe(scope) });
+  } catch (e) { next(e); }
+};
+
+// PUT /api/roles/staff/:id — nombre y permisos de un subrol (solo el dueño).
+exports.updateStaff = async (req, res, next) => {
+  try {
+    if (!soloDuenio(req, res)) return;
+    const id = Number(req.params.id);
+    const nombre = String(req.body?.nombre || '').trim().slice(0, 60);
+    if (!nombre) return res.status(400).json({ ok: false, error: 'nombre_requerido' });
+    if (reservado(nombre)) return res.status(409).json({ ok: false, error: 'nombre_reservado' });
+    const scope = scopeDe(req);
+    const { rows: dup } = await pool.query(
+      `SELECT 1 FROM app_custom_roles WHERE ${scope.col} = $1 AND deleted_at IS NULL AND NOT es_administracion AND NOT es_staff_base AND LOWER(nombre) = LOWER($2) AND id <> $3`,
+      [scope.id, nombre, id]);
+    if (dup.length) return res.status(409).json({ ok: false, error: 'nombre_repetido' });
+    const permisos = limpiarStaff(req.body?.permisos);
+    const { rowCount } = await pool.query(
+      `UPDATE app_custom_roles SET nombre = $1, permisos_staff = $2::jsonb, updated_at = NOW()
+        WHERE id = $3 AND ${scope.col} = $4 AND deleted_at IS NULL AND base_role = 'staff' AND NOT es_staff_base`,
+      [nombre, JSON.stringify(permisos), id, scope.id]);
+    if (!rowCount) return res.status(404).json({ ok: false, error: 'not_found' });
+    res.json({ ok: true, staff: await staffDe(scope) });
   } catch (e) { next(e); }
 };
 
@@ -108,7 +196,7 @@ exports.update = async (req, res, next) => {
     if (dup.length) return res.status(409).json({ ok: false, error: 'nombre_repetido' });
     const { rows } = await pool.query(
       `UPDATE app_custom_roles SET nombre = $1, secciones = $2::jsonb, ocultos = $3::jsonb, updated_at = NOW()
-        WHERE id = $4 AND ${scope.col} = $5 AND deleted_at IS NULL AND NOT es_administracion RETURNING *`,
+        WHERE id = $4 AND ${scope.col} = $5 AND deleted_at IS NULL AND NOT es_administracion AND COALESCE(base_role, 'admin') = 'admin' RETURNING *`,
       [r.nombre, JSON.stringify(r.secciones), JSON.stringify(r.ocultos), id, scope.id]
     );
     if (!rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
@@ -162,7 +250,7 @@ exports.remove = async (req, res, next) => {
     );
     if (usos[0].n > 0) return res.status(409).json({ ok: false, error: 'rol_en_uso', personas: usos[0].n });
     const { rowCount } = await pool.query(
-      `UPDATE app_custom_roles SET deleted_at = NOW() WHERE id = $1 AND ${scope.col} = $2 AND deleted_at IS NULL AND NOT es_administracion`,
+      `UPDATE app_custom_roles SET deleted_at = NOW() WHERE id = $1 AND ${scope.col} = $2 AND deleted_at IS NULL AND NOT es_administracion AND NOT es_staff_base`,
       [id, scope.id]
     );
     if (!rowCount) return res.status(404).json({ ok: false, error: 'not_found' });

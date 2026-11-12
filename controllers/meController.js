@@ -4,7 +4,7 @@
 
 const pool = require('../config/db');
 const { listAccessibleBusinesses } = require('../services/auth/accessControl');
-const { getPermisos } = require('../services/auth/permisos');
+const { getPermisos, getStaffPermisos } = require('../services/auth/permisos');
 
 /* ════════════════════════════════════════════════════════════════════
    GET /api/me/access
@@ -77,6 +77,14 @@ exports.getAccess = async (req, res, next) => {
       b.permisos = null;
       if (b.role === 'admin') {
         try { b.permisos = await getPermisos(uid, b.id); } catch (e) { console.warn('[getAccess permisos]', e.message); }
+      }
+      // Staff: subrol y qué puede hacer (Diego 11/11/2026).
+      b.subrol = null; b.subrolId = null; b.staffPermisos = null;
+      if (b.role === 'staff') {
+        try {
+          const sp = await getStaffPermisos(uid, b.id);
+          if (sp) { b.subrol = sp.subrol; b.subrolId = sp.subrolId; b.staffPermisos = sp.permisos; }
+        } catch (e) { console.warn('[getAccess staff]', e.message); }
       }
     }
 

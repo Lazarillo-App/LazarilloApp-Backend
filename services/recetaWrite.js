@@ -16,6 +16,23 @@ const { recalcularCostoReceta, propagarCostoInsumo } = require('./costoRecetaSer
 const { normalizarCantidadUnidad } = require('./unidades');
 const { logAudit } = require('./audit/auditLog');
 
+// Mermas elegidas en una fila: se quedan solo las que existen (y son de ese insumo).
+// Una merma borrada mientras la receta estaba abierta hacía fallar todo el guardado
+// con "violates foreign key constraint receta_items_merma_id_fkey".
+async function mermasExistentes(client, ids, insumoId) {
+  if (!ids.length) return ids;
+  const { rows } = await client.query(
+    `SELECT id FROM insumo_mermas WHERE id = ANY($1::int[])${insumoId ? ' AND insumo_id = $2' : ''}`,
+    insumoId ? [ids, insumoId] : [ids]
+  );
+  const ok = new Set(rows.map(r => Number(r.id)));
+  const filtrados = ids.filter(id => ok.has(Number(id)));
+  if (filtrados.length !== ids.length) {
+    console.warn(`[recetaWrite] mermas inexistentes descartadas: ${ids.filter(id => !ok.has(Number(id))).join(',')}`);
+  }
+  return filtrados;
+}
+
 /**
  * POST /businesses/:businessId/articles/:articleId/receta — lógica real.
  */
@@ -176,9 +193,10 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
       const notasItem = (item.notas || '').trim() || null;
       const orden = Number.isFinite(Number(item.orden)) ? Number(item.orden) : i;
       const merma = item.merma !== false;
-      const mermaIds = Array.isArray(item.mermaIds)
+      const mermaIds = await mermasExistentes(client, Array.isArray(item.mermaIds)
         ? item.mermaIds.map(Number).filter(Number.isFinite)
-        : (item.mermaId != null ? [Number(item.mermaId)] : []);
+        : (item.mermaId != null ? [Number(item.mermaId)] : []),
+        Number(item.supplyId) > 0 ? Number(item.supplyId) : null);
       const mermaId = mermaIds.length ? mermaIds[0] : null;
       const pedido = item.pedido !== false;
       const secreto = item.secreto === true;
@@ -269,6 +287,21 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
       `UPDATE recetas SET es_promo = $1 WHERE id = $2`,
       [esPromo, receta.id]
     );
+
+    // Regla de precio de la promo (Diego 11/11/2026): solo si el modal la manda (otros caminos que
+    // guardan recetas no la tocan). 'margen' o vacío = lo de siempre.
+    if (body && Object.prototype.hasOwnProperty.call(body, 'promoRegla')) {
+      const regla = ['off', 'nxm', 'margen'].includes(body.promoRegla) ? body.promoRegla : null;
+      const num = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
+      const entero = (v) => { const n = num(v); return n != null && n > 0 ? Math.round(n) : null; };
+      await client.query(
+        `UPDATE recetas SET promo_regla = $2, promo_off_pct = $3, promo_llevas = $4, promo_pagas = $5 WHERE id = $1`,
+        [receta.id, regla,
+          regla === 'off' ? num(body.promoOffPct) : null,
+          regla === 'nxm' ? entero(body.promoLlevas) : null,
+          regla === 'nxm' ? entero(body.promoPagas) : null]
+      );
+    }
 
     const recetaCostos = await recalcularCostoReceta(receta.id, client);
     const costoTotalDB = Number(recetaCostos?.costo_total) || costoTotal;
@@ -516,9 +549,9 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
       if (!insumoCheck.length) continue;
 
       const merma = item.merma !== false;
-      const mermaIds = Array.isArray(item.mermaIds)
+      const mermaIds = await mermasExistentes(client, Array.isArray(item.mermaIds)
         ? item.mermaIds.map(Number).filter(Number.isFinite)
-        : (item.mermaId != null ? [Number(item.mermaId)] : []);
+        : (item.mermaId != null ? [Number(item.mermaId)] : []), supplyId);
       const mermaId = mermaIds.length ? mermaIds[0] : null;
       const pedido = item.pedido !== false;
       const secreto = item.secreto === true;

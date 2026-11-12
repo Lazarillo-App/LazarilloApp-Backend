@@ -30,7 +30,7 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
   const renglones = await db.many(sql`
     WITH l AS (${renglonesSql({ businessId, esquema, sucursalCond: sucDc })}),
     c AS (
-      SELECT c."rowId", c.branch_id, c.comprobante, c.codigo, c.proveedor
+      SELECT c."rowId", c.branch_id, c.comprobante, c.codigo, c.proveedor, c.fecha
         FROM gestion_compras c
        WHERE ${filtroSucursalSql('c', businessId, sucursal)}
          AND c.origen = ${ORIGEN_SIN_CONCEPTO}
@@ -41,7 +41,7 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
            COALESCE(l.m_rubro, '') AS rubro, TRIM(COALESCE(l.nombre, '')) AS insumo,
            l.rubro_codigo::text AS rubro_codigo, l.insumo_id::int AS insumo_id, l.alternativas,
            l.iva::float8 AS iva, l.imp_int::float8 AS imp_int,
-           c."rowId" AS row_id, c.comprobante, c.proveedor, l.importe::float8 AS importe
+           c."rowId" AS row_id, c.comprobante, c.proveedor, to_char(c.fecha, 'YYYY-MM-DD') AS fecha, l.importe::float8 AS importe
       -- Cada renglón con SU fila: misma clave que arma render/sin-concepto (las de «se decide en cada
       -- compra» van aparte por rubro, así cada una se resuelve por su lado).
       FROM l JOIN c ON c."rowId" = 'sc:' || md5(l.business_id::text || '|' || COALESCE(l.branch_id::text, '') || '|' || l.comprobante
@@ -55,7 +55,7 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
            COALESCE(TRIM(lr.nombre), '') AS rubro, TRIM(COALESCE(dl.nombre, '')) AS insumo,
            lr.codigo_maxi::text AS rubro_codigo, li.id::int AS insumo_id, al.alts AS alternativas,
            COALESCE(dl."ivaTot", 0)::float8 AS iva, COALESCE(dl."impNtTot", 0)::float8 AS imp_int,
-           c."rowId" AS row_id, c.comprobante, c.proveedor,
+           c."rowId" AS row_id, c.comprobante, c.proveedor, to_char(c.fecha, 'YYYY-MM-DD') AS fecha,
            (SIGN(c.importe) * (COALESCE(dl."totalIns", 0) + COALESCE(dl."ivaTot", 0) + COALESCE(dl."impNtTot", 0)))::float8 AS importe
       FROM gestion_compras c
       JOIN gestion_detalle_compras dl ON dl.business_id = c.business_id AND dl."compraId" = c."rowId" AND dl.origen = ${ORIGEN_LAZARILLO}
@@ -82,7 +82,7 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
   const otras = await db.many(sql`
     SELECT COALESCE(NULLIF(TRIM(COALESCE(cc.nombre, c.concepto)), ''), 'Sin concepto') AS concepto,
            cc.codigo AS concepto_codigo,
-           c."rowId" AS row_id, c.comprobante, c.proveedor, COALESCE(c."importeManual", c.importe)::float8 AS importe
+           c."rowId" AS row_id, c.comprobante, c.proveedor, to_char(c.fecha, 'YYYY-MM-DD') AS fecha, COALESCE(c."importeManual", c.importe)::float8 AS importe
       FROM gestion_compras c
       LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId}
             AND cc.codigo = COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")
@@ -103,7 +103,7 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
       it.importe += f.importe;
       const n = detalleDe(f);
       if (n) it.nombres.set(n, (it.nombres.get(n) ?? 0) + Math.abs(f.importe));
-      const cp = it.cpb.get(f.row_id) ?? { rowId: f.row_id, comprobante: f.comprobante, proveedor: f.proveedor, importe: 0, insumos: new Set() };
+      const cp = it.cpb.get(f.row_id) ?? { rowId: f.row_id, comprobante: f.comprobante, proveedor: f.proveedor, fecha: f.fecha ?? null, importe: 0, insumos: new Set() };
       cp.importe += f.importe;
       if (f.insumo) cp.insumos.add(f.insumo);
       it.cpb.set(f.row_id, cp);
@@ -113,7 +113,9 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
       nombre: it.nombre,
       importe: r2(it.importe),
       detalle: [...it.nombres.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n),
-      comprobantes: [...it.cpb.values()].map((c) => ({ ...c, importe: r2(c.importe), insumos: [...c.insumos] })).sort((a, b) => Math.abs(b.importe) - Math.abs(a.importe)).slice(0, MAX_CPB),
+      comprobantes: [...it.cpb.values()].map((c) => ({ ...c, importe: r2(c.importe), insumos: [...c.insumos] }))
+        // Por fecha de compra, la más nueva primero (Diego 11/11/2026); a igual fecha, el mayor importe.
+        .sort((a, b) => String(b.fecha ?? '').localeCompare(String(a.fecha ?? '')) || Math.abs(b.importe) - Math.abs(a.importe)).slice(0, MAX_CPB),
       cantidadComprobantes: it.cpb.size,
       editar: it.editar,
       ...(it.opciones ? { opciones: it.opciones } : {}),
@@ -147,9 +149,25 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
        AND NULLIF(TRIM(r.codigo_maxi::text), '0') IS NOT NULL AND NULLIF(TRIM(r.nombre), '') IS NOT NULL
      ORDER BY r.codigo_maxi, (r.business_id = ${businessId}) DESC, r.id`);
 
+  // Nombres de opción ya usados en «depende de la compra» (Reposición, Nuevo elemento…), los más usados
+  // primero: se ofrecen al escribir una opción nueva (Diego 11/11/2026: no escribir siempre lo mismo).
+  // Con cada nombre va el concepto con el que más se usó: al elegirlo se completa solo (Diego 11/11/2026).
+  const etiquetas = await db.many(sql`
+    WITH x AS (
+      SELECT TRIM(etiqueta) AS etiqueta, concepto::text AS concepto, COUNT(*)::int AS n
+        FROM insumo_rubro_conceptos
+       WHERE organization_id = ${organizationId} AND NULLIF(TRIM(etiqueta), '') IS NOT NULL
+       GROUP BY TRIM(etiqueta), concepto)
+    SELECT etiqueta, SUM(n)::int AS usos,
+           (ARRAY_AGG(concepto ORDER BY n DESC, concepto))[1] AS concepto
+      FROM x GROUP BY etiqueta
+     ORDER BY usos DESC, etiqueta`);
+
   return {
     anio: year, importe: r2(grupos.reduce((s, g) => s + g.importe, 0)), grupos,
     rubrosInsumo: rubrosInsumo.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')),
+    etiquetasUsadas: etiquetas.map((e) => e.etiqueta),
+    conceptoPorEtiqueta: Object.fromEntries(etiquetas.map((e) => [e.etiqueta, e.concepto])),
   };
 }
 

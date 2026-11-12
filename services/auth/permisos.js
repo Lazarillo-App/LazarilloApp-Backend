@@ -74,4 +74,59 @@ function requireSeccion(seccion) {
   };
 }
 
-module.exports = { SECCIONES, normalizarRol, getPermisos, puedeSeccion, estaOculto, requireSeccion };
+// ── Staff y sus subroles (Diego 11/11/2026) ──────────────────────────────────────────────
+// Qué puede hacer un Staff. Por defecto NO (clave ausente = false); el dueño habilita en Roles.
+// aprobar_equipo convierte al subrol en «jefe» de sus sectores (da el OK antes del admin).
+const STAFF_KEYS = ['ver_precio', 'ver_costo_pct', 'ver_objetivo', 'ver_sugerido', 'mover_agrupacion', 'ver_menu', 'aprobar_equipo'];
+// El subrol que se crea solo la primera vez (se puede editar o borrar).
+const JEFE_DEFAULT = { ver_precio: true, ver_costo_pct: true, aprobar_equipo: true };
+
+function limpiarStaff(src, { base = false } = {}) {
+  const out = {};
+  const o = src && typeof src === 'object' ? src : {};
+  for (const k of STAFF_KEYS) if (o[k] === true) out[k] = true;
+  if (base) delete out.aprobar_equipo; // el Staff sin subrol nunca es jefe
+  return out;
+}
+
+/** Permisos de un Staff en el negocio: { subrolId, subrol, permisos } o null si no es staff.
+ *  Base (es_staff_base de su organización/negocio) + su subrol (custom_role_id con base staff);
+ *  el legado user_assignments.subrol = 'jefe' cuenta como JEFE_DEFAULT. */
+async function getStaffPermisos(userId, businessId) {
+  if (!userId || !businessId) return null;
+  const { rows } = await pool.query(
+    `
+    WITH biz AS (SELECT id, organization_id FROM app_businesses WHERE id = $2)
+    SELECT ua.subrol, cr.id AS subrol_id, cr.nombre AS subrol_nombre, cr.permisos_staff AS sub_perm,
+           (SELECT b.permisos_staff FROM app_custom_roles b
+             WHERE b.es_staff_base AND b.deleted_at IS NULL
+               AND (b.organization_id = (SELECT organization_id FROM biz)
+                 OR (b.business_id = $2 AND (SELECT organization_id FROM biz) IS NULL))
+             LIMIT 1) AS base_perm
+      FROM user_assignments ua
+      LEFT JOIN app_custom_roles cr ON cr.id = ua.custom_role_id AND cr.deleted_at IS NULL AND cr.base_role = 'staff'
+     WHERE ua.user_id = $1 AND ua.revoked_at IS NULL AND ua.role = 'staff'
+       AND ua.scope_type = 'business' AND ua.scope_id = $2
+     LIMIT 1
+    `,
+    [userId, businessId]
+  );
+  if (!rows.length) return null;
+  const r = rows[0];
+  const permisos = { ...limpiarStaff(r.base_perm, { base: true }) };
+  if (r.subrol_id) Object.assign(permisos, limpiarStaff(r.sub_perm));
+  else if (r.subrol === 'jefe') Object.assign(permisos, JEFE_DEFAULT);
+  return {
+    subrolId: r.subrol_id ? Number(r.subrol_id) : null,
+    subrol: r.subrol_id ? r.subrol_nombre : (r.subrol === 'jefe' ? 'Jefe de cocina' : null),
+    permisos,
+  };
+}
+
+// SQL: la asignación (alias a) es de un jefe = subrol con aprobar_equipo (o el legado subrol='jefe').
+const sqlEsJefe = (a) => `(${a}.role = 'staff' AND (${a}.subrol = 'jefe' OR EXISTS (
+  SELECT 1 FROM app_custom_roles xj WHERE xj.id = ${a}.custom_role_id AND xj.deleted_at IS NULL
+     AND xj.base_role = 'staff' AND COALESCE((xj.permisos_staff->>'aprobar_equipo')::boolean, FALSE))))`;
+
+module.exports = { SECCIONES, normalizarRol, getPermisos, puedeSeccion, estaOculto, requireSeccion,
+  STAFF_KEYS, JEFE_DEFAULT, limpiarStaff, getStaffPermisos, sqlEsJefe };

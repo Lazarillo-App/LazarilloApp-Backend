@@ -236,6 +236,14 @@ exports.update = async (req, res) => {
         : (BOOL_CONFIG_KEYS.has(key) ? !!incoming[key] : Number(incoming[key]));
     }
   }
+  // Rubros de insumo que NO generan la alerta de "sin compra" (ej. Especias, que se
+  // compran cada muchos meses). Lista de códigos de rubro (insumos.rubro), como texto.
+  if (incoming.alertas_rubros_excluidos !== undefined) {
+    const lista = Array.isArray(incoming.alertas_rubros_excluidos) ? incoming.alertas_rubros_excluidos : [];
+    configPatch.alertas_rubros_excluidos = [...new Set(
+      lista.map((v) => String(v ?? '').trim()).filter(Boolean)
+    )].slice(0, 300);
+  }
   const hasConfigPatch = Object.keys(configPatch).length > 0;
 
   // Construir patch sin eliminar nulls — necesitamos poder borrar campos (ej: logo_url: null)
@@ -281,6 +289,17 @@ exports.update = async (req, res) => {
   );
 
   const saved = attachBranding(rows[0]);
+
+  // Cambió el desperdicio global: el costo de cada ingrediente lo lleva adentro, así que se
+  // recalculan todas las recetas del negocio (en segundo plano, sin demorar la respuesta).
+  if (configPatch.desperdicio_global_pct !== undefined) {
+    const { recalcularRecetasDeNegocio } = require('../services/costoRecetaService');
+    setImmediate(() => {
+      recalcularRecetasDeNegocio(businessId)
+        .then(() => { try { invalidateCacheForBiz(businessId); } catch { /* sin caché */ } })
+        .catch((e) => console.error('[update] recálculo por desperdicio:', e.message));
+    });
+  }
 
   //solo borrar si pisarTodo=true
   if (configPatch.articulos_costo_ideal !== undefined) {

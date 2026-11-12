@@ -5,6 +5,12 @@ const pool = require('../config/db');
 const { propagatePrecioManual, propagateObjetivo } = require('../services/linkPropagation');
 const { logAudit } = require('../services/audit/auditLog');
 
+// Rubros de insumo excluidos de la alerta de compras (config del negocio).
+function rubrosExcluidosDe(props) {
+  const lista = Array.isArray(props?.alertas_rubros_excluidos) ? props.alertas_rubros_excluidos : [];
+  return lista.map((v) => String(v ?? '').trim()).filter(Boolean);
+}
+
 /* ══════════════════════════════════════════════════════════════
    GET /api/businesses/:businessId/recetas-costos
 ══════════════════════════════════════════════════════════════ */
@@ -18,14 +24,31 @@ exports.getRecetasCostos = async (req, res, next) => {
     );
     const alertaSemanas = Number(bizRows[0]?.props?.compras_alerta_semanas ?? 4);
     const alertaMs = alertaSemanas * 7 * 24 * 60 * 60 * 1000;
+    const rubrosExcluidos = new Set(rubrosExcluidosDe(bizRows[0]?.props));
+
+    // ?insumoId=N → solo los artículos cuyas recetas usan ese insumo, directo o a través de
+    // elaborados (en cascada). La tabla lo pide al cambiar una merma, en vez de recargar
+    // los costos de todo el negocio (navegación más fluida, Diego 11/11).
+    const soloInsumo = Number(req.query?.insumoId);
+    const filtrarPorInsumo = Number.isFinite(soloInsumo) && soloInsumo > 0;
 
     const { rows } = await pool.query(
-      `SELECT
+      `WITH RECURSIVE afectados(insumo_id) AS (
+         SELECT $2::int WHERE $2::int IS NOT NULL
+         UNION
+         SELECT re.insumo_id
+           FROM receta_items rie
+           JOIN recetas re ON re.id = rie.receta_id AND re.active = TRUE AND re.insumo_id IS NOT NULL
+           JOIN afectados a ON a.insumo_id = rie.insumo_id
+       )
+       SELECT
          r.article_id,
          r.costo_total,
          r.porciones,
          r.updated_at,
          ri.insumo_id,
+         i.nombre AS insumo_nombre,
+         i.rubro  AS insumo_rubro,
          COALESCE(i.es_elaborado, FALSE) AS es_elaborado,
          COALESCE(i.tiene_receta, FALSE) AS tiene_receta,
          (
@@ -36,11 +59,17 @@ exports.getRecetasCostos = async (req, res, next) => {
          ) AS fecha_ultima_compra
        FROM recetas r
        JOIN receta_items ri ON ri.receta_id = r.id
-       LEFT JOIN insumos i ON i.id = ri.insumo_id AND i.business_id = $1
+       -- Sin filtrar por negocio: los insumos viven en el negocio principal de la
+       -- organización (ej. receta de Container FC con insumos de Container Bar).
+       LEFT JOIN insumos i ON i.id = ri.insumo_id
        WHERE r.business_id = $1
          AND r.active = TRUE
-         AND ri.tipo_costo != 'nulo'`,
-      [bizId]
+         AND ri.tipo_costo != 'nulo'
+         AND ($2::int IS NULL OR r.id IN (
+               SELECT rif.receta_id FROM receta_items rif
+                WHERE rif.insumo_id IN (SELECT insumo_id FROM afectados)
+             ))`,
+      [bizId, filtrarPorInsumo ? soloInsumo : null]
     );
 
     const costos = {};
@@ -55,6 +84,9 @@ exports.getRecetasCostos = async (req, res, next) => {
           updatedAt: r.updated_at || null,
           tieneAlerta: false,
           insumosAlerta: [],
+          // Detalle para el tooltip de la tabla: qué insumo y desde cuándo no se compra
+          alertas: [],
+          alertaSemanas,
         };
       }
 
@@ -65,8 +97,18 @@ exports.getRecetasCostos = async (req, res, next) => {
       const fechaUltima = r.fecha_ultima_compra ? new Date(r.fecha_ultima_compra).getTime() : null;
       const esVieja = !fechaUltima || (ahora - fechaUltima) > alertaMs;
       if (esVieja && r.insumo_id) {
+        // Rubros que el negocio sacó de la alerta (ej. Especias)
+        if (rubrosExcluidos.has(String(r.insumo_rubro ?? '').trim())) continue;
+        if (costos[artId].insumosAlerta.includes(Number(r.insumo_id))) continue;
         costos[artId].tieneAlerta = true;
         costos[artId].insumosAlerta.push(Number(r.insumo_id));
+        costos[artId].alertas.push({
+          insumoId: Number(r.insumo_id),
+          nombre: r.insumo_nombre || `Insumo #${r.insumo_id}`,
+          fechaUltimaCompra: r.fecha_ultima_compra
+            ? new Date(r.fecha_ultima_compra).toISOString().slice(0, 10)
+            : null,
+        });
       }
     }
 
@@ -503,6 +545,7 @@ exports.getRecetasAlertas = async (req, res, next) => {
       `SELECT props FROM app_businesses WHERE id = $1`, [bizId]
     );
     const alertaSemanas = Number(bizRows[0]?.props?.compras_alerta_semanas ?? 4);
+    const rubrosExcluidos = rubrosExcluidosDe(bizRows[0]?.props);
 
     const { rows } = await pool.query(
       `SELECT
@@ -528,17 +571,51 @@ exports.getRecetasAlertas = async (req, res, next) => {
        LEFT JOIN app_articles a ON a.id = r.article_id AND a.business_id = $1
        LEFT JOIN purchase_items pi ON pi.insumo_id = i.id AND pi.precio > 0
        WHERE ri.tipo_costo != 'nulo'
+         AND NOT (COALESCE(TRIM(i.rubro), '') = ANY($3::text[]))   -- rubros excluidos de la alerta
        GROUP BY i.id, i.nombre, i.unidad_med, ir.nombre
        HAVING
          MAX(pi.fecha) IS NOT NULL
          AND MAX(pi.fecha) < CURRENT_DATE - ($2 || ' weeks')::interval
        ORDER BY rubro ASC, fecha_ultima_compra ASC NULLS FIRST, i.nombre ASC`,
+      [bizId, alertaSemanas, rubrosExcluidos]
+    );
+
+    // Rubros de los insumos que se usan en recetas de artículo (para elegir en la
+    // configuración cuáles no alertan). Incluye los ya excluidos.
+    const { rows: rubrosRows } = await pool.query(
+      `WITH ins AS (
+         SELECT DISTINCT i.id, TRIM(i.rubro) AS codigo, i.business_id, i.rubro
+           FROM receta_items ri
+           JOIN recetas r ON r.id = ri.receta_id AND r.business_id = $1 AND r.active = TRUE
+            AND r.article_id IS NOT NULL
+           JOIN insumos i ON i.id = ri.insumo_id AND i.es_elaborado IS NOT TRUE
+          WHERE ri.tipo_costo != 'nulo'
+            AND COALESCE(TRIM(i.rubro), '') <> ''
+       ), ult AS (
+         SELECT ins.*, (SELECT MAX(pi.fecha) FROM purchase_items pi
+                         WHERE pi.insumo_id = ins.id AND pi.precio > 0) AS fecha_ultima
+           FROM ins
+       )
+       SELECT u.codigo,
+              COALESCE(MAX(ir.nombre), u.codigo) AS nombre,
+              COUNT(DISTINCT u.id)::int AS insumos,
+              -- mismo criterio que el ⚠ de la tabla: sin compra o compra más vieja que el umbral
+              COUNT(DISTINCT u.id) FILTER (
+                WHERE u.fecha_ultima IS NULL
+                   OR u.fecha_ultima < CURRENT_DATE - ($2 || ' weeks')::interval
+              )::int AS en_alerta
+         FROM ult u
+         LEFT JOIN insumo_rubros ir ON ir.business_id = u.business_id AND ir.codigo::text = u.rubro
+        GROUP BY u.codigo
+        ORDER BY 2 ASC`,
       [bizId, alertaSemanas]
     );
 
     return res.json({
       ok: true,
       alertaSemanas,
+      rubrosExcluidos,
+      rubrosEnRecetas: rubrosRows.map(r => ({ codigo: r.codigo, nombre: r.nombre, insumos: r.insumos, enAlerta: r.en_alerta })),
       total: rows.length,
       insumos: rows.map(r => ({
         insumoId: Number(r.insumo_id),

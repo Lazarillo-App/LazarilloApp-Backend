@@ -9,6 +9,7 @@
 // - Nadie puede revocar a un owner ni a sí mismo.
 
 const { problemaPassword, rechazarPasswordDebil } = require('../utils/passwordPolicy');
+const { SUBROLES } = require('../services/jefeCocina');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const pool = require('../config/db');
@@ -94,7 +95,7 @@ exports.listMembers = async (req, res, next) => {
         SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
                b.id AS scope_id, 'owner'::text AS role,
                u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
-               NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre,
+               NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol,
                u.created_at, u.updated_at,
                u.email, u.name, u.account_status,
                u.invitation_expires_at, u.invitation_accepted_at,
@@ -117,7 +118,7 @@ exports.listMembers = async (req, res, next) => {
         SELECT * FROM (
           SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
                  ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
-                 ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre,
+                 ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol,
                  ua.created_at, ua.updated_at,
                  u.email, u.name, u.account_status,
                  u.invitation_expires_at, u.invitation_accepted_at,
@@ -167,7 +168,7 @@ exports.listMembers = async (req, res, next) => {
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
              ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
-             ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre,
+             ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol,
              ua.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -184,7 +185,7 @@ exports.listMembers = async (req, res, next) => {
       SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
              b.id AS scope_id, 'owner'::text AS role,
              u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
-             NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre,
+             NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol,
              u.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -333,7 +334,8 @@ exports.createInvitation = async (req, res, next) => {
         // solo lo asigna el dueño y tiene que ser un rol de ese negocio u organización.
         const tocaRolMedida = Object.prototype.hasOwnProperty.call(req.body || {}, 'customRoleId');
         const customRoleId = tocaRolMedida && req.body.customRoleId != null ? Number(req.body.customRoleId) : null;
-        if (customRoleId != null && (role !== 'admin' || !Number.isFinite(customRoleId))) {
+        // También subroles de Staff (Diego 11/11/2026): el rol a medida tiene que ser de la misma base.
+        if (customRoleId != null && (!['admin', 'staff'].includes(role) || !Number.isFinite(customRoleId))) {
             return res.status(400).json({ ok: false, error: 'custom_role_requires_admin' });
         }
 
@@ -386,12 +388,12 @@ exports.createInvitation = async (req, res, next) => {
         for (const s of scopes) {
             const r = await assertManagerOnScope(uid, s.scopeType, s.scopeId, res);
             if (!r) return;
-            if (tocaRolMedida && r !== 'owner') {
+            if (tocaRolMedida && r !== 'owner' && role !== 'staff') {
                 return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
             }
             if (customRoleId != null) {
                 const { rows: rr } = await pool.query(
-                    `SELECT cr.id FROM app_custom_roles cr
+                    `SELECT cr.id, cr.base_role FROM app_custom_roles cr
                       WHERE cr.id = $1 AND cr.deleted_at IS NULL AND NOT cr.es_administracion
                         AND (
                           (cr.organization_id IS NOT NULL AND cr.organization_id = CASE WHEN $2 = 'organization' THEN $3::bigint
@@ -400,7 +402,7 @@ exports.createInvitation = async (req, res, next) => {
                         )`,
                     [customRoleId, s.scopeType, s.scopeId]
                 );
-                if (!rr.length) return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
+                if (!rr.length || (rr[0].base_role || 'admin') !== role) return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
             }
         }
 
@@ -672,9 +674,13 @@ exports.updateAssignment = async (req, res, next) => {
         const sectorIds = Array.isArray(req.body?.sectorIds)
             ? [...new Set(req.body.sectorIds.map(Number).filter(Number.isFinite))]
             : undefined;
+        // subrol de Staff: 'jefe' (jefe de cocina) o null (staff común). Diego 11/11/2026.
+        const tocaSubrol = Object.prototype.hasOwnProperty.call(req.body || {}, 'subrol');
+        const subrol = tocaSubrol && req.body.subrol ? String(req.body.subrol) : null;
+        if (subrol && !SUBROLES.includes(subrol)) return res.status(400).json({ ok: false, error: 'invalid_subrol' });
 
         if (!assignmentId) return res.status(400).json({ ok: false, error: 'invalid_id' });
-        if (alias == null && role == null && sectorIds === undefined && !tocaRolMedida) {
+        if (alias == null && role == null && sectorIds === undefined && !tocaRolMedida && !tocaSubrol) {
             return res.status(400).json({ ok: false, error: 'nothing_to_update' });
         }
         if (role && !isValidRole(role) && role !== 'owner') {
@@ -719,7 +725,8 @@ exports.updateAssignment = async (req, res, next) => {
 
         // Rol a medida: tiene que ser de la misma organización (o negocio) y solo va con admin.
         // Solo el dueño los asigna (un admin no puede darse ni dar más permisos).
-        if (tocaRolMedida && callerRole !== 'owner') {
+        // Roles a medida de Administración: solo el dueño. Subroles de Staff: también un admin.
+        if (tocaRolMedida && callerRole !== 'owner' && finalRole !== 'staff') {
             return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
         }
         // Un admin no puede ascender a Administración completa a alguien que tiene rol a medida.
@@ -727,11 +734,11 @@ exports.updateAssignment = async (req, res, next) => {
             return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
         }
         if (tocaRolMedida && customRoleId != null) {
-            if (finalRole !== 'admin') {
+            if (!['admin', 'staff'].includes(finalRole)) {
                 return res.status(400).json({ ok: false, error: 'custom_role_requires_admin' });
             }
             const { rows: rr } = await pool.query(
-                `SELECT cr.id FROM app_custom_roles cr
+                `SELECT cr.id, cr.base_role FROM app_custom_roles cr
                   WHERE cr.id = $1 AND cr.deleted_at IS NULL AND NOT cr.es_administracion
                     AND (
                       (cr.organization_id IS NOT NULL AND cr.organization_id = CASE WHEN $2 = 'organization' THEN $3::bigint
@@ -740,7 +747,7 @@ exports.updateAssignment = async (req, res, next) => {
                     )`,
                 [customRoleId, a.scope_type, a.scope_id]
             );
-            if (!rr.length) return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
+            if (!rr.length || (rr[0].base_role || 'admin') !== finalRole) return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
         }
 
         await client.query('BEGIN');
@@ -760,14 +767,23 @@ exports.updateAssignment = async (req, res, next) => {
             sets.push(`role = $${i++}`);
             params.push(role);
         }
-        if (tocaRolMedida || (role != null && role !== 'admin')) {
-            // Al pasar a staff (o a Administración completa) se suelta el rol a medida.
+        if (tocaRolMedida || (role != null && role !== a.role)) {
+            // Al cambiar de rol se suelta el rol a medida (salvo que venga uno nuevo de esa base).
             sets.push(`custom_role_id = $${i++}`);
-            params.push(finalRole === 'admin' ? customRoleId : null);
+            params.push(tocaRolMedida ? customRoleId : null);
         }
         if (sectorIds !== undefined) {
             sets.push(`sector_ids = $${i++}`);
             params.push(sectorIds.length ? sectorIds : null);
+        }
+        if (tocaSubrol || (role != null && role !== 'staff') || (tocaRolMedida && finalRole === 'staff')) {
+            // El subrol solo existe en Staff: al pasar a otro rol se suelta.
+            if (subrol && finalRole !== 'staff') {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ ok: false, error: 'subrol_requires_staff' });
+            }
+            sets.push(`subrol = $${i++}`);
+            params.push(finalRole === 'staff' ? subrol : null);
         }
         sets.push(`updated_at = NOW()`);
         params.push(assignmentId);
@@ -785,8 +801,8 @@ exports.updateAssignment = async (req, res, next) => {
             entityId: assignmentId,
             action: 'update',
             diff: {
-                before: { alias: a.alias, role: a.role, custom_role_id: a.custom_role_id ?? null },
-                after: { alias: updated[0].alias, role: updated[0].role, custom_role_id: updated[0].custom_role_id ?? null },
+                before: { alias: a.alias, role: a.role, custom_role_id: a.custom_role_id ?? null, subrol: a.subrol ?? null },
+                after: { alias: updated[0].alias, role: updated[0].role, custom_role_id: updated[0].custom_role_id ?? null, subrol: updated[0].subrol ?? null },
             },
         });
 

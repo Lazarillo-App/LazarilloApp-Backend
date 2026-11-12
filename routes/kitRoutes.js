@@ -17,6 +17,7 @@ const express = require('express');
 const router = express.Router();
 const kit = require('../services/kit/kitPcs');
 const { cargar } = require('../services/kit/cargas');
+const { avisarCarga } = require('../services/kit/despuesDeSubir');
 const versiones = require('../services/kit/versiones');
 
 // Freno simple a probar contraseñas: 8 intentos fallidos por IP+email cada 15 minutos.
@@ -96,6 +97,8 @@ router.post('/cargas', conLlave, async (req, res, next) => {
     const t0 = Date.now();
     const r = await cargar(req.kitPc, req.body);
     res.json({ ok: true, ...r, ms: Date.now() - t0 });
+    // Lazarillo lo lee apenas la PC termina de subir (services/kit/despuesDeSubir.js).
+    try { avisarCarga(req.kitPc, r?.tabla || req.body?.tabla); } catch (e) { console.error('[kit-leer]', e?.message || e); }
   } catch (e) {
     if (e.status) return res.status(e.status).json({ error: e.message });
     next(e);
