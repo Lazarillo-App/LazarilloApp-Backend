@@ -103,8 +103,9 @@ const asInt = (v) => {
  * renuevan solos al año vigente). Todo editable después desde ⚙ Configuración.
  */
 const PUESTOS_DEF = [
-  ['1', 'Plaza 1'], ['2', 'Plaza 2'], ['K', 'Caja'], ['Ba', 'Barista'],
-  ['B', 'Bartender'], ['Co', 'Cocinero'], ['E', 'Encargado'], ['Ru', 'Runner'],
+  // Diego 12/11/2026: los puestos de un negocio nuevo (las plazas se agregan desde el modal)
+  ['Co', 'Cocinero'], ['M', 'Mozo'], ['B', 'Bartender'], ['Ba', 'Barista'],
+  ['E', 'Encargado'], ['K', 'Caja'], ['R', 'Recepción'], ['Ru', 'Runner'],
 ];
 
 // [mm, dd, tipo, nombre, fijo]  (móviles con la fecha 2026 del catálogo aprobado)
@@ -148,10 +149,13 @@ async function ensureSeed(client, bizId, branchId = null) {
     }
   }
 
+  // solo si el negocio no tiene ninguno: si no, un puesto quitado desde el modal volvía a aparecer
+  // y los defaults nuevos se sumaban a negocios que ya tienen los suyos
   await client.query(
     `INSERT INTO rrhh_puestos (business_id, codigo, nombre)
      SELECT $1, d.codigo, d.nombre
      FROM unnest($2::text[], $3::text[]) AS d(codigo, nombre)
+     WHERE NOT EXISTS (SELECT 1 FROM rrhh_puestos WHERE business_id = $1)
      ON CONFLICT (business_id, codigo) DO NOTHING`,
     [bizId, PUESTOS_DEF.map((p) => p[0]), PUESTOS_DEF.map((p) => p[1])]
   );
