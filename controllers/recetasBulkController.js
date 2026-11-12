@@ -4,6 +4,7 @@
 const pool = require('../config/db');
 const getBusinessId = require('../utils/getBusinessId');
 const { recalcularCostoRecetas } = require('../services/costoRecetaService');
+const { avisarAbm } = require('../services/notificationService');
 
 /**
  * Resuelve los article_id de una agrupación leyendo tanto
@@ -177,6 +178,14 @@ exports.bulkDelete = async (req, res, next) => {
     await client.query('COMMIT');
     console.log(`[recetas/bulk] business=${bizId} tipo=${tipo} scope=${filtroScope} deleted=${rowCount}`);
 
+    if (rowCount) {
+      avisarAbm(req, {
+        businessId: bizId, type: 'receta_bulk',
+        title: `${rowCount} ${rowCount === 1 ? 'receta borrada' : 'recetas borradas'} (${tipo === 'articulo' ? 'artículos' : 'elaborados'})`,
+        message: filtroScope === 'agrupacion' ? 'De una agrupación' : 'Todas',
+        metadata: { scope: tipo === 'articulo' ? 'articulo' : 'insumo' },
+      });
+    }
     return res.json({ ok: true, deleted: rowCount });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
@@ -375,6 +384,13 @@ exports.bulkAddInsumo = async (req, res, next) => {
     await recalcularCostoRecetas(recetasTocadas, client);
 
     await client.query('COMMIT');
+    if (agregados || actualizados || recetasCreadas) {
+      const partes = [agregados && `agregado en ${agregados}`, actualizados && `actualizado en ${actualizados}`, recetasCreadas && `${recetasCreadas} recetas nuevas`].filter(Boolean);
+      avisarAbm(req, {
+        businessId: bizId, type: 'receta_bulk', title: `${insumo.nombre} en varias recetas`,
+        message: partes.join(' · '), metadata: { scope: 'articulo' },
+      });
+    }
     return res.json({ ok: true, agregados, actualizados, recetasCreadas, insumo: insumo.nombre });
   } catch (e) {
     await client.query('ROLLBACK');

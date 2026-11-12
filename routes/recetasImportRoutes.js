@@ -23,6 +23,7 @@ const { importarPasosDesdeZip }  = require('../services/recetasPasosImportServic
 const { authRequired }           = require('../middleware/authMiddleware');
 const { requireBusinessAccess }  = require('../middleware/requireBusinessAccess');
 const { MAX_FILE_SIZE_MB }       = require('../config/features');
+const { avisarAbm }              = require('../services/notificationService');
 
 const uploadsDir = path.join(__dirname, '../uploads/csv-temp');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -67,6 +68,13 @@ router.post(
       }
 
       const result = await syncRecetasFromMaxi({ businessId, req });
+      const sm = result?.summary;
+      if (sm && (sm.inserted || sm.updated)) {
+        avisarAbm(req, {
+          businessId, type: 'receta_import', title: `Recetas traídas de MaxiRest: ${sm.inserted || 0} nuevas · ${sm.updated || 0} actualizadas`,
+          metadata: { scope: 'articulo' },
+        });
+      }
       return res.json(result);
 
     } catch (error) {
@@ -120,6 +128,13 @@ router.post(
         originalName: req.file.originalname,
       });
 
+      const n = result?.summary?.recetas_upserted || 0;
+      if (result?.ok && n) {
+        avisarAbm(req, {
+          businessId, type: 'receta_import', title: `Recetas importadas: ${n}`,
+          message: req.file.originalname || null, metadata: { scope: 'articulo' },
+        });
+      }
       return res.json(result);
 
     } catch (error) {
@@ -155,6 +170,12 @@ router.post(
 
       const aplicar = String(req.query.aplicar || '') === 'true';
       const result = await importarPasosDesdeZip({ businessId, zipPath: req.file.path, aplicar });
+      if (aplicar && result?.resumen?.ok) {
+        avisarAbm(req, {
+          businessId, type: 'receta_import', title: `Paso a paso importado en ${result.resumen.ok} ${result.resumen.ok === 1 ? 'receta' : 'recetas'}`,
+          message: req.file.originalname || null, metadata: { scope: 'articulo' },
+        });
+      }
 
       try { fs.unlinkSync(req.file.path); } catch {}
       return res.json(result);
