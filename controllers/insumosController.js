@@ -15,7 +15,8 @@ const insumosRubrosRepo = require('../repos/insumosRubrosRepo');
 const { autoAssignNewInsumos } = require('../services/autoAssignNewInsumos');
 const { notifyAutoAssign } = require('../services/notificationService');
 const {
-  createSyncNotificationForBusinessUsers
+  createSyncNotificationForBusinessUsers,
+  avisarAlEquipoSinEsperar,
 } = require('../services/notificationService');
 const { logAudit, computeDiff } = require('../services/audit/auditLog');
 
@@ -777,20 +778,14 @@ exports.crearManual = async (req, res) => {
       diff: { after: { nombre: rows[0].nombre, unidadMed: rows[0].unidad_med, precioRef: rows[0].precio_ref, rubro: rows[0].rubro } },
     });
 
-    // Staff puede crear un insumo simple directo (lo necesita para poder
-    // proponer una receta que lo usa), pero admin/owner tienen que enterarse
-    // — ya pueden editarlo/borrarlo como a cualquier otro insumo, esto es
-    // solo el aviso.
-    if (req.businessRole === 'staff') {
-      createSyncNotificationForBusinessUsers({
-        businessId,
-        type: 'ui_action',
-        title: 'Insumo nuevo creado por el equipo',
-        message: `${req.user?.name || req.user?.email || 'Un miembro del equipo'} creó el insumo "${rows[0].nombre}" (${skuFinal}).`,
-        metadata: { kind: 'insumo_creado_staff', insumo_id: rows[0].id },
-        onlyAdmins: true,
-      }).catch((e) => console.error('[crearManual] error notificando alta de insumo:', e?.message));
-    }
+    // Aviso al equipo de gestión (antes solo si lo creaba el staff, y sin decir quién en el
+    // panel): ahora siempre, con el autor en metadata para separar «Mías» / «Del equipo».
+    avisarAlEquipoSinEsperar({
+      businessId, actorUserId: req.user?.id, type: 'insumo_create',
+      title: `Insumo nuevo: ${rows[0].nombre}`,
+      message: [rows[0].rubro, skuFinal].filter(Boolean).join(' · ') || null,
+      metadata: { kind: 'insumo_create', scope: 'insumo', ids: [rows[0].id] },
+    });
 
     res.status(201).json({ ok: true, data: rows[0], sku: skuFinal });
   } catch (e) {
@@ -2487,10 +2482,15 @@ exports.eliminarManual = async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Solo se pueden eliminar insumos creados manualmente' });
     }
     // Borrado real. insumo_group_items, receta_items, etc. se limpian por FK CASCADE/SET NULL
-    await pool.query(
-      `DELETE FROM insumos WHERE id = $1 AND business_id = $2`,
+    const { rows: borrado } = await pool.query(
+      `DELETE FROM insumos WHERE id = $1 AND business_id = $2 RETURNING nombre`,
       [id, businessId]
     );
+    avisarAlEquipoSinEsperar({
+      businessId, actorUserId: req.user?.id, type: 'insumo_delete',
+      title: `Insumo eliminado: ${borrado[0]?.nombre || `#${id}`}`,
+      metadata: { kind: 'insumo_delete', scope: 'insumo', ids: [Number(id)] },
+    });
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(businessId);
 
