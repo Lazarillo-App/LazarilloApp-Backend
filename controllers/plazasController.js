@@ -6,7 +6,7 @@
 // El color es por insumo y vale en todas las plazas del negocio.
 //   Ver: dueño/admin todas; Staff las de sus sectores.
 //   Armar la ficha (orden, ojito, extras, colores): dueño/admin y el jefe del sector.
-//   Crear/editar/borrar plazas y sus productos: dueño/admin.
+//   Crear/editar/borrar plazas y sus productos: dueño/admin en todos los sectores; el jefe en los que conduce.
 'use strict';
 
 const pool = require('../config/db');
@@ -68,6 +68,17 @@ async function puedeVer(req, plaza) {
   if (req.businessRole !== 'staff') return false;
   return (await sectoresDelStaff(req.user?.id, plaza.business_id)).includes(Number(plaza.sector_id));
 }
+// Sectores donde se pueden crear / editar / borrar plazas (Diego 12/11/2026: «del jefe de cocina
+// para arriba»): dueño/admin todos los del negocio; el jefe, los sectores que conduce.
+async function sectoresGestionables(req, bizId) {
+  if (esGestor(req)) {
+    const { rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]);
+    return rows.map((r) => Number(r.id));
+  }
+  if (req.businessRole !== 'staff') return [];
+  return sectoresQueConduce(req.user?.id, bizId);
+}
+
 async function puedeArmar(req, plaza) {
   if (esGestor(req)) return true;
   if (req.businessRole !== 'staff') return false;
@@ -117,15 +128,21 @@ exports.list = async (req, res, next) => {
         WHERE p.business_id = $1 AND p.deleted_at IS NULL ${filtro}
         GROUP BY p.id, s.nombre
         ORDER BY s.nombre, p.orden, p.nombre`, params);
-    res.json({ ok: true, plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos })) });
+    const gestionables = await sectoresGestionables(req, bizId);
+    const { rows: secs } = gestionables.length ? await pool.query(
+      'SELECT id, nombre FROM sectores WHERE business_id = $1 AND id = ANY($2::int[]) ORDER BY nombre', [bizId, gestionables]) : { rows: [] };
+    res.json({ ok: true,
+      plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos,
+        puedeEditar: gestionables.includes(Number(r.sector_id)) })),
+      puedeCrear: secs.length > 0, sectores: secs.map((x) => ({ id: x.id, nombre: x.nombre })) });
   } catch (e) { next(e); }
 };
 
 /** GET /businesses/:businessId/plazas/articulos?q= — artículos con receta para elegir. */
 exports.articulos = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const bizId = num(req.businessId);
+    if (!(await sectoresGestionables(req, bizId)).length) return res.status(403).json({ ok: false, error: 'forbidden' });
     const q = String(req.query.q || '').trim();
     const { rows } = await pool.query(
       `SELECT DISTINCT ON (r.article_id) r.article_id AS id, COALESCE(ma.nombre, r.nombre) AS nombre
@@ -174,9 +191,9 @@ async function congelarOrden(plazaId) {
 /** POST /businesses/:businessId/plazas  { sectorId, nombre, articleIds } */
 exports.create = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const bizId = num(req.businessId);
     const sectorId = num(req.body?.sectorId);
+    if (!(await sectoresGestionables(req, bizId)).includes(sectorId)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const nombre = String(req.body?.nombre || '').trim().slice(0, 60);
     if (!sectorId || !nombre) return res.status(400).json({ ok: false, error: 'datos_incompletos' });
     const { rows: sec } = await pool.query('SELECT 1 FROM sectores WHERE id = $1 AND business_id = $2', [sectorId, bizId]);
@@ -191,10 +208,10 @@ exports.create = async (req, res, next) => {
 /** PUT /businesses/:businessId/plazas/:id  { nombre, articleIds } */
 exports.update = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const bizId = num(req.businessId);
     const plaza = await cargarPlaza(num(req.params.id), bizId);
     if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await sectoresGestionables(req, bizId)).includes(Number(plaza.sector_id))) return res.status(403).json({ ok: false, error: 'forbidden' });
     const nombre = String(req.body?.nombre || plaza.nombre).trim().slice(0, 60);
     await pool.query('UPDATE plazas SET nombre = $1, updated_at = NOW() WHERE id = $2', [nombre, plaza.id]);
     if (Array.isArray(req.body?.articleIds)) await guardarProductos(plaza.id, req.body.articleIds);
@@ -205,7 +222,10 @@ exports.update = async (req, res, next) => {
 /** DELETE /businesses/:businessId/plazas/:id */
 exports.remove = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const bizId = num(req.businessId);
+    const plaza = await cargarPlaza(num(req.params.id), bizId);
+    if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await sectoresGestionables(req, bizId)).includes(Number(plaza.sector_id))) return res.status(403).json({ ok: false, error: 'forbidden' });
     const { rowCount } = await pool.query(
       'UPDATE plazas SET deleted_at = NOW() WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL',
       [num(req.params.id), num(req.businessId)]);
