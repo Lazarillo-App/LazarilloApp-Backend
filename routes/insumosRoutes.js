@@ -10,6 +10,8 @@ const upload = multer({
 const ctrl = require('../controllers/insumosController');
 const { authRequired } = require('../middleware/authMiddleware');
 const blockStaffWrite = require('../middleware/blockStaffWrite');
+// Avisos de Notificaciones de cada ABM (regla «todo ABM queda en Notificaciones», 12/11/2026)
+const A = require('../services/avisosInsumos');
 
 /* ================== VISTAS Y ESTADÍSTICAS (NUEVAS) ================== */
 router.get('/tree-view', ctrl.getTreeView);
@@ -23,28 +25,28 @@ router.get('/maxi', ctrl.listarMaxi);
 router.post('/maxi/rubros/sync', ctrl.syncRubrosFromMaxi);
 router.get('/maxi/rubros', ctrl.listarRubrosMaxi);
 router.get('/rubros', ctrl.getRubrosInsumos);
-router.put('/rubros/rename', blockStaffWrite, ctrl.renombrarRubro);
+router.put('/rubros/rename', blockStaffWrite, A.renombrarRubro, ctrl.renombrarRubro);
 
 /* ================== AGRUPACIONES DE INSUMOS ================== */
-router.post('/groups/create-or-move', blockStaffWrite, ctrl.groups_createOrMove);
+router.post('/groups/create-or-move', blockStaffWrite, A.grupoCrearOMover, ctrl.groups_createOrMove);
 
 router.get('/groups', ctrl.groups_list);
 router.get('/groups/:id', ctrl.groups_getOne);
-router.post('/groups', blockStaffWrite, ctrl.groups_create);
-router.put('/groups/:id', blockStaffWrite, ctrl.groups_update);
-router.delete('/groups/:id', blockStaffWrite, ctrl.groups_remove);
+router.post('/groups', blockStaffWrite, A.grupoCrear, ctrl.groups_create);
+router.put('/groups/:id', blockStaffWrite, A.grupoEditar, ctrl.groups_update);
+router.delete('/groups/:id', blockStaffWrite, A.grupoBorrar, ctrl.groups_remove);
 
-router.post('/groups/:id/items/bulk', blockStaffWrite.salvo('mover_agrupacion'), ctrl.groups_addMultiple);
-router.put('/groups/:id/items', blockStaffWrite, ctrl.groups_replaceItems);
-router.post('/groups/:id/items', blockStaffWrite.salvo('mover_agrupacion'), ctrl.groups_addItem);
-router.delete('/groups/:id/items/:insumoId', blockStaffWrite, ctrl.groups_removeItem);
+router.post('/groups/:id/items/bulk', blockStaffWrite.salvo('mover_agrupacion'), A.grupoAgregarVarios, ctrl.groups_addMultiple);
+router.put('/groups/:id/items', blockStaffWrite, A.grupoReemplazarItems, ctrl.groups_replaceItems);
+router.post('/groups/:id/items', blockStaffWrite.salvo('mover_agrupacion'), A.grupoAgregarUno, ctrl.groups_addItem);
+router.delete('/groups/:id/items/:insumoId', blockStaffWrite, A.grupoQuitarUno, ctrl.groups_removeItem);
 
 router.get('/groups/:id/exclusions', ctrl.groups_getExclusions);
-router.post('/groups/:id/exclusions', blockStaffWrite, ctrl.groups_addExclusions);
-router.delete('/groups/:id/exclusions', blockStaffWrite, ctrl.groups_removeExclusions);
+router.post('/groups/:id/exclusions', blockStaffWrite, A.grupoExcluir, ctrl.groups_addExclusions);
+router.delete('/groups/:id/exclusions', blockStaffWrite, A.grupoQuitarExclusion, ctrl.groups_removeExclusions);
 
 /* Regla persistente rubro→agrupación — ver autoAssignNewInsumos.js */
-router.post('/group-rules', blockStaffWrite, ctrl.groups_upsertRule);
+router.post('/group-rules', blockStaffWrite, A.grupoRegla, ctrl.groups_upsertRule);
 
 /* ================== IMPORT PAIRED + PREVIEW (rutas específicas antes de CRUD) ================== */
 router.post(
@@ -53,6 +55,7 @@ router.post(
     { name: 'rubros', maxCount: 1 },
     { name: 'insumos', maxCount: 1 },
   ]),
+  A.importPaired,
   ctrl.importCsvPaired
 );
 
@@ -79,13 +82,13 @@ router.post(
 /* ================== REEMPLAZAR INSUMO ================== */
 
 router.get('/:id/reemplazar-preview', ctrl.reemplazarPreview);
-router.post('/:id/reemplazar', ctrl.reemplazarInsumo);
+router.post('/:id/reemplazar', A.reemplazar, ctrl.reemplazarInsumo);
 
 /* ================== DESPERDICIO ================== */
 
 // Al cambiar el desperdicio propio del insumo, recalcular ya las recetas que lo usan (antes quedaban
 // con el costo viejo hasta que alguien las abría y guardaba). Corre después de responder.
-router.put('/:id/desperdicio-override', blockStaffWrite, (req, res, next) => {
+router.put('/:id/desperdicio-override', blockStaffWrite, A.desperdicio, (req, res, next) => {
   res.on('finish', () => {
     if (res.statusCode !== 200) return;
     const insumoId = Number(req.params.id);
@@ -102,34 +105,34 @@ router.put('/:id/desperdicio-override', blockStaffWrite, (req, res, next) => {
 /* ================== MERMAS ================== */
 
 router.get('/:id/mermas', ctrl.mermas_list);
-router.post('/:id/mermas', blockStaffWrite, ctrl.mermas_create);
-router.put('/:id/mermas/:mermaId', blockStaffWrite, ctrl.mermas_update);
-router.delete('/:id/mermas/:mermaId', blockStaffWrite, ctrl.mermas_remove);
+router.post('/:id/mermas', blockStaffWrite, A.mermaCrear, ctrl.mermas_create);
+router.put('/:id/mermas/:mermaId', blockStaffWrite, A.mermaEditar, ctrl.mermas_update);
+router.delete('/:id/mermas/:mermaId', blockStaffWrite, A.mermaBorrar, ctrl.mermas_remove);
 router.get('/:id/mermas/:mermaId/uso', ctrl.mermasUso);
 router.get('/:id/mermas/:mermaId/aplicar-preview', ctrl.mermasAplicarPreview);
-router.post('/:id/mermas/:mermaId/aplicar', blockStaffWrite, ctrl.mermasAplicar);
+router.post('/:id/mermas/:mermaId/aplicar', blockStaffWrite, A.mermaAplicar, ctrl.mermasAplicar);
 
 /* ================== EQUIVALENCIAS ================== */
 router.get('/:id/equivalencias', ctrl.equivalencias_list);
-router.post('/:id/equivalencias', blockStaffWrite, ctrl.equivalencias_create);
-router.put('/:id/equivalencias/:eqId', blockStaffWrite, ctrl.equivalencias_update);
-router.post('/:id/equivalencias/:eqId/aplicar', blockStaffWrite, ctrl.equivalencias_aplicar);
-router.delete('/:id/equivalencias/:eqId', blockStaffWrite, ctrl.equivalencias_remove);
+router.post('/:id/equivalencias', blockStaffWrite, A.eqCrear, ctrl.equivalencias_create);
+router.put('/:id/equivalencias/:eqId', blockStaffWrite, A.eqEditar, ctrl.equivalencias_update);
+router.post('/:id/equivalencias/:eqId/aplicar', blockStaffWrite, A.eqAplicar, ctrl.equivalencias_aplicar);
+router.delete('/:id/equivalencias/:eqId', blockStaffWrite, A.eqBorrar, ctrl.equivalencias_remove);
 
 /* ================== BONIFICACIONES ================== */
 router.get('/:id/bonificacion/estado', ctrl.estadoBonificacion);
-router.post('/:id/bonificacion/aplicar', blockStaffWrite, ctrl.aplicarBonificacion);
-router.post('/:id/bonificacion/descartar', blockStaffWrite, ctrl.descartarBonificacion);
+router.post('/:id/bonificacion/aplicar', blockStaffWrite, A.bonifAplicar, ctrl.aplicarBonificacion);
+router.post('/:id/bonificacion/descartar', blockStaffWrite, A.bonifDescartar, ctrl.descartarBonificacion);
 
 /* ================== USO (recetas donde se usa el insumo) ================== */
 router.get('/:id/uso', ctrl.usoInsumo);
 router.get('/:id/uso-resumen', ctrl.usoInsumoResumen);
-router.put('/:id/uso/:itemId/merma', blockStaffWrite, ctrl.usoInsumoCambiarMerma);
-router.put('/:id/uso/:itemId/cantidad', blockStaffWrite, ctrl.usoInsumoCambiarCantidad);
-router.post('/:id/uso/quitar', blockStaffWrite, ctrl.usoInsumoQuitar);
+router.put('/:id/uso/:itemId/merma', blockStaffWrite, A.usoMerma, ctrl.usoInsumoCambiarMerma);
+router.put('/:id/uso/:itemId/cantidad', blockStaffWrite, A.usoCantidad, ctrl.usoInsumoCambiarCantidad);
+router.post('/:id/uso/quitar', blockStaffWrite, A.usoQuitar, ctrl.usoInsumoQuitar);
 
 /* ================== CRUD MANUAL INSUMOS ================== */
-router.post('/normalizar-nombres', blockStaffWrite, ctrl.normalizarNombres);
+router.post('/normalizar-nombres', blockStaffWrite, A.normalizar, ctrl.normalizarNombres);
 router.post('/batch-detalle', ctrl.batchDetalle);
 router.post('/batch-recetas', require('../controllers/recetasElaboradosController').batchRecetasElaborados);
 // POST / (crearManual) queda SIN bloquear a propósito: es el camino usado
@@ -143,17 +146,17 @@ router.get('/', ctrl.listar);
 router.get('/:id/compras', ctrl.getCompras);
 router.get('/search-padrino', ctrl.searchPadrinoInsumo);
 router.delete('/:id/manual', blockStaffWrite, ctrl.eliminarManual);
-router.put('/:id', blockStaffWrite, ctrl.actualizar);
-router.delete('/:id', blockStaffWrite, ctrl.eliminar);
+router.put('/:id', blockStaffWrite, A.actualizar, ctrl.actualizar);
+router.delete('/:id', blockStaffWrite, A.darDeBaja, ctrl.eliminar);
 
 /* ================== BULK (JSON / CSV) ================== */
-router.post('/bulk', blockStaffWrite, ctrl.bulkUpsert);
-router.post('/bulk-csv', upload.single('file'), blockStaffWrite, ctrl.bulkUpsertCSV);
+router.post('/bulk', blockStaffWrite, A.bulk, ctrl.bulkUpsert);
+router.post('/bulk-csv', upload.single('file'), blockStaffWrite, A.bulkCsv, ctrl.bulkUpsertCSV);
 
 /* ================== BATCHES DE SUBIDA MANUAL ================== */
 router.get('/batches', ctrl.listBatchesInsumos);
 router.get('/batches/:batchId/preview', ctrl.previewBatchInsumos);
-router.delete('/batches/:batchId', ctrl.deleteBatchInsumos);
+router.delete('/batches/:batchId', A.borrarLote, ctrl.deleteBatchInsumos);
 
 // GET individual — al final, después de todas las estáticas, para no capturarlas
 router.get('/:id', ctrl.getOne);

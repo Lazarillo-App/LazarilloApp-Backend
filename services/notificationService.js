@@ -31,6 +31,9 @@ const ALLOWED_TYPES = new Set([
   'rrhh_empleado_no_aplica', 'rrhh_nomina', 'rrhh_config', 'rrhh_cronograma',
   // Recetas (misma regla)
   'receta_save', 'receta_delete', 'receta_bulk', 'receta_import', 'insumo_elaborado',
+  // Insumos (misma regla)
+  'insumo_edit', 'insumo_group', 'insumo_rubro', 'insumo_merma', 'insumo_equivalencia',
+  'insumo_bonificacion', 'insumo_uso', 'insumo_import', 'insumo_reemplazo',
   // Usuarios (Diego 12/11/2026)
   'usuario_email',
 ]);
