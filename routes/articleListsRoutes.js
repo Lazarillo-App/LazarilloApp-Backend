@@ -81,6 +81,12 @@ router.get(
   ensureFn('links.getLinkByArticle', links.getLinkByArticle)
 );
 
+// Vincula solo con los artículos de receta idéntica y devuelve el grupo (Diego 12/11)
+router.post(
+  '/:id/article-links/by-article/:articleId/auto',
+  ensureFn('links.autoLinkByArticle', links.autoLinkByArticle)
+);
+
 router.post(
   '/:id/article-links',
   ensureFn('links.createLinkGroup', links.createLinkGroup)
