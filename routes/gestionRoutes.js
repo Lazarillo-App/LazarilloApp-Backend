@@ -223,6 +223,10 @@ router.get('/actividad', responder((req) => actividad.listarActividad({ ...req.g
 router.post('/actividad/:id/restaurar', responder((req) => actividad.restaurarFacturaEliminada({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
 router.get('/notas', responder((req) => actividad.leerNota({ ...req.gestion, userId: req.user?.id })));
 router.put('/notas', responder((req) => actividad.guardarNota({ ...req.gestion, userId: req.user?.id, body: req.body })));
+router.get('/tareas', responder((req) => actividad.listarTareas({ ...req.gestion, userId: req.user?.id })));
+router.post('/tareas', responder((req) => actividad.crearTarea({ ...req.gestion, userId: req.user?.id, body: req.body })));
+router.patch('/tareas/:id', responder((req) => actividad.editarTarea({ ...req.gestion, userId: req.user?.id, id: idDe(req), body: req.body })));
+router.delete('/tareas/:id', responder((req) => actividad.borrarTarea({ ...req.gestion, userId: req.user?.id, id: idDe(req) })));
 
 // ── Empleados y concepto fijo ──
 router.get('/empleados', responder((req) => empleados.obtenerNomina({ ...req.gestion, sp: paramsDe(req) })));
