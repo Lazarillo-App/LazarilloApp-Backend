@@ -1482,9 +1482,18 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     // Si viene subrubro nuevo: reescribir fuente de verdad + copia desnormalizada
     if (nuevoSubrubro) {
       // maxi_articles.subrubro = "Rubro" UI (fuente de verdad, respetada por el sync)
+      // Solo en los negocios de ESTA organización: el mismo número de artículo en otro
+      // negocio es otro artículo (antes pisaba también el de otras cuentas — Diego 12/11).
       await client.query(
-        `UPDATE maxi_articles SET subrubro = $1 WHERE articulo_id = ANY($2::int[])`,
-        [nuevoSubrubro, ids]
+        `UPDATE maxi_articles SET subrubro = $1
+          WHERE articulo_id = ANY($2::int[])
+            AND business_id IN (
+              SELECT b.id FROM app_businesses b
+               WHERE b.id = ANY($3::int[])
+                  OR (b.organization_id IS NOT NULL AND b.organization_id IN (
+                        SELECT organization_id FROM app_businesses WHERE id = ANY($3::int[])))
+            )`,
+        [nuevoSubrubro, ids, [businessId, fromBizId, toBizId].map(Number)]
       );
       // agrupacion_articulos.subrubro (copia desnormalizada) para el destino
       await client.query(

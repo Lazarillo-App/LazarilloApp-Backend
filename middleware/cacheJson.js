@@ -13,6 +13,12 @@ function buildKey(req) {
   return `${req.method}:${bizId}:${req.originalUrl}`;
 }
 
+// El navegador NO guarda la respuesta por su cuenta: siempre vuelve a preguntar (con ETag → 304
+// si no cambió). Antes era `public, max-age=N` y el navegador servía su copia vieja aunque el
+// servidor ya hubiera invalidado su caché: después de mover un artículo de rubro la tabla seguía
+// mostrando el rubro anterior hasta 5 minutos (Diego 12/11).
+const CACHE_CONTROL = 'private, no-cache';
+
 function cacheJson(ttlSeconds = 60) {
   return (req, res, next) => {
     // Solo cachea GET
@@ -26,11 +32,11 @@ function cacheJson(ttlSeconds = 60) {
       // Soporta If-None-Match -> 304
       if (req.headers['if-none-match'] === hit.etag) {
         res.set('ETag', hit.etag);
-        res.set('Cache-Control', `public, max-age=${ttlSeconds}`);
+        res.set('Cache-Control', CACHE_CONTROL);
         return res.status(304).end();
       }
       res.set('ETag', hit.etag);
-      res.set('Cache-Control', `public, max-age=${ttlSeconds}`);
+      res.set('Cache-Control', CACHE_CONTROL);
       return res.status(200).json(hit.body);
     }
 
@@ -42,7 +48,7 @@ function cacheJson(ttlSeconds = 60) {
         const etag = '"' + crypto.createHash('sha1').update(raw).digest('hex') + '"';
         store.set(key, { body, etag, exp: now + ttlSeconds * 1000 });
         res.set('ETag', etag);
-        res.set('Cache-Control', `public, max-age=${ttlSeconds}`);
+        res.set('Cache-Control', CACHE_CONTROL);
       } catch (_) { /* no-op si falla hash */ }
       return originalJson(body);
     };
