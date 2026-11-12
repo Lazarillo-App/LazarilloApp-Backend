@@ -29,6 +29,8 @@ const ALLOWED_TYPES = new Set([
   // RRHH (Diego 12/11/2026: todo ABM queda en Notificaciones)
   'rrhh_empleado_alta', 'rrhh_empleado_baja', 'rrhh_empleado_reactivar', 'rrhh_empleado_edit',
   'rrhh_empleado_no_aplica', 'rrhh_nomina', 'rrhh_config', 'rrhh_cronograma',
+  // Recetas (misma regla)
+  'receta_save', 'receta_delete', 'receta_bulk', 'receta_import', 'insumo_elaborado',
 ]);
 
 function safeType(type) {
@@ -532,6 +534,19 @@ async function avisarAlEquipo({ businessId, actorUserId = null, type, title, mes
   return { created: rowCount };
 }
 
+/**
+ * Atajo para los endpoints de ABM (regla «todo ABM queda en Notificaciones», 12/11/2026):
+ * toma negocio y autor del request; el autor lo recibe ya leído («Mías»).
+ */
+function avisarAbm(req, { businessId, type, title, message = null, metadata = {}, clave = null, agruparMin = 30 }) {
+  const bid = Number(businessId ?? req?.businessId ?? req?.params?.businessId);
+  const actor = Number(req?.user?.id) || null;
+  avisarAlEquipoSinEsperar({
+    businessId: bid, actorUserId: actor, type, title, message,
+    metadata: { kind: type, ...metadata }, incluirActor: !!actor, clave, agruparMin,
+  });
+}
+
 /** Igual que avisarAlEquipo pero sin bloquear la respuesta ni romperla si falla. */
 function avisarAlEquipoSinEsperar(args) {
   avisarAlEquipo(args).catch((e) => console.error('[avisarAlEquipo]', args?.type, e?.message));
@@ -540,6 +555,7 @@ function avisarAlEquipoSinEsperar(args) {
 module.exports = {
   avisarAlEquipo,
   avisarAlEquipoSinEsperar,
+  avisarAbm,
   createSyncNotification,
   createSyncNotificationForBusinessUsers,
   notifySalesImportOverlap,

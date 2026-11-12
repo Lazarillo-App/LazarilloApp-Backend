@@ -5,6 +5,7 @@
  */
 
 const db = require('../config/db');
+const { avisarAbm } = require('../services/notificationService');
 
 /**
  * PATCH /api/insumos/:id/elaborado
@@ -36,6 +37,11 @@ async function toggleInsumoElaborado(req, res) {
       return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
     }
 
+    avisarAbm(req, {
+      businessId, type: 'insumo_elaborado',
+      title: `${es_elaborado ? 'Marcado como elaborado' : 'Ya no es elaborado'}: ${result.rows[0].nombre || `Insumo ${id}`}`,
+      metadata: { scope: 'insumo', ids: [Number(id)] },
+    });
     res.json({
       ok: true,
       data: result.rows[0],
@@ -76,6 +82,13 @@ async function toggleInsumosElaboradosBulk(req, res) {
       [es_elaborado, insumo_ids, businessId]
     );
 
+    if (result.rowCount) {
+      avisarAbm(req, {
+        businessId, type: 'insumo_elaborado',
+        title: `${result.rowCount} ${result.rowCount === 1 ? 'insumo' : 'insumos'} ${es_elaborado ? 'marcados como elaborados' : 'ya no son elaborados'}`,
+        metadata: { scope: 'insumo', ids: result.rows.map((r) => r.id).slice(0, 200) },
+      });
+    }
     res.json({
       ok: true,
       updated: result.rowCount,
