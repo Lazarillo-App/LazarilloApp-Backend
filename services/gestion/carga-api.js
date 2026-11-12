@@ -72,7 +72,7 @@ async function obtenerLugares(cliente, businessId) {
   ];
 }
 
-// ── Actividad ───────────────────────────────────────────────────────────────────
+// ── Actividad ───────────────────────────────────────────────────────────────────────────────
 async function registrarActividad(tx, a) {
   await tx.execute(sql`
     INSERT INTO gestion_actividad (organization_id, business_id, tipo, accion, descripcion, "refId", usuario, datos)
@@ -736,7 +736,9 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
           AND COALESCE(c."fechaManual", c.fecha) >= CURRENT_DATE - 365
           AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NOT NULL)
       SELECT p, TRIM(k) AS k, percentile_cont(0.5) WITHIN GROUP (ORDER BY imp)::float8 AS mediana, COUNT(*)::int AS n
-      FROM h WHERE rn <= 6 GROUP BY p, k HAVING COUNT(*) >= 2`),
+      -- Solo conceptos ESTABLES (Diego 12/11/2026): 3 cargas o más y la mayor no pasa el doble de la
+      -- menor. Si el concepto tiene altibajos abruptos no hay un «habitual» y no se sugiere nada.
+      FROM h WHERE rn <= 6 GROUP BY p, k HAVING COUNT(*) >= 3 AND MAX(imp) <= 2 * MIN(imp)`),
     // Insumos creados en Lazarillo (Recetas o «Crear insumo» desde la carga, códigos L1, L2…): el mismo
     // maestro que Recetas, así un insumo nuevo no se duplica (Diego 05/11/2026).
     db.many(sql`
@@ -865,7 +867,8 @@ async function historialConcepto({ businessId, sp }) {
            MAX(TRIM(COALESCE(c.proveedor, ''))) AS proveedor,
            MAX(TRIM(COALESCE(c."cajaPago", ''))) AS medio,
            SUM(COALESCE(c."importeManual", c.importe))::float8 AS importe,
-           COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo
+           COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo,
+           MIN(c."rowId") AS "rowId" -- para eliminarla desde «Últimas cargas» (Diego 12/11/2026)
     FROM gestion_compras c
     WHERE c.business_id = ${businessId} AND c.branch_id IS NOT DISTINCT FROM ${lugar.branchId}::bigint
       AND TRIM(COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")) = ${cod}
@@ -877,7 +880,7 @@ async function historialConcepto({ businessId, sp }) {
   return { filas };
 }
 
-// ── Gastos varios ───────────────────────────────────────────────────────────────
+// ── Gastos varios ────────────────────────────────────────────────────────────────────────────
 // Un Ticket interno del proveedor "Gastos Varios" (9999-NNNNNNNN), sin IVA. Con pago, se registra
 // en la misma transacción; sin pago queda impago.
 const gastoSchema = z.object({
@@ -944,7 +947,7 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
   });
 }
 
-// ── Ventas manuales ─────────────────────────────────────────────────────────────
+// ── Ventas manuales ─────────────────────────────────────────────────────────────────────────
 const MAN = `${PREFIJO_MANUAL}%`;
 const ventasAltaSchema = z.object({ items: z.array(itemSchema).min(1).max(400), forzar: z.boolean().optional() });
 const exigirSucursal = (sucursal) => { if (sucursal === undefined) throw rechazo('Elegí una sucursal'); };
