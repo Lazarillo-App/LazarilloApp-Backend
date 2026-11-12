@@ -1,6 +1,6 @@
 // db/scripts/listar-recetas-con-observaciones.js
 //
-// SOLO LECTURA (transacción READ ONLY): lista recetas que ya tienen observaciones, para
+// SOLO LECTURA (transacción READ ONLY): lista recetas con observaciones y con paso a paso, para
 // revisarlas en pantalla.
 //   - Por ingrediente: receta_items.notas (las trae la importación de recetas de MaxiRest,
 //     columna OBSERVACIONES, o se cargan a mano en la fila del ingrediente).
@@ -68,6 +68,32 @@ async function main() {
       console.table(rows);
     } else {
       console.log('No existe la tabla receta_observaciones en esta base.');
+    }
+
+    // Paso a paso y foto (la importación masiva de la carpeta del 09/11 cargó esto, no observaciones).
+    const conPasos = (await client.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recetas' AND column_name='pasos'`
+    )).rowCount > 0;
+    if (conPasos) {
+      const tot = await client.query(
+        `SELECT count(*) FILTER (WHERE jsonb_typeof(r.pasos) = 'array' AND jsonb_array_length(r.pasos) > 0)::int AS con_pasos,
+                count(*) FILTER (WHERE coalesce(r.foto, '') <> '')::int AS con_foto
+           FROM recetas r WHERE ($1::int IS NULL OR r.business_id = $1)`,
+        [BIZ]
+      );
+      console.log(`\n── Paso a paso: ${tot.rows[0].con_pasos} recetas con pasos, ${tot.rows[0].con_foto} con foto ──`);
+      const { rows } = await client.query(
+        `SELECT b.name AS negocio, r.nombre AS receta, jsonb_array_length(r.pasos)::int AS pasos,
+                CASE WHEN coalesce(r.foto, '') <> '' THEN 'sí' ELSE '' END AS foto,
+                left(r.pasos->>0, 70) AS primer_paso
+           FROM recetas r JOIN app_businesses b ON b.id = r.business_id
+          WHERE jsonb_typeof(r.pasos) = 'array' AND jsonb_array_length(r.pasos) > 0
+            AND ($1::int IS NULL OR r.business_id = $1)
+          ORDER BY jsonb_array_length(r.pasos) DESC, r.nombre
+          LIMIT $2`,
+        [BIZ, LIMITE]
+      );
+      console.table(rows);
     }
 
     await client.query('ROLLBACK');
