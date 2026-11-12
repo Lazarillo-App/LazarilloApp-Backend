@@ -1,5 +1,6 @@
 // controllers/articleLinksController.js
 const pool = require('../config/db');
+const { autoVincularReceta } = require('../services/recetaAutoVinculo');
 
 /* ========================= Helpers ========================= */
 
@@ -146,6 +147,15 @@ const articleIds = (Array.isArray(req.body?.articleIds) ? req.body.articleIds : 
     const group = groupRows[0];
     const groupId = Number(group.id);
 
+    // Vincular a mano por receta vuelve a permitir la vinculación automática.
+    if (linkType === 'receta') {
+      await client.query(
+        `UPDATE recetas SET auto_vinculo_off = FALSE
+          WHERE article_id = ANY($1::bigint[]) AND business_id = $2 AND auto_vinculo_off`,
+        [articleIds, bizId]
+      );
+    }
+
     // Insertar miembros (con link_type denormalizado)
     const memberValues = articleIds
       .map((_, i) => `($1, $${i + 2}, $${articleIds.length + 2}, $${articleIds.length + 3})`)
@@ -206,10 +216,19 @@ exports.deleteLinkGroup = async (req, res) => {
     let memberIds = [];
     if (isRecipeLink) {
       const { rows: m } = await client.query(
-        `SELECT article_id FROM article_link_members WHERE link_group_id = $1`,
+        `SELECT article_id, auto FROM article_link_members WHERE link_group_id = $1`,
         [groupId]
       );
-      memberIds = m.map(r => Number(r.article_id)).filter(Number.isFinite);
+      // Desarmado a mano → ninguno se vuelve a vincular solo.
+      const todos = m.map(r => Number(r.article_id)).filter(Number.isFinite);
+      if (todos.length) {
+        await client.query(
+          `UPDATE recetas SET auto_vinculo_off = TRUE WHERE article_id = ANY($1::bigint[]) AND business_id = $2`,
+          [todos, bizId]
+        );
+      }
+      // Los que entraron solos (receta idéntica) conservan su receta.
+      memberIds = m.filter(r => r.auto !== true).map(r => Number(r.article_id)).filter(Number.isFinite);
     }
 
     // Borrar el grupo (CASCADE elimina los miembros)
@@ -285,6 +304,20 @@ exports.removeMember = async (req, res) => {
     }
     const isRecipeLink = groupRows[0].sync_recipe === true;
 
+    // ¿Había entrado solo (receta idéntica)? Entonces la receta es suya: se conserva.
+    const { rows: autoRows } = await client.query(
+      `SELECT auto FROM article_link_members
+        WHERE link_group_id = $1 AND article_id = $2 AND business_id = $3`,
+      [groupId, articleId, bizId]
+    );
+    const eraAuto = autoRows[0]?.auto === true;
+
+    // Desvinculado a mano → no se vuelve a vincular solo (Diego 12/11).
+    await client.query(
+      `UPDATE recetas SET auto_vinculo_off = TRUE WHERE article_id = $1 AND business_id = $2`,
+      [articleId, bizId]
+    );
+
     // Eliminar el miembro
     await client.query(
       `DELETE FROM article_link_members
@@ -295,7 +328,7 @@ exports.removeMember = async (req, res) => {
     // Si era vinculación de receta, borrar la receta del artículo desvinculado.
     // El artículo queda limpio — sin receta y sin link.
     let recipeDeleted = false;
-    if (isRecipeLink) {
+    if (isRecipeLink && !eraAuto) {
       const { rowCount: recDel } = await client.query(
         `UPDATE recetas
             SET active = FALSE, updated_at = NOW()
@@ -337,6 +370,7 @@ exports.removeMember = async (req, res) => {
       groupDeleted,
       remainingMembers: remaining,
       recipeDeleted,
+      eraAuto,
     });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -509,6 +543,7 @@ exports.getLinkByArticle = async (req, res) => {
          FROM article_link_members m
          JOIN article_link_groups g ON g.id = m.link_group_id
         WHERE m.article_id = $1 AND m.business_id = $2
+          AND m.link_type = 'receta'   -- este endpoint es del modal de receta; la de precio es de la tabla
         LIMIT 1`,
       [articleId, bizId]
     );
@@ -523,6 +558,7 @@ exports.getLinkByArticle = async (req, res) => {
     const { rows: memberRows } = await pool.query(
       `SELECT
      m.article_id,
+     m.auto,
      COALESCE(apc.objetivo_pct, m.pct_objetivo) AS pct_objetivo,
      COALESCE(ma.nombre, aa.name, '#' || m.article_id::text) AS nombre
    FROM article_link_members m
@@ -547,6 +583,7 @@ exports.getLinkByArticle = async (req, res) => {
         syncPrecio: group.sync_precio,
         members: memberRows.map(m => ({
           article_id: Number(m.article_id),
+          auto: m.auto === true,
           nombre: m.nombre,
           pct_objetivo: m.pct_objetivo != null ? Number(m.pct_objetivo) : null,
         })),
@@ -612,6 +649,12 @@ exports.addMember = async (req, res) => {
       });
     }
 
+    // Vincular a mano vuelve a permitir la vinculación automática de ese artículo.
+    await client.query(
+      `UPDATE recetas SET auto_vinculo_off = FALSE WHERE article_id = $1 AND business_id = $2 AND auto_vinculo_off`,
+      [articleId, bizId]
+    );
+
     // Agregar el miembro (con link_type denormalizado)
     await client.query(
       `INSERT INTO article_link_members (link_group_id, article_id, business_id, link_type)
@@ -664,4 +707,19 @@ exports.addMember = async (req, res) => {
   } finally {
     client.release();
   }
+};
+
+// ============================================================================
+// POST /businesses/:id/article-links/by-article/:articleId/auto
+// Vincula solo el artículo con los de receta idéntica (mismos ingredientes, cantidades,
+// mermas y rendimiento) y devuelve su grupo de receta, igual que GET by-article.
+// Diego 12/11/2026. Ver services/recetaAutoVinculo.js.
+// ============================================================================
+exports.autoLinkByArticle = async (req, res) => {
+  const bizId = getBusinessId(req);
+  const articleId = safeNum(req.params.articleId);
+  if (Number.isFinite(bizId) && articleId) {
+    try { await autoVincularReceta(bizId, articleId); } catch (e) { console.warn('[autoLinkByArticle]', e.message); }
+  }
+  return exports.getLinkByArticle(req, res);
 };

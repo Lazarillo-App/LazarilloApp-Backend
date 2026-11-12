@@ -58,11 +58,18 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
           `INSERT INTO recetas
      (article_id, business_id, nombre, descripcion, porciones,
       porcentaje_venta, costo_total, notas, foto, notas_updated_at,
-      active, origen, updated_at)
-   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'linked', NOW())
+      active, origen, updated_at, fotos, rendimiento_unidad, rendimiento_peso, unidad_peso)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 'linked', NOW(), $11, $12, $13, $14)
    ON CONFLICT (article_id, business_id)
    DO UPDATE SET
+     -- Vinculadas por receta se sincroniza: foto, rendimiento e ingredientes (Diego 12/11).
+     -- Nombre, objetivo, precio y el resto quedan de cada artículo.
      porciones        = EXCLUDED.porciones,
+     rendimiento_unidad = EXCLUDED.rendimiento_unidad,
+     rendimiento_peso = EXCLUDED.rendimiento_peso,
+     unidad_peso      = EXCLUDED.unidad_peso,
+     foto             = EXCLUDED.foto,
+     fotos            = EXCLUDED.fotos,
      costo_total      = EXCLUDED.costo_total,
      active           = TRUE,
      origen           = 'linked',
@@ -78,6 +85,10 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
             receta.notas || null,
             receta.foto || null,
             receta.notas_updated_at || null,
+            receta.fotos != null ? JSON.stringify(receta.fotos) : null, // jsonb
+            receta.rendimiento_unidad ?? null,
+            receta.rendimiento_peso ?? null,
+            receta.unidad_peso ?? null,
           ]
         );
 
@@ -87,7 +98,10 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
 
       for (const item of savedItems || []) {
         const insumoId = Number(item.insumo_id ?? item.supply_id);
-        if (!Number.isFinite(insumoId) || insumoId <= 0) continue;
+        const articleRefId = Number(item.article_ref_id);
+        const tieneInsumo = Number.isFinite(insumoId) && insumoId > 0;
+        const tieneArticulo = Number.isFinite(articleRefId) && articleRefId > 0;
+        if (!tieneInsumo && !tieneArticulo) continue;
 
         const fotosUrls = Array.isArray(item.fotos_urls)
           ? item.fotos_urls.filter(u => typeof u === 'string' && u.startsWith('http'))
@@ -97,11 +111,11 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
           `INSERT INTO receta_items
              (receta_id, insumo_id, cantidad, unidad, costo_unitario, notas,
               observaciones, fotos_urls, merma, pedido, tipo_costo, orden,
-              created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())`,
+              created_at, updated_at, article_ref_id, merma_id, merma_ids, secreto)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW(), $13, $14, $15, $16)`,
           [
             siblingRecetaId,
-            insumoId,
+            tieneInsumo ? insumoId : null,
             item.cantidad,
             item.unidad || null,
             item.costo_unitario,
@@ -112,6 +126,10 @@ async function propagateRecipe({ bizId, articleId, receta, savedItems }) {
             item.pedido !== false,
             item.tipo_costo || 'total',
             item.orden ?? 0,
+            tieneArticulo ? articleRefId : null,
+            item.merma_id ?? null,
+            Array.isArray(item.merma_ids) ? item.merma_ids : null,
+            item.secreto ?? false,
           ]
         );
       }
