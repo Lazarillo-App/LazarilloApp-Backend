@@ -2550,6 +2550,13 @@ exports.equivalencias_list = async (req, res) => {
         ORDER BY nombre ASC`,
       [insumoId]
     );
+    // ?coincidencias=1 (solo la pestaña Equivalencias): por cada una, las recetas que usan exactamente
+    // esa medida y se pueden pasar a «1 <equivalencia>». Las recetas no lo piden (más rápido).
+    if (req.query?.coincidencias === '1') {
+      for (const eq of rows) {
+        try { eq.coincidencias = await coincidenciasDeEquivalencia(insumoId, bizId, eq); } catch { eq.coincidencias = []; }
+      }
+    }
     return res.json({ ok: true, data: rows });
   } catch (e) {
     console.error('equivalencias_list error:', e);
@@ -2577,11 +2584,78 @@ exports.equivalencias_create = async (req, res) => {
        RETURNING id, insumo_id, nombre, contenido, unidad, created_at, updated_at`,
       [insumoId, nombre.trim(), Number(contenido), unidad.trim()]
     );
-    return res.status(201).json({ ok: true, data: rows[0] });
+    // Recetas que usan EXACTAMENTE esa medida (Diego 12/11/2026): el front pregunta si se reemplazan
+    // por «1 <equivalencia>». No se toca nada acá.
+    let coincidencias = [];
+    try { coincidencias = await coincidenciasDeEquivalencia(insumoId, bizId, rows[0]); }
+    catch (e2) { console.warn('[equivalencias_create] coincidencias', e2.message); }
+    return res.status(201).json({ ok: true, data: rows[0], coincidencias });
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ ok: false, error: 'Ya existe una equivalencia con ese nombre' });
     console.error('equivalencias_create error:', e);
     return res.status(500).json({ ok: false, error: e.message });
+  }
+};
+
+// Renglones de recetas activas de la organización que usan este insumo en una cantidad IGUAL a la
+// equivalencia (misma familia: 75 gr = «dip y medio» de 75 gr) y todavía no están en esa unidad.
+async function coincidenciasDeEquivalencia(insumoId, bizId, eq, db = pool) {
+  const { tamanoUnidad } = require('../services/unidades');
+  const orgBizIds = await getOrgBizIds(bizId, db);
+  const { rows: eqs } = await db.query('SELECT nombre, contenido, unidad FROM insumo_equivalencias WHERE insumo_id = $1', [insumoId]);
+  const tEq = tamanoUnidad(eq.nombre, eqs);
+  if (!tEq || !(tEq.valor > 0)) return [];
+  const { rows } = await db.query(
+    `SELECT ri.id AS item_id, ri.receta_id, ri.cantidad, ri.unidad,
+            COALESCE(ma.nombre, ie.nombre, r.nombre) AS receta_nombre
+       FROM receta_items ri
+       JOIN recetas r ON r.id = ri.receta_id
+       LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
+       LEFT JOIN insumos ie ON ie.id = r.insumo_id
+      WHERE ri.insumo_id = $1 AND r.business_id = ANY($2::int[]) AND r.active = TRUE
+      ORDER BY 5`, [insumoId, orgBizIds]);
+  return rows.filter((x) => {
+    if (String(x.unidad || '').trim().toLowerCase() === String(eq.nombre).trim().toLowerCase()) return false;
+    const t = tamanoUnidad(x.unidad, eqs);
+    if (!t || t.familia !== tEq.familia) return false;
+    const enBase = Number(x.cantidad) * t.valor;
+    return Math.abs(enBase - tEq.valor) <= 1e-6 * Math.max(1, tEq.valor);
+  }).map((x) => ({ itemId: Number(x.item_id), recetaId: Number(x.receta_id), receta: x.receta_nombre, cantidad: Number(x.cantidad), unidad: x.unidad }));
+}
+
+// POST /insumos/:id/equivalencias/:eqId/aplicar  { itemIds }
+// Reemplaza en esos renglones la cantidad exacta por «1 <equivalencia>». El costo de cada renglón no
+// cambia (costo unitario nuevo = cantidad vieja × costo unitario viejo). Solo los que siguen
+// coincidiendo exacto (se vuelve a calcular acá, no se confía en la lista del front).
+exports.equivalencias_aplicar = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const bizId = getBusinessId(req);
+    const insumoId = Number(req.params.id);
+    const eqId = Number(req.params.eqId);
+    const pedidos = new Set((Array.isArray(req.body?.itemIds) ? req.body.itemIds : []).map(Number));
+    if (!bizId || !Number.isFinite(insumoId) || !Number.isFinite(eqId)) return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    if (!(await assertInsumoBiz(insumoId, bizId))) return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
+    const { rows: eqRows } = await client.query('SELECT id, nombre, contenido, unidad FROM insumo_equivalencias WHERE id = $1 AND insumo_id = $2', [eqId, insumoId]);
+    if (!eqRows.length) return res.status(404).json({ ok: false, error: 'Equivalencia no encontrada' });
+    const eq = eqRows[0];
+    await client.query('BEGIN');
+    const validos = (await coincidenciasDeEquivalencia(insumoId, bizId, eq, client)).filter((c) => pedidos.has(c.itemId));
+    for (const c of validos) {
+      await client.query(
+        `UPDATE receta_items SET cantidad = 1, unidad = $1, costo_unitario = cantidad * costo_unitario, updated_at = NOW() WHERE id = $2`,
+        [eq.nombre, c.itemId]);
+    }
+    const recetaIds = [...new Set(validos.map((c) => c.recetaId))];
+    if (recetaIds.length) await recalcularCostoRecetas(recetaIds, client);
+    await client.query('COMMIT');
+    return res.json({ ok: true, aplicados: validos.length });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { /* sin transacción */ }
+    console.error('equivalencias_aplicar error:', e);
+    return res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
   }
 };
 
