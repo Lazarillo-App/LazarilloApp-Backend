@@ -3,10 +3,10 @@
 'use strict';
 
 const pool = require('../config/db');
+const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
 const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 const { logAudit } = require('../services/audit/auditLog');
 const { schemaDeNegocio } = require('../services/maxiPdvMap');
-const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
 
 // 'mayuscula' → TODO MAYÚSCULA. 'titulo' → solo la primera letra del nombre en
 // mayúscula, el resto en minúscula (así lo pidió la usuaria explícitamente,
