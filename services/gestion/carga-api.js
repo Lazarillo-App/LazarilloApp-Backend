@@ -1127,6 +1127,14 @@ async function borrarConcepto({ organizationId, codigo: crudo }) {
 
 // ── Medios de pago (del negocio) ───────────────────────────────────────────────
 async function obtenerMedios({ businessId }) {
+  // «Descuento» viene en todos los negocios (Diego 12/11/2026): si falta, se agrega una sola vez.
+  // Si ya hay uno con ese nombre (de cualquier tipo) no se toca.
+  await db.execute(sql`
+    INSERT INTO gestion_medios_pago (business_id, nombre, tipo, "pideId", activo, orden)
+    SELECT ${businessId}, 'Descuento', 'descuento', false, true, COALESCE(MAX(orden), 0) + 1
+      FROM gestion_medios_pago WHERE business_id = ${businessId}
+    HAVING NOT bool_or(tipo = 'descuento' OR lower(trim(nombre)) = 'descuento') OR COUNT(*) = 0
+    ON CONFLICT (business_id, nombre) DO NOTHING`);
   const [medios, usos] = await Promise.all([
     db.many(sql`SELECT id, nombre, tipo, "pideId", activo, orden FROM gestion_medios_pago WHERE business_id = ${businessId} ORDER BY orden, nombre`),
     db.many(sql`
@@ -1175,8 +1183,9 @@ async function editarMedio({ businessId, id, body }) {
 
 // Solo si ningún pago lo usa; si tiene pagos, se desactiva.
 async function borrarMedio({ businessId, id }) {
-  const actual = await db.one(sql`SELECT nombre FROM gestion_medios_pago WHERE business_id = ${businessId} AND id = ${id}`);
+  const actual = await db.one(sql`SELECT nombre, tipo FROM gestion_medios_pago WHERE business_id = ${businessId} AND id = ${id}`);
   if (!actual) throw rechazo('Ese medio ya no existe.', 404);
+  if (actual.tipo === 'descuento') throw rechazo('Descuento viene fijo en todos los negocios: si no lo usás, desactivalo.', 409);
   const u = await db.one(sql`
     SELECT (SELECT COUNT(*)::int FROM gestion_pagos_proveedor WHERE business_id = ${businessId} AND medio = ${actual.nombre})
          + (SELECT COUNT(*)::int FROM gestion_pagos_internos WHERE origen_business_id = ${businessId} AND medio = ${actual.nombre}) AS n`);
