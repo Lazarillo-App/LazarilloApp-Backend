@@ -6,6 +6,7 @@ const { listObservaciones, addObservacion, editObservacion, deleteObservacion } 
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { snapshotReceta, createOrUpdateProposal, propuestaAbiertaDe, resolverMarcasDeRevision } = require('../services/recetaProposals');
 const { writeArticleReceta } = require('../services/recetaWrite');
+const { autoVincularReceta } = require('../services/recetaAutoVinculo');
 
 async function resolveRecetaId(articleId, bizId) {
   const { rows } = await pool.query(
@@ -196,9 +197,13 @@ exports.saveReceta = async (req, res, next) => {
     // aprobación aparte ni bloqueando volver a marcarla más adelante.
     resolverMarcasDeRevision({ bizId, articleId, uid }).catch(() => {});
 
+    // Receta idéntica a la de otros artículos → quedan vinculados solos (Diego 12/11).
+    const autoVinculo = await autoVincularReceta(bizId, articleId).catch(() => null);
+
     return res.json({
       ok: true,
       receta: { ...receta, ...recetaCostos, items: savedItems },
+      autoVinculo,
     });
   } catch (e) {
     console.error('[saveReceta]', e);
