@@ -5,6 +5,7 @@ const { listObservaciones, addObservacion, editObservacion, deleteObservacion } 
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { snapshotRecetaElaborado, createOrUpdateProposal, propuestaAbiertaDe, resolverMarcasDeRevision } = require('../services/recetaProposals');
 const { writeElaboradoReceta } = require('../services/recetaWrite');
+const { avisarAbm } = require('../services/notificationService');
 
 async function resolveRecetaIdElaborado(insumoId, bizId) {
   const { rows } = await pool.query(
@@ -218,6 +219,13 @@ exports.saveRecetaElaborado = async (req, res, next) => {
     // resolver cualquier marca de revisión que siguiera abierta sobre este insumo.
     resolverMarcasDeRevision({ bizId, insumoId, uid }).catch(() => {});
 
+    avisarAbm(req, {
+      businessId: bizId, type: 'receta_save', title: `Receta del elaborado guardada: ${insumo.nombre}`,
+      message: `${(savedItems || []).length} ${(savedItems || []).length === 1 ? 'insumo' : 'insumos'}`,
+      metadata: { scope: 'insumo', ids: [insumoId] },
+      clave: `receta:i:${bizId}:${insumoId}:${uid || 0}`,
+    });
+
     return res.json({
       ok: true,
       receta: { ...receta, ...recetaCostos, items: savedItems },
@@ -274,6 +282,13 @@ exports.deleteRecetaElaborado = async (req, res, next) => {
     invalidateCacheForBiz(bizId);
 
     console.log(`🗑️ [deleteRecetaElaborado] Receta ID=${rows[0].id} | Insumo=${insumoId} desactivada`);
+    {
+      const { rows: ins } = await pool.query('SELECT nombre FROM insumos WHERE id=$1 AND business_id=$2', [insumoId, bizId]);
+      avisarAbm(req, {
+        businessId: bizId, type: 'receta_delete', title: `Receta del elaborado borrada: ${ins[0]?.nombre || `Insumo ${insumoId}`}`,
+        metadata: { scope: 'insumo', ids: [insumoId] },
+      });
+    }
 
     await logAudit(null, {
       userId: uid, businessId: bizId,
