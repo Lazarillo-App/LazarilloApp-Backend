@@ -223,13 +223,60 @@ async function sincronizarNomina(bizId) {
 
 /* ───────────────────────── config ───────────────────────── */
 
+// Cuántos días mira para atrás el "espacio aprendido" y la sugerencia de baja.
+const VENTANA_DIAS = 56; // 8 semanas (Diego, 12/11/2026)
+// 'YYYY-MM-DD' de hace n días en hora Argentina
+const haceDias = (n) => {
+  const d = new Date(Date.now() - 3 * 3600e3 - n * 86400e3);
+  return d.toISOString().slice(0, 10);
+};
+
+// Lo que se aprende de los cronogramas (no se carga a mano):
+//  · por empleado: en qué espacios de ESTE negocio tuvo turnos en las últimas
+//    8 semanas y cuál fue su último turno (en cualquier negocio que lo use);
+//  · por negocio: desde cuándo hay cronogramas con turnos (historia).
+// Sin historia de 8 semanas no se sugiere ninguna baja (estado sin datos).
+async function leerAprendido(bizId, nominaId) {
+  const [porEmpleado, historia] = await Promise.all([
+    pool.query(
+      `WITH hoy AS (SELECT (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS d)
+       SELECT c.empleado_id AS id,
+              COALESCE(json_agg(DISTINCT jsonb_build_object('id', s.espacio_id, 'nombre', es.nombre))
+                FILTER (WHERE s.business_id = $1 AND s.fecha_inicio + c.dia >= (SELECT d FROM hoy) - $3::int), '[]') AS espacios,
+              to_char(max(s.fecha_inicio + c.dia), 'YYYY-MM-DD') AS ultimo
+       FROM rrhh_celdas c
+       JOIN rrhh_filas f ON f.id = c.fila_id
+       JOIN rrhh_semanas s ON s.id = f.semana_id
+       JOIN rrhh_espacios es ON es.id = s.espacio_id
+       JOIN rrhh_empleados e ON e.id = c.empleado_id
+       WHERE e.business_id = $2
+       GROUP BY c.empleado_id`, [bizId, nominaId, VENTANA_DIAS]
+    ),
+    pool.query(
+      `SELECT to_char(min(s.fecha_inicio), 'YYYY-MM-DD') AS desde,
+              count(DISTINCT s.semana)::int AS semanas,
+              COALESCE(min(s.fecha_inicio) <= (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date - $2::int, false) AS alcanza
+       FROM rrhh_semanas s
+       WHERE s.business_id = $1
+         AND EXISTS (SELECT 1 FROM rrhh_filas f JOIN rrhh_celdas c ON c.fila_id = f.id WHERE f.semana_id = s.id)`,
+      [bizId, VENTANA_DIAS]
+    ),
+  ]);
+  return {
+    porEmpleado: new Map(porEmpleado.rows.map((r) => [Number(r.id), r])),
+    historia: historia.rows[0] || { desde: null, semanas: 0, alcanza: false },
+  };
+}
+
 async function leerConfig(bizId, branchId = null) {
   const nominaId = await nominaDe(bizId);
-  const [empleados, puestos, fechas, espacios, turnos] = await Promise.all([
+  const [empleados, puestos, fechas, espacios, turnos, aprendido] = await Promise.all([
     pool.query(
       `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
-              to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja"
-       FROM rrhh_empleados WHERE business_id=$1 ORDER BY nombre, apellido`, [nominaId]
+              to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja",
+              no_aplica_crono AS "noAplica",
+              COALESCE(baja_sug_silenciada > (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date - $2::int, false) AS "bajaSilenciada"
+       FROM rrhh_empleados WHERE business_id=$1 ORDER BY nombre, apellido`, [nominaId, VENTANA_DIAS]
     ),
     pool.query(
       `SELECT id, codigo, nombre FROM rrhh_puestos WHERE business_id=$1 ORDER BY id`, [bizId]
@@ -252,6 +299,7 @@ async function leerConfig(bizId, branchId = null) {
        WHERE e.business_id=$1 AND e.branch_id IS NOT DISTINCT FROM $2
        ORDER BY t.orden, t.id`, [bizId, branchId]
     ),
+    leerAprendido(bizId, nominaId),
   ]);
   const turnosPorEspacio = new Map();
   for (const t of turnos.rows) {
@@ -264,7 +312,21 @@ async function leerConfig(bizId, branchId = null) {
     nomina: nominaId !== Number(bizId)
       ? { compartidaCon: { id: nominaId, nombre: await nombreNegocio(nominaId) } }
       : { compartidaCon: null },
-    empleados: empleados.rows,
+    // historia: desde cuándo hay turnos cargados; `alcanza` = 8 semanas o más
+    historia: aprendido.historia,
+    empleados: empleados.rows.map(({ bajaSilenciada, ...e }) => {
+      const a = aprendido.porEmpleado.get(Number(e.id));
+      const ultimoTurno = a?.ultimo || null;
+      return {
+        ...e,
+        espacios: a?.espacios || [],   // aprendidos de los cronogramas (8 semanas)
+        ultimoTurno,
+        // Sugerir baja: activo, va en cronogramas, el negocio tiene 8+ semanas
+        // de historia y no tuvo turnos en ese lapso (ni lo silenciaron).
+        sugerirBaja: !!(e.activo && !e.noAplica && aprendido.historia.alcanza && !bajaSilenciada
+          && (!ultimoTurno || ultimoTurno < haceDias(VENTANA_DIAS))),
+      };
+    }),
     puestos: puestos.rows,
     fechas: fechas.rows,
     espacios: espacios.rows.map((e) => ({ ...e, turnos: turnosPorEspacio.get(e.id) || [] })),
@@ -620,16 +682,23 @@ async function editarEmpleado(req, res) {
            WHEN $6 IS FALSE AND (activo OR $7::date IS NOT NULL)
              THEN COALESCE($7::date, (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date)
            ELSE fecha_baja END,
-         activo   = COALESCE($6, activo)
+         activo   = COALESCE($6, activo),
+         no_aplica_crono = COALESCE($8, no_aplica_crono),
+         baja_sug_silenciada = CASE
+           WHEN $9::boolean IS TRUE THEN (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+           ELSE baja_sug_silenciada END
        WHERE id=$1 AND business_id=$2
        RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
-                 to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja"`,
+                 to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja",
+                 no_aplica_crono AS "noAplica"`,
       [id, await nominaDe(req.businessId),
         typeof b.nombre === 'string' && b.nombre.trim() ? b.nombre.trim() : null,
         typeof b.apellido === 'string' ? b.apellido.trim() : null,
         typeof b.sector === 'string' ? b.sector : null,
         typeof b.activo === 'boolean' ? b.activo : null,
-        fechaBaja]
+        fechaBaja,
+        typeof b.noAplica === 'boolean' ? b.noAplica : null,
+        b.silenciarBaja === true]
     );
     if (!rows[0]) return res.status(404).json({ ok: false, error: 'not_found' });
     return res.json({ ok: true, empleado: rows[0] });
