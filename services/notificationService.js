@@ -31,6 +31,8 @@ const ALLOWED_TYPES = new Set([
   'rrhh_empleado_no_aplica', 'rrhh_nomina', 'rrhh_config', 'rrhh_cronograma',
   // Recetas (misma regla)
   'receta_save', 'receta_delete', 'receta_bulk', 'receta_import', 'insumo_elaborado',
+  // Usuarios (Diego 12/11/2026)
+  'usuario_email',
 ]);
 
 function safeType(type) {
