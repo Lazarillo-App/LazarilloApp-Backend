@@ -4,7 +4,7 @@
 // tiene). Solo el dueño los crea, edita o borra. Se apoyan en el rol admin: Dueño y
 // Staff son fijos y no pasan por acá.
 const pool = require('../config/db');
-const { normalizarRol, SECCIONES, limpiarStaff, JEFE_DEFAULT } = require('../services/auth/permisos');
+const { normalizarRol, SECCIONES, limpiarStaff, JEFE_DEFAULT, administracionDefault } = require('../services/auth/permisos');
 
 const scopeDe = (req) => {
   const orgId = Number(req.business?.organization_id);
@@ -62,7 +62,9 @@ async function administracionDe(scope) {
     [scope.id]
   );
   const personas = n[0]?.n ?? 0;
-  return rows[0] ? { ...normalizarRol(rows[0]), id: 'admin', ajustada: true, personas } : { id: 'admin', ajustada: false, personas };
+  // Sin ajuste propio → la Administración por defecto del sistema (porDefecto: true).
+  return rows[0] ? { ...normalizarRol(rows[0]), id: 'admin', ajustada: true, personas }
+    : { ...administracionDefault(), id: 'admin', ajustada: false, personas };
 }
 
 // ── Staff y sus subroles (Diego 11/11/2026) ──────────────────────────────────────────────
@@ -226,7 +228,7 @@ exports.setAdministracion = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// DELETE /api/roles/administracion — vuelve a "ve todo".
+// DELETE /api/roles/administracion — vuelve a la Administración por defecto del sistema.
 exports.resetAdministracion = async (req, res, next) => {
   try {
     if (!soloDuenio(req, res)) return;

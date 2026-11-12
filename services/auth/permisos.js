@@ -7,6 +7,17 @@ const pool = require('../../config/db');
 
 const SECCIONES = ['resultados', 'carga', 'recetas', 'rrhh', 'conceptos', 'medios', 'configuracion', 'conexiones'];
 
+// Administración POR DEFECTO del sistema (Diego 12/11/2026): los roles que se definen acá en el
+// código valen para TODAS las cuentas; lo particular lo ajusta cada dueño en Roles. Es el ajuste
+// que Diego armó para CONTENEDORES: edita todo, pero sin tarjetas de ventas/equilibrio/resultado,
+// sin totales por rubro, sin ingresos vs egresos ni diferencia de caja y sin la pestaña Resultados.
+const ADMINISTRACION_DEFAULT = Object.freeze({
+  secciones: Object.freeze(Object.fromEntries(SECCIONES.map((s) => [s, 'editar']))),
+  ocultos: Object.freeze(['tarjeta.ventas', 'tarjeta.equilibrio', 'tarjeta.resultado', 'tabla.totales_rubro', 'tabla.ing_egr', 'tabla.dif_caja', 'tab.resultados']),
+});
+const administracionDefault = () => ({ rolId: null, nombre: 'Administración', porDefecto: true,
+  secciones: { ...ADMINISTRACION_DEFAULT.secciones }, ocultos: [...ADMINISTRACION_DEFAULT.ocultos] });
+
 function normalizarRol(row) {
   if (!row) return null;
   const secciones = {};
@@ -20,7 +31,8 @@ function normalizarRol(row) {
 
 /** Permisos del usuario sobre el negocio, o null si no tiene límites.
  *  Admin con rol a medida → ese rol. Admin sin rol a medida → el "Administración" ajustado de
- *  la organización (o del negocio), si el dueño lo ajustó; si no, null (ve todo). */
+ *  la organización (o del negocio), si el dueño lo ajustó; si no, la Administración por defecto
+ *  del sistema (ADMINISTRACION_DEFAULT). */
 async function getPermisos(userId, businessId) {
   if (!userId || !businessId) return null;
   const { rows } = await pool.query(
@@ -50,10 +62,8 @@ async function getPermisos(userId, businessId) {
   if (rows.some((r) => r.es_owner || r.role === 'owner')) return null;
   const admins = rows.filter((r) => r.role === 'admin');
   if (!admins.length) return null; // staff: vista de siempre
-  // Un acceso admin sin límites (Administración sin ajustar) gana: ve todo.
-  if (admins.some((r) => r.sin_limites)) return null;
   const elegido = admins.find((r) => r.scope_type === 'business') || admins[0];
-  return normalizarRol(elegido);
+  return elegido.sin_limites ? administracionDefault() : normalizarRol(elegido);
 }
 
 const puedeSeccion = (permisos, seccion, modo = 'ver') => {
@@ -128,5 +138,5 @@ const sqlEsJefe = (a) => `(${a}.role = 'staff' AND (${a}.subrol = 'jefe' OR EXIS
   SELECT 1 FROM app_custom_roles xj WHERE xj.id = ${a}.custom_role_id AND xj.deleted_at IS NULL
      AND xj.base_role = 'staff' AND COALESCE((xj.permisos_staff->>'aprobar_equipo')::boolean, FALSE))))`;
 
-module.exports = { SECCIONES, normalizarRol, getPermisos, puedeSeccion, estaOculto, requireSeccion,
+module.exports = { SECCIONES, normalizarRol, ADMINISTRACION_DEFAULT, administracionDefault, getPermisos, puedeSeccion, estaOculto, requireSeccion,
   STAFF_KEYS, JEFE_DEFAULT, limpiarStaff, getStaffPermisos, sqlEsJefe };
