@@ -5,6 +5,7 @@
 const pool = require('../config/db');
 const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 const { logAudit } = require('../services/audit/auditLog');
+const { schemaDeNegocio } = require('../services/maxiPdvMap');
 
 // 'mayuscula' → TODO MAYÚSCULA. 'titulo' → solo la primera letra del nombre en
 // mayúscula, el resto en minúscula (así lo pidió la usuaria explícitamente,
@@ -361,7 +362,9 @@ exports.obtenerArticulo = async (req, res, next) => {
     if (articleId < 0) {
       const { rows } = await pool.query(
         `SELECT id, name AS nombre, rubro, subrubro, price AS precio, codigo,
-                nombre_original
+                nombre_original,
+                NULLIF(TRIM(props->>'descripc'), '') AS descripcion_original,
+                NULLIF(TRIM(props->>'descripcion'), '') AS descripcion_propia
            FROM app_articles WHERE id = $1 AND business_id = $2`,
         [articleId, storageBizId]
       );
@@ -372,13 +375,31 @@ exports.obtenerArticulo = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT ma.articulo_id AS id, ma.nombre,
               ma.subrubro AS rubro, ma.categoria AS subrubro,
-              ma.precio, aa.codigo, ma.nombre_original
+              ma.precio, aa.codigo, ma.nombre_original,
+              NULLIF(TRIM(ma.raw->>'descripc'), '') AS descripcion_original,
+              NULLIF(TRIM(ma.descripcion), '') AS descripcion_propia
          FROM maxi_articles ma
          LEFT JOIN app_articles aa ON aa.id = ma.articulo_id AND aa.business_id = ma.business_id
         WHERE ma.business_id = $1 AND ma.articulo_id = $2`,
       [storageBizId, articleId]
     );
     if (!rows.length) return res.status(404).json({ ok: false, error: 'No encontrado' });
+    // Igual que el árbol (listArticlesTreeFromDB): la descripción de MaxiRest que guarda el
+    // sync perdió los acentos; si el negocio tiene réplica, manda la de la réplica (Diego 12/11).
+    try {
+      const schemaReplica = schemaDeNegocio(storageBizId);
+      if (schemaReplica && /^[a-z0-9_]+$/.test(schemaReplica)) {
+        const { rows: d } = await pool.query(
+          `SELECT TRIM(descripcion::text) AS descripcion
+             FROM "${schemaReplica}".m6_listado_de_articulos
+            WHERE TRIM(codigo::text) = $1 AND NULLIF(TRIM(descripcion::text), '') IS NOT NULL
+            LIMIT 1`,
+          [String(articleId)]
+        );
+        if (d[0]?.descripcion) rows[0].descripcion_original = d[0].descripcion;
+      }
+    } catch (_) { /* sin réplica: queda la del sync */ }
+    rows[0].descripcion = rows[0].descripcion_propia ?? rows[0].descripcion_original ?? null;
     return res.json({ ok: true, articulo: rows[0] });
   } catch (e) {
     console.error('[obtenerArticulo]', e.message);
