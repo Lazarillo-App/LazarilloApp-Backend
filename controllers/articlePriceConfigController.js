@@ -31,6 +31,11 @@ exports.getRecetasCostos = async (req, res, next) => {
     // los costos de todo el negocio (navegación más fluida, Diego 11/11).
     const soloInsumo = Number(req.query?.insumoId);
     const filtrarPorInsumo = Number.isFinite(soloInsumo) && soloInsumo > 0;
+    // ?articleId=N → ese artículo, sus gemelos (receta vinculada) y las promos que lo usan
+    // como componente. La tabla lo pide después de guardar una receta, en vez de recargar
+    // los costos de todo el negocio (Diego 12/11: refrescar solo lo afectado).
+    const soloArticulo = Number(req.query?.articleId);
+    const filtrarPorArticulo = Number.isFinite(soloArticulo) && soloArticulo !== 0;
 
     const { rows } = await pool.query(
       `WITH RECURSIVE afectados(insumo_id) AS (
@@ -40,6 +45,23 @@ exports.getRecetasCostos = async (req, res, next) => {
            FROM receta_items rie
            JOIN recetas re ON re.id = rie.receta_id AND re.active = TRUE AND re.insumo_id IS NOT NULL
            JOIN afectados a ON a.insumo_id = rie.insumo_id
+       ),
+       base_art(article_id) AS (
+         SELECT $3::int WHERE $3::int IS NOT NULL
+         UNION
+         SELECT m2.article_id
+           FROM article_link_members m1
+           JOIN article_link_members m2 ON m2.link_group_id = m1.link_group_id
+          WHERE $3::int IS NOT NULL AND m1.article_id = $3::int
+       ),
+       arts(article_id) AS (
+         SELECT article_id FROM base_art
+         UNION
+         SELECT rp.article_id
+           FROM recetas rp
+           JOIN receta_items rip ON rip.receta_id = rp.id
+          WHERE rp.active = TRUE AND rp.es_promo = TRUE
+            AND rip.article_ref_id IN (SELECT article_id FROM base_art)
        )
        SELECT
          r.article_id,
@@ -68,8 +90,9 @@ exports.getRecetasCostos = async (req, res, next) => {
          AND ($2::int IS NULL OR r.id IN (
                SELECT rif.receta_id FROM receta_items rif
                 WHERE rif.insumo_id IN (SELECT insumo_id FROM afectados)
-             ))`,
-      [bizId, filtrarPorInsumo ? soloInsumo : null]
+             ))
+         AND ($3::int IS NULL OR r.article_id IN (SELECT article_id FROM arts))`,
+      [bizId, filtrarPorInsumo ? soloInsumo : null, filtrarPorArticulo ? soloArticulo : null]
     );
 
     const costos = {};
