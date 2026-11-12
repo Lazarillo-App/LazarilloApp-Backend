@@ -389,6 +389,7 @@ exports.obtenerArticulo = async (req, res, next) => {
       `SELECT ma.articulo_id AS id, ma.nombre,
               ma.subrubro AS rubro, ma.categoria AS subrubro,
               ma.precio, aa.codigo, ma.nombre_original,
+              NULLIF(TRIM(ma.raw->>'nombre'), '') AS nombre_maxi, -- cómo se llama en MaxiRest (ⓘ del modal, Diego 12/11)
               NULLIF(TRIM(ma.raw->>'descripc'), '') AS descripcion_original,
               NULLIF(TRIM(ma.descripcion), '') AS descripcion_propia
          FROM maxi_articles ma
