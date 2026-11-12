@@ -73,10 +73,10 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
     const fotosJson = JSON.stringify(fotosArr);
     const fotoPrincipal = fotosArr[0] || null;
 
-    const VALID_RU = ['porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
+    const VALID_RU = ['porcion', 'media_porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
     const VALID_UP = ['gr', 'kg', 'ml', 'lt'];
     const ruFinal = VALID_RU.includes(rendimientoUnidad) ? rendimientoUnidad : 'porcion';
-    const aplicaPeso = ['porcion', 'u'].includes(ruFinal);
+    const aplicaPeso = ['porcion', 'media_porcion', 'u'].includes(ruFinal);
     const rpFinal = aplicaPeso && rendimientoPeso != null && Number(rendimientoPeso) > 0
       ? Number(rendimientoPeso)
       : null;
@@ -420,10 +420,10 @@ async function writeElaboradoReceta({ bizId, insumoId, uid, body, insumo }) {
     const fotosJson = JSON.stringify(fotosArr);
     const fotoPrincipal = fotosArr[0] || null;
 
-    const VALID_RU = ['porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
+    const VALID_RU = ['porcion', 'media_porcion', 'u', 'lt', 'ml', 'kg', 'gr'];
     const VALID_UP = ['gr', 'kg', 'ml', 'lt'];
     const ruFinal = VALID_RU.includes(rendimientoUnidad) ? rendimientoUnidad : 'porcion';
-    const aplicaPeso = ['porcion', 'u'].includes(ruFinal);
+    const aplicaPeso = ['porcion', 'media_porcion', 'u'].includes(ruFinal);
     const rpRaw = aplicaPeso && rendimientoPeso != null && Number(rendimientoPeso) > 0 ? Number(rendimientoPeso) : null;
     const upRaw = aplicaPeso && VALID_UP.includes(unidadPeso) ? unidadPeso : null;
     const rpFinal = (rpRaw != null && upRaw != null) ? rpRaw : null;
