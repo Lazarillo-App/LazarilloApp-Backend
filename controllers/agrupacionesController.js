@@ -90,7 +90,7 @@ const TOP20_NAME = 'Top 20';
 const normName = (s) =>
   String(s || '')
     .normalize('NFD')
-    .replace(/[\\u0300-\\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .trim();
 
