@@ -21,6 +21,9 @@ Dentro de cada esquema (nombres: ver NOMBRES; en el Drive van los originales):
         i27_mov_de_stock_detallado_por_remito_<año>, i28_mov_de_stock_resumido_por_remito_<año>
         (el 22 lleva además cod_dto y nom_dto: tipo de descuento de cada venta, solo en Render)
         i000_nomina  empleados, foto del dia (sin la columna 'clave' = contraseña de MaxiRest)
+        i06_formas_de_cobro  formas de cobro del PDV (mxfor), foto del dia. Para la
+                     conciliacion bancaria (Diego 12/11): cada local las llama distinto
+                     ("Transferencia MP", "QR-POSNET"...) y no se replican al admin.
     maestros (uno por organizacion, sin pdv)
         m6_listado_de_articulos     (con rubro, subrubro, descripcion y discontinuado)
         m0_listado_de_insumos_con_discontinuados (con rubro, cod_cga del rubro y envases)
@@ -85,6 +88,7 @@ NOMBRES = {
     'inf_27':  ('27 - MOV DE STOCK ANUAL - Detallado por remito',     'i27_mov_de_stock_detallado_por_remito'),
     'inf_28':  ('28 - MOV DE STOCK ANUAL - RESUMIDO POR REMITO',      'i28_mov_de_stock_resumido_por_remito'),
     'nomina':  ('000 - nomina',                                       'i000_nomina'),
+    'formas_cobro': ('06 - formas de cobro',                          'i06_formas_de_cobro'),
     'articulos':           ('6 - listado de articulos',                 'm6_listado_de_articulos'),
     'insumos':             ('0 - LISTADO DE INSUMOS CON DISCONTINUADOS', 'm0_listado_de_insumos_con_discontinuados'),
     'conceptos_caja':      ('17 - conceptos de caja',                   'm17_conceptos_de_caja'),
@@ -642,6 +646,29 @@ def armar_informes(B, anio, generados, log_tmp):
         out['nomina'] = [(None, d)]
     except Exception as e:
         faltas.append('nomina: %s' % e)
+    # formas de cobro del PDV (Diego 12/11, conciliacion bancaria): foto del dia.
+    # El codigo es una letra/simbolo ('*', '/', 'W'): NO pasa por leer_tsv, que
+    # descarta los codigos no numericos. Los logicos de MaxiRest (\x01/\x00) van
+    # como true/false.
+    try:
+        from genmaestros import desescapar
+        d = pd.read_csv(os.path.join(B, '06_formas_cobro.tsv'), sep='\t', dtype=str,
+                        keep_default_na=False, lineterminator='\n')
+        d.columns = [c.rstrip('\r') for c in d.columns]
+        d = d.apply(lambda col: col.map(lambda x: desescapar(x.rstrip('\r')) if isinstance(x, str) else x))
+        for c in d.columns:
+            vals = set(d[c].unique())
+            if vals and vals <= {'\x00', '\x01', ''} and vals & {'\x00', '\x01'}:
+                d[c] = d[c].map({'\x01': True, '\x00': False, '': None})
+            elif c in ('nombre',):
+                d[c] = d[c].str.strip()
+        for c in ('rinde', 'dias_acred', 'descuento'):
+            if c in d:
+                d[c] = pd.to_numeric(d[c], errors='coerce')
+        d = d[d['codigo'].astype(str).str.len() > 0]
+        out['formas_cobro'] = [(None, d)]
+    except Exception as e:
+        faltas.append('formas de cobro: %s' % e)
     return out, faltas
 
 
@@ -876,7 +903,7 @@ def _xlsx(df, ruta):
 def _vigente_informe(nombre):
     """Archivo con nombre de esta version: "<informe>_<año>" o la nomina."""
     for k, (dn, _) in NOMBRES.items():
-        if k == 'nomina':
+        if k in ('nomina', 'formas_cobro'):
             if nombre == dn:
                 return True
         elif k.startswith('inf_') and re.fullmatch(re.escape(dn) + r'_\d{4}', nombre):
