@@ -26,6 +26,9 @@ const ALLOWED_TYPES = new Set([
   // al releer la notificación guardada (backendNotifs mapea kind desde n.type).
   'articulo_create', 'articulo_delete', 'articulo_move',
   'insumo_create', 'insumo_delete', 'insumo_move',
+  // RRHH (Diego 12/11/2026: todo ABM queda en Notificaciones)
+  'rrhh_empleado_alta', 'rrhh_empleado_baja', 'rrhh_empleado_reactivar', 'rrhh_empleado_edit',
+  'rrhh_empleado_no_aplica', 'rrhh_nomina', 'rrhh_config', 'rrhh_cronograma',
 ]);
 
 function safeType(type) {
@@ -473,7 +476,15 @@ async function createUiNotification({
  * (ya la ve en su pantalla). Un solo INSERT … SELECT, sin un pedido por persona.
  * metadata.actor_user_id / actor_nombre → el panel separa «Mías» de «Del equipo».
  */
-async function avisarAlEquipo({ businessId, actorUserId = null, type, title, message = null, metadata = {} }) {
+/*
+ * Opciones (regla «todo ABM queda en Notificaciones», Diego 12/11/2026):
+ *  · incluirActor: quien hizo el cambio también lo recibe, ya LEÍDO (queda en «Mías» sin sumar
+ *    al número de la campana). Por defecto false para no duplicar lo que algunas pantallas
+ *    viejas todavía persisten desde el front (usePersistUiActions).
+ *  · clave + agruparMin: si ya hay un aviso con esa clave en los últimos N minutos, se actualiza
+ *    en vez de crear otro (ej. el autoguardado de un cronograma no llena la campana).
+ */
+async function avisarAlEquipo({ businessId, actorUserId = null, type, title, message = null, metadata = {}, incluirActor = false, clave = null, agruparMin = 30 }) {
   const bid = Number(businessId);
   if (!Number.isFinite(bid) || bid <= 0) return { created: 0 };
   const ttl = String(title || '').trim();
@@ -487,10 +498,22 @@ async function avisarAlEquipo({ businessId, actorUserId = null, type, title, mes
     );
     actorNombre = rows[0]?.n || null;
   }
-  const meta = { ...(metadata || {}), actor_user_id: actor, actor_nombre: actorNombre };
+  const meta = { ...(metadata || {}), actor_user_id: actor, actor_nombre: actorNombre, ...(clave ? { clave: String(clave) } : {}) };
+  if (clave) {
+    // mismo aviso reciente → se renueva (vuelve a no leído para el resto del equipo)
+    const up = await pool.query(
+      `UPDATE sync_notifications
+          SET title = $3, message = $4, metadata = $5::jsonb, created_at = NOW(),
+              read = CASE WHEN user_id = COALESCE($6::int, -1) THEN TRUE ELSE FALSE END
+        WHERE business_id = $1 AND metadata->>'clave' = $2
+          AND created_at > NOW() - ($7::int * INTERVAL '1 minute')`,
+      [bid, String(clave), ttl, message == null ? null : String(message), JSON.stringify(meta), actor, Number(agruparMin) || 30]
+    );
+    if (up.rowCount) return { created: 0, updated: up.rowCount };
+  }
   const { rowCount } = await pool.query(
     `INSERT INTO sync_notifications (business_id, user_id, type, title, message, metadata, created_at, read)
-     SELECT $1, uid, $2, $3, $4, $5::jsonb, NOW(), false
+     SELECT $1, uid, $2, $3, $4, $5::jsonb, NOW(), (uid = COALESCE($6::int, -1))
        FROM (
          SELECT owner_id AS uid FROM app_businesses WHERE id = $1
          UNION
@@ -500,9 +523,11 @@ async function avisarAlEquipo({ businessId, actorUserId = null, type, title, mes
           WHERE ua.revoked_at IS NULL AND ua.role IN ('admin','owner')
             AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
               OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
+         UNION
+         SELECT $6::int WHERE $7::boolean AND $6::int IS NOT NULL
        ) x
-      WHERE uid IS NOT NULL AND uid <> COALESCE($6::int, -1)`,
-    [bid, safeType(type), ttl, message == null ? null : String(message), JSON.stringify(meta), actor]
+      WHERE uid IS NOT NULL AND ($7::boolean OR uid <> COALESCE($6::int, -1))`,
+    [bid, safeType(type), ttl, message == null ? null : String(message), JSON.stringify(meta), actor, !!incluirActor]
   );
   return { created: rowCount };
 }
