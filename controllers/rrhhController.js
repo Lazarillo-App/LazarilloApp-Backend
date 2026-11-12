@@ -228,7 +228,7 @@ async function leerConfig(bizId, branchId = null) {
   const [empleados, puestos, fechas, espacios, turnos] = await Promise.all([
     pool.query(
       `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
-              to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi"
+              to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja"
        FROM rrhh_empleados WHERE business_id=$1 ORDER BY nombre, apellido`, [nominaId]
     ),
     pool.query(
@@ -607,21 +607,29 @@ async function editarEmpleado(req, res) {
   const id = asInt(req.params.id);
   if (!id) return res.status(400).json({ ok: false, error: 'id_required' });
   const b = req.body || {};
+  // Baja: fechaBaja 'YYYY-MM-DD' o vacía (= hoy en Argentina). Reactivar la borra.
+  const fechaBaja = typeof b.fechaBaja === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.fechaBaja) ? b.fechaBaja : null;
   try {
     const { rows } = await pool.query(
       `UPDATE rrhh_empleados SET
          nombre   = COALESCE($3, nombre),
          apellido = CASE WHEN $4::text IS NOT NULL THEN NULLIF($4,'') ELSE apellido END,
          sector   = CASE WHEN $5::text IS NOT NULL THEN NULLIF($5,'') ELSE sector END,
+         fecha_baja = CASE
+           WHEN $6 IS TRUE THEN NULL
+           WHEN $6 IS FALSE AND (activo OR $7::date IS NOT NULL)
+             THEN COALESCE($7::date, (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date)
+           ELSE fecha_baja END,
          activo   = COALESCE($6, activo)
        WHERE id=$1 AND business_id=$2
        RETURNING id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
-                 to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi"`,
+                 to_char(baja_maxi,'YYYY-MM-DD') AS "bajaMaxi", to_char(fecha_baja,'YYYY-MM-DD') AS "fechaBaja"`,
       [id, await nominaDe(req.businessId),
         typeof b.nombre === 'string' && b.nombre.trim() ? b.nombre.trim() : null,
         typeof b.apellido === 'string' ? b.apellido.trim() : null,
         typeof b.sector === 'string' ? b.sector : null,
-        typeof b.activo === 'boolean' ? b.activo : null]
+        typeof b.activo === 'boolean' ? b.activo : null,
+        fechaBaja]
     );
     if (!rows[0]) return res.status(404).json({ ok: false, error: 'not_found' });
     return res.json({ ok: true, empleado: rows[0] });
