@@ -55,4 +55,59 @@ async function guardarNota({ businessId, userId, body }) {
   return { ok: true, actualizadoEn: n.actualizadoEn };
 }
 
-module.exports = { listarActividad, restaurarFacturaEliminada, leerNota, guardarNota };
+// ── Tareas (to-do) del cajón de Notas: de cada usuario en cada negocio (Diego 12/11/2026). ──
+// Pendientes todas (las más viejas arriba, en el orden en que se anotaron) + las hechas de los últimos
+// 60 días: pasado eso desaparecen de la lista (Diego 12/11/2026). No se borran de la tabla.
+const fila = (t) => ({
+  id: Number(t.id), texto: t.texto,
+  creadaEn: new Date(t.creadaEn).toISOString(),
+  hechaEn: t.hechaEn ? new Date(t.hechaEn).toISOString() : null,
+});
+
+async function listarTareas({ businessId, userId }) {
+  const filas = await db.many(sql`
+    (SELECT id, texto, "creadaEn", "hechaEn" FROM gestion_tareas_usuario
+      WHERE user_id = ${userId} AND business_id = ${businessId} AND "hechaEn" IS NULL)
+    UNION ALL
+    (SELECT id, texto, "creadaEn", "hechaEn" FROM gestion_tareas_usuario
+      WHERE user_id = ${userId} AND business_id = ${businessId} AND "hechaEn" >= CURRENT_TIMESTAMP - INTERVAL '60 days'
+      ORDER BY "hechaEn" DESC LIMIT 500)`);
+  const pendientes = filas.filter((t) => !t.hechaEn).sort((a, b) => new Date(a.creadaEn) - new Date(b.creadaEn) || a.id - b.id);
+  const hechas = filas.filter((t) => t.hechaEn).sort((a, b) => new Date(b.hechaEn) - new Date(a.hechaEn));
+  return { pendientes: pendientes.map(fila), hechas: hechas.map(fila) };
+}
+
+const textoTarea = z.string().trim().min(1).max(500);
+
+async function crearTarea({ businessId, userId, body }) {
+  const b = z.object({ texto: textoTarea }).safeParse(body);
+  if (!b.success) throw rechazo('Escribí la tarea');
+  const t = await db.one(sql`
+    INSERT INTO gestion_tareas_usuario (user_id, business_id, texto) VALUES (${userId}, ${businessId}, ${b.data.texto})
+    RETURNING id, texto, "creadaEn", "hechaEn"`);
+  return fila(t);
+}
+
+// Tildar (hecha: true → fecha de baja = ahora), destildar (vuelve a pendiente) o corregir el texto.
+async function editarTarea({ businessId, userId, id, body }) {
+  const b = z.object({ hecha: z.boolean().optional(), texto: textoTarea.optional() }).safeParse(body);
+  if (!b.success || !Number.isFinite(id)) throw rechazo('Datos inválidos');
+  const { hecha, texto } = b.data;
+  const t = await db.one(sql`
+    UPDATE gestion_tareas_usuario SET
+      texto = COALESCE(${texto ?? null}::text, texto),
+      "hechaEn" = CASE WHEN ${hecha ?? null}::boolean IS NULL THEN "hechaEn"
+                       WHEN ${hecha ?? null}::boolean THEN COALESCE("hechaEn", CURRENT_TIMESTAMP) ELSE NULL END
+    WHERE id = ${id} AND user_id = ${userId} AND business_id = ${businessId}
+    RETURNING id, texto, "creadaEn", "hechaEn"`);
+  if (!t) throw rechazo('La tarea no existe', 404);
+  return fila(t);
+}
+
+async function borrarTarea({ businessId, userId, id }) {
+  if (!Number.isFinite(id)) throw rechazo('Datos inválidos');
+  await db.one(sql`DELETE FROM gestion_tareas_usuario WHERE id = ${id} AND user_id = ${userId} AND business_id = ${businessId} RETURNING id`);
+  return { ok: true };
+}
+
+module.exports = { listarActividad, restaurarFacturaEliminada, leerNota, guardarNota, listarTareas, crearTarea, editarTarea, borrarTarea };

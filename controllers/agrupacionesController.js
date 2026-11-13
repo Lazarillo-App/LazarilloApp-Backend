@@ -1,5 +1,6 @@
 // controllers/agrupacionesController.js
 const pool = require('../config/db');
+const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
 const { invalidateCacheForBiz } = require('../middleware/cacheJson');
 
 /* ========================= Helpers ========================= */
@@ -90,7 +91,7 @@ const TOP20_NAME = 'Top 20';
 const normName = (s) =>
   String(s || '')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .trim();
 
@@ -708,6 +709,22 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
     );
 
     invalidateCacheForBiz(businessId);
+    // Discontinuar = mover a Discontinuados: avisar al equipo de gestión (Diego 12/11/2026).
+    if (isDiscontinuadosName(agNombre)) {
+      const yaEstaban = new Set(base.map((a) => Number(a?.id)));
+      const nuevos = incoming.filter((a) => !yaEstaban.has(Number(a?.id)));
+      if (nuevos.length) {
+        const nombres = nuevos.map((a) => String(a?.nombre || '').trim()).filter(Boolean);
+        avisarAlEquipoSinEsperar({
+          businessId: requestBusinessId, actorUserId: req.user?.id, type: 'discontinue',
+          title: nuevos.length === 1
+            ? `${nombres[0] || `Artículo #${nuevos[0].id}`} discontinuado`
+            : `${nuevos.length} artículos discontinuados`,
+          message: nuevos.length > 1 && nombres.length ? nombres.slice(0, 5).join(', ') + (nombres.length > 5 ? '…' : '') : null,
+          metadata: { kind: 'discontinue', scope: 'articulo', ids: nuevos.map((a) => Number(a.id)) },
+        });
+      }
+    }
     return res.json(rows[0]);
   } catch (e) {
     console.error('agregarArticulosAgrupacion error:', {
@@ -1482,9 +1499,18 @@ exports.moveItemsBetweenGroups = async (req, res) => {
     // Si viene subrubro nuevo: reescribir fuente de verdad + copia desnormalizada
     if (nuevoSubrubro) {
       // maxi_articles.subrubro = "Rubro" UI (fuente de verdad, respetada por el sync)
+      // Solo en los negocios de ESTA organización: el mismo número de artículo en otro
+      // negocio es otro artículo (antes pisaba también el de otras cuentas — Diego 12/11).
       await client.query(
-        `UPDATE maxi_articles SET subrubro = $1 WHERE articulo_id = ANY($2::int[])`,
-        [nuevoSubrubro, ids]
+        `UPDATE maxi_articles SET subrubro = $1
+          WHERE articulo_id = ANY($2::int[])
+            AND business_id IN (
+              SELECT b.id FROM app_businesses b
+               WHERE b.id = ANY($3::int[])
+                  OR (b.organization_id IS NOT NULL AND b.organization_id IN (
+                        SELECT organization_id FROM app_businesses WHERE id = ANY($3::int[])))
+            )`,
+        [nuevoSubrubro, ids, [businessId, fromBizId, toBizId].map(Number)]
       );
       // agrupacion_articulos.subrubro (copia desnormalizada) para el destino
       await client.query(

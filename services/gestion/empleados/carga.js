@@ -49,6 +49,7 @@ const cargaEmpleadoSchema = z.discriminatedUnion("tipo", [
     fechaPago: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     importe: z.number().positive().max(1e12),
     medio: z.string().trim().min(1).max(40),
+    observacion: z.string().trim().max(200).nullish(), // Diego 12/11/2026: motivo del adelanto
     reparto: repartoSchema.nullish(),
     forzar: z.boolean().optional(),
   }),

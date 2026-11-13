@@ -736,7 +736,9 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
           AND COALESCE(c."fechaManual", c.fecha) >= CURRENT_DATE - 365
           AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NOT NULL)
       SELECT p, TRIM(k) AS k, percentile_cont(0.5) WITHIN GROUP (ORDER BY imp)::float8 AS mediana, COUNT(*)::int AS n
-      FROM h WHERE rn <= 6 GROUP BY p, k HAVING COUNT(*) >= 2`),
+      -- Solo conceptos ESTABLES (Diego 12/11/2026): 3 cargas o más y la mayor no pasa el doble de la
+      -- menor. Si el concepto tiene altibajos abruptos no hay un «habitual» y no se sugiere nada.
+      FROM h WHERE rn <= 6 GROUP BY p, k HAVING COUNT(*) >= 3 AND MAX(imp) <= 2 * MIN(imp)`),
     // Insumos creados en Lazarillo (Recetas o «Crear insumo» desde la carga, códigos L1, L2…): el mismo
     // maestro que Recetas, así un insumo nuevo no se duplica (Diego 05/11/2026).
     db.many(sql`
@@ -865,7 +867,8 @@ async function historialConcepto({ businessId, sp }) {
            MAX(TRIM(COALESCE(c.proveedor, ''))) AS proveedor,
            MAX(TRIM(COALESCE(c."cajaPago", ''))) AS medio,
            SUM(COALESCE(c."importeManual", c.importe))::float8 AS importe,
-           COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo
+           COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo,
+           MIN(c."rowId") AS "rowId" -- para eliminarla desde «Últimas cargas» (Diego 12/11/2026)
     FROM gestion_compras c
     WHERE c.business_id = ${businessId} AND c.branch_id IS NOT DISTINCT FROM ${lugar.branchId}::bigint
       AND TRIM(COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")) = ${cod}
@@ -1124,6 +1127,14 @@ async function borrarConcepto({ organizationId, codigo: crudo }) {
 
 // ── Medios de pago (del negocio) ───────────────────────────────────────────────
 async function obtenerMedios({ businessId }) {
+  // «Descuento» viene en todos los negocios (Diego 12/11/2026): si falta, se agrega una sola vez.
+  // Si ya hay uno con ese nombre (de cualquier tipo) no se toca.
+  await db.execute(sql`
+    INSERT INTO gestion_medios_pago (business_id, nombre, tipo, "pideId", activo, orden)
+    SELECT ${businessId}, 'Descuento', 'descuento', false, true, COALESCE(MAX(orden), 0) + 1
+      FROM gestion_medios_pago WHERE business_id = ${businessId}
+    HAVING NOT bool_or(tipo = 'descuento' OR lower(trim(nombre)) = 'descuento') OR COUNT(*) = 0
+    ON CONFLICT (business_id, nombre) DO NOTHING`);
   const [medios, usos] = await Promise.all([
     db.many(sql`SELECT id, nombre, tipo, "pideId", activo, orden FROM gestion_medios_pago WHERE business_id = ${businessId} ORDER BY orden, nombre`),
     db.many(sql`
@@ -1172,8 +1183,9 @@ async function editarMedio({ businessId, id, body }) {
 
 // Solo si ningún pago lo usa; si tiene pagos, se desactiva.
 async function borrarMedio({ businessId, id }) {
-  const actual = await db.one(sql`SELECT nombre FROM gestion_medios_pago WHERE business_id = ${businessId} AND id = ${id}`);
+  const actual = await db.one(sql`SELECT nombre, tipo FROM gestion_medios_pago WHERE business_id = ${businessId} AND id = ${id}`);
   if (!actual) throw rechazo('Ese medio ya no existe.', 404);
+  if (actual.tipo === 'descuento') throw rechazo('Descuento viene fijo en todos los negocios: si no lo usás, desactivalo.', 409);
   const u = await db.one(sql`
     SELECT (SELECT COUNT(*)::int FROM gestion_pagos_proveedor WHERE business_id = ${businessId} AND medio = ${actual.nombre})
          + (SELECT COUNT(*)::int FROM gestion_pagos_internos WHERE origen_business_id = ${businessId} AND medio = ${actual.nombre}) AS n`);

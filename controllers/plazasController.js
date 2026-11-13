@@ -6,7 +6,7 @@
 // El color es por insumo y vale en todas las plazas del negocio.
 //   Ver: dueño/admin todas; Staff las de sus sectores.
 //   Armar la ficha (orden, ojito, extras, colores): dueño/admin y el jefe del sector.
-//   Crear/editar/borrar plazas y sus productos: dueño/admin.
+//   Crear/editar/borrar plazas y sus productos: dueño/admin en todos los sectores; el jefe en los que conduce.
 'use strict';
 
 const pool = require('../config/db');
@@ -68,6 +68,17 @@ async function puedeVer(req, plaza) {
   if (req.businessRole !== 'staff') return false;
   return (await sectoresDelStaff(req.user?.id, plaza.business_id)).includes(Number(plaza.sector_id));
 }
+// Sectores donde se pueden crear / editar / borrar plazas (Diego 12/11/2026: «del jefe de cocina
+// para arriba»): dueño/admin todos los del negocio; el jefe, los sectores que conduce.
+async function sectoresGestionables(req, bizId) {
+  if (esGestor(req)) {
+    const { rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]);
+    return rows.map((r) => Number(r.id));
+  }
+  if (req.businessRole !== 'staff') return [];
+  return sectoresQueConduce(req.user?.id, bizId);
+}
+
 async function puedeArmar(req, plaza) {
   if (esGestor(req)) return true;
   if (req.businessRole !== 'staff') return false;
@@ -117,24 +128,53 @@ exports.list = async (req, res, next) => {
         WHERE p.business_id = $1 AND p.deleted_at IS NULL ${filtro}
         GROUP BY p.id, s.nombre
         ORDER BY s.nombre, p.orden, p.nombre`, params);
-    res.json({ ok: true, plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos })) });
+    const gestionables = await sectoresGestionables(req, bizId);
+    const { rows: secs } = gestionables.length ? await pool.query(
+      'SELECT id, nombre FROM sectores WHERE business_id = $1 AND id = ANY($2::int[]) ORDER BY nombre', [bizId, gestionables]) : { rows: [] };
+    res.json({ ok: true,
+      plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos,
+        puedeEditar: gestionables.includes(Number(r.sector_id)) })),
+      puedeCrear: secs.length > 0, sectores: secs.map((x) => ({ id: x.id, nombre: x.nombre })) });
   } catch (e) { next(e); }
 };
 
-/** GET /businesses/:businessId/plazas/articulos?q= — artículos con receta para elegir. */
+/** GET /businesses/:businessId/plazas/articulos?q= — artículos con receta para elegir.
+ * Diego 12/11/2026: ordenados por ventas (últimos 90 días, de mayor a menor), con su rubro y subrubro
+ * (para agruparlos) y las agrupaciones donde están (para filtrar). Los discontinuados no se ofrecen.
+ * Una sola consulta: ~11 ms con 597 artículos (EXPLAIN ANALYZE, negocio 147). */
+const NO_FILTRO = ['todo', 'sin agrupacion', 'sin agrupación', 'sin agrupar', 'sin grupo', 'discontinuados', 'descontinuados', 'top 20'];
 exports.articulos = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const bizId = num(req.businessId);
+    if (!(await sectoresGestionables(req, bizId)).length) return res.status(403).json({ ok: false, error: 'forbidden' });
     const q = String(req.query.q || '').trim();
     const { rows } = await pool.query(
-      `SELECT DISTINCT ON (r.article_id) r.article_id AS id, COALESCE(ma.nombre, r.nombre) AS nombre
-         FROM recetas r LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
-        WHERE r.business_id = $1 AND r.article_id IS NOT NULL AND COALESCE(r.active, TRUE)
-          AND ($2 = '' OR COALESCE(ma.nombre, r.nombre) ILIKE '%' || $2 || '%')
-        ORDER BY r.article_id LIMIT 400`, [bizId, q]);
-    rows.sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
-    res.json({ ok: true, articulos: rows });
+      `WITH base AS (
+         SELECT DISTINCT ON (r.article_id) r.article_id AS id, COALESCE(ma.nombre, r.nombre) AS nombre,
+                NULLIF(TRIM(ma.subrubro), '') AS rubro, NULLIF(TRIM(ma.categoria), '') AS subrubro
+           FROM recetas r LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
+          WHERE r.business_id = $1 AND r.article_id IS NOT NULL AND COALESCE(r.active, TRUE)
+            AND ($2 = '' OR COALESCE(ma.nombre, r.nombre) ILIKE '%' || $2 || '%')
+          ORDER BY r.article_id),
+       v AS (SELECT s.article_id, SUM(s.qty)::float8 AS qty FROM sales_daily_items s
+              WHERE s.business_id = $1 AND s.day >= CURRENT_DATE - 90 GROUP BY s.article_id),
+       g AS (SELECT (e->>'id')::int AS articulo_id, array_agg(DISTINCT a.id) AS agrup,
+                    bool_or(LOWER(TRIM(a.nombre)) IN ('discontinuados', 'descontinuados')) AS disc
+               FROM agrupaciones a
+               CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(a.articulos) = 'array' THEN a.articulos ELSE '[]'::jsonb END) e
+              WHERE a.business_id = $1 AND NOT COALESCE(a.is_temporary, FALSE) AND (e->>'id') ~ '^-?[0-9]+$'
+              GROUP BY 1)
+       SELECT b.id, b.nombre, b.rubro, b.subrubro, COALESCE(v.qty, 0) AS ventas, COALESCE(g.agrup, '{}') AS agrupaciones
+         FROM base b LEFT JOIN v ON v.article_id = b.id LEFT JOIN g ON g.articulo_id = b.id
+        WHERE NOT COALESCE(g.disc, FALSE)
+        ORDER BY ventas DESC, b.nombre`, [bizId, q]);
+    const { rows: grupos } = await pool.query(
+      `SELECT id, nombre FROM agrupaciones
+        WHERE business_id = $1 AND NOT COALESCE(is_temporary, FALSE)
+          AND jsonb_typeof(articulos) = 'array' AND jsonb_array_length(articulos) > 0
+          AND LOWER(TRIM(nombre)) <> ALL($2::text[])
+        ORDER BY nombre`, [bizId, NO_FILTRO]);
+    res.json({ ok: true, articulos: rows.map((r) => ({ ...r, ventas: Number(r.ventas) || 0 })), agrupaciones: grupos });
   } catch (e) { next(e); }
 };
 
@@ -174,9 +214,9 @@ async function congelarOrden(plazaId) {
 /** POST /businesses/:businessId/plazas  { sectorId, nombre, articleIds } */
 exports.create = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const bizId = num(req.businessId);
     const sectorId = num(req.body?.sectorId);
+    if (!(await sectoresGestionables(req, bizId)).includes(sectorId)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const nombre = String(req.body?.nombre || '').trim().slice(0, 60);
     if (!sectorId || !nombre) return res.status(400).json({ ok: false, error: 'datos_incompletos' });
     const { rows: sec } = await pool.query('SELECT 1 FROM sectores WHERE id = $1 AND business_id = $2', [sectorId, bizId]);
@@ -191,10 +231,10 @@ exports.create = async (req, res, next) => {
 /** PUT /businesses/:businessId/plazas/:id  { nombre, articleIds } */
 exports.update = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
     const bizId = num(req.businessId);
     const plaza = await cargarPlaza(num(req.params.id), bizId);
     if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await sectoresGestionables(req, bizId)).includes(Number(plaza.sector_id))) return res.status(403).json({ ok: false, error: 'forbidden' });
     const nombre = String(req.body?.nombre || plaza.nombre).trim().slice(0, 60);
     await pool.query('UPDATE plazas SET nombre = $1, updated_at = NOW() WHERE id = $2', [nombre, plaza.id]);
     if (Array.isArray(req.body?.articleIds)) await guardarProductos(plaza.id, req.body.articleIds);
@@ -205,7 +245,10 @@ exports.update = async (req, res, next) => {
 /** DELETE /businesses/:businessId/plazas/:id */
 exports.remove = async (req, res, next) => {
   try {
-    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const bizId = num(req.businessId);
+    const plaza = await cargarPlaza(num(req.params.id), bizId);
+    if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await sectoresGestionables(req, bizId)).includes(Number(plaza.sector_id))) return res.status(403).json({ ok: false, error: 'forbidden' });
     const { rowCount } = await pool.query(
       'UPDATE plazas SET deleted_at = NOW() WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL',
       [num(req.params.id), num(req.businessId)]);
@@ -232,7 +275,7 @@ exports.vista = async (req, res, next) => {
         ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, num(req.query.articleId) || null]);
     const ids = prods.map((p) => p.article_id);
     const { rows: items } = ids.length ? await pool.query(
-      `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones,
+      `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones, ri.secreto,
               COALESCE(i.nombre, ri.nombre_insumo_maxi, ma2.nombre, 'Ingrediente') AS nombre
          FROM recetas r
          JOIN receta_items ri ON ri.receta_id = r.id
@@ -274,7 +317,9 @@ exports.vista = async (req, res, next) => {
           alias: aliasDe.get(ref) || '',
           editable: !!it.insumo_id,
           unidades: it.insumo_id ? unidadesDe(it.unidad, eqsDe.get(it.insumo_id)) : [],
-          oculto: ocultos.has(key), extra: false,
+          // Oculto = el «Oculto» del renglón en su receta (Diego 12/11/2026: el tablero es un atajo
+          // visual de la receta). Los ocultos viejos de la ficha solo quedan para renglones sin insumo.
+          oculto: it.secreto === true || (!it.insumo_id && !it.article_ref_id && ocultos.has(key)), extra: false,
         };
       });
       const extras = (Array.isArray(layout.extras) ? layout.extras : []).map((x) => ({
@@ -409,6 +454,33 @@ exports.editarItem = async (req, res, next) => {
   }
 };
 
+/** PUT /businesses/:businessId/plazas/:id/ocultar  { ref, oculto }
+ *  Ojito del tablero (Diego 12/11/2026): ocultar un ingrediente lo oculta en TODAS las recetas de la
+ *  organización que lo usan, y queda guardado en cada receta como ingrediente oculto (receta_items.secreto,
+ *  el mismo que respeta la Vista Cocina). Solo cambia la vista: el costo no se toca. */
+exports.ocultar = async (req, res, next) => {
+  try {
+    const bizId = num(req.businessId);
+    const plaza = await cargarPlaza(num(req.params.id), bizId);
+    if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await puedeArmar(req, plaza))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const m = String(req.body?.ref || '').match(/^([ia]):(-?\d+)$/);
+    if (!m) return res.status(400).json({ ok: false, error: 'ref_invalida' });
+    const oculto = req.body?.oculto === true;
+    const col = m[1] === 'i' ? 'insumo_id' : 'article_ref_id';
+    const { rowCount } = await pool.query(
+      `UPDATE receta_items ri SET secreto = $1, updated_at = NOW()
+         FROM recetas r
+        WHERE ri.receta_id = r.id AND r.active = TRUE AND ri.${col} = $2
+          AND r.business_id IN (SELECT id FROM app_businesses
+                                 WHERE organization_id = (SELECT organization_id FROM app_businesses WHERE id = $3)
+                                 UNION SELECT $3::int)
+          AND COALESCE(ri.secreto, FALSE) <> $1`,
+      [oculto, Number(m[2]), bizId]);
+    res.json({ ok: true, renglones: rowCount });
+  } catch (e) { next(e); }
+};
+
 /** PUT /businesses/:businessId/plazas/:id/fichas/:articleId  { orden, ocultos, extras } */
 exports.guardarFicha = async (req, res, next) => {
   try {
@@ -430,7 +502,7 @@ exports.guardarFicha = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/** PUT /businesses/:businessId/plazas/colores  { ref, color?, mostrar?, alias? } — color, qué mostrar (peso | obs) y alias de un ingrediente, en todas las plazas. */
+/** PUT /businesses/:businessId/plazas/colores  { ref, color?, mostrar?, alias? } — color, qué mostrar (peso | obs | ambos) y alias de un ingrediente, en todas las plazas. */
 exports.guardarColor = async (req, res, next) => {
   try {
     const bizId = num(req.businessId);
@@ -442,7 +514,8 @@ exports.guardarColor = async (req, res, next) => {
     const tocaAlias = req.body?.alias !== undefined && req.body?.alias !== null;
     const alias = tocaAlias ? String(req.body.alias).trim().slice(0, 60) : null;
     const colorOk = color == null || (color >= 0 && color < PALETA_N);
-    const mostrarOk = mostrar == null || ['peso', 'obs'].includes(mostrar);
+    // 'ambos' = peso y, en otro renglón, la observación (Diego 12/11/2026).
+    const mostrarOk = mostrar == null || ['peso', 'obs', 'ambos'].includes(mostrar);
     if (!ref || (color == null && mostrar == null && !tocaAlias) || !colorOk || !mostrarOk) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
     if (!esGestor(req)) {
       const conduce = await sectoresQueConduce(req.user?.id, bizId);

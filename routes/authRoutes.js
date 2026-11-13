@@ -14,6 +14,7 @@ router.post('/accept-invitation', team.acceptInvitation);
 // Protegido
 router.get('/me',  authRequired, authCtrl.me);
 router.put('/me',  authRequired, authCtrl.updateMe);
+router.put('/me/email', authRequired, authCtrl.changeEmail);
 router.put('/change-password', authRequired, authCtrl.changePassword);
 
 // Opcionales

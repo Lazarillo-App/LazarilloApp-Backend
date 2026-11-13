@@ -33,7 +33,8 @@ router.post('/propagate', async (req, res, next) => {
     // Leer receta + items guardados
     const { rows } = await pool.query(
       `SELECT r.id, r.nombre, r.porciones, r.porcentaje_venta, r.costo_total,
-              r.notas, r.foto, r.notas_updated_at,
+              r.notas, r.foto, r.notas_updated_at, r.fotos,
+              r.rendimiento_unidad, r.rendimiento_peso, r.unidad_peso,
               COALESCE(
                 json_agg(
                   json_build_object(
@@ -46,7 +47,11 @@ router.post('/propagate', async (req, res, next) => {
                     'merma', ri.merma,
                     'pedido', ri.pedido,
                     'tipo_costo', ri.tipo_costo,
-                    'orden', ri.orden
+                    'orden', ri.orden,
+                    'article_ref_id', ri.article_ref_id,
+                    'merma_id', ri.merma_id,
+                    'merma_ids', ri.merma_ids,
+                    'secreto', ri.secreto
                   ) ORDER BY ri.orden
                 ) FILTER (WHERE ri.id IS NOT NULL),
                 '[]'

@@ -68,6 +68,7 @@ const plazasRoutes = require('./routes/plazasRoutes');
 const branchAccessRoutes = require('./routes/branchAccessRoutes');
 const accessRequestsByIdRoutes = require('./routes/accessRequestsByIdRoutes');
 const publicAccessRoutes = require('./routes/publicAccessRoutes');
+const publicDemoRoutes = require('./routes/publicDemoRoutes');
 const recetaProposalsRoutes = require('./routes/recetaProposalsRoutes');
 const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
@@ -165,6 +166,8 @@ app.use('/api/access', accessRoutes);
 
 /* ── Vista Operación: alta por QR — pública, sin auth ── */
 app.use('/api/public/access', publicAccessRoutes);
+// Pedido de demo de la landing (sin auth).
+app.use('/api/public/demo', publicDemoRoutes);
 
 /* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
 app.use('/api/cron', adminCronRoutes);
@@ -303,6 +306,7 @@ const PORT = process.env.PORT || 4000;
     require('./services/tareasUnicas/costosPorLocal').programar();
     // Costo de las promos = costo de la receta de sus artículos, no su precio de venta. 11/11/2026.
     require('./services/tareasUnicas/costoPromosComponentes').programar();
+    require('./services/tareasUnicas/promosDuplicadas').programar();
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);

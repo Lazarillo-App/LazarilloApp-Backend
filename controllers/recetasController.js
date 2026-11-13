@@ -6,6 +6,17 @@ const { listObservaciones, addObservacion, editObservacion, deleteObservacion } 
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { snapshotReceta, createOrUpdateProposal, propuestaAbiertaDe, resolverMarcasDeRevision } = require('../services/recetaProposals');
 const { writeArticleReceta } = require('../services/recetaWrite');
+const { autoVincularReceta } = require('../services/recetaAutoVinculo');
+const { avisarAbm } = require('../services/notificationService');
+
+// nombre para el aviso: el de la receta o, si no tiene, el del artículo
+async function nombreArticulo(bizId, articleId, fallback) {
+  if (fallback) return fallback;
+  const { rows } = await pool.query(
+    `SELECT nombre FROM maxi_articles WHERE business_id = $1 AND articulo_id = $2 LIMIT 1`, [bizId, articleId]
+  ).catch(() => ({ rows: [] }));
+  return rows[0]?.nombre || `Artículo ${articleId}`;
+}
 
 async function resolveRecetaId(articleId, bizId) {
   const { rows } = await pool.query(
@@ -196,9 +207,22 @@ exports.saveReceta = async (req, res, next) => {
     // aprobación aparte ni bloqueando volver a marcarla más adelante.
     resolverMarcasDeRevision({ bizId, articleId, uid }).catch(() => {});
 
+    // Receta idéntica a la de otros artículos → quedan vinculados solos (Diego 12/11).
+    const autoVinculo = await autoVincularReceta(bizId, articleId).catch(() => null);
+
+    // el modal autoguarda: un aviso por persona y receta cada 30 min (se renueva)
+    const nomArt = await nombreArticulo(bizId, articleId, receta?.nombre);
+    avisarAbm(req, {
+      businessId: bizId, type: 'receta_save', title: `Receta guardada: ${nomArt}`,
+      message: `${(savedItems || []).length} ${(savedItems || []).length === 1 ? 'insumo' : 'insumos'}`,
+      metadata: { scope: 'articulo', ids: [articleId] },
+      clave: `receta:a:${bizId}:${articleId}:${uid || 0}`,
+    });
+
     return res.json({
       ok: true,
       receta: { ...receta, ...recetaCostos, items: savedItems },
+      autoVinculo,
     });
   } catch (e) {
     console.error('[saveReceta]', e);
@@ -221,7 +245,7 @@ exports.deleteReceta = async (req, res, next) => {
       `UPDATE recetas
           SET active = FALSE, updated_at = NOW()
         WHERE article_id = $1 AND business_id = $2 AND active = TRUE
-        RETURNING id`,
+        RETURNING id, nombre`,
       [articleId, bizId]
     );
 
@@ -244,6 +268,11 @@ exports.deleteReceta = async (req, res, next) => {
     );
 
     console.log(`🗑️ [deleteReceta] Receta ID=${rows[0].id} desactivada`);
+    avisarAbm(req, {
+      businessId: bizId, type: 'receta_delete',
+      title: `Receta borrada: ${await nombreArticulo(bizId, articleId, rows[0].nombre)}`,
+      metadata: { scope: 'articulo', ids: [articleId] },
+    });
 
     await logAudit(null, {
       userId: uid, businessId: bizId,

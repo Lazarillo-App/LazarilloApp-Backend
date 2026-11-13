@@ -10,6 +10,8 @@ const TIPOS_MEDIO = [
   { valor: "caja", etiqueta: "Caja" },
   { valor: "banco", etiqueta: "Banco" },
   { valor: "tarjeta", etiqueta: "Tarjeta" },
+  // Descuento (Diego 12/11/2026): salda deuda sin mover plata. Viene en todos los negocios.
+  { valor: "descuento", etiqueta: "Descuento" },
   { valor: "otro", etiqueta: "Otro" },
 ];
 
@@ -17,7 +19,7 @@ const etiquetaTipoMedio = (t) => TIPOS_MEDIO.find((x) => x.valor === t)?.etiquet
 
 const medioSchema = z.object({
   nombre: z.string().trim().min(1, "Poné un nombre").max(40),
-  tipo: z.enum(["caja", "banco", "tarjeta", "otro"]),
+  tipo: z.enum(["caja", "banco", "tarjeta", "descuento", "otro"]),
   pideId: z.boolean(),
   activo: z.boolean().optional(),
 });

@@ -1,31 +1,8 @@
 -- db/migrations/live/023_sync_notifications_add_sales_import_overlap.sql
--- ✅ Debe ser SUPERSET de todo lo que ya existe en prod
-
--- (opcional pero recomendado) normalizar filas “fuera de lista”
-UPDATE sync_notifications
-SET type = 'error'
-WHERE type IS NULL
-   OR type NOT IN (
-     'sync_insumos',
-     'sync_articles',
-     'sync_sales',
-     'auto_assign',
-     'sales_import_overlap',
-     'ui_action',
-     'error'
-   );
-
+-- Neutralizada el 12/11/2026. Esta migración corre en CADA arranque: pasaba a 'error' todo aviso
+-- con un tipo fuera de su lista (discontinuar, mover, agrupaciones…) y volvía a poner un CHECK
+-- que rechazaba los tipos nuevos (altas/bajas de artículos e insumos, RRHH, Recetas), así que
+-- esos avisos nunca se guardaban. Los tipos válidos ahora los controla el código
+-- (ALLOWED_TYPES en services/notificationService.js). Ver 102_sync_notifications_sin_check.sql.
 ALTER TABLE sync_notifications
   DROP CONSTRAINT IF EXISTS sync_notifications_type_check;
-
-ALTER TABLE sync_notifications
-  ADD CONSTRAINT sync_notifications_type_check
-  CHECK (type IN (
-    'sync_insumos',
-    'sync_articles',
-    'sync_sales',
-    'auto_assign',
-    'sales_import_overlap',
-    'ui_action',
-    'error'
-  ));

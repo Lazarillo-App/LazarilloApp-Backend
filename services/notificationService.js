@@ -26,6 +26,16 @@ const ALLOWED_TYPES = new Set([
   // al releer la notificación guardada (backendNotifs mapea kind desde n.type).
   'articulo_create', 'articulo_delete', 'articulo_move',
   'insumo_create', 'insumo_delete', 'insumo_move',
+  // RRHH (Diego 12/11/2026: todo ABM queda en Notificaciones)
+  'rrhh_empleado_alta', 'rrhh_empleado_baja', 'rrhh_empleado_reactivar', 'rrhh_empleado_edit',
+  'rrhh_empleado_no_aplica', 'rrhh_nomina', 'rrhh_config', 'rrhh_cronograma',
+  // Recetas (misma regla)
+  'receta_save', 'receta_delete', 'receta_bulk', 'receta_import', 'insumo_elaborado',
+  // Insumos (misma regla)
+  'insumo_edit', 'insumo_group', 'insumo_rubro', 'insumo_merma', 'insumo_equivalencia',
+  'insumo_bonificacion', 'insumo_uso', 'insumo_import', 'insumo_reemplazo',
+  // Usuarios (Diego 12/11/2026)
+  'usuario_email',
 ]);
 
 function safeType(type) {
@@ -463,7 +473,94 @@ async function createUiNotification({
 };
 
 
+/**
+ * Aviso al equipo de gestión de un negocio cuando alguien crea, borra o discontinúa un
+ * artículo o insumo (Diego 12/11/2026: «un usuario creó el artículo y no aparece en
+ * notificaciones»). Antes estas acciones solo se avisaban en la sesión de quien las hacía.
+ *
+ * Destinatarios: dueño del negocio + owner/admin asignados al negocio o a su organización
+ * (user_assignments) + owner/manager de app_memberships. No le llega a quien hizo la acción
+ * (ya la ve en su pantalla). Un solo INSERT … SELECT, sin un pedido por persona.
+ * metadata.actor_user_id / actor_nombre → el panel separa «Mías» de «Del equipo».
+ */
+/*
+ * Opciones (regla «todo ABM queda en Notificaciones», Diego 12/11/2026):
+ *  · incluirActor: quien hizo el cambio también lo recibe, ya LEÍDO (queda en «Mías» sin sumar
+ *    al número de la campana). Por defecto false para no duplicar lo que algunas pantallas
+ *    viejas todavía persisten desde el front (usePersistUiActions).
+ *  · clave + agruparMin: si ya hay un aviso con esa clave en los últimos N minutos, se actualiza
+ *    en vez de crear otro (ej. el autoguardado de un cronograma no llena la campana).
+ */
+async function avisarAlEquipo({ businessId, actorUserId = null, type, title, message = null, metadata = {}, incluirActor = false, clave = null, agruparMin = 30 }) {
+  const bid = Number(businessId);
+  if (!Number.isFinite(bid) || bid <= 0) return { created: 0 };
+  const ttl = String(title || '').trim();
+  if (!ttl) return { created: 0 };
+  const actor = Number(actorUserId) || null;
+  let actorNombre = null;
+  if (actor) {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), split_part(email, '@', 1)) AS n FROM app_users WHERE id = $1`,
+      [actor]
+    );
+    actorNombre = rows[0]?.n || null;
+  }
+  const meta = { ...(metadata || {}), actor_user_id: actor, actor_nombre: actorNombre, ...(clave ? { clave: String(clave) } : {}) };
+  if (clave) {
+    // mismo aviso reciente → se renueva (vuelve a no leído para el resto del equipo)
+    const up = await pool.query(
+      `UPDATE sync_notifications
+          SET title = $3, message = $4, metadata = $5::jsonb, created_at = NOW(),
+              read = CASE WHEN user_id = COALESCE($6::int, -1) THEN TRUE ELSE FALSE END
+        WHERE business_id = $1 AND metadata->>'clave' = $2
+          AND created_at > NOW() - ($7::int * INTERVAL '1 minute')`,
+      [bid, String(clave), ttl, message == null ? null : String(message), JSON.stringify(meta), actor, Number(agruparMin) || 30]
+    );
+    if (up.rowCount) return { created: 0, updated: up.rowCount };
+  }
+  const { rowCount } = await pool.query(
+    `INSERT INTO sync_notifications (business_id, user_id, type, title, message, metadata, created_at, read)
+     SELECT $1, uid, $2, $3, $4, $5::jsonb, NOW(), (uid = COALESCE($6::int, -1))
+       FROM (
+         SELECT owner_id AS uid FROM app_businesses WHERE id = $1
+         UNION
+         SELECT m.user_id FROM app_memberships m WHERE m.business_id = $1 AND m.role IN ('owner','manager')
+         UNION
+         SELECT ua.user_id FROM user_assignments ua
+          WHERE ua.revoked_at IS NULL AND ua.role IN ('admin','owner')
+            AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
+              OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
+         UNION
+         SELECT $6::int WHERE $7::boolean AND $6::int IS NOT NULL
+       ) x
+      WHERE uid IS NOT NULL AND ($7::boolean OR uid <> COALESCE($6::int, -1))`,
+    [bid, safeType(type), ttl, message == null ? null : String(message), JSON.stringify(meta), actor, !!incluirActor]
+  );
+  return { created: rowCount };
+}
+
+/**
+ * Atajo para los endpoints de ABM (regla «todo ABM queda en Notificaciones», 12/11/2026):
+ * toma negocio y autor del request; el autor lo recibe ya leído («Mías»).
+ */
+function avisarAbm(req, { businessId, type, title, message = null, metadata = {}, clave = null, agruparMin = 30 }) {
+  const bid = Number(businessId ?? req?.businessId ?? req?.params?.businessId);
+  const actor = Number(req?.user?.id) || null;
+  avisarAlEquipoSinEsperar({
+    businessId: bid, actorUserId: actor, type, title, message,
+    metadata: { kind: type, ...metadata }, incluirActor: !!actor, clave, agruparMin,
+  });
+}
+
+/** Igual que avisarAlEquipo pero sin bloquear la respuesta ni romperla si falla. */
+function avisarAlEquipoSinEsperar(args) {
+  avisarAlEquipo(args).catch((e) => console.error('[avisarAlEquipo]', args?.type, e?.message));
+}
+
 module.exports = {
+  avisarAlEquipo,
+  avisarAlEquipoSinEsperar,
+  avisarAbm,
   createSyncNotification,
   createSyncNotificationForBusinessUsers,
   notifySalesImportOverlap,
