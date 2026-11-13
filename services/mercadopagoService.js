@@ -12,6 +12,9 @@
 // FRONTEND_BASE_URL + FRONTEND_BASE_PATH + '/mercadopago/vuelta'; tiene que estar cargada igual en
 // la aplicación de MP, en "URLs de redireccionamiento").
 //
+// Va por SUCURSAL (14/11, usuaria): cada sucursal conecta su propia cuenta. sucursal 0 = la
+// principal, > 0 = app_branches.id. La sucursal viaja dentro del estado firmado.
+//
 // Datos: traerCobros() usa la búsqueda de pagos (/v1/payments/search) día por día y arma las
 // filas con el mismo formato que el módulo de conciliación lee del archivo "Todas las
 // transacciones" (parseBanco), así el módulo no cambia.
@@ -40,26 +43,27 @@ function configurado() {
 }
 
 // ── estado firmado (que la vuelta sea del mismo negocio y usuario que empezó) ──
-function firmarEstado(businessId, userId) {
-  return jwt.sign({ b: Number(businessId), u: Number(userId) || 0, t: 'mp' }, env().secreto, { expiresIn: '20m' });
+function firmarEstado(businessId, userId, sucursal = 0) {
+  return jwt.sign({ b: Number(businessId), u: Number(userId) || 0, s: Number(sucursal) || 0, t: 'mp' }, env().secreto, { expiresIn: '20m' });
 }
+/** { error } si no vale; { sucursal } si es del mismo negocio y usuario. */
 function verificarEstado(state, businessId, userId) {
   try {
     const p = jwt.verify(String(state || ''), env().secreto);
-    if (p.t !== 'mp') return 'estado_invalido';
-    if (Number(p.b) !== Number(businessId)) return 'otro_negocio';
-    if (Number(p.u) !== (Number(userId) || 0)) return 'otro_usuario';
-    return null;
+    if (p.t !== 'mp') return { error: 'estado_invalido' };
+    if (Number(p.b) !== Number(businessId)) return { error: 'otro_negocio' };
+    if (Number(p.u) !== (Number(userId) || 0)) return { error: 'otro_usuario' };
+    return { sucursal: Number(p.s) || 0 };
   } catch {
-    return 'estado_vencido';
+    return { error: 'estado_vencido' };
   }
 }
 
-function urlAutorizacion(businessId, userId) {
+function urlAutorizacion(businessId, userId, sucursal = 0) {
   const e = env();
   const q = new URLSearchParams({
     client_id: e.clientId, response_type: 'code', platform_id: 'mp',
-    state: firmarEstado(businessId, userId), redirect_uri: e.redirect,
+    state: firmarEstado(businessId, userId, sucursal), redirect_uri: e.redirect,
   });
   return `${AUTH}?${q.toString()}`;
 }
@@ -94,8 +98,9 @@ const venceEn = (seg) => (Number(seg) > 0 ? new Date(Date.now() + Number(seg) * 
 async function conectar(businessId, userId, code, state) {
   if (!configurado()) return { error: 'mp_sin_configurar' };
   if (!code) return { error: 'falta_code' };
-  const malEstado = verificarEstado(state, businessId, userId);
-  if (malEstado) return { error: malEstado };
+  const ve = verificarEstado(state, businessId, userId);
+  if (ve.error) return { error: ve.error };
+  const sucursal = ve.sucursal;
   let tok;
   try {
     tok = await pedirTokens({ grant_type: 'authorization_code', code: String(code), redirect_uri: env().redirect });
@@ -107,27 +112,27 @@ async function conectar(businessId, userId, code, state) {
   try { yo = await pedir(`${API}/users/me`, { token: tok.access_token }); } catch { yo = null; }
   await pool.query(
     `INSERT INTO integraciones_mercadopago
-       (business_id, mp_user_id, mp_nickname, mp_email, access_token, refresh_token, expira_at, live_mode, conectado_por, conectado_at, ultimo_sync_error, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), NULL, now())
-     ON CONFLICT (business_id) DO UPDATE SET
+       (business_id, sucursal, mp_user_id, mp_nickname, mp_email, access_token, refresh_token, expira_at, live_mode, conectado_por, conectado_at, ultimo_sync_error, updated_at)
+     VALUES ($1, $10, $2, $3, $4, $5, $6, $7, $8, $9, now(), NULL, now())
+     ON CONFLICT (business_id, sucursal) DO UPDATE SET
        mp_user_id = EXCLUDED.mp_user_id, mp_nickname = EXCLUDED.mp_nickname, mp_email = EXCLUDED.mp_email,
        access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token, expira_at = EXCLUDED.expira_at,
        live_mode = EXCLUDED.live_mode, conectado_por = EXCLUDED.conectado_por, conectado_at = now(),
        ultimo_sync_error = NULL, updated_at = now()`,
     [businessId, tok.user_id || yo?.id || null, yo?.nickname || null, yo?.email || null,
       encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null,
-      venceEn(tok.expires_in), tok.live_mode ?? null, userId || null]);
-  return { ok: true, cuenta: { user_id: tok.user_id || yo?.id || null, nickname: yo?.nickname || null, email: yo?.email || null } };
+      venceEn(tok.expires_in), tok.live_mode ?? null, userId || null, sucursal]);
+  return { ok: true, sucursal, cuenta: { user_id: tok.user_id || yo?.id || null, nickname: yo?.nickname || null, email: yo?.email || null } };
 }
 
-async function fila(businessId) {
-  const { rows } = await pool.query('SELECT * FROM integraciones_mercadopago WHERE business_id = $1', [businessId]);
+async function fila(businessId, sucursal = 0) {
+  const { rows } = await pool.query('SELECT * FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2', [businessId, sucursal]);
   return rows[0] || null;
 }
 
 /** Lo que ve la pantalla (nunca los tokens). */
-async function estado(businessId) {
-  const f = await fila(businessId);
+async function estado(businessId, sucursal = 0) {
+  const f = await fila(businessId, sucursal);
   return {
     configurado: configurado(),
     conectado: !!f,
@@ -141,14 +146,14 @@ async function estado(businessId) {
   };
 }
 
-async function desconectar(businessId) {
-  await pool.query('DELETE FROM integraciones_mercadopago WHERE business_id = $1', [businessId]);
+async function desconectar(businessId, sucursal = 0) {
+  await pool.query('DELETE FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2', [businessId, sucursal]);
   return { ok: true };
 }
 
 /** Access token válido (lo renueva si vence en menos de 7 días). */
-async function tokenVigente(businessId) {
-  const f = await fila(businessId);
+async function tokenVigente(businessId, sucursal = 0) {
+  const f = await fila(businessId, sucursal);
   if (!f) return { error: 'mp_no_conectado' };
   const access = decryptSecret(f.access_token);
   if (!access) return { error: 'mp_token_ilegible' };
@@ -160,8 +165,8 @@ async function tokenVigente(businessId) {
     const tok = await pedirTokens({ grant_type: 'refresh_token', refresh_token: refresh });
     await pool.query(
       `UPDATE integraciones_mercadopago SET access_token = $2, refresh_token = COALESCE($3, refresh_token),
-         expira_at = $4, updated_at = now() WHERE business_id = $1`,
-      [businessId, encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null, venceEn(tok.expires_in)]);
+         expira_at = $4, updated_at = now() WHERE business_id = $1 AND sucursal = $5`,
+      [businessId, encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null, venceEn(tok.expires_in), sucursal]);
     return { token: tok.access_token, fila: f };
   } catch (e) {
     return vence > Date.now() ? { token: access, fila: f } : { error: 'mp_vencido', detalle: e.message };
@@ -244,36 +249,36 @@ async function traerCobros(token, mpUserId, desde, hasta, { fetchPagina } = {}) 
  * Trae los cobros del período y los deja como fuente "banco" del módulo de conciliación:
  * reemplaza lo que había de esas fechas (venga de archivo o de MP) y deja el resto.
  */
-async function sincronizarBanco(businessId, desde, hasta) {
+async function sincronizarBanco(businessId, sucursal, desde, hasta) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(desde || '') || !/^\d{4}-\d{2}-\d{2}$/.test(hasta || '') || desde > hasta) {
     return { error: 'fechas_invalidas' };
   }
   if (diasEntre(desde, hasta).length > MAX_DIAS) return { error: 'periodo_muy_largo' };
-  const t = await tokenVigente(businessId);
+  const t = await tokenVigente(businessId, sucursal);
   if (t.error) return t;
   let nuevas;
   try {
     nuevas = await traerCobros(t.token, t.fila.mp_user_id, desde, hasta);
   } catch (e) {
-    await pool.query('UPDATE integraciones_mercadopago SET ultimo_sync_error = $2, updated_at = now() WHERE business_id = $1',
-      [businessId, String(e.message || e).slice(0, 300)]);
+    await pool.query('UPDATE integraciones_mercadopago SET ultimo_sync_error = $2, updated_at = now() WHERE business_id = $1 AND sucursal = $3',
+      [businessId, String(e.message || e).slice(0, 300), sucursal]);
     return { error: 'mp_fallo_consulta', detalle: e.message };
   }
   const { rows } = await pool.query(
-    "SELECT filas FROM conciliacion_fuentes WHERE business_id = $1 AND tipo = 'banco'", [businessId]);
+    "SELECT filas FROM conciliacion_fuentes WHERE business_id = $1 AND sucursal = $2 AND tipo = 'banco'", [businessId, sucursal]);
   const viejas = (rows[0]?.filas || []).filter((x) => !(x.fecha >= desde && x.fecha <= hasta));
   const todas = [...viejas, ...nuevas].sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
   todas.forEach((x, i) => { x.ord = i; });
   const fechas = todas.map((x) => x.fecha).filter(Boolean).sort();
   await pool.query(
-    `INSERT INTO conciliacion_fuentes (business_id, tipo, archivo, filas, cantidad, desde, hasta, origen, updated_at)
-     VALUES ($1, 'banco', $2, $3::jsonb, $4, $5, $6, 'mercadopago', now())
-     ON CONFLICT (business_id, tipo) DO UPDATE SET archivo = EXCLUDED.archivo, filas = EXCLUDED.filas,
+    `INSERT INTO conciliacion_fuentes (business_id, sucursal, tipo, archivo, filas, cantidad, desde, hasta, origen, updated_at)
+     VALUES ($1, $7, 'banco', $2, $3::jsonb, $4, $5, $6, 'mercadopago', now())
+     ON CONFLICT (business_id, sucursal, tipo) DO UPDATE SET archivo = EXCLUDED.archivo, filas = EXCLUDED.filas,
        cantidad = EXCLUDED.cantidad, desde = EXCLUDED.desde, hasta = EXCLUDED.hasta, origen = 'mercadopago', updated_at = now()`,
-    [businessId, `Mercado Pago ${desde} a ${hasta}`, JSON.stringify(todas), todas.length, fechas[0] || null, fechas[fechas.length - 1] || null]);
+    [businessId, `Mercado Pago ${desde} a ${hasta}`, JSON.stringify(todas), todas.length, fechas[0] || null, fechas[fechas.length - 1] || null, sucursal]);
   await pool.query(
     `UPDATE integraciones_mercadopago SET ultimo_sync_at = now(), ultimo_sync_desde = $2, ultimo_sync_hasta = $3,
-       ultimo_sync_error = NULL, updated_at = now() WHERE business_id = $1`, [businessId, desde, hasta]);
+       ultimo_sync_error = NULL, updated_at = now() WHERE business_id = $1 AND sucursal = $4`, [businessId, desde, hasta, sucursal]);
   return { ok: true, cobros: nuevas.length, total: todas.length, desde, hasta };
 }
 

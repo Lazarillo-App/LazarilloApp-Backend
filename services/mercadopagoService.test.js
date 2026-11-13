@@ -3,12 +3,13 @@ const test = require('node:test');
 const assert = require('node:assert');
 const mp = require('./mercadopagoService');
 
-test('el estado firmado solo vale para el mismo negocio y usuario', () => {
-  const s = mp._firmarEstado(147, 9);
-  assert.strictEqual(mp._verificarEstado(s, 147, 9), null);
-  assert.strictEqual(mp._verificarEstado(s, 204, 9), 'otro_negocio');
-  assert.strictEqual(mp._verificarEstado(s, 147, 10), 'otro_usuario');
-  assert.strictEqual(mp._verificarEstado('basura', 147, 9), 'estado_vencido');
+test('el estado firmado lleva la sucursal y solo vale para el mismo negocio y usuario', () => {
+  const s = mp._firmarEstado(147, 9, 31);
+  assert.deepStrictEqual(mp._verificarEstado(s, 147, 9), { sucursal: 31 });
+  assert.deepStrictEqual(mp._verificarEstado(mp._firmarEstado(147, 9), 147, 9), { sucursal: 0 });
+  assert.strictEqual(mp._verificarEstado(s, 204, 9).error, 'otro_negocio');
+  assert.strictEqual(mp._verificarEstado(s, 147, 10).error, 'otro_usuario');
+  assert.strictEqual(mp._verificarEstado('basura', 147, 9).error, 'estado_vencido');
 });
 
 test('un pago aprobado se convierte en fila de banco en hora de Argentina', () => {
