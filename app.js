@@ -68,6 +68,7 @@ const plazasRoutes = require('./routes/plazasRoutes');
 const branchAccessRoutes = require('./routes/branchAccessRoutes');
 const accessRequestsByIdRoutes = require('./routes/accessRequestsByIdRoutes');
 const publicAccessRoutes = require('./routes/publicAccessRoutes');
+const publicDemoRoutes = require('./routes/publicDemoRoutes');
 const recetaProposalsRoutes = require('./routes/recetaProposalsRoutes');
 const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
@@ -165,6 +166,8 @@ app.use('/api/access', accessRoutes);
 
 /* ── Vista Operación: alta por QR — pública, sin auth ── */
 app.use('/api/public/access', publicAccessRoutes);
+// Pedido de demo de la landing (sin auth).
+app.use('/api/public/demo', publicDemoRoutes);
 
 /* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
 app.use('/api/cron', adminCronRoutes);
