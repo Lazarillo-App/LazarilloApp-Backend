@@ -103,9 +103,8 @@ const asInt = (v) => {
  * renuevan solos al año vigente). Todo editable después desde ⚙ Configuración.
  */
 const PUESTOS_DEF = [
-  // Diego 12/11/2026: los puestos de un negocio nuevo (las plazas se agregan desde el modal)
-  ['Co', 'Cocinero'], ['M', 'Mozo'], ['B', 'Bartender'], ['Ba', 'Barista'],
-  ['E', 'Encargado'], ['K', 'Caja'], ['R', 'Recepción'], ['Ru', 'Runner'],
+  // Diego 13/11/2026: los puestos de un negocio nuevo, sin abreviaturas (el código es el nombre)
+  ...['Cocinero', 'Camarero', 'Mozo', 'Bartender', 'Barista', 'Encargado', 'Caja', 'Recepción', 'Runner'].map((n) => [n, n]),
 ];
 
 // [mm, dd, tipo, nombre, fijo]  (móviles con la fecha 2026 del catálogo aprobado)
