@@ -101,31 +101,8 @@ r.post('/businesses/:id/sync-sales',
   ensureFn('adminSyncSales', salesSync.adminSyncSales)
 );
 
-// Chat de Anthony: mails que reciben, WhatsApp y menú/respuestas (editable por super-admin).
-const soporte = require('../services/soporteService');
-r.get('/soporte/config', async (_req, res, next) => {
-  try { res.json({ ok: true, config: await soporte.leerConfig() }); } catch (e) { next(e); }
-});
-// Últimos mensajes del chat (para ver qué llegó y si salió el mail).
-r.get('/soporte/mensajes', async (_req, res, next) => {
-  try {
-    const { rows } = await require('../config/db').query(
-      `SELECT m.id, m.created_at, m.opcion, m.respuesta, m.mensaje, m.enviado, m.error,
-              u.email AS usuario, b.name AS negocio, m.business_id
-         FROM soporte_mensajes m
-         LEFT JOIN app_users u ON u.id = m.user_id
-         LEFT JOIN app_businesses b ON b.id = m.business_id
-        ORDER BY m.created_at DESC LIMIT 50`);
-    res.json({ ok: true, mensajes: rows });
-  } catch (e) { next(e); }
-});
-r.put('/soporte/config', async (req, res, next) => {
-  try {
-    const out = await soporte.guardarConfig(req.body?.config, req.user?.id);
-    if (out.error) return res.status(400).json({ ok: false, error: out.error });
-    res.json({ ok: true, config: out.config });
-  } catch (e) { next(e); }
-});
+// El chat de Anthony y los pedidos de los clientes pasaron al panel de super usuarios
+// (/api/superusuarios/pedidos, /soporte/config), usuaria 13/11/2026.
 
 // Super-admins: todos ven la lista; dar/quitar el rol solo la cuenta de control y con código
 // que llega a su mail (10/11).
