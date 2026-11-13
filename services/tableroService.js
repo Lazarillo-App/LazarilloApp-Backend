@@ -4,6 +4,7 @@
 'use strict';
 
 const pool = require('../config/db');
+const actividad = require('./superActividadService');
 
 const ESTADOS = ['pendiente', 'en_curso', 'hecha'];
 const PRIORIDADES = ['alta', 'normal', 'baja'];
@@ -75,7 +76,26 @@ async function crear(datos, userId) {
      VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $3 = 'hecha' THEN $6::bigint END, CASE WHEN $3 = 'hecha' THEN now() END)
      RETURNING id`,
     [c.titulo, c.detalle ?? null, c.estado || 'pendiente', c.prioridad || 'normal', c.asignado_a ?? null, userId]);
-  return { tarea: await detalle(rows[0].id) };
+  const tarea = await detalle(rows[0].id);
+  await actividad.registrar(userId, 'tarea', 'agregó una tarea', { titulo: tarea.titulo, detalle: tarea.detalle, tarea_id: tarea.id });
+  return { tarea };
+}
+
+const NOMBRE_PRIORIDAD = { alta: 'Alta', normal: 'Normal', baja: 'Baja' };
+const primerNombre = (s) => String(s || '').split(/[\s@]/)[0];
+
+/** Qué se hizo, en palabras: "marcó como hecha", "le asignó la tarea a Diego"… */
+function describirCambios(c, tarea) {
+  const partes = [];
+  if (c.estado === 'hecha') partes.push('marcó como hecha');
+  else if (c.estado === 'en_curso') partes.push('empezó');
+  else if (c.estado === 'pendiente') partes.push('volvió a pendiente');
+  if (c.asignado_a !== undefined) {
+    partes.push(c.asignado_a ? `le asignó la tarea a ${primerNombre(tarea?.asignado_nombre) || 'alguien'}` : 'dejó la tarea sin asignar');
+  }
+  if (c.prioridad) partes.push(`cambió la prioridad a ${NOMBRE_PRIORIDAD[c.prioridad]}`);
+  if (c.titulo !== undefined || c.detalle !== undefined) partes.push('editó la tarea');
+  return partes.join(' y ');
 }
 
 async function actualizar(id, cambios, userId) {
@@ -93,12 +113,16 @@ async function actualizar(id, cambios, userId) {
   }
   const { rowCount } = await pool.query(`UPDATE super_tareas SET ${sets.join(', ')}, updated_at = now() WHERE id = $1`, params);
   if (!rowCount) return { error: 'no_encontrada', status: 404 };
-  return { tarea: await detalle(id) };
+  const tarea = await detalle(id);
+  await actividad.registrar(userId, 'tarea', describirCambios(v.campos, tarea), { titulo: tarea.titulo, tarea_id: id });
+  return { tarea };
 }
 
-async function borrar(id) {
-  const { rowCount } = await pool.query('DELETE FROM super_tareas WHERE id = $1', [id]);
-  return rowCount ? { borrada: true } : { error: 'no_encontrada', status: 404 };
+async function borrar(id, userId) {
+  const { rows } = await pool.query('DELETE FROM super_tareas WHERE id = $1 RETURNING titulo', [id]);
+  if (!rows[0]) return { error: 'no_encontrada', status: 404 };
+  await actividad.registrar(userId, 'tarea', 'borró una tarea', { titulo: rows[0].titulo });
+  return { borrada: true };
 }
 
 async function agregarNota(id, texto, userId) {
@@ -108,7 +132,9 @@ async function agregarNota(id, texto, userId) {
   if (!rowCount) return { error: 'no_encontrada', status: 404 };
   await pool.query('INSERT INTO super_tareas_notas (tarea_id, autor_id, texto) VALUES ($1, $2, $3)', [id, userId, t]);
   await pool.query('UPDATE super_tareas SET updated_at = now() WHERE id = $1', [id]);
-  return { tarea: await detalle(id) };
+  const tarea = await detalle(id);
+  await actividad.registrar(userId, 'nota', 'agregó una nota', { titulo: tarea.titulo, detalle: t, tarea_id: id });
+  return { tarea };
 }
 
 /** Cada uno borra solo sus propias notas. */
@@ -116,10 +142,12 @@ async function borrarNota(tareaId, notaId, userId) {
   const { rowCount } = await pool.query(
     'DELETE FROM super_tareas_notas WHERE id = $1 AND tarea_id = $2 AND autor_id = $3', [notaId, tareaId, userId]);
   if (!rowCount) return { error: 'no_es_tuya', status: 403 };
-  return { tarea: await detalle(tareaId) };
+  const tarea = await detalle(tareaId);
+  if (tarea) await actividad.registrar(userId, 'nota', 'borró una nota', { titulo: tarea.titulo, tarea_id: tareaId });
+  return { tarea };
 }
 
 module.exports = {
-  ESTADOS, PRIORIDADES, validarCambios,
+  ESTADOS, PRIORIDADES, validarCambios, describirCambios,
   listar, detalle, crear, actualizar, borrar, agregarNota, borrarNota,
 };

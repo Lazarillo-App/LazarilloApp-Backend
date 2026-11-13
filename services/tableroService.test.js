@@ -20,3 +20,11 @@ test('al editar solo cambia lo que viene, y valida estado, prioridad y asignado'
   assert.deepStrictEqual(validarCambios({ detalle: '   ' }).campos, { detalle: null });
   assert.strictEqual(validarCambios({ titulo: '' }).error, 'titulo_vacio');
 });
+
+test('el aviso dice en palabras qué se cambió', () => {
+  const { describirCambios } = require('./tableroService');
+  assert.strictEqual(describirCambios({ estado: 'hecha' }), 'marcó como hecha');
+  assert.strictEqual(describirCambios({ asignado_a: 2 }, { asignado_nombre: 'Diego Albo' }), 'le asignó la tarea a Diego');
+  assert.strictEqual(describirCambios({ asignado_a: null }), 'dejó la tarea sin asignar');
+  assert.strictEqual(describirCambios({ titulo: 'x', detalle: 'y', prioridad: 'alta' }), 'cambió la prioridad a Alta y editó la tarea');
+});
