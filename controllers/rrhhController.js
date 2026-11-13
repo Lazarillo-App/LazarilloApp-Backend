@@ -439,7 +439,7 @@ async function getConfig(req, res) {
  */
 async function putConfig(req, res) {
   const bizId = req.businessId;
-  const { puestos, fechas, espacios } = req.body || {};
+  const { puestos, fechas, espacios, renombres } = req.body || {};
   const avisos = [];
   let branchId;
   try {
@@ -450,6 +450,21 @@ async function putConfig(req, res) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Cambio de código de un puesto (Diego 13/11/2026: editar puestos desde el calendario): los
+    // turnos ya cargados con el código viejo pasan al nuevo, solo en las semanas de este negocio.
+    if (Array.isArray(renombres)) {
+      for (const r of renombres) {
+        const de = String(r?.de || '').trim(); const a = String(r?.a || '').trim();
+        if (!de || !a || de === a) continue;
+        await client.query(
+          `UPDATE rrhh_celdas c SET puesto = $3
+             FROM rrhh_filas f JOIN rrhh_semanas s ON s.id = f.semana_id
+            WHERE c.fila_id = f.id AND s.business_id = $1 AND c.puesto = $2`,
+          [bizId, de, a]
+        );
+      }
+    }
 
     if (Array.isArray(puestos)) {
       const codigos = [];
