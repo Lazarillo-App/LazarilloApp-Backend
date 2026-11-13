@@ -192,6 +192,21 @@ const TIPO_MEDIO = {
   digital_currency: 'Moneda digital', digital_wallet: 'Billetera digital',
 };
 
+// Nombre de quien pagó (13/11): con la cuenta del que cobra, payer.first_name/last_name suele venir
+// vacío; en transferencias el nombre viene en los datos bancarios del que manda la plata.
+function nombrePagador(p) {
+  const limpio = (x) => String(x || '').replace(/\s+/g, ' ').trim();
+  const candidatos = [
+    [p.payer?.first_name, p.payer?.last_name].filter(Boolean).join(' '),
+    p.point_of_interaction?.transaction_data?.bank_info?.payer?.long_name,
+    [p.additional_info?.payer?.first_name, p.additional_info?.payer?.last_name].filter(Boolean).join(' '),
+    p.payer?.name,
+    p.card?.cardholder?.name,
+  ];
+  for (const c of candidatos) { const v = limpio(c); if (v && !/^(null|undefined)$/i.test(v)) return v; }
+  return '';
+}
+
 /**
  * Un pago de Mercado Pago → fila "banco" del módulo de conciliación (mismo formato que
  * parseBanco del archivo). Devuelve null si no es un ingreso aprobado.
@@ -202,7 +217,7 @@ function pagoAFila(p) {
   if (imp <= 0) return null;
   const f = enAR(p.date_approved || p.date_created);
   if (!f) return null;
-  const nombre = [p.payer?.first_name, p.payer?.last_name].filter(Boolean).join(' ').trim();
+  const nombre = nombrePagador(p);
   const desc = String(p.description || '');
   return {
     id: `mp${p.id}`, mpId: p.id, fecha: f.fecha, ts: f.ts, hora: f.hora, imp,

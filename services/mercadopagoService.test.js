@@ -29,6 +29,14 @@ test('un pago aprobado se convierte en fila de banco en hora de Argentina', () =
   assert.strictEqual(mp._pagoAFila({ id: 2, status: 'approved', transaction_amount: -10, date_created: '2026-10-01T10:00:00Z' }), null);
 });
 
+test('el nombre del pagador sale de donde lo mande Mercado Pago', () => {
+  const base = { id: 9, status: 'approved', transaction_amount: 300000, date_created: '2026-11-06T16:12:00.000-03:00' };
+  assert.strictEqual(mp._pagoAFila({ ...base, payer: { first_name: null, last_name: null } }).cliente, '');
+  assert.strictEqual(mp._pagoAFila({ ...base, payer: { first_name: '', last_name: '' },
+    point_of_interaction: { transaction_data: { bank_info: { payer: { long_name: 'Angulo  Marquez Antony Rosnerr' } } } } }).cliente, 'Angulo Marquez Antony Rosnerr');
+  assert.strictEqual(mp._pagoAFila({ ...base, card: { cardholder: { name: 'ANA PEREZ' } } }).cliente, 'ANA PEREZ');
+});
+
 test('la búsqueda va día por día y pagina de a 100', async () => {
   const urls = [];
   const pago = (i, dia) => ({ id: i, status: 'approved', transaction_amount: 100, date_created: `${dia}T12:00:00.000-03:00` });
