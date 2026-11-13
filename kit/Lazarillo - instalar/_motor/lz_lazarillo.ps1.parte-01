@@ -44,7 +44,7 @@ New-Item -ItemType Directory -Force -Path $pcDir | Out-Null
 # NUMERO DE VERSION: se sube DE A UNO cada vez que se empuja un cambio del
 # motor a las PC. Diego lo lee de un vistazo en _VERSION.txt y en el cartel
 # final, y asi sabe si esa PC ya tiene el cambio sin mirar fechas.
-$MOTOR_VER = "V51"
+$MOTOR_VER = "V52"
 
 $miArchivo = $MyInvocation.MyCommand.Path
 $version   = $MOTOR_VER + " - " + (Get-Item $miArchivo).LastWriteTime.ToString('dd/MM/yyyy HH:mm')
@@ -185,7 +185,15 @@ function Fase($pct, $txt) {
     $script:barraLanzada = $true
     try {
       $barra = Join-Path $motor "lz_barra.ps1"
-      if (Test-Path $barra) {
+      $chost = Join-Path $env:SystemRoot "System32\conhost.exe"
+      if ((Test-Path $barra) -and (Test-Path $chost)) {
+        # V52 (13/11, Diego: nada de pantallas negras): la barra arranca en conhost con
+        # -WindowStyle Hidden, como el instalador. Su consola se esconde enseguida y la
+        # ventanita con la barra se ve igual (Windows Terminal ignora -WindowStyle Hidden).
+        Start-Process -FilePath $chost -WindowStyle Minimized `
+          -ArgumentList ('powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $barra + '" -arch "' + $progArch + '"') `
+          -ErrorAction SilentlyContinue | Out-Null
+      } elseif (Test-Path $barra) {
         Start-Process -FilePath powershell.exe -WindowStyle Normal `
           -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', $barra, '-arch', $progArch) `
           -ErrorAction SilentlyContinue | Out-Null

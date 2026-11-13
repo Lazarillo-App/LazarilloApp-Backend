@@ -407,6 +407,29 @@ if ($extraccionMala) {
   Fase 45 "Programando las tareas..."
   $yo = $MyInvocation.MyCommand.Path
 
+  # V52 (13/11, Diego: "un acceso directo en la PC que diga sincronizar, siempre en el
+  # escritorio cuando se instala el kit"). "Sincronizar Lazarillo" en el escritorio de quien
+  # usa la PC: corre el kit ahora (extrae MaxiRest, arma los informes y sube a Lazarillo) con
+  # la barra de progreso y el cartel final. Se rehace en cada corrida, así si alguien lo
+  # borra vuelve solo. Arranca en conhost con -WindowStyle Hidden y minimizado (lo mismo que
+  # el instalador): sin la pantalla negra de LAZARILLO.bat. Si ya hay una corrida en curso,
+  # el candado de siempre lo avisa.
+  try {
+    $escritorio = [Environment]::GetFolderPath('Desktop')
+    $chostS = Join-Path $env:SystemRoot "System32\conhost.exe"
+    if ($escritorio -and (Test-Path $escritorio) -and (Test-Path $chostS)) {
+      $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $escritorio "Sincronizar Lazarillo.lnk"))
+      $lnk.TargetPath = $chostS
+      $lnk.Arguments = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $yo + '"'
+      $lnk.WorkingDirectory = $base
+      $lnk.WindowStyle = 7
+      $lnk.Description = "Sube ahora los datos de MaxiRest a Lazarillo"
+      $icoS = Join-Path $motor "lazarillo.ico"
+      $lnk.IconLocation = $(if (Test-Path $icoS) { $icoS } else { (Join-Path $env:SystemRoot "System32\shell32.dll") + ",238" })
+      $lnk.Save()
+    }
+  } catch { Log ("Acceso directo Sincronizar: no pude crearlo - " + $_.Exception.Message) }
+
   # 4a) la corrida diaria tiene DOS disparadores, porque la PC de un punto de
   # venta puede estar apagada a las 08:00:
   #   - todos los dias a las 08:00
