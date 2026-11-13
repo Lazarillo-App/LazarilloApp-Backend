@@ -5,6 +5,7 @@ const requireSuperusuario = require('../middleware/requireSuperusuario');
 const ctrl = require('../controllers/superusuarioController');
 const soporte = require('../services/soporteService');
 const ajustes = require('../services/ajustesService');
+const tablero = require('../services/tableroService');
 const telegram = require('../utils/telegram');
 const pool = require('../config/db');
 
@@ -82,6 +83,33 @@ router.get('/buscar-alcance', async (req, res, next) => {
     const { rows } = await pool.query(consultas[tipo], [like, q]);
     res.json({ ok: true, resultados: rows });
   } catch (e) { next(e); }
+});
+
+// Tablero de tareas del equipo (usuaria 13/11/2026): pendientes, notas, quién lo hace.
+router.get('/tareas', async (_req, res, next) => {
+  try { responder(res, await tablero.listar()); } catch (e) { next(e); }
+});
+router.get('/tareas/:id', async (req, res, next) => {
+  try {
+    const t = await tablero.detalle(Number(req.params.id));
+    if (!t) return res.status(404).json({ ok: false, error: 'no_encontrada' });
+    res.json({ ok: true, tarea: t });
+  } catch (e) { next(e); }
+});
+router.post('/tareas', async (req, res, next) => {
+  try { responder(res, await tablero.crear(req.body || {}, req.user.id)); } catch (e) { next(e); }
+});
+router.patch('/tareas/:id', async (req, res, next) => {
+  try { responder(res, await tablero.actualizar(Number(req.params.id), req.body || {}, req.user.id)); } catch (e) { next(e); }
+});
+router.delete('/tareas/:id', async (req, res, next) => {
+  try { responder(res, await tablero.borrar(Number(req.params.id))); } catch (e) { next(e); }
+});
+router.post('/tareas/:id/notas', async (req, res, next) => {
+  try { responder(res, await tablero.agregarNota(Number(req.params.id), req.body?.texto, req.user.id)); } catch (e) { next(e); }
+});
+router.delete('/tareas/:id/notas/:notaId', async (req, res, next) => {
+  try { responder(res, await tablero.borrarNota(Number(req.params.id), Number(req.params.notaId), req.user.id)); } catch (e) { next(e); }
 });
 
 // Super usuarios (Diego).
