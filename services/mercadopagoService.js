@@ -126,7 +126,8 @@ async function conectar(businessId, userId, code, state) {
 }
 
 async function fila(businessId, sucursal = 0) {
-  const { rows } = await pool.query('SELECT * FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2', [businessId, sucursal]);
+  const { rows } = await pool.query(`SELECT *, ultimo_sync_desde::text AS sync_desde_txt, ultimo_sync_hasta::text AS sync_hasta_txt
+       FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2`, [businessId, sucursal]);
   return rows[0] || null;
 }
 
@@ -140,8 +141,9 @@ async function estado(businessId, sucursal = 0) {
     conectado_at: f?.conectado_at || null,
     expira_at: f?.expira_at || null,
     ultimo_sync_at: f?.ultimo_sync_at || null,
-    ultimo_sync_desde: f?.ultimo_sync_desde || null,
-    ultimo_sync_hasta: f?.ultimo_sync_hasta || null,
+    // como texto YYYY-MM-DD (si no, el driver los manda como fecha con hora UTC)
+    ultimo_sync_desde: f?.sync_desde_txt || null,
+    ultimo_sync_hasta: f?.sync_hasta_txt || null,
     ultimo_sync_error: f?.ultimo_sync_error || null,
   };
 }
