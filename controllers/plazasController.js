@@ -271,14 +271,21 @@ exports.vista = async (req, res, next) => {
     const plaza = await cargarPlaza(num(req.params.id), bizId);
     if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
     if (!(await puedeVer(req, plaza))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const v = await armarVista(plaza, bizId, num(req.query.articleId) || null);
+    res.json({ ok: true, ...v, puedeArmar: await puedeArmar(req, plaza) });
+  } catch (e) { next(e); }
+};
 
+/** Tarjetas armadas de una plaza ({ plaza, productos }). La usan la vista del tablero y la pantalla de TV
+ *  (controllers/pantallasController.js), así las dos muestran exactamente lo mismo. */
+async function armarVista(plaza, bizId, articleId = null) {
     const { rows: prods } = await pool.query(
       `SELECT pp.article_id, COALESCE(ma.nombre, '#' || pp.article_id) AS nombre, f.layout
          FROM plaza_productos pp
          LEFT JOIN maxi_articles ma ON ma.articulo_id = pp.article_id AND ma.business_id = $2
          LEFT JOIN plaza_fichas f ON f.plaza_id = pp.plaza_id AND f.article_id = pp.article_id
         WHERE pp.plaza_id = $1 AND ($3::int IS NULL OR pp.article_id = $3)
-        ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, num(req.query.articleId) || null]);
+        ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, articleId]);
     const ids = prods.map((p) => p.article_id);
     const { rows: items } = ids.length ? await pool.query(
       `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones, ri.secreto,
@@ -343,10 +350,11 @@ exports.vista = async (req, res, next) => {
       todos.sort((a, b) => lugar.get(a.key) - lugar.get(b.key));
       return { articleId: p.article_id, nombre: p.nombre, renglones: todos };
     });
-    res.json({ ok: true, plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza },
-      puedeArmar: await puedeArmar(req, plaza), productos });
-  } catch (e) { next(e); }
-};
+    return { plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza }, productos };
+}
+exports.armarVista = armarVista;
+exports.cargarPlaza = cargarPlaza;
+exports.puedeArmar = puedeArmar;
 
 /** PUT /businesses/:businessId/plazas/:id/fichas/:articleId/item  { key, cantidad, unidad, observaciones }
  *  Edita UN ingrediente de la receta desde la plaza (Diego 11/11/2026).
