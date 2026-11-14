@@ -1,8 +1,9 @@
 // services/conciliacionMaxiService.js
 // Conciliación sin subir archivos (usuaria 13/11/2026): las ventas detalladas (informe 22) y las
-// cobranzas de cuenta corriente (el "CTA POR COMPROBANTE" que el kit sube como 71, el que el
-// módulo de Diego llama 72: trae COBRANZA y FECHACOB) se leen de las tablas que el kit de
-// MaxiRest sube a Render todos los días, en lugar del Excel.
+// cobranzas de cuenta corriente (informe 72, "Cta. Cte. por comprobante": trae COBRANZA y
+// FECHACOB) se leen de las tablas que el kit de MaxiRest sube a Render todos los días, en lugar
+// del Excel. Confirmado 14/11: es el 72. El kit hoy lo sube con el nombre viejo
+// (i71_cta_por_comprobante_<año>); si algún día se renombra a i72_…, se lee esa.
 //
 // Las filas salen con filaDeRender (el mismo convertidor del Panel de Gestión): quedan IGUALES a
 // las del Excel (claves en mayúscula, fechas como serial, hora como fracción del día), así el
@@ -71,7 +72,7 @@ async function estado(businessId, sucursal) {
 }
 
 /**
- * Ventas (22) y cobranzas de cuenta corriente (71) del período, como filas de Excel.
+ * Ventas (22) y cobranzas de cuenta corriente (72) del período, como filas de Excel.
  * Las cobranzas se filtran por la fecha del COBRO (FECHACOB): una factura de octubre cobrada en
  * noviembre está en la tabla de octubre, por eso se leen todas las tablas del 71.
  */
@@ -90,7 +91,9 @@ async function traer(businessId, sucursal, desde, hasta) {
     ventas.push(...await leer(p.schema, t, p.pdv, 'fecha', desde, hasta));
   }
   const pagos = [];
-  for (const t of await tablasDe(p.schema, 'i71_cta_por_comprobante')) {
+  let tablas72 = await tablasDe(p.schema, 'i72_cta_cte_por_comprobante');
+  if (!tablas72.length) tablas72 = await tablasDe(p.schema, 'i71_cta_por_comprobante'); // nombre con que lo sube el kit hoy
+  for (const t of tablas72) {
     if (t.anio > a1) continue;
     pagos.push(...await leer(p.schema, t, p.pdv, 'fechacob', desde, hasta));
   }
