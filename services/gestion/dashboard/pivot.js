@@ -9,7 +9,7 @@
 'use strict';
 
 const { sql, db } = require('../db');
-const { buildPivotConditions } = require('./query-builders');
+const { buildPivotConditions, rubroVisibleSql } = require('./query-builders');
 const { buildComposicion, buildComposicionPorProveedor } = require('./apertura-composicion');
 const { buildPivotDataByProveedor } = require('./pivot-por-proveedor');
 const { fuenteCompras } = require('./fuente-compras');
@@ -233,10 +233,27 @@ async function obtenerPivot({ organizationId, businessId, params }) {
 
   // Los tres queries son independientes entre sí y el pool reparte conexiones — se
   // corren en paralelo para no triplicar la latencia de cada carga del dashboard.
-  const [rows, composicionDestinos, composicionOriginales] = await Promise.all([
+  // Estructura en cero (Diego 14/11/2026, «Rubros siempre, conceptos al abrir»): todos los
+  // rubros visibles de la organización aparecen aunque el negocio no tenga gastos (un negocio
+  // nuevo ve su plan de cuentas en $0) y, al abrir un rubro, también sus conceptos sin
+  // movimiento. Solo en la vista por concepto (la de insumos sale antes) y sin búsqueda ni filtros: si se busca algo,
+  // se muestra solo lo que coincide.
+  const conEstructura = agrupacion !== "proveedor" && !rubroCodigo && !conceptoCodigo && !proveedorId && !observacionQuery && !importeQuery;
+  const estructuraQuery = conEstructura
+    ? db.many(sql`
+      SELECT rc.codigo AS rubro_codigo, rc.nombre AS rubro_nombre, cc.codigo AS concepto_codigo, cc.nombre AS concepto_nombre
+      FROM gestion_rubros_concepto_caja rc
+      LEFT JOIN gestion_rubros_visibilidad rv ON rv.business_id = ${businessId} AND rv.codigo = rc.codigo
+      LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId} AND cc."codRga" = rc.codigo
+      WHERE rc.organization_id = ${organizationId} AND ${rubroVisibleSql(visibilidadCol)}
+      ORDER BY rc.nombre, cc.nombre`)
+    : Promise.resolve([]);
+
+  const [rows, composicionDestinos, composicionOriginales, estructura] = await Promise.all([
     rowsQuery,
     composicionDestinosQuery,
     composicionOriginalesQuery,
+    estructuraQuery,
   ]);
 
   if (agrupacion === "proveedor") {
@@ -245,10 +262,14 @@ async function obtenerPivot({ organizationId, businessId, params }) {
   }
 
   const composicion = buildComposicion(composicionDestinos, composicionOriginales);
-  return buildPivotData(rows, composicion);
+  return buildPivotData(rows, composicion, estructura);
 }
 
-function buildPivotData(sqlRows, composicion) {
+/**
+ * @param estructura filas { rubro_codigo, rubro_nombre, concepto_codigo, concepto_nombre } del plan
+ *   de cuentas: los que no tienen movimiento se suman en cero (vacio: true) al final.
+ */
+function buildPivotData(sqlRows, composicion, estructura = []) {
   const rubroMap = new Map();
   const conceptoMap = new Map();
 
@@ -346,6 +367,25 @@ function buildPivotData(sqlRows, composicion) {
       }
       rubro.rowTotal += concepto.rowTotal;
     }
+  }
+
+  // Plan de cuentas en cero: rubros y conceptos sin movimiento, después de los que tienen.
+  for (const e of estructura) {
+    if (!rubroMap.has(e.rubro_codigo)) {
+      rubroMap.set(e.rubro_codigo, {
+        level: 0, id: e.rubro_codigo, nombre: e.rubro_nombre, rubroCodigo: e.rubro_codigo,
+        values: {}, rowTotal: 0, children: [], vacio: true,
+      });
+    }
+    if (e.concepto_codigo == null) continue;
+    const concKey = `${e.rubro_codigo}|${e.concepto_codigo}`;
+    if (conceptoMap.has(concKey)) continue;
+    const concepto = {
+      level: 1, id: concKey, nombre: e.concepto_nombre, conceptoCodigo: e.concepto_codigo,
+      rubroCodigo: e.rubro_codigo, values: {}, rowTotal: 0, children: [], vacio: true,
+    };
+    conceptoMap.set(concKey, concepto);
+    rubroMap.get(e.rubro_codigo).children.push(concepto);
   }
 
   const columnTotals = {};
