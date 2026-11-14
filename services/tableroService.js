@@ -99,6 +99,33 @@ async function crear(datos, userId) {
   return { tarea };
 }
 
+/** Varios pendientes de una (ej. el listado inicial de Claude): un solo aviso con la cantidad. */
+async function crearLote(lista, userId) {
+  if (!Array.isArray(lista) || !lista.length || lista.length > 200) return { error: 'lote_invalido' };
+  const filas = [];
+  for (const datos of lista) {
+    const v = validarCambios(datos, { nueva: true });
+    if (v.error) return v;
+    filas.push(v.campos);
+  }
+  const ids = [];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const c of filas) {
+      const { rows } = await client.query(
+        `INSERT INTO super_tareas (titulo, detalle, estado, prioridad, asignado_a, creado_por, modulo, business_id, pedido_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        [c.titulo, c.detalle ?? null, c.estado === 'hecha' ? 'pendiente' : (c.estado || 'pendiente'), c.prioridad || 'normal',
+         c.asignado_a ?? null, userId, c.modulo || 'general', c.business_id ?? null, c.pedido_id ?? null]);
+      ids.push(rows[0].id);
+    }
+    await client.query('COMMIT');
+  } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+  await actividad.registrar(userId, 'tarea', `agregó ${ids.length} pendientes`, { titulo: `${ids.length} pendientes`, ids });
+  return { creadas: ids.length, ids };
+}
+
 const NOMBRE_PRIORIDAD = { alta: '★★★', normal: '★★', baja: '★' };
 const primerNombre = (s) => String(s || '').split(/[\s@]/)[0];
 
@@ -169,5 +196,5 @@ async function borrarNota(tareaId, notaId, userId) {
 
 module.exports = {
   ESTADOS, PRIORIDADES, MODULOS, validarCambios, describirCambios,
-  listar, detalle, crear, actualizar, borrar, agregarNota, borrarNota,
+  listar, detalle, crear, crearLote, actualizar, borrar, agregarNota, borrarNota,
 };
