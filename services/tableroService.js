@@ -8,6 +8,14 @@ const actividad = require('./superActividadService');
 
 const ESTADOS = ['pendiente', 'en_curso', 'hecha'];
 const PRIORIDADES = ['alta', 'normal', 'baja'];
+// Módulos de la app (Diego 14/11/2026: los pendientes se ven separados por módulo).
+const MODULOS = ['tableros', 'resultados', 'compras', 'recetas', 'stock', 'rrhh', 'administracion',
+  'conexiones', 'equipo', 'celular', 'super', 'general'];
+const idOpcional = (v) => {
+  if (v === null || v === '' || v === 0 || v === undefined) return { ok: true, val: null };
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? { ok: true, val: n } : { ok: false };
+};
 
 const corto = (s, max) => String(s ?? '').trim().slice(0, max);
 
@@ -28,11 +36,15 @@ function validarCambios(c = {}, { nueva = false } = {}) {
     if (!PRIORIDADES.includes(c.prioridad)) return { error: 'prioridad_invalida' };
     campos.prioridad = c.prioridad;
   }
-  if (c.asignado_a !== undefined) {
-    const n = Number(c.asignado_a);
-    if (c.asignado_a === null || c.asignado_a === '' || c.asignado_a === 0) campos.asignado_a = null;
-    else if (Number.isInteger(n) && n > 0) campos.asignado_a = n;
-    else return { error: 'asignado_invalido' };
+  for (const col of ['asignado_a', 'business_id', 'pedido_id']) {
+    if (c[col] === undefined) continue;
+    const r = idOpcional(c[col]);
+    if (!r.ok) return { error: col === 'asignado_a' ? 'asignado_invalido' : `${col}_invalido` };
+    campos[col] = r.val;
+  }
+  if (c.modulo !== undefined) {
+    if (!MODULOS.includes(c.modulo)) return { error: 'modulo_invalido' };
+    campos.modulo = c.modulo;
   }
   return { campos };
 }
@@ -40,21 +52,24 @@ function validarCambios(c = {}, { nueva = false } = {}) {
 const nombre = (alias) => `coalesce(${alias}.display_name, ${alias}.name, ${alias}.email)`;
 const SELECT_TAREA = `
   SELECT t.id, t.titulo, t.detalle, t.estado, t.prioridad, t.asignado_a, t.creado_por, t.hecha_por,
-         t.hecha_at, t.created_at, t.updated_at,
+         t.hecha_at, t.created_at, t.updated_at, t.modulo, t.business_id, t.pedido_id, b.name AS negocio,
          ${nombre('ua')} AS asignado_nombre, ${nombre('uc')} AS creado_nombre, ${nombre('uh')} AS hecha_nombre,
          (SELECT COUNT(*)::int FROM super_tareas_notas n WHERE n.tarea_id = t.id) AS notas
     FROM super_tareas t
     LEFT JOIN app_users ua ON ua.id = t.asignado_a
     LEFT JOIN app_users uc ON uc.id = t.creado_por
-    LEFT JOIN app_users uh ON uh.id = t.hecha_por`;
+    LEFT JOIN app_users uh ON uh.id = t.hecha_por
+    LEFT JOIN app_businesses b ON b.id = t.business_id`;
 
 const ORDEN = `ORDER BY CASE t.prioridad WHEN 'alta' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, t.updated_at DESC`;
 
 /** Todas las tareas abiertas y las hechas de los últimos 60 días (las viejas no hacen falta en pantalla). */
 async function listar() {
   const { rows } = await pool.query(
-    `${SELECT_TAREA} WHERE t.estado <> 'hecha' OR t.hecha_at > now() - interval '60 days' ${ORDEN} LIMIT 500`);
-  return { tareas: rows };
+    `${SELECT_TAREA} WHERE t.estado <> 'hecha' OR t.hecha_at > now() - interval '60 days' ${ORDEN} LIMIT 1000`);
+  // Para elegir de dónde viene cada pendiente (los super usuarios ven todos los negocios).
+  const { rows: negocios } = await pool.query('SELECT id, name FROM app_businesses ORDER BY lower(name)');
+  return { tareas: rows, negocios, modulos: MODULOS };
 }
 
 async function detalle(id) {
@@ -72,16 +87,19 @@ async function crear(datos, userId) {
   if (v.error) return v;
   const c = v.campos;
   const { rows } = await pool.query(
-    `INSERT INTO super_tareas (titulo, detalle, estado, prioridad, asignado_a, creado_por, hecha_por, hecha_at)
-     VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $3 = 'hecha' THEN $6::bigint END, CASE WHEN $3 = 'hecha' THEN now() END)
+    `INSERT INTO super_tareas (titulo, detalle, estado, prioridad, asignado_a, creado_por, hecha_por, hecha_at,
+                               modulo, business_id, pedido_id)
+     VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $3 = 'hecha' THEN $6::bigint END, CASE WHEN $3 = 'hecha' THEN now() END,
+             $7, $8, $9)
      RETURNING id`,
-    [c.titulo, c.detalle ?? null, c.estado || 'pendiente', c.prioridad || 'normal', c.asignado_a ?? null, userId]);
+    [c.titulo, c.detalle ?? null, c.estado || 'pendiente', c.prioridad || 'normal', c.asignado_a ?? null, userId,
+     c.modulo || 'general', c.business_id ?? null, c.pedido_id ?? null]);
   const tarea = await detalle(rows[0].id);
   await actividad.registrar(userId, 'tarea', 'agregó una tarea', { titulo: tarea.titulo, detalle: tarea.detalle, tarea_id: tarea.id });
   return { tarea };
 }
 
-const NOMBRE_PRIORIDAD = { alta: 'Alta', normal: 'Normal', baja: 'Baja' };
+const NOMBRE_PRIORIDAD = { alta: '★★★', normal: '★★', baja: '★' };
 const primerNombre = (s) => String(s || '').split(/[\s@]/)[0];
 
 /** Qué se hizo, en palabras: "marcó como hecha", "le asignó la tarea a Diego"… */
@@ -94,6 +112,8 @@ function describirCambios(c, tarea) {
     partes.push(c.asignado_a ? `le asignó la tarea a ${primerNombre(tarea?.asignado_nombre) || 'alguien'}` : 'dejó la tarea sin asignar');
   }
   if (c.prioridad) partes.push(`cambió la prioridad a ${NOMBRE_PRIORIDAD[c.prioridad]}`);
+  if (c.modulo) partes.push('la pasó de módulo');
+  if (c.business_id !== undefined) partes.push(c.business_id ? `la marcó de ${tarea?.negocio || 'un negocio'}` : 'la marcó para todos');
   if (c.titulo !== undefined || c.detalle !== undefined) partes.push('editó la tarea');
   return partes.join(' y ');
 }
@@ -148,6 +168,6 @@ async function borrarNota(tareaId, notaId, userId) {
 }
 
 module.exports = {
-  ESTADOS, PRIORIDADES, validarCambios, describirCambios,
+  ESTADOS, PRIORIDADES, MODULOS, validarCambios, describirCambios,
   listar, detalle, crear, actualizar, borrar, agregarNota, borrarNota,
 };
