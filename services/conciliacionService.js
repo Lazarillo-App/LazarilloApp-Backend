@@ -8,7 +8,7 @@
 
 const pool = require('../config/db');
 
-const TIPOS = ['ventas', 'pagos', 'banco', 'facturas_cc'];
+const TIPOS = ['ventas', 'pagos', 'banco', 'facturas_cc', 'egresos'];
 const MAX_FILAS = 100000;
 const RE_FECHA = /^\d{4}-\d{2}-\d{2}$/;
 const RE_PERIODO = /^(\d{4}-\d{2}-\d{2})?\|(\d{4}-\d{2}-\d{2})?$/;
