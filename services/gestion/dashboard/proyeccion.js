@@ -30,7 +30,14 @@
 
                                                          // fecha YYYY-MM-DD
 
-const METODOS = ["unico", "semanas", "dias_mes"];
+const METODOS = ["unico", "semanas", "dias_mes", "calendario"];
+// "calendario" (Diego 14/11/2026): el único + las fechas especiales del calendario de RRHH
+// (feriados, vísperas, días cerrados y eventos). Cada tipo de fecha aprende cuánto vende de más
+// o de menos con la historia del propio local (3 casos o más; si no, no toca nada) y el método
+// solo se usa donde el backtest da menos error, igual que los demás. Backtest 2026: Comercio
+// 6,3% → 5,7% (feriado ×0,49); Bar sin mejora (el año anterior ya trae los mismos feriados).
+const MIN_CASOS_FECHA = 3;
+const MARGEN_CALENDARIO = 0.01;
 // Proyección guardada un día cualquiera de un mes (tabla proyecciones_ingresos).
 
 const VENTANA_DIAS = 56; // 8 semanas
@@ -79,11 +86,13 @@ function sumaRango(s, desdeMs, hastaMs) {
 
 // Promedio por día de semana en las 8 semanas hasta `corteMs` (los días sin ventas cuentan como 0:
 // si el local cierra los lunes, el lunes vale 0).
-function promedioPorDia(s, corteMs) {
+function promedioPorDia(s, corteMs, cal = null) {
   const desde = Math.max(corteMs - (VENTANA_DIAS - 1) * DIA_MS, s.primerDia);
   const suma = new Array(7).fill(0);
   const cant = new Array(7).fill(0);
   for (let ms = desde; ms <= corteMs; ms += DIA_MS) {
+    // Las fechas especiales no entran al promedio (como el «suma al promedio = NO» del Excel).
+    if (cal && cal.tipo.has(aFecha(ms))) continue;
     suma[dow(ms)] += venta(s, ms);
     cant[dow(ms)] += 1;
   }
@@ -95,7 +104,7 @@ function promedioPorDia(s, corteMs) {
 // Estacionalidad del mes de `corteMs` cortado el día `dia`: en cada uno de los años anteriores, lo que
 // vendió el tramo hasta el corte y el resto del mes contra lo que decía su base de 8 semanas.
 // Media geométrica de los años con historia completa, acotada a 0,5–2. null si no hay años.
-function estacionalidad(s, anio, mes, dia) {
+function estacionalidad(s, anio, mes, dia, cal = null) {
   const hasta = [];
   const resto = [];
   for (let k = 1; k <= ANIOS_ESTACIONALIDAD; k++) {
@@ -104,7 +113,7 @@ function estacionalidad(s, anio, mes, dia) {
     const corte = Date.UTC(anio - k, mes - 1, Math.min(dia, dm));
     const fin = Date.UTC(anio - k, mes - 1, dm);
     if (corte - (VENTANA_DIAS - 1) * DIA_MS < s.primerDia) continue;
-    const p = promedioPorDia(s, corte);
+    const p = promedioPorDia(s, corte, cal);
     let bH = 0, bR = 0;
     for (let ms = ini; ms <= corte; ms += DIA_MS) bH += p[dow(ms)];
     for (let ms = corte + DIA_MS; ms <= fin; ms += DIA_MS) bR += p[dow(ms)];
@@ -119,20 +128,22 @@ function estacionalidad(s, anio, mes, dia) {
 }
 
 // Núcleo: estimación del cierre del mes de `corteMs` usando solo datos hasta el corte.
-function estimar(s, corteMs, metodo = "semanas") {
+function estimar(s, corteMs, metodo = "semanas", cal = null) {
+  const conCal = metodo === "calendario" && cal ? cal : null;
+  const F = (ms) => (conCal ? conCal.factor(aFecha(ms), corteMs) : 1);
   const c = new Date(corteMs);
   const anio = c.getUTCFullYear();
   const mes = c.getUTCMonth() + 1;
   const inicioMes = Date.UTC(anio, mes - 1, 1);
   const finMes = Date.UTC(anio, mes - 1, diasDelMes(anio, mes));
 
-  const prom = promedioPorDia(s, corteMs);
+  const prom = promedioPorDia(s, corteMs, conCal);
 
   let esperadoHasta = 0;
   const sumaMes = new Array(7).fill(0);
   const cantMes = new Array(7).fill(0);
   for (let ms = inicioMes; ms <= corteMs; ms += DIA_MS) {
-    esperadoHasta += prom[dow(ms)];
+    esperadoHasta += prom[dow(ms)] * F(ms);
     sumaMes[dow(ms)] += venta(s, ms);
     cantMes[dow(ms)] += 1;
   }
@@ -142,7 +153,8 @@ function estimar(s, corteMs, metodo = "semanas") {
   const diasTranscurridos = Math.round((corteMs - inicioMes) / DIA_MS) + 1;
 
   // Método único: base × estacionalidad × ritmo frenado.
-  const est = metodo === "unico" ? estacionalidad(s, anio, mes, diasTranscurridos) : null;
+  const comoUnico = metodo === "unico" || metodo === "calendario";
+  const est = comoUnico ? estacionalidad(s, anio, mes, diasTranscurridos, conCal) : null;
   const ritmoBruto = esperadoHasta > 0 ? facturado / (esperadoHasta * (est?.hasta ?? 1)) : 1;
   const ritmoEstacional = 1 + (ritmoBruto - 1) * (diasTranscurridos / (diasTranscurridos + FRENO_RITMO));
 
@@ -153,7 +165,7 @@ function estimar(s, corteMs, metodo = "semanas") {
   let restante = 0;
   for (let ms = corteMs + DIA_MS; ms <= finMes; ms += DIA_MS) {
     const d = dow(ms);
-    restante += metodo === "unico" ? prom[d] * estResto * ritmoEstacional
+    restante += comoUnico ? prom[d] * estResto * ritmoEstacional * F(ms)
       : metodo === "dias_mes" && cantMes[d] > 0 ? sumaMes[d] / cantMes[d] : prom[d] * ritmo;
   }
 
@@ -165,18 +177,95 @@ function estimar(s, corteMs, metodo = "semanas") {
   };
 }
 
+// Calendario del negocio: fechas = [{ fecha, tipo: feriado|prefer|evento|cerrado, nombre, fijo }].
+// Las inamovibles (fijo) valen también los años anteriores, para aprender con más historia.
+// Víspera = el día antes de un feriado que no sea especial él mismo (o un «pre feriado» marcado).
+// factor(fecha, corteMs): cuánto vende ese día contra su día de semana normal, aprendido solo con
+// fechas ANTERIORES al corte (mediana; 3 casos o más). Cerrado = 0 siempre. null si no hay fechas.
+function armarCalendario(s, fechas) {
+  if (!fechas || !fechas.length) return null;
+  const tipo = new Map(); // fecha → clave
+  const nombre = new Map();
+  const norm = (t) => String(t || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const clave = (f) => (f.tipo === "prefer" ? "vispera" : f.tipo === "evento" ? `evento:${norm(f.nombre)}` : f.tipo);
+  const poner = (fecha, f) => { if (!tipo.has(fecha)) { tipo.set(fecha, clave(f)); nombre.set(fecha, f.nombre || null); } };
+  for (const f of fechas) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(f.fecha || "")) continue;
+    poner(f.fecha, f);
+    if (f.fijo) for (let k = 1; k <= ANIOS_ESTACIONALIDAD; k++) poner(`${Number(f.fecha.slice(0, 4)) - k}${f.fecha.slice(4)}`, f);
+  }
+  for (const [f, t] of [...tipo]) {
+    if (t !== "feriado") continue;
+    const v = aFecha(aMs(f) - DIA_MS);
+    if (!tipo.has(v)) { tipo.set(v, "vispera"); nombre.set(v, null); }
+  }
+  const base = (ms) => {
+    let t = 0, n = 0;
+    for (let k = 1; k <= 8; k++) {
+      const g = ms - 7 * k * DIA_MS;
+      if (g < s.primerDia || tipo.has(aFecha(g))) continue;
+      t += venta(s, g); n++;
+    }
+    return n ? t / n : 0;
+  };
+  const cache = new Map();
+  const aprender = (cl, corteMs) => {
+    const k = `${cl}|${corteMs}`;
+    if (cache.has(k)) return cache.get(k);
+    const r = [];
+    for (const [f, t] of tipo) {
+      const ms = aMs(f);
+      if (t !== cl || ms >= corteMs || ms < s.primerDia) continue;
+      const b = base(ms);
+      if (b > 0) r.push(venta(s, ms) / b);
+    }
+    r.sort((a, b) => a - b);
+    const v = r.length >= MIN_CASOS_FECHA ? r[Math.floor(r.length / 2)] : null;
+    cache.set(k, v);
+    return v;
+  };
+  const factorDe = (fecha, corteMs) => {
+    const cl = tipo.get(fecha);
+    if (!cl) return 1;
+    if (cl === "cerrado") return 0;
+    let v = aprender(cl, corteMs);
+    // Un evento con poca historia propia usa lo que suelen vender los eventos en general.
+    if (v == null && cl.startsWith("evento:")) v = aprenderEventos(corteMs);
+    return v ?? 1;
+  };
+  const aprenderEventos = (corteMs) => {
+    const k = `evento*|${corteMs}`;
+    if (cache.has(k)) return cache.get(k);
+    const r = [];
+    for (const [f, t] of tipo) {
+      const ms = aMs(f);
+      if (!t.startsWith("evento:") || ms >= corteMs || ms < s.primerDia) continue;
+      const b = base(ms);
+      if (b > 0) r.push(venta(s, ms) / b);
+    }
+    r.sort((a, b) => a - b);
+    const v = r.length >= MIN_CASOS_FECHA ? r[Math.floor(r.length / 2)] : null;
+    cache.set(k, v);
+    return v;
+  };
+  return { tipo, nombre, factor: factorDe };
+}
+
 function proyectarMes(
   dias,
   corte,
   guardadas = [],
+  fechas = [],
 ) {
   if (!dias.length) return null;
   const s = armarSerie(dias);
   const corteMs = aMs(corte);
+  const cal = armarCalendario(s, fechas);
   const e = estimar(s, corteMs, "semanas");
   const eMes = estimar(s, corteMs, "dias_mes");
   const eUnico = estimar(s, corteMs, "unico");
-  const proyecciones = { unico: eUnico.proyeccion, semanas: e.proyeccion, dias_mes: eMes.proyeccion };
+  const eCal = cal ? estimar(s, corteMs, "calendario", cal) : eUnico;
+  const proyecciones = { unico: eUnico.proyeccion, semanas: e.proyeccion, dias_mes: eMes.proyeccion, calendario: eCal.proyeccion };
   if (e.diasTranscurridos >= e.diasMes || e.facturado <= 0) return null;
 
   // Días que faltan agrupados por día de semana, en orden de aparición.
@@ -198,7 +287,7 @@ function proyectarMes(
   const lyHasta = hayLy ? sumaRango(s, lyInicio, lyCorte) : 0;
 
   // Backtest: los meses anteriores, cortados el mismo día del mes.
-  const errBt = { unico: [], semanas: [], dias_mes: [] };
+  const errBt = { unico: [], semanas: [], dias_mes: [], calendario: [] };
   const errR = [];
   for (let k = 1; k <= MESES_BACKTEST; k++) {
     const a = new Date(Date.UTC(e.anio, e.mes - 1 - k, 1));
@@ -211,15 +300,15 @@ function proyectarMes(
     if (bCorte - (VENTANA_DIAS - 1) * DIA_MS < s.primerDia) break;
     const real = sumaRango(s, bInicio, Date.UTC(ba, bm - 1, bDias));
     if (real <= 0) continue;
-    for (const m of METODOS) errBt[m].push(Math.abs(estimar(s, bCorte, m).proyeccion - real) / real);
+    for (const m of METODOS) errBt[m].push(Math.abs((m === "calendario" && !cal ? estimar(s, bCorte, "unico") : estimar(s, bCorte, m, cal)).proyeccion - real) / real);
     errR.push(Math.abs(estimar(s, bCorte).reglaDeTres - real) / real);
   }
   const media = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
 
   // Proyecciones guardadas de meses ya cerrados (anteriores al del corte) contra su cierre real.
-  const errG = { unico: [], semanas: [], dias_mes: [] };
+  const errG = { unico: [], semanas: [], dias_mes: [], calendario: [] };
   const mesesG = new Set ();
-  const mesesPorMetodo = { unico: new Set(), semanas: new Set(), dias_mes: new Set() };
+  const mesesPorMetodo = { unico: new Set(), semanas: new Set(), dias_mes: new Set(), calendario: new Set() };
   const realMes = new Map ();
   for (const g of guardadas) {
     if (g.anio * 12 + g.mes >= e.anio * 12 + e.mes) continue;
@@ -238,19 +327,39 @@ function proyectarMes(
   let backtest = null;
   // Lo guardado manda cuando CADA método tiene 3+ meses cerrados medidos (el único empezó a
   // guardarse el 30/10/2026: hasta entonces se compara por backtest, en igualdad de condiciones).
-  if (mesesG.size >= 3 && METODOS.every((m) => mesesPorMetodo[m].size >= 3)) {
-    const errores = { unico: media(errG.unico), semanas: media(errG.semanas), dias_mes: media(errG.dias_mes) };
+  // Sin calendario cargado, "calendario" es igual al único y no compite.
+  const candidatos = cal ? METODOS : METODOS.filter((m) => m !== "calendario");
+  if (mesesG.size >= 3 && candidatos.every((m) => mesesPorMetodo[m].size >= 3)) {
+    const errores = Object.fromEntries(METODOS.map((m) => [m, media(errG[m])]));
     backtest = { fuente: "guardadas", meses: mesesG.size, dia: e.diasTranscurridos, errorMetodo: 0, errores, errorReglaDeTres: errR.length ? media(errR) : null };
   } else if (errBt.semanas.length) {
-    const errores = { unico: media(errBt.unico), semanas: media(errBt.semanas), dias_mes: media(errBt.dias_mes) };
+    const errores = Object.fromEntries(METODOS.map((m) => [m, media(errBt[m])]));
     backtest = { fuente: "backtest", meses: errBt.semanas.length, dia: e.diasTranscurridos, errorMetodo: 0, errores, errorReglaDeTres: media(errR) };
   }
   // Se usa el que menos erró; empate o sin datos → el único.
+  // El calendario tiene que ganar por 1 punto: con pocas fechas el backtest es ruidoso (2026:
+  // Comercio 6,5% → 5,8%, Bar 8,6% → 8,8%; sin margen el Bar empeoraba a 9,2%).
   const metodo = backtest
-    ? METODOS.reduce((m, x) => (backtest.errores[x] < backtest.errores[m] ? x : m), "unico")
+    ? candidatos.reduce((m, x) => ((x === "calendario" ? backtest.errores[x] + MARGEN_CALENDARIO : backtest.errores[x]) < backtest.errores[m] ? x : m), "unico")
     : "unico";
   if (backtest) backtest.errorMetodo = backtest.errores[metodo];
-  const elegido = metodo === "unico" ? eUnico : metodo === "semanas" ? e : eMes;
+  const elegido = { unico: eUnico, semanas: e, dias_mes: eMes, calendario: eCal }[metodo];
+
+  // Fechas especiales que faltan en el mes, con cuánto se espera que vendan (aplicadas o no).
+  const fechasRestantes = [];
+  if (cal) {
+    for (let ms = corteMs + DIA_MS; ms <= e.finMes; ms += DIA_MS) {
+      const f = aFecha(ms);
+      const cl = cal.tipo.get(f);
+      if (!cl) continue;
+      fechasRestantes.push({
+        fecha: f,
+        tipo: cl.startsWith("evento:") ? "evento" : cl,
+        nombre: cal.nombre.get(f) || null,
+        factor: cal.factor(f, corteMs),
+      });
+    }
+  }
 
   // Lo ya facturado es seguro: el rango nunca baja de ahí.
   const rango = backtest
@@ -279,6 +388,8 @@ function proyectarMes(
     cierreAnioAnterior: hayLy && cierreLy > 0 ? cierreLy : null,
     backtest,
     rango,
+    conCalendario: !!cal,
+    fechasRestantes,
   };
 }
 
@@ -305,4 +416,4 @@ function fmtMillones(v) {
   return `$ ${Math.round(v / 1000).toLocaleString("es-AR")} mil`;
 }
 
-module.exports = { METODOS, proyectarMes, debeProyectar, DIA_SEMANA_CORTO, fmtMillones };
+module.exports = { METODOS, proyectarMes, debeProyectar, DIA_SEMANA_CORTO, fmtMillones, armarCalendario };
