@@ -186,7 +186,7 @@ function armarCalendario(s, fechas) {
   if (!fechas || !fechas.length) return null;
   const tipo = new Map(); // fecha → clave
   const nombre = new Map();
-  const norm = (t) => String(t || "").trim().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, "");
+  const norm = (t) => String(t || "").trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
   const clave = (f) => (f.tipo === "prefer" ? "vispera" : f.tipo === "evento" ? `evento:${norm(f.nombre)}` : f.tipo);
   const poner = (fecha, f) => { if (!tipo.has(fecha)) { tipo.set(fecha, clave(f)); nombre.set(fecha, f.nombre || null); } };
   for (const f of fechas) {
