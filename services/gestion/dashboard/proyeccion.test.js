@@ -166,3 +166,38 @@ describe("método único (estacionalidad)", () => {
     expect(proyectarMes(d, "2026-07-05", g).backtest.fuente).toBe("backtest");
   });
 });
+
+describe('calendario (fechas especiales de RRHH)', () => {
+  // 120 días parejos: 1.000 por día; los feriados venden la mitad.
+  const dias = [];
+  const feriados = ['2026-02-02', '2026-02-16', '2026-03-02', '2026-03-16', '2026-04-20'];
+  for (let ms = Date.UTC(2026, 0, 1); ms <= Date.UTC(2026, 3, 15); ms += 86400000) {
+    const f = new Date(ms).toISOString().slice(0, 10);
+    dias.push({ fecha: f, total: feriados.includes(f) ? 500 : 1000 });
+  }
+  const fechas = feriados.map((f) => ({ fecha: f, tipo: 'feriado', nombre: 'F', fijo: false }));
+
+  it('lista las fechas que faltan con lo que se espera que vendan', () => {
+    const p = proyectarMes(dias, '2026-04-15', [], [...fechas, { fecha: '2026-04-25', tipo: 'cerrado', nombre: 'Inventario', fijo: false }]);
+    const f20 = p.fechasRestantes.find((f) => f.fecha === '2026-04-20');
+    expect(f20.tipo).toBe('feriado');
+    expect(Math.abs(f20.factor - 0.5) < 0.01).toBe(true);
+    expect(p.fechasRestantes.find((f) => f.fecha === '2026-04-19').tipo).toBe('vispera');
+    expect(p.fechasRestantes.find((f) => f.fecha === '2026-04-25').factor).toBe(0);
+    expect(p.conCalendario).toBe(true);
+  });
+
+  it('sin 3 casos no aprende nada (factor 1) y sin calendario no compite', () => {
+    const p = proyectarMes(dias, '2026-04-15', [], [{ fecha: '2026-04-28', tipo: 'evento', nombre: 'Gin y tarot', fijo: false }]);
+    expect(p.fechasRestantes.find((f) => f.fecha === '2026-04-28').factor).toBe(1);
+    const q = proyectarMes(dias, '2026-04-15', [], []);
+    expect(q.conCalendario).toBe(false);
+    expect(q.metodo === 'calendario').toBe(false);
+  });
+
+  it('el día cerrado proyecta 0', () => {
+    const sin = proyectarMes(dias, '2026-04-15', [], []);
+    const con = proyectarMes(dias, '2026-04-15', [], [{ fecha: '2026-04-25', tipo: 'cerrado', nombre: 'Cerrado', fijo: false }]);
+    expect(con.proyecciones.calendario < sin.proyecciones.unico).toBe(true);
+  });
+});

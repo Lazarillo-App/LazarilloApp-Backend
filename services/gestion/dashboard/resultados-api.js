@@ -86,10 +86,25 @@ async function obtenerProyeccion({ businessId, params }) {
     return [];
   });
 
+  // Calendario del negocio (RRHH › Cronogramas, Diego 14/11/2026): feriados y vísperas son de todo
+  // el negocio; eventos y días cerrados, de la sucursal que se mira (con «Todas», solo lo compartido).
+  const suc = typeof sucursal === "number" ? sucursal : null;
+  const fechas = await db.many(sql`
+    SELECT to_char(f.fecha, 'YYYY-MM-DD') AS fecha, f.tipo, f.nombre, f.fijo
+    FROM rrhh_fechas f
+    WHERE f.business_id = ${businessId}
+      AND (f.compartida
+        OR (${sucursal === undefined}::boolean = false AND f.branch_id IS NOT DISTINCT FROM ${suc}::bigint))
+  `).catch((err) => {
+    console.error("No se pudo leer el calendario para la proyección", err);
+    return [];
+  });
+
   const proyeccion = proyectarMes(
     rows.map((r) => ({ fecha: r.fecha, total: toNumber(r.total) })),
     ultimo,
     guardadas.map((g) => ({ anio: g.anio, mes: g.mes, metodo: g.metodo, proyeccion: toNumber(g.proyeccion) })),
+    fechas.map((f) => ({ fecha: f.fecha, tipo: f.tipo, nombre: f.nombre, fijo: !!f.fijo })),
   );
 
   // Se guarda la de hoy (los dos métodos). Mismo corte = se actualiza, no se duplica.
