@@ -228,7 +228,8 @@ const SELECT_PEDIDO = `
          m.business_id, b.name AS negocio, b.organization_id, o.name AS organizacion,
          a.email AS asignado_email, coalesce(a.display_name, a.name, a.email) AS asignado_nombre,
          (SELECT COUNT(*)::int FROM soporte_respuestas r WHERE r.mensaje_id = m.id) AS respuestas_n,
-         (SELECT r.de_equipo FROM soporte_respuestas r WHERE r.mensaje_id = m.id AND NOT r.interna ORDER BY r.created_at DESC LIMIT 1) AS ultima_del_equipo
+         (SELECT r.de_equipo FROM soporte_respuestas r WHERE r.mensaje_id = m.id AND NOT r.interna ORDER BY r.created_at DESC LIMIT 1) AS ultima_del_equipo,
+         (SELECT t.id FROM super_tareas t WHERE t.pedido_id = m.id ORDER BY t.id LIMIT 1) AS tarea_id
     FROM soporte_mensajes m
     LEFT JOIN app_users u ON u.id = m.user_id
     LEFT JOIN app_businesses b ON b.id = m.business_id

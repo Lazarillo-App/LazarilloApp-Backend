@@ -26,5 +26,13 @@ test('el aviso dice en palabras qué se cambió', () => {
   assert.strictEqual(describirCambios({ estado: 'hecha' }), 'marcó como hecha');
   assert.strictEqual(describirCambios({ asignado_a: 2 }, { asignado_nombre: 'Diego Albo' }), 'le asignó la tarea a Diego');
   assert.strictEqual(describirCambios({ asignado_a: null }), 'dejó la tarea sin asignar');
-  assert.strictEqual(describirCambios({ titulo: 'x', detalle: 'y', prioridad: 'alta' }), 'cambió la prioridad a Alta y editó la tarea');
+  assert.strictEqual(describirCambios({ titulo: 'x', detalle: 'y', prioridad: 'alta' }), 'cambió la prioridad a ★★★ y editó la tarea');
+});
+
+test('módulo y negocio de origen (14/11/2026)', () => {
+  assert.deepStrictEqual(validarCambios({ modulo: 'recetas', business_id: '147' }).campos, { modulo: 'recetas', business_id: 147 });
+  assert.strictEqual(validarCambios({ modulo: 'cocina' }).error, 'modulo_invalido');
+  assert.deepStrictEqual(validarCambios({ business_id: null }).campos, { business_id: null });
+  assert.strictEqual(validarCambios({ business_id: 'bar' }).error, 'business_id_invalido');
+  assert.deepStrictEqual(validarCambios({ pedido_id: 3 }).campos, { pedido_id: 3 });
 });
