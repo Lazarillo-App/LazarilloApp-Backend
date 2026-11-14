@@ -58,3 +58,43 @@ test('la búsqueda va día por día y pagina de a 100', async () => {
   assert.ok(urls[0].includes('collector.id=55'));
   assert.ok(urls[0].includes('status=approved'));
 });
+
+test('columnas extra: comisión, cuotas y retenciones por separado, referencia y documento', () => {
+  const p = {
+    id: 9, status: 'approved', transaction_amount: 10000, date_approved: '2026-11-10T15:00:00.000-04:00',
+    payment_type_id: 'credit_card', payment_method_id: 'visa', installments: 3, external_reference: 'MX-4512',
+    money_release_date: '2026-11-24T10:00:00.000-04:00', pos_id: '77', store_id: '12',
+    payer: { identification: { type: 'CUIT', number: '20 12345678 9' } }, card: { last_four_digits: '4242' },
+    fee_details: [{ type: 'mercadopago_fee', amount: 300, fee_payer: 'collector' }, { type: 'financing_fee', amount: 800, fee_payer: 'collector' },
+      { type: 'financing_fee', amount: 500, fee_payer: 'payer' }],
+    transaction_details: { net_received_amount: 8650 },
+  };
+  const f = mp._pagoAFila(p);
+  assert.strictEqual(f.comisionMp, 300);
+  assert.strictEqual(f.costoCuotas, 800);
+  assert.strictEqual(f.retenciones, 250); // 10000 − 8650 − 300 − 800
+  assert.strictEqual(f.ref, 'MX-4512');
+  assert.strictEqual(f.doc, '20123456789');
+  assert.strictEqual(f.docTipo, 'CUIT');
+  assert.strictEqual(f.acredita, '2026-11-24');
+  assert.strictEqual(f.cuotas, 3);
+  assert.strictEqual(f.caja, '77');
+  assert.strictEqual(f.tarjeta, '4242');
+});
+
+test('sin neto de MP no se inventan retenciones', () => {
+  assert.strictEqual(mp._descuentosDe({ transaction_amount: 100 }).retenciones, null);
+});
+
+test('devoluciones: total, parcial, contracargo y disputa; un cobro normal no', () => {
+  const base = { id: 1, transaction_amount: 5000, date_created: '2026-11-01T12:00:00.000-03:00', date_last_updated: '2026-11-05T09:30:00.000-03:00', payment_type_id: 'account_money' };
+  const tot = mp._devolucionAFila({ ...base, status: 'refunded', transaction_amount_refunded: 5000 });
+  assert.strictEqual(tot.tipo, 'Devolución'); assert.strictEqual(tot.imp, 5000); assert.strictEqual(tot.fecha, '2026-11-05');
+  assert.strictEqual(tot.cobroFecha, '2026-11-01'); assert.strictEqual(tot.parcial, false);
+  const par = mp._devolucionAFila({ ...base, status: 'approved', transaction_amount_refunded: 1200, refunds: [{ date_created: '2026-11-03T10:00:00.000-03:00' }] });
+  assert.strictEqual(par.parcial, true); assert.strictEqual(par.imp, 1200); assert.strictEqual(par.fecha, '2026-11-03');
+  assert.strictEqual(mp._devolucionAFila({ ...base, status: 'charged_back' }).tipo, 'Contracargo');
+  assert.strictEqual(mp._devolucionAFila({ ...base, status: 'in_mediation' }).tipo, 'En disputa');
+  assert.strictEqual(mp._devolucionAFila({ ...base, status: 'approved' }), null);
+  assert.strictEqual(mp._devolucionAFila({ ...base, status: 'rejected' }), null);
+});

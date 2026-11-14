@@ -169,12 +169,44 @@ function startRecetasKitCron() {
   }, { timezone: tz });
 }
 
+/**
+ * Mercado Pago todos los días (Diego 14/11/2026): cada cuenta conectada trae cobros, pagos,
+ * devoluciones y el reporte de los últimos días (services/mercadopagoDiario.js).
+ * - MP_CRON=1 / 0 → fuerza encenderlo / apagarlo. Sin la variable, corre donde corre la ingesta
+ *   de gestion (un solo servicio: testing y producción comparten la base).
+ * - CRON_MP_SCHEDULE → default "40 6 * * *" (06:40, antes de que abra la administración).
+ */
+let mpStarted = false;
+
+function startMercadoPagoCron() {
+  if (mpStarted) return;
+  mpStarted = true;
+  const forzado = process.env.MP_CRON;
+  const habilitado = forzado === '1' || (forzado !== '0' && gestionCronHabilitado());
+  if (!habilitado) {
+    console.log(`[cron] Mercado Pago diario deshabilitado en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
+    return;
+  }
+  const tz = process.env.CRON_TZ || 'America/Argentina/Buenos_Aires';
+  const expr = process.env.CRON_MP_SCHEDULE || '40 6 * * *';
+  console.log(`[cron] Mercado Pago diario habilitado. TZ=${tz} schedule=${expr}`);
+  cron.schedule(expr, async () => {
+    try {
+      await require('./mercadopagoDiario').corridaDiaria();
+    } catch (e) {
+      console.error('[cron] ❌ error en Mercado Pago diario:', e.message);
+    }
+  }, { timezone: tz });
+}
+
 function startGestionCron() {
   if (gestionStarted) return;
   gestionStarted = true;
 
   // Independiente de la ingesta: tiene su propia llave (RECETAS_KIT_CRON).
   startRecetasKitCron();
+  // Mercado Pago diario: su propia llave (MP_CRON).
+  startMercadoPagoCron();
 
   if (!gestionCronHabilitado()) {
     console.log(`[cron] ingesta de gestion deshabilitada en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
@@ -202,4 +234,4 @@ function startGestionCron() {
   }, { timezone: tz });
 }
 
-module.exports = { startCron, startGestionCron, startRecetasKitCron, syncAllBusinessesDaily, ensureBackfillAll };
+module.exports = { startCron, startGestionCron, startRecetasKitCron, startMercadoPagoCron, syncAllBusinessesDaily, ensureBackfillAll };

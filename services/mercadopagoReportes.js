@@ -145,6 +145,7 @@ function tipoEgreso(desc) {
  */
 function analizar(filas) {
   const nombres = new Map();
+  const docs = new Map(); // documento (CUIT/DNI) de quien pagó, por id de pago
   const egresos = [];
   const comisionesDia = new Map();
   const vistos = new Map();
@@ -153,6 +154,8 @@ function analizar(filas) {
     const id = String(f.SOURCE_ID || '').trim();
     const nombre = String(f.PAYER_NAME || '').replace(/\s+/g, ' ').trim();
     if (id && nombre && num(f.NET_CREDIT_AMOUNT) > 0) nombres.set(id, nombre);
+    const doc = String(f.PAYER_ID_NUMBER || '').replace(/\s+/g, '').trim();
+    if (id && doc && num(f.NET_CREDIT_AMOUNT) > 0) docs.set(id, doc);
     const fecha = fechaDe(f.DATE) || fechaDe(f.TRANSACTION_DATE);
     if (!fecha) continue;
     const debito = Math.abs(num(f.NET_DEBIT_AMOUNT));
@@ -178,7 +181,7 @@ function analizar(filas) {
     if (d.com > 0) egresos.push({ id: `mpc:${fecha}:comision`, origen: 'reporte', fecha, hora: '', tipo: 'Comisión', detalle: `Comisiones de MP de ${d.n} cobro${d.n === 1 ? '' : 's'}`, imp: Math.round(d.com * 100) / 100 });
     if (d.imp > 0) egresos.push({ id: `mpc:${fecha}:retencion`, origen: 'reporte', fecha, hora: '', tipo: 'Impuesto', detalle: `Retenciones sobre ${d.n} cobro${d.n === 1 ? '' : 's'}`, imp: Math.round(d.imp * 100) / 100 });
   }
-  return { nombres, egresos };
+  return { nombres, docs, egresos };
 }
 
 module.exports = { COLUMNAS, asegurarConfig, buscarOPedir, bajar, parsearCSV, analizar, tipoEgreso, _inicioAR: inicioAR, _finAR: finAR };
