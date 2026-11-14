@@ -49,4 +49,8 @@ router.delete('/', manejar((req) => mp.desconectar(bid(req), req.sucursal)));
 
 router.post('/sincronizar', manejar((req) => mp.sincronizarBanco(bid(req), req.sucursal, req.body?.desde, req.body?.hasta)));
 
+// Reporte de liberaciones (nombres de pagadores y egresos): MP lo arma en unos minutos, el front
+// vuelve a preguntar acá hasta que esté.
+router.post('/reporte', manejar((req) => mp.aplicarReporte(bid(req), req.sucursal, req.body?.desde, req.body?.hasta)));
+
 module.exports = router;

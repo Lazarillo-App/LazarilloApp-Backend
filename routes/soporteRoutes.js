@@ -4,6 +4,7 @@
 const router = require('express').Router();
 const soporte = require('../services/soporteService');
 const ajustes = require('../services/ajustesService');
+const actividad = require('../services/superActividadService');
 
 const negocioDe = (req) => Number(req.body?.businessId || req.query?.businessId || req.businessId || req.headers['x-business-id']) || null;
 
@@ -20,6 +21,9 @@ router.post('/mensaje', async (req, res, next) => {
       user: req.user, businessId: negocioDe(req), opcion, respuesta, mensaje, contexto, captura, tipo, pantalla,
     });
     if (r.error) return res.status(r.error === 'demasiados_mensajes' ? 429 : 400).json({ ok: false, error: r.error });
+    // Aviso en la solapa "Admins" de la campana de los super usuarios.
+    const nombreTipo = { problema: 'un problema', consulta: 'una consulta' }[tipo] || 'un pedido';
+    await actividad.registrar(req.user?.id, 'pedido', `mandó ${nombreTipo}`, { titulo: `Pedido #${r.id}`, detalle: mensaje, pedido_id: r.id });
     res.json(r);
   } catch (e) { next(e); }
 });
@@ -36,8 +40,10 @@ router.post('/mis-pedidos/vistos', async (req, res, next) => {
 });
 router.post('/mis-pedidos/:id/responder', async (req, res, next) => {
   try {
-    const r = await soporte.responderCliente(req.user.id, Number(req.params.id), req.body?.texto);
+    const id = Number(req.params.id);
+    const r = await soporte.responderCliente(req.user.id, id, req.body?.texto);
     if (r.error) return res.status(r.status || 400).json({ ok: false, error: r.error });
+    await actividad.registrar(req.user.id, 'pedido', 'contestó en su pedido', { titulo: `Pedido #${id}`, detalle: req.body?.texto, pedido_id: id });
     res.json(r);
   } catch (e) { next(e); }
 });

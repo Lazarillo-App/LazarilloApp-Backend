@@ -235,6 +235,7 @@ app.use('/api/businesses/:businessId/rrhh', requireSeccion('rrhh'), rrhhRoutes);
 app.use('/api/businesses/:businessId/gestion', gestionRoutes);
 app.use('/api/businesses/:businessId/conciliacion', require('./routes/conciliacionRoutes'));
 app.use('/api/businesses/:businessId/mercadopago', require('./routes/mercadopagoRoutes'));
+app.use('/api/businesses/:businessId/mercadolibre', require('./routes/mercadolibreRoutes'));
 app.use('/api/businesses/:businessId/pulso', pulsoRoutes);
 app.use('/api/businesses/:businessId/kit', kitAppRoutes);
 

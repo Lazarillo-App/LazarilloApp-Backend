@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const { requireBusinessRole } = require('../middleware/authMiddleware');
 const svc = require('../services/conciliacionService');
+const maxi = require('../services/conciliacionMaxiService');
 
 router.use(requireBusinessRole('admin'));
 router.use(async (req, res, next) => {
@@ -58,6 +59,11 @@ router.put('/estado', manejar(async (req) => {
   if (!estado || typeof estado !== 'object' || Array.isArray(estado)) return { error: 'estado_invalido' };
   return svc.guardarEstado(bid(req), req.sucursal, req.user?.id, periodo, estado);
 }));
+
+// Ventas y cobranzas de cuenta corriente desde las tablas de MaxiRest en Render (sin subir Excel).
+router.get('/maxi', manejar((req) => (req.query.desde
+  ? maxi.traer(bid(req), req.sucursal, String(req.query.desde), String(req.query.hasta || ''))
+  : maxi.estado(bid(req), req.sucursal))));
 
 router.put('/pagadores', manejar(async (req) => {
   const mapa = req.body?.mapa;

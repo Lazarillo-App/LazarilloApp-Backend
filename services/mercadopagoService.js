@@ -23,6 +23,7 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { encryptSecret, decryptSecret } = require('../utils/cryptoField');
+const reportes = require('./mercadopagoReportes');
 
 const API = 'https://api.mercadopago.com';
 const AUTH = 'https://auth.mercadopago.com/authorization';
@@ -238,8 +239,8 @@ const diasEntre = (desde, hasta) => {
   return out;
 };
 
-/** Cobros aprobados de la cuenta entre dos fechas (YYYY-MM-DD, hora de Argentina). */
-async function traerCobros(token, mpUserId, desde, hasta, { fetchPagina } = {}) {
+/** Pagos aprobados día por día (hora de Argentina), filtrados por quien cobra o quien paga. */
+async function buscarPagos(token, filtro, desde, hasta, convertir, { fetchPagina } = {}) {
   const pagina = fetchPagina || ((url) => pedir(url, { token }));
   const filas = [];
   for (const dia of diasEntre(desde, hasta)) {
@@ -250,16 +251,111 @@ async function traerCobros(token, mpUserId, desde, hasta, { fetchPagina } = {}) 
         begin_date: `${dia}T00:00:00.000-03:00`, end_date: `${dia}T23:59:59.999-03:00`,
         status: 'approved', limit: '100', offset: String(offset),
       });
-      if (mpUserId) q.set('collector.id', String(mpUserId));
+      Object.entries(filtro || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
       const r = await pagina(`${API}/v1/payments/search?${q.toString()}`);
       const res = Array.isArray(r?.results) ? r.results : [];
-      res.forEach((p) => { const x = pagoAFila(p); if (x) filas.push(x); });
+      res.forEach((p) => { const x = convertir(p); if (x) filas.push(x); });
       offset += res.length;
       const total = Number(r?.paging?.total) || 0;
       if (res.length < 100 || offset >= total || offset >= 10000) break;
     }
   }
   return filas;
+}
+
+/** Cobros aprobados de la cuenta entre dos fechas (YYYY-MM-DD, hora de Argentina). */
+function traerCobros(token, mpUserId, desde, hasta, opciones) {
+  return buscarPagos(token, { 'collector.id': mpUserId }, desde, hasta, pagoAFila, opciones);
+}
+
+/**
+ * Un pago que HIZO la cuenta (a un proveedor, una compra, una transferencia) → egreso.
+ * Lo que la cuenta se paga a sí misma no es un egreso.
+ */
+function pagoHechoAFila(p, mpUserId) {
+  if (!p || p.status !== 'approved') return null;
+  if (mpUserId && String(p.collector_id ?? p.collector?.id ?? '') === String(mpUserId)) return null;
+  const imp = Math.round((Number(p.transaction_amount) || 0) * 100) / 100;
+  if (imp <= 0) return null;
+  const f = enAR(p.date_approved || p.date_created);
+  if (!f) return null;
+  const detalle = String(p.description || '').trim()
+    || (p.operation_type === 'money_transfer' ? 'Transferencia enviada' : 'Pago con Mercado Pago');
+  return {
+    id: `mpp${p.id}`, mpId: p.id, origen: 'pago', fecha: f.fecha, hora: f.hora,
+    tipo: p.operation_type === 'money_transfer' ? 'Transferencia' : 'Pago', detalle,
+    medio: TIPO_MEDIO[p.payment_type_id] || String(p.payment_type_id || ''), imp,
+  };
+}
+
+function traerPagosHechos(token, mpUserId, desde, hasta, opciones) {
+  return buscarPagos(token, { 'payer.id': mpUserId }, desde, hasta, (p) => pagoHechoAFila(p, mpUserId), opciones);
+}
+
+async function leerFuente(businessId, sucursal, tipo) {
+  const { rows } = await pool.query(
+    'SELECT filas FROM conciliacion_fuentes WHERE business_id = $1 AND sucursal = $2 AND tipo = $3', [businessId, sucursal, tipo]);
+  return rows[0]?.filas || [];
+}
+
+async function escribirFuente(businessId, sucursal, tipo, filas, archivo) {
+  const fechas = filas.map((x) => x.fecha).filter(Boolean).sort();
+  await pool.query(
+    `INSERT INTO conciliacion_fuentes (business_id, sucursal, tipo, archivo, filas, cantidad, desde, hasta, origen, updated_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, 'mercadopago', now())
+     ON CONFLICT (business_id, sucursal, tipo) DO UPDATE SET archivo = EXCLUDED.archivo, filas = EXCLUDED.filas,
+       cantidad = EXCLUDED.cantidad, desde = EXCLUDED.desde, hasta = EXCLUDED.hasta, origen = 'mercadopago', updated_at = now()`,
+    [businessId, sucursal, tipo, archivo, JSON.stringify(filas), filas.length, fechas[0] || null, fechas[fechas.length - 1] || null]);
+}
+
+/** Egresos: reemplaza los de ese origen ('pago' | 'reporte') en el rango y deja el resto. */
+async function guardarEgresos(businessId, sucursal, desde, hasta, origen, nuevas) {
+  const viejas = (await leerFuente(businessId, sucursal, 'egresos'))
+    .filter((x) => !(x.origen === origen && x.fecha >= desde && x.fecha <= hasta));
+  const todas = [...viejas, ...nuevas].sort((a, b) => `${a.fecha} ${a.hora || ''}`.localeCompare(`${b.fecha} ${b.hora || ''}`));
+  await escribirFuente(businessId, sucursal, 'egresos', todas, `Mercado Pago ${desde} a ${hasta}`);
+  return todas.length;
+}
+
+/**
+ * Reporte de liberaciones (14/11): nombres de quienes transfirieron y egresos (retiros,
+ * impuestos, comisiones…). MP lo arma en unos minutos: la primera vez queda "pendiente" y el
+ * front vuelve a preguntar.
+ */
+async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo } = {}) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(desde || '') || !/^\d{4}-\d{2}-\d{2}$/.test(hasta || '') || desde > hasta) {
+    return { error: 'fechas_invalidas' };
+  }
+  const t = tokenListo || await tokenVigente(businessId, sucursal);
+  if (t.error) return t;
+  try {
+    const cfg = await reportes.asegurarConfig(t.token);
+    if (cfg.error) return { reporte: 'error', motivo: cfg.error };
+    const b = await reportes.buscarOPedir(t.token, desde, hasta);
+    if (b.error) return { reporte: 'error', motivo: b.error };
+    if (b.pendiente) return { reporte: 'pendiente' };
+    const d = await reportes.bajar(t.token, b.archivo);
+    if (d.error) return { reporte: 'error', motivo: d.error };
+    const { nombres, egresos } = reportes.analizar(reportes.parsearCSV(d.csv));
+    // Nombres en los cobros que vinieron sin nombre.
+    let conNombre = 0;
+    if (nombres.size) {
+      const banco = await leerFuente(businessId, sucursal, 'banco');
+      banco.forEach((x) => {
+        const n = x.mpId != null ? nombres.get(String(x.mpId)) : null;
+        if (n && !x.cliente) { x.cliente = n; conNombre += 1; }
+      });
+      if (conNombre) {
+        await pool.query(
+          "UPDATE conciliacion_fuentes SET filas = $3::jsonb, updated_at = now() WHERE business_id = $1 AND sucursal = $2 AND tipo = 'banco'",
+          [businessId, sucursal, JSON.stringify(banco)]);
+      }
+    }
+    await guardarEgresos(businessId, sucursal, desde, hasta, 'reporte', egresos);
+    return { reporte: 'listo', nombres: conNombre, egresos: egresos.length };
+  } catch (e) {
+    return { reporte: 'error', motivo: 'mp_reporte_fallo', detalle: e.message };
+  }
 }
 
 /**
@@ -296,11 +392,24 @@ async function sincronizarBanco(businessId, sucursal, desde, hasta) {
   await pool.query(
     `UPDATE integraciones_mercadopago SET ultimo_sync_at = now(), ultimo_sync_desde = $2, ultimo_sync_hasta = $3,
        ultimo_sync_error = NULL, updated_at = now() WHERE business_id = $1 AND sucursal = $4`, [businessId, desde, hasta, sucursal]);
-  return { ok: true, cobros: nuevas.length, total: todas.length, desde, hasta };
+
+  // Egresos (14/11): lo que pagó la cuenta en esas fechas…
+  let pagosHechos = null;
+  try {
+    const hechos = await traerPagosHechos(t.token, t.fila.mp_user_id, desde, hasta);
+    await guardarEgresos(businessId, sucursal, desde, hasta, 'pago', hechos);
+    pagosHechos = hechos.length;
+  } catch (e) {
+    console.warn('[mercadopago] pagos hechos:', e.message);
+  }
+  // …y el reporte con nombres, retiros, impuestos y comisiones (puede quedar pendiente).
+  const rep = await aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo: t });
+  return { ok: true, cobros: nuevas.length, total: todas.length, desde, hasta, pagos_hechos: pagosHechos, ...rep };
 }
 
 module.exports = {
-  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, sincronizarBanco,
+  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, sincronizarBanco, aplicarReporte,
   // para tests
   _firmarEstado: firmarEstado, _verificarEstado: verificarEstado, _pagoAFila: pagoAFila, _traerCobros: traerCobros, _enAR: enAR,
+  _pagoHechoAFila: pagoHechoAFila, _traerPagosHechos: traerPagosHechos,
 };
