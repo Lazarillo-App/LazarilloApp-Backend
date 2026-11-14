@@ -228,7 +228,77 @@ function pagoAFila(p) {
     cliente: nombre,
     descripcion: desc,
     neto: p.transaction_details?.net_received_amount ?? null,
+    ...extrasDePago(p),
     status: 'pend', matchedWith: null,
+  };
+}
+
+// Columnas extra de cada cobro (Diego 14/11/2026): cuándo se acredita, qué descontó MP separado
+// (comisión / costo de cuotas / retenciones), referencia externa (el código que se carga en el POS),
+// documento del pagador, caja/QR, cuotas y tarjeta. Lo que MP no manda queda vacío.
+const redondo = (n) => Math.round((Number(n) || 0) * 100) / 100;
+function descuentosDe(p) {
+  const bruto = Number(p.transaction_amount) || 0;
+  const netoMp = p.transaction_details?.net_received_amount;
+  let comisionMp = 0, costoCuotas = 0, otros = 0;
+  (Array.isArray(p.fee_details) ? p.fee_details : []).forEach((f) => {
+    if (f?.fee_payer && f.fee_payer !== 'collector') return; // lo pagó el cliente, no se descuenta
+    const a = Math.abs(Number(f?.amount) || 0);
+    if (f?.type === 'financing_fee') costoCuotas += a;
+    else if (f?.type === 'mercadopago_fee' || f?.type === 'application_fee') comisionMp += a;
+    else otros += a;
+  });
+  // Lo que falta entre bruto y neto y no es comisión: retenciones (IIBB, IVA, Ganancias…).
+  const retenciones = netoMp == null ? null
+    : Math.max(0, redondo(bruto - Number(netoMp) - comisionMp - costoCuotas - otros));
+  return { comisionMp: redondo(comisionMp + otros), costoCuotas: redondo(costoCuotas), retenciones };
+}
+function extrasDePago(p) {
+  const acr = p.money_release_date ? enAR(p.money_release_date) : null;
+  const ident = p.payer?.identification || p.point_of_interaction?.transaction_data?.bank_info?.payer?.identification || {};
+  const doc = String(ident.number || '').replace(/\s+/g, '').trim();
+  const cuotas = Number(p.installments) || 0;
+  return {
+    acredita: acr?.fecha || null,
+    liberado: p.money_release_status ? p.money_release_status === 'released' : null,
+    ...descuentosDe(p),
+    ref: String(p.external_reference || '').trim() || null,
+    docTipo: doc ? String(ident.type || '').trim() || null : null,
+    doc: doc || null,
+    caja: String(p.pos_id || '').trim() || null,
+    local: String(p.store_id || '').trim() || null,
+    cuotas: cuotas > 1 ? cuotas : null,
+    tarjeta: p.card?.last_four_digits ? String(p.card.last_four_digits) : null,
+    operacion: p.operation_type || null,
+  };
+}
+
+/**
+ * Devoluciones, contracargos y disputas (Diego 14/11/2026: «una pestaña más tipo ingresos,
+ * salidas, devoluciones»). Sale del mismo pago: si MP lo devolvió (todo o parte), si el cliente
+ * lo desconoció con la tarjeta o si está en disputa. Una fila por pago; si cambia de estado
+ * (disputa → contracargo) se actualiza la misma fila.
+ */
+const TIPO_DEVOLUCION = { refunded: 'Devolución', charged_back: 'Contracargo', in_mediation: 'En disputa' };
+function devolucionAFila(p) {
+  if (!p) return null;
+  const parcial = p.status === 'approved' && Number(p.transaction_amount_refunded) > 0;
+  const tipo = parcial ? 'Devolución' : TIPO_DEVOLUCION[p.status];
+  if (!tipo) return null;
+  const bruto = Number(p.transaction_amount) || 0;
+  const devuelto = p.status === 'in_mediation' ? bruto : (Number(p.transaction_amount_refunded) || (p.status === 'charged_back' || p.status === 'refunded' ? bruto : 0));
+  if (devuelto <= 0) return null;
+  const refunds = Array.isArray(p.refunds) ? p.refunds : [];
+  const ultima = refunds.map((r) => r?.date_created).filter(Boolean).sort().pop();
+  const f = enAR(ultima || p.date_last_updated || p.date_created);
+  const c = enAR(p.date_approved || p.date_created);
+  if (!f) return null;
+  return {
+    id: `mpd${p.id}`, mpId: p.id, fecha: f.fecha, hora: f.hora, tipo,
+    parcial: parcial || (devuelto < bruto && tipo === 'Devolución'),
+    imp: redondo(devuelto), cobro: redondo(bruto), cobroFecha: c?.fecha || null,
+    cliente: nombrePagador(p), medio: TIPO_MEDIO[p.payment_type_id] || String(p.payment_type_id || ''),
+    ref: String(p.external_reference || '').trim() || null, detalle: String(p.description || ''),
   };
 }
 
@@ -240,17 +310,18 @@ const diasEntre = (desde, hasta) => {
 };
 
 /** Pagos aprobados día por día (hora de Argentina), filtrados por quien cobra o quien paga. */
-async function buscarPagos(token, filtro, desde, hasta, convertir, { fetchPagina } = {}) {
+async function buscarPagos(token, filtro, desde, hasta, convertir, { fetchPagina, rango = 'date_created', estado = 'approved' } = {}) {
   const pagina = fetchPagina || ((url) => pedir(url, { token }));
   const filas = [];
   for (const dia of diasEntre(desde, hasta)) {
     let offset = 0;
     for (;;) {
       const q = new URLSearchParams({
-        sort: 'date_created', criteria: 'asc', range: 'date_created',
+        sort: rango, criteria: 'asc', range: rango,
         begin_date: `${dia}T00:00:00.000-03:00`, end_date: `${dia}T23:59:59.999-03:00`,
-        status: 'approved', limit: '100', offset: String(offset),
+        limit: '100', offset: String(offset),
       });
+      if (estado) q.set('status', estado);
       Object.entries(filtro || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
       const r = await pagina(`${API}/v1/payments/search?${q.toString()}`);
       const res = Array.isArray(r?.results) ? r.results : [];
@@ -285,7 +356,30 @@ function pagoHechoAFila(p, mpUserId) {
     id: `mpp${p.id}`, mpId: p.id, origen: 'pago', fecha: f.fecha, hora: f.hora,
     tipo: p.operation_type === 'money_transfer' ? 'Transferencia' : 'Pago', detalle,
     medio: TIPO_MEDIO[p.payment_type_id] || String(p.payment_type_id || ''), imp,
+    ref: String(p.external_reference || '').trim() || null,
   };
+}
+
+/** Pagos cobrados que cambiaron en esas fechas (por fecha de actualización, así entra la devolución
+ *  de un cobro viejo) y que son devolución, contracargo o disputa. */
+function traerDevoluciones(token, mpUserId, desde, hasta, opciones) {
+  return buscarPagos(token, { 'collector.id': mpUserId }, desde, hasta, devolucionAFila,
+    { ...opciones, rango: 'date_last_updated', estado: null });
+}
+
+/** Junta las devoluciones nuevas con las guardadas (una fila por pago). Devuelve las que no estaban. */
+async function guardarDevoluciones(businessId, sucursal, filasNuevas) {
+  const viejas = await leerFuente(businessId, sucursal, 'devoluciones');
+  const porId = new Map(viejas.map((x) => [x.id, x]));
+  const aviso = [];
+  filasNuevas.forEach((x) => {
+    const antes = porId.get(x.id);
+    if (!antes || antes.tipo !== x.tipo || antes.imp !== x.imp) aviso.push(x);
+    porId.set(x.id, x);
+  });
+  const todas = [...porId.values()].sort((a, b) => `${a.fecha} ${a.hora || ''}`.localeCompare(`${b.fecha} ${b.hora || ''}`));
+  if (filasNuevas.length) await escribirFuente(businessId, sucursal, 'devoluciones', todas, 'Mercado Pago');
+  return { total: todas.length, nuevas: aviso };
 }
 
 function traerPagosHechos(token, mpUserId, desde, hasta, opciones) {
@@ -336,16 +430,18 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo }
     if (b.pendiente) return { reporte: 'pendiente' };
     const d = await reportes.bajar(t.token, b.archivo);
     if (d.error) return { reporte: 'error', motivo: d.error };
-    const { nombres, egresos } = reportes.analizar(reportes.parsearCSV(d.csv));
-    // Nombres en los cobros que vinieron sin nombre.
-    let conNombre = 0;
-    if (nombres.size) {
+    const { nombres, docs, egresos } = reportes.analizar(reportes.parsearCSV(d.csv));
+    // Nombres (y CUIT/DNI) en los cobros que vinieron sin eso.
+    let conNombre = 0, cambios = 0;
+    if (nombres.size || docs.size) {
       const banco = await leerFuente(businessId, sucursal, 'banco');
       banco.forEach((x) => {
         const n = x.mpId != null ? nombres.get(String(x.mpId)) : null;
-        if (n && !x.cliente) { x.cliente = n; conNombre += 1; }
+        if (n && !x.cliente) { x.cliente = n; conNombre += 1; cambios += 1; }
+        const dc = x.mpId != null ? docs.get(String(x.mpId)) : null;
+        if (dc && !x.doc) { x.doc = dc; cambios += 1; }
       });
-      if (conNombre) {
+      if (cambios) {
         await pool.query(
           "UPDATE conciliacion_fuentes SET filas = $3::jsonb, updated_at = now() WHERE business_id = $1 AND sucursal = $2 AND tipo = 'banco'",
           [businessId, sucursal, JSON.stringify(banco)]);
@@ -402,9 +498,35 @@ async function sincronizarBanco(businessId, sucursal, desde, hasta) {
   } catch (e) {
     console.warn('[mercadopago] pagos hechos:', e.message);
   }
+  // Devoluciones, contracargos y disputas de esas fechas (por fecha de actualización del pago).
+  let devoluciones = null;
+  try {
+    const dev = await guardarDevoluciones(businessId, sucursal,
+      await traerDevoluciones(t.token, t.fila.mp_user_id, desde, hasta));
+    devoluciones = dev.total;
+    if (dev.nuevas.length) avisarDevoluciones(businessId, dev.nuevas);
+  } catch (e) {
+    console.warn('[mercadopago] devoluciones:', e.message);
+  }
   // …y el reporte con nombres, retiros, impuestos y comisiones (puede quedar pendiente).
   const rep = await aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo: t });
-  return { ok: true, cobros: nuevas.length, total: todas.length, desde, hasta, pagos_hechos: pagosHechos, ...rep };
+  return { ok: true, cobros: nuevas.length, total: todas.length, desde, hasta, pagos_hechos: pagosHechos, devoluciones, ...rep };
+}
+
+/** Un aviso en la campana por tanda (no uno por devolución). */
+function avisarDevoluciones(businessId, filas) {
+  const { avisarAlEquipoSinEsperar } = require('./notificationService');
+  const pesos = (n) => `$${Math.round(n).toLocaleString('es-AR')}`;
+  const total = filas.reduce((a, x) => a + (Number(x.imp) || 0), 0);
+  const cuenta = (t) => filas.filter((x) => x.tipo === t).length;
+  const partes = [['Devolución', 'devolución', 'devoluciones'], ['Contracargo', 'contracargo', 'contracargos'], ['En disputa', 'disputa', 'disputas']]
+    .map(([t, uno, varios]) => { const n = cuenta(t); return n ? `${n} ${n === 1 ? uno : varios}` : null; }).filter(Boolean);
+  avisarAlEquipoSinEsperar({
+    businessId, type: 'mercadopago_devolucion', incluirActor: false,
+    title: `Mercado Pago: ${partes.join(', ')} (${pesos(total)})`,
+    message: filas.slice(0, 5).map((x) => `${x.tipo} ${pesos(x.imp)}${x.cliente ? ` · ${x.cliente}` : ''} (cobro del ${x.cobroFecha || '—'})`).join('\n'),
+    metadata: { link: '/movimientos-bancarios', ids: filas.map((x) => x.mpId).slice(0, 50) },
+  });
 }
 
 module.exports = {
@@ -412,4 +534,5 @@ module.exports = {
   // para tests
   _firmarEstado: firmarEstado, _verificarEstado: verificarEstado, _pagoAFila: pagoAFila, _traerCobros: traerCobros, _enAR: enAR,
   _pagoHechoAFila: pagoHechoAFila, _traerPagosHechos: traerPagosHechos,
+  _devolucionAFila: devolucionAFila, _descuentosDe: descuentosDe, _extrasDePago: extrasDePago,
 };

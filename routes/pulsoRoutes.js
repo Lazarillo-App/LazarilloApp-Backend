@@ -15,6 +15,7 @@
 //     (syncComprasDeNegocio → purchases, con cascada a los costos de las recetas).
 //     Antes usaba runDailyAuto (API de MaxiRest online, cortada desde octubre). Diego, 06/11.
 //     La lógica vive en services/recetasDesdeKit.js (la usa también el reloj de cada hora).
+//   - Mercado Pago (14/11): las cuentas conectadas traen cobros, pagos y devoluciones recientes.
 //   Responde enseguida; todo sigue en segundo plano.
 // El front pinta un solo punto con la peor de las dos y el detalle en el tooltip.
 //   - kit (Diego, 08/11: "no sé si está atrasado o que no hay compras cargadas"): cuándo subió
@@ -140,7 +141,10 @@ router.post('/actualizar', requireBusinessAccess, async (req, res, next) => {
       });
     }
 
-    res.status(202).json({ ok: true, recetas, balance });
+    // Mercado Pago (Diego 14/11/2026): las cuentas conectadas del negocio traen lo último.
+    require('../services/mercadopagoDiario').dispararNegocio(businessId);
+
+    res.status(202).json({ ok: true, recetas, balance, mercadopago: 'iniciado' });
   } catch (e) {
     next(e);
   }
