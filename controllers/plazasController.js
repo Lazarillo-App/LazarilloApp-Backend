@@ -57,6 +57,9 @@ async function sectoresDelStaff(uid, bizId) {
   return (rows[0]?.s || []).map(Number);
 }
 
+// Qué muestra cada renglón: el peso, la observación de la receta o los dos.
+const MOSTRAR = ['peso', 'obs', 'ambos'];
+
 async function cargarPlaza(id, bizId) {
   const { rows } = await pool.query(
     `SELECT p.*, s.nombre AS sector_nombre FROM plazas p LEFT JOIN sectores s ON s.id = p.sector_id
@@ -228,7 +231,7 @@ exports.create = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/** PUT /businesses/:businessId/plazas/:id  { nombre, articleIds } */
+/** PUT /businesses/:businessId/plazas/:id  { nombre?, articleIds?, mostrar? } — mostrar: 'peso' | 'obs' | 'ambos', para toda la plaza. */
 exports.update = async (req, res, next) => {
   try {
     const bizId = num(req.businessId);
@@ -236,7 +239,10 @@ exports.update = async (req, res, next) => {
     if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
     if (!(await sectoresGestionables(req, bizId)).includes(Number(plaza.sector_id))) return res.status(403).json({ ok: false, error: 'forbidden' });
     const nombre = String(req.body?.nombre || plaza.nombre).trim().slice(0, 60);
-    await pool.query('UPDATE plazas SET nombre = $1, updated_at = NOW() WHERE id = $2', [nombre, plaza.id]);
+    const mostrar = req.body?.mostrar == null ? null : String(req.body.mostrar);
+    if (mostrar != null && !MOSTRAR.includes(mostrar)) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
+    await pool.query('UPDATE plazas SET nombre = $1, mostrar = COALESCE($3, mostrar), updated_at = NOW() WHERE id = $2 AND business_id = $4',
+      [nombre, plaza.id, mostrar, bizId]);
     if (Array.isArray(req.body?.articleIds)) await guardarProductos(plaza.id, req.body.articleIds);
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -292,6 +298,7 @@ exports.vista = async (req, res, next) => {
     const colorDe = new Map(cols.filter((c) => c.color != null).map((c) => [c.ref, Number(c.color)]));
     const mostrarDe = new Map(cols.filter((c) => c.mostrar).map((c) => [c.ref, c.mostrar]));
     const aliasDe = new Map(cols.filter((c) => c.alias).map((c) => [c.ref, c.alias]));
+    const mostrarPlaza = MOSTRAR.includes(plaza.mostrar) ? plaza.mostrar : 'peso';
 
     const productos = prods.map((p) => {
       const layout = p.layout || {};
@@ -313,7 +320,9 @@ exports.vista = async (req, res, next) => {
           cantidad: it.cantidad != null ? Number(it.cantidad) : null, unidad: it.unidad || '',
           color: colorDe.has(ref) ? colorDe.get(ref) : colorPorDefecto(ref, it.nombre),
           obs: it.observaciones ? String(it.observaciones).trim() : '',
-          mostrar: mostrarDe.get(ref) || 'peso',
+          // Lo de la plaza, salvo que el ingrediente tenga el suyo (Diego 14/11/2026).
+          mostrar: mostrarDe.get(ref) || mostrarPlaza,
+          mostrarPropio: mostrarDe.has(ref),
           alias: aliasDe.get(ref) || '',
           editable: !!it.insumo_id,
           unidades: it.insumo_id ? unidadesDe(it.unidad, eqsDe.get(it.insumo_id)) : [],
@@ -334,7 +343,7 @@ exports.vista = async (req, res, next) => {
       todos.sort((a, b) => lugar.get(a.key) - lugar.get(b.key));
       return { articleId: p.article_id, nombre: p.nombre, renglones: todos };
     });
-    res.json({ ok: true, plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre },
+    res.json({ ok: true, plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza },
       puedeArmar: await puedeArmar(req, plaza), productos });
   } catch (e) { next(e); }
 };
@@ -515,16 +524,17 @@ exports.guardarColor = async (req, res, next) => {
     const alias = tocaAlias ? String(req.body.alias).trim().slice(0, 60) : null;
     const colorOk = color == null || (color >= 0 && color < PALETA_N);
     // 'ambos' = peso y, en otro renglón, la observación (Diego 12/11/2026).
-    const mostrarOk = mostrar == null || ['peso', 'obs', 'ambos'].includes(mostrar);
+    // 'plaza' = sacarle la excepción: el ingrediente vuelve a seguir lo de cada plaza (Diego 14/11/2026).
+    const mostrarOk = mostrar == null || mostrar === 'plaza' || MOSTRAR.includes(mostrar);
     if (!ref || (color == null && mostrar == null && !tocaAlias) || !colorOk || !mostrarOk) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
     if (!esGestor(req)) {
       const conduce = await sectoresQueConduce(req.user?.id, bizId);
       if (!conduce.length) return res.status(403).json({ ok: false, error: 'forbidden' });
     }
     await pool.query(
-      `INSERT INTO despacho_colores (business_id, ref, color, mostrar, alias) VALUES ($1, $2, $3, $4, NULLIF($6, ''))
+      `INSERT INTO despacho_colores (business_id, ref, color, mostrar, alias) VALUES ($1, $2, $3, NULLIF($4::text, 'plaza'), NULLIF($6, ''))
        ON CONFLICT (business_id, ref) DO UPDATE SET color = COALESCE(EXCLUDED.color, despacho_colores.color),
-                                                    mostrar = COALESCE(EXCLUDED.mostrar, despacho_colores.mostrar),
+                                                    mostrar = CASE WHEN $4::text = 'plaza' THEN NULL ELSE COALESCE(EXCLUDED.mostrar, despacho_colores.mostrar) END,
                                                     alias = CASE WHEN $5::boolean THEN NULLIF($6, '') ELSE despacho_colores.alias END`,
       [bizId, ref, color, mostrar, tocaAlias, alias || '']);
     res.json({ ok: true });
