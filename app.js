@@ -65,6 +65,7 @@ const branchesRouter = require("./routes/branchesRoutes");
 const sectoresRoutes = require('./routes/sectoresRoutes');
 const sectoresByIdRoutes = require('./routes/sectoresByIdRoutes');
 const plazasRoutes = require('./routes/plazasRoutes');
+const publicPantallaRoutes = require('./routes/publicPantallaRoutes');
 const branchAccessRoutes = require('./routes/branchAccessRoutes');
 const accessRequestsByIdRoutes = require('./routes/accessRequestsByIdRoutes');
 const publicAccessRoutes = require('./routes/publicAccessRoutes');
@@ -168,6 +169,8 @@ app.use('/api/access', accessRoutes);
 app.use('/api/public/access', publicAccessRoutes);
 // Pedido de demo de la landing (sin auth).
 app.use('/api/public/demo', publicDemoRoutes);
+// Pantallas de TV de las plazas (sin login: token propio de la TV, solo lectura de su plaza).
+app.use('/api/public/pantalla', publicPantallaRoutes);
 
 /* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
 app.use('/api/cron', adminCronRoutes);

@@ -24,6 +24,7 @@ const corsWithCache = cors({
     'X-Division-Id',
     'X-Maxi-Token',
     'X-Cron-Secret',
+    'X-Pantalla-Token', // TV de cocina (pantallasController)
   ],
   credentials: false,
   optionsSuccessStatus: 204,
