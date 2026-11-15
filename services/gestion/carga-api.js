@@ -805,12 +805,14 @@ const fichaSchema = z.object({
   nombre: z.string().trim().min(1, 'Poné un nombre').max(120),
   razon: opc(120), cuit: opc(20), telefono: opc(60), celular: opc(60), email: opc(120),
   direccion: opc(160), localidad: opc(80), contacto: opc(120), cbu: opc(40), aliasCbu: opc(60),
+  // Forma de pago habitual (Diego 15/11/2026): sale elegida al pagarle; la usa la carga de Mercado Pago.
+  medioPago: opc(40),
 });
-const CAMPOS_FICHA = ['nombre', 'razon', 'cuit', 'telefono', 'celular', 'email', 'direccion', 'localidad', 'contacto', 'cbu', 'aliasCbu'];
+const CAMPOS_FICHA = ['nombre', 'razon', 'cuit', 'telefono', 'celular', 'email', 'direccion', 'localidad', 'contacto', 'cbu', 'aliasCbu', 'medioPago'];
 
 async function obtenerProveedor({ organizationId, id }) {
   const p = await db.one(sql`
-    SELECT id, codigo, nombre, razon, cuit, telefono, celular, email, direccion, localidad, contacto, cbu, "aliasCbu",
+    SELECT id, codigo, nombre, razon, cuit, telefono, celular, email, direccion, localidad, contacto, cbu, "aliasCbu", "medioPago",
            "editadoEnLazarillo", (codigo !~ '^L[0-9]+$') AS "deMaxirest"
     FROM gestion_proveedores WHERE organization_id = ${organizationId} AND id = ${id}`);
   if (!p) throw rechazo('Proveedor no encontrado', 404);
@@ -824,7 +826,8 @@ async function editarProveedor({ organizationId, id, body }) {
   return db.transaction(async (tx) => {
     const igual = await tx.one(sql`SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND id <> ${id} AND LOWER(TRIM(nombre)) = LOWER(${d.nombre})`);
     if (igual) throw rechazo(`Ya existe otro proveedor "${d.nombre}".`, 409);
-    const sets = CAMPOS_FICHA.map((c) => sql`${sql.raw(`"${c}"`)} = ${d[c] ?? null}`);
+    // medioPago solo si vino (una ficha vieja que no lo manda no lo borra).
+    const sets = CAMPOS_FICHA.filter((c) => c !== 'medioPago' || body?.medioPago !== undefined).map((c) => sql`${sql.raw(`"${c}"`)} = ${d[c] ?? null}`);
     const r = await tx.one(sql`
       UPDATE gestion_proveedores SET ${sql.join(sets, ', ')},
         "editadoEnLazarillo" = (codigo !~ '^L[0-9]+$')
@@ -1198,7 +1201,9 @@ module.exports = {
   aplicarEnvasesPropios, guardarEnvase, borrarEnvase, guardarDescuentos, guardarRecordados,
   historialConcepto,
   facturaDeCompra, digitosCpb,
-  idLugar, obtenerLugares, combinarPagos, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
+  idLugar, obtenerLugares, combinarPagos,
+  // Para la carga automática de Mercado Pago (services/mpCargos.js): mismo alta que un gasto vario.
+  conReparto, prepararFactura, altaEnTx, registrarActividad, restaurarFacturaEliminada, buscarFilaFactura,
   crearFactura, obtenerFactura, editarFactura, borrarFactura, facturaExiste, ultimaFactura, obtenerMaestrosFactura, crearProveedor, obtenerProveedor, editarProveedor,
   crearGastoVario, obtenerVentasManuales, crearVentasManuales, borrarVentasManuales,
   obtenerConceptos, crearConcepto, editarConcepto, borrarConcepto,
