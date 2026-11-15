@@ -258,7 +258,12 @@ function extrasDePago(p) {
   const ident = p.payer?.identification || p.point_of_interaction?.transaction_data?.bank_info?.payer?.identification || {};
   const doc = String(ident.number || '').replace(/\s+/g, '').trim();
   const cuotas = Number(p.installments) || 0;
+  const op = String(p.id ?? '');
   return {
+    op: op || null,
+    // Cómo queda el número de operación en el cupón de MaxiRest (informe 22): MaxiRest guarda 10
+    // dígitos — los primeros 9 y el último (verificado con Container Bar, oct–nov 2026: 1.256 de 1.272).
+    claveMx: op.length > 10 ? `${op.slice(0, 9)}${op.slice(-1)}` : op || null,
     acredita: acr?.fecha || null,
     liberado: p.money_release_status ? p.money_release_status === 'released' : null,
     ...descuentosDe(p),
@@ -368,8 +373,8 @@ function traerDevoluciones(token, mpUserId, desde, hasta, opciones) {
 }
 
 /** Junta las devoluciones nuevas con las guardadas (una fila por pago). Devuelve las que no estaban. */
-async function guardarDevoluciones(businessId, sucursal, filasNuevas) {
-  const viejas = await leerFuente(businessId, sucursal, 'devoluciones');
+async function guardarDevoluciones(businessId, sucursal, filasNuevas, db = pool) {
+  const viejas = await leerFuente(businessId, sucursal, 'devoluciones', db);
   const porId = new Map(viejas.map((x) => [x.id, x]));
   const aviso = [];
   filasNuevas.forEach((x) => {
@@ -378,7 +383,7 @@ async function guardarDevoluciones(businessId, sucursal, filasNuevas) {
     porId.set(x.id, x);
   });
   const todas = [...porId.values()].sort((a, b) => `${a.fecha} ${a.hora || ''}`.localeCompare(`${b.fecha} ${b.hora || ''}`));
-  if (filasNuevas.length) await escribirFuente(businessId, sucursal, 'devoluciones', todas, 'Mercado Pago');
+  if (filasNuevas.length) await escribirFuente(businessId, sucursal, 'devoluciones', todas, 'Mercado Pago', db);
   return { total: todas.length, nuevas: aviso };
 }
 
@@ -386,15 +391,15 @@ function traerPagosHechos(token, mpUserId, desde, hasta, opciones) {
   return buscarPagos(token, { 'payer.id': mpUserId }, desde, hasta, (p) => pagoHechoAFila(p, mpUserId), opciones);
 }
 
-async function leerFuente(businessId, sucursal, tipo) {
-  const { rows } = await pool.query(
+async function leerFuente(businessId, sucursal, tipo, db = pool) {
+  const { rows } = await db.query(
     'SELECT filas FROM conciliacion_fuentes WHERE business_id = $1 AND sucursal = $2 AND tipo = $3', [businessId, sucursal, tipo]);
   return rows[0]?.filas || [];
 }
 
-async function escribirFuente(businessId, sucursal, tipo, filas, archivo) {
+async function escribirFuente(businessId, sucursal, tipo, filas, archivo, db = pool) {
   const fechas = filas.map((x) => x.fecha).filter(Boolean).sort();
-  await pool.query(
+  await db.query(
     `INSERT INTO conciliacion_fuentes (business_id, sucursal, tipo, archivo, filas, cantidad, desde, hasta, origen, updated_at)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, 'mercadopago', now())
      ON CONFLICT (business_id, sucursal, tipo) DO UPDATE SET archivo = EXCLUDED.archivo, filas = EXCLUDED.filas,
@@ -403,11 +408,11 @@ async function escribirFuente(businessId, sucursal, tipo, filas, archivo) {
 }
 
 /** Egresos: reemplaza los de ese origen ('pago' | 'reporte') en el rango y deja el resto. */
-async function guardarEgresos(businessId, sucursal, desde, hasta, origen, nuevas) {
-  const viejas = (await leerFuente(businessId, sucursal, 'egresos'))
+async function guardarEgresos(businessId, sucursal, desde, hasta, origen, nuevas, db = pool) {
+  const viejas = (await leerFuente(businessId, sucursal, 'egresos', db))
     .filter((x) => !(x.origen === origen && x.fecha >= desde && x.fecha <= hasta));
   const todas = [...viejas, ...nuevas].sort((a, b) => `${a.fecha} ${a.hora || ''}`.localeCompare(`${b.fecha} ${b.hora || ''}`));
-  await escribirFuente(businessId, sucursal, 'egresos', todas, `Mercado Pago ${desde} a ${hasta}`);
+  await escribirFuente(businessId, sucursal, 'egresos', todas, `Mercado Pago ${desde} a ${hasta}`, db);
   return todas.length;
 }
 
@@ -441,6 +446,16 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo }
         const dc = x.mpId != null ? docs.get(String(x.mpId)) : null;
         if (dc && !x.doc) { x.doc = dc; cambios += 1; }
       });
+      // También en lo guardado entero, así sobrevive al rearmar las filas.
+      const extras = [...new Set([...nombres.keys(), ...docs.keys()])].filter((id) => /^\d+$/.test(id))
+        .map((id) => ({ id, nombre: nombres.get(id) || null, doc: docs.get(id) || null }));
+      if (extras.length) {
+        await pool.query(
+          `UPDATE mp_pagos m SET extra = COALESCE(m.extra, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('nombre', x->>'nombre', 'doc', x->>'doc'))
+             FROM jsonb_array_elements($3::jsonb) x
+            WHERE m.business_id = $1 AND m.sucursal = $2 AND m.rol = 'cobro' AND m.mp_id = (x->>'id')::bigint`,
+          [businessId, sucursal, JSON.stringify(extras)]);
+      }
       if (cambios) {
         await pool.query(
           "UPDATE conciliacion_fuentes SET filas = $3::jsonb, updated_at = now() WHERE business_id = $1 AND sucursal = $2 AND tipo = 'banco'",
@@ -454,63 +469,162 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo }
   }
 }
 
+// ── Todo lo que manda Mercado Pago, guardado entero (Diego 14/11/2026) ──────────────────────
+// «Cuando trae lo de bancos debe traer todo, no parcial con algunas columnas; y si MP suma una
+// columna, hacer el barrido hacia atrás para todos los registros». Cada pago se guarda COMPLETO en
+// mp_pagos (raw). Las filas que leen la conciliación y Movimientos bancarios (banco, egresos,
+// devoluciones) se arman desde ahí: sumar una columna = subir VERSION_FILAS y se rearman todas las
+// filas desde lo guardado, sin volver a pedirle nada a MP (mercadopagoDiario.js).
+const VERSION_FILAS = 2;
+const restarDiasIso = (iso, n) => { const d = new Date(`${iso}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+
+/** Saca de lo que manda MP lo que pesa y no sirve (imágenes del QR). */
+function aligerar(p) {
+  const x = JSON.parse(JSON.stringify(p));
+  const td = x.point_of_interaction?.transaction_data;
+  if (td) { delete td.qr_code_base64; delete td.qr_code; }
+  return x;
+}
+
+/** Guarda (o actualiza) los pagos tal cual vienen de MP. rol: 'cobro' (cobró la cuenta) | 'pago' (pagó). */
+async function guardarCrudos(businessId, sucursal, rol, pagos, db = pool) {
+  const lista = pagos.filter((p) => p && p.id != null);
+  for (let i = 0; i < lista.length; i += 400) {
+    const tanda = lista.slice(i, i + 400).map((p) => ({ ...aligerar(p), _fecha: enAR(p.date_created)?.fecha || null }));
+    await db.query(
+      `INSERT INTO mp_pagos (business_id, sucursal, rol, mp_id, fecha, estado, raw, actualizado)
+       SELECT $1, $2, $3, (x->>'id')::bigint, (x->>'_fecha')::date, x->>'status', x - '_fecha', now()
+         FROM jsonb_array_elements($4::jsonb) x
+       ON CONFLICT (business_id, sucursal, mp_id, rol) DO UPDATE
+         SET raw = EXCLUDED.raw, estado = EXCLUDED.estado, fecha = EXCLUDED.fecha, actualizado = now()`,
+      [businessId, sucursal, rol, JSON.stringify(tanda)]);
+  }
+  return lista.length;
+}
+
+/** Pagos crudos de la cuenta (cualquier estado menos rechazados/cancelados). */
+async function traerCrudos(token, filtro, desde, hasta, rango = 'date_created', opciones = {}) {
+  const todos = await buscarPagos(token, filtro, desde, hasta, (p) => p, { ...opciones, rango, estado: null });
+  return todos.filter((p) => !['rejected', 'cancelled'].includes(p.status));
+}
+
+/** Lo que agregó el reporte de liberaciones a un pago (nombre, documento). */
+const conExtra = (fila, extra) => {
+  if (!fila || !extra) return fila;
+  if (extra.nombre && !fila.cliente) fila.cliente = extra.nombre;
+  if (extra.doc && !fila.doc) fila.doc = extra.doc;
+  return fila;
+};
+
 /**
- * Trae los cobros del período y los deja como fuente "banco" del módulo de conciliación:
+ * Arma las filas de banco, egresos (pagos hechos) y devoluciones de un rango desde lo guardado
+ * en mp_pagos y las deja en conciliacion_fuentes. Con candado por cuenta: dos traídas a la vez
+ * no se pisan.
+ */
+async function derivarRango(businessId, sucursal, mpUserId, desde, hasta) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`mpfuentes:${businessId}:${sucursal}`]);
+    const { rows } = await client.query(
+      `SELECT rol, raw, extra FROM mp_pagos
+        WHERE business_id = $1 AND sucursal = $2
+          AND (fecha BETWEEN ($3::date - 1) AND $4::date
+               OR (rol = 'cobro' AND (raw->>'date_last_updated') >= $5::text AND (raw->>'date_last_updated') < $6::text))`,
+      [businessId, sucursal, desde, hasta, desde, restarDiasIso(hasta, -2)]);
+    const enRango = (f) => f && f.fecha >= desde && f.fecha <= hasta;
+    const banco = [], hechos = [], devol = [];
+    rows.forEach((r) => {
+      if (r.rol === 'cobro') {
+        const f = conExtra(pagoAFila(r.raw), r.extra);
+        if (enRango(f)) banco.push(f);
+        const d = devolucionAFila(r.raw);
+        if (d) devol.push(d);
+      } else {
+        const f = pagoHechoAFila(r.raw, mpUserId);
+        if (enRango(f)) hechos.push(f);
+      }
+    });
+    // banco: reemplaza el rango
+    const viejas = (await leerFuente(businessId, sucursal, 'banco', client)).filter((x) => !(x.fecha >= desde && x.fecha <= hasta));
+    const todas = [...viejas, ...banco].sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+    todas.forEach((x, i) => { x.ord = i; });
+    await escribirFuente(businessId, sucursal, 'banco', todas, `Mercado Pago ${desde} a ${hasta}`, client);
+    await guardarEgresos(businessId, sucursal, desde, hasta, 'pago', hechos, client);
+    const dev = await guardarDevoluciones(businessId, sucursal, devol, client);
+    await client.query('COMMIT');
+    return { cobros: banco.length, total: todas.length, pagos_hechos: hechos.length, devoluciones: dev.total, devolucionesNuevas: dev.nuevas };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** Pide a MP todo lo del rango y lo guarda entero (sin armar filas). Devuelve cuántos pagos guardó. */
+async function traerYGuardar(t, businessId, sucursal, desde, hasta) {
+  const quien = t.fila.mp_user_id;
+  const cobros = await traerCrudos(t.token, { 'collector.id': quien }, desde, hasta, 'date_created');
+  await guardarCrudos(businessId, sucursal, 'cobro', cobros);
+  // Los que cambiaron en el rango (devoluciones y contracargos de cobros más viejos).
+  const cambiados = await traerCrudos(t.token, { 'collector.id': quien }, desde, hasta, 'date_last_updated');
+  await guardarCrudos(businessId, sucursal, 'cobro', cambiados);
+  let pagos = [];
+  try {
+    pagos = await traerCrudos(t.token, { 'payer.id': quien }, desde, hasta, 'date_created');
+    await guardarCrudos(businessId, sucursal, 'pago', pagos);
+  } catch (e) {
+    console.warn('[mercadopago] pagos hechos:', e.message);
+  }
+  return { cobros: cobros.length, cambiados: cambiados.length, pagos: pagos.length };
+}
+
+/**
+ * Trae TODO lo del período (guardado entero) y arma las filas de banco, egresos y devoluciones:
  * reemplaza lo que había de esas fechas (venga de archivo o de MP) y deja el resto.
  */
-async function sincronizarBanco(businessId, sucursal, desde, hasta) {
+async function sincronizarBanco(businessId, sucursal, desde, hasta, { sinReporte = false } = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(desde || '') || !/^\d{4}-\d{2}-\d{2}$/.test(hasta || '') || desde > hasta) {
     return { error: 'fechas_invalidas' };
   }
   if (diasEntre(desde, hasta).length > MAX_DIAS) return { error: 'periodo_muy_largo' };
   const t = await tokenVigente(businessId, sucursal);
   if (t.error) return t;
-  let nuevas;
+  let traido;
   try {
-    nuevas = await traerCobros(t.token, t.fila.mp_user_id, desde, hasta);
+    traido = await traerYGuardar(t, businessId, sucursal, desde, hasta);
   } catch (e) {
     await pool.query('UPDATE integraciones_mercadopago SET ultimo_sync_error = $2, updated_at = now() WHERE business_id = $1 AND sucursal = $3',
       [businessId, String(e.message || e).slice(0, 300), sucursal]);
     return { error: 'mp_fallo_consulta', detalle: e.message };
   }
-  const { rows } = await pool.query(
-    "SELECT filas FROM conciliacion_fuentes WHERE business_id = $1 AND sucursal = $2 AND tipo = 'banco'", [businessId, sucursal]);
-  const viejas = (rows[0]?.filas || []).filter((x) => !(x.fecha >= desde && x.fecha <= hasta));
-  const todas = [...viejas, ...nuevas].sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
-  todas.forEach((x, i) => { x.ord = i; });
-  const fechas = todas.map((x) => x.fecha).filter(Boolean).sort();
-  await pool.query(
-    `INSERT INTO conciliacion_fuentes (business_id, sucursal, tipo, archivo, filas, cantidad, desde, hasta, origen, updated_at)
-     VALUES ($1, $7, 'banco', $2, $3::jsonb, $4, $5, $6, 'mercadopago', now())
-     ON CONFLICT (business_id, sucursal, tipo) DO UPDATE SET archivo = EXCLUDED.archivo, filas = EXCLUDED.filas,
-       cantidad = EXCLUDED.cantidad, desde = EXCLUDED.desde, hasta = EXCLUDED.hasta, origen = 'mercadopago', updated_at = now()`,
-    [businessId, `Mercado Pago ${desde} a ${hasta}`, JSON.stringify(todas), todas.length, fechas[0] || null, fechas[fechas.length - 1] || null, sucursal]);
+  const d = await derivarRango(businessId, sucursal, t.fila.mp_user_id, desde, hasta);
+  if (d.devolucionesNuevas.length) avisarDevoluciones(businessId, d.devolucionesNuevas);
   await pool.query(
     `UPDATE integraciones_mercadopago SET ultimo_sync_at = now(), ultimo_sync_desde = $2, ultimo_sync_hasta = $3,
        ultimo_sync_error = NULL, updated_at = now() WHERE business_id = $1 AND sucursal = $4`, [businessId, desde, hasta, sucursal]);
+  const rep = sinReporte ? {} : await aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo: t });
+  return { ok: true, desde, hasta, crudos: traido.cobros, cobros: d.cobros, total: d.total, pagos_hechos: d.pagos_hechos, devoluciones: d.devoluciones, ...rep };
+}
 
-  // Egresos (14/11): lo que pagó la cuenta en esas fechas…
-  let pagosHechos = null;
-  try {
-    const hechos = await traerPagosHechos(t.token, t.fila.mp_user_id, desde, hasta);
-    await guardarEgresos(businessId, sucursal, desde, hasta, 'pago', hechos);
-    pagosHechos = hechos.length;
-  } catch (e) {
-    console.warn('[mercadopago] pagos hechos:', e.message);
+/**
+ * Barrido hacia atrás sin pedirle nada a MP: rearma todas las filas de una cuenta desde lo
+ * guardado (cuando cambia VERSION_FILAS). Mes por mes, solo los meses que tienen pagos guardados.
+ */
+async function rederivarCuenta(businessId, sucursal) {
+  const f = await fila(businessId, sucursal);
+  if (!f) return { error: 'mp_no_conectado' };
+  const { rows } = await pool.query(
+    `SELECT DISTINCT to_char(date_trunc('month', fecha), 'YYYY-MM-DD') AS mes FROM mp_pagos
+      WHERE business_id = $1 AND sucursal = $2 AND fecha IS NOT NULL ORDER BY 1`, [businessId, sucursal]);
+  for (const { mes } of rows) {
+    const fin = new Date(`${mes}T12:00:00Z`); fin.setUTCMonth(fin.getUTCMonth() + 1); fin.setUTCDate(0);
+    await derivarRango(businessId, sucursal, f.mp_user_id, mes, fin.toISOString().slice(0, 10));
   }
-  // Devoluciones, contracargos y disputas de esas fechas (por fecha de actualización del pago).
-  let devoluciones = null;
-  try {
-    const dev = await guardarDevoluciones(businessId, sucursal,
-      await traerDevoluciones(t.token, t.fila.mp_user_id, desde, hasta));
-    devoluciones = dev.total;
-    if (dev.nuevas.length) avisarDevoluciones(businessId, dev.nuevas);
-  } catch (e) {
-    console.warn('[mercadopago] devoluciones:', e.message);
-  }
-  // …y el reporte con nombres, retiros, impuestos y comisiones (puede quedar pendiente).
-  const rep = await aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo: t });
-  return { ok: true, cobros: nuevas.length, total: todas.length, desde, hasta, pagos_hechos: pagosHechos, devoluciones, ...rep };
+  await pool.query('UPDATE integraciones_mercadopago SET version_filas = $3 WHERE business_id = $1 AND sucursal = $2',
+    [businessId, sucursal, VERSION_FILAS]);
+  return { meses: rows.length };
 }
 
 /** Un aviso en la campana por tanda (no uno por devolución). */
@@ -530,9 +644,10 @@ function avisarDevoluciones(businessId, filas) {
 }
 
 module.exports = {
+  VERSION_FILAS, rederivarCuenta, traerYGuardar, derivarRango,
   configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, sincronizarBanco, aplicarReporte,
   // para tests
   _firmarEstado: firmarEstado, _verificarEstado: verificarEstado, _pagoAFila: pagoAFila, _traerCobros: traerCobros, _enAR: enAR,
   _pagoHechoAFila: pagoHechoAFila, _traerPagosHechos: traerPagosHechos,
-  _devolucionAFila: devolucionAFila, _descuentosDe: descuentosDe, _extrasDePago: extrasDePago,
+  _devolucionAFila: devolucionAFila, _guardarCrudos: guardarCrudos, _descuentosDe: descuentosDe, _extrasDePago: extrasDePago,
 };
