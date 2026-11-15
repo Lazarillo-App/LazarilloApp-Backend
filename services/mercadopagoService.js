@@ -362,6 +362,9 @@ function extrasDePago(p) {
     ref: String(p.external_reference || '').trim() || null,
     docTipo: doc ? String(ident.type || '').trim() || null : null,
     doc: doc || null,
+    // Email del que pagó (Diego 15/11: «al exportar, con los datos del cliente: mail…»). El genérico de las
+    // ventas con Point (ventapresencial@mercadopago…) no es de nadie: va vacío. MP no manda teléfono.
+    email: /^ventapresencial@mercadopago\./i.test(String(p.payer?.email || '')) ? null : (String(p.payer?.email || '').trim() || null),
     caja: String(p.pos_id || '').trim() || null,
     local: String(p.store_id || '').trim() || null,
     cuotas: cuotas > 1 ? cuotas : null,
@@ -579,7 +582,7 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo, 
 // mp_pagos (raw). Las filas que leen la conciliación y Movimientos bancarios (banco, egresos,
 // devoluciones) se arman desde ahí: sumar una columna = subir VERSION_FILAS y se rearman todas las
 // filas desde lo guardado, sin volver a pedirle nada a MP (mercadopagoDiario.js).
-const VERSION_FILAS = 3; // 3 (15/11): cada fila dice de qué cuenta de MP viene (varias cuentas por sucursal)
+const VERSION_FILAS = 4; // 4 (15/11): email del pagador. 3 (15/11): 3 (15/11): cada fila dice de qué cuenta de MP viene (varias cuentas por sucursal)
 const restarDiasIso = (iso, n) => { const d = new Date(`${iso}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
 
 /** Saca de lo que manda MP lo que pesa y no sirve (imágenes del QR). */

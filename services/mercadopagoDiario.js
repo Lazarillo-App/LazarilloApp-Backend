@@ -155,9 +155,11 @@ function dispararNegocio(businessId) {
 async function asegurarHistorial(businessId) {
   const { rows } = await pool.query(
     `UPDATE integraciones_mercadopago SET historial_intento_at = now()
-      WHERE business_id = $1 AND NOT coalesce(historial_completo, false)
+      WHERE business_id = $1
+        -- historial incompleto, o filas armadas con una versión vieja (se rearman desde lo guardado, sin pedirle a MP)
+        AND (NOT coalesce(historial_completo, false) OR coalesce(version_filas, 0) < $2)
         AND (historial_intento_at IS NULL OR historial_intento_at < now() - interval '15 minutes')
-      RETURNING sucursal`, [businessId]);
+      RETURNING sucursal`, [businessId, mp.VERSION_FILAS]);
   if (rows.length) dispararNegocio(businessId);
   return rows.length;
 }
