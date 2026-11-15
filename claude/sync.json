@@ -48,5 +48,30 @@
     "modulo": "general",
     "prioridad": "normal",
     "estado": "hecha"
+  },
+  {
+    "clave": "2026-11-15-21",
+    "tipo": "tarea",
+    "titulo": "Web: portada orientada a vender",
+    "modulo": "general",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "detalle": "Relato «Un negocio con Lazarillo sabe dónde está parado» (6 tarjetas), logos y tarjetas de clientes, sección Asesores, integraciones (MaxiRest, Mercado Pago y Mercado Libre conectados), header sólido, robots.txt y pedido de demo real (se guarda en demo_requests y llega por mail a Diego y Martín). Front #55 #63 #64 #72 #280 #281 #283 #284 #338, back #140."
+  },
+  {
+    "clave": "2026-11-15-22",
+    "tipo": "tarea",
+    "titulo": "Web: sector Asesoría (servicios, cómo trabajamos, preguntas frecuentes)",
+    "modulo": "general",
+    "prioridad": "normal",
+    "detalle": "Decidido: la web queda en 2 sectores, Inicio y Asesoría, con «Pedí una demo» siempre a la vista. Asesoría, inspirada en plusasesoria.com.ar (sin hotelería): Software hay mucho… · qué hacemos · cómo trabajamos (diagnóstico, plan, implementación, seguimiento) · preguntas frecuentes · pedí tu diagnóstico. Falta de Diego: lista de servicios y qué se entrega con el diagnóstico."
+  },
+  {
+    "clave": "2026-11-15-23",
+    "tipo": "tarea",
+    "titulo": "Web: Nosotros estilo Yurest (historia de Container, fotos, hitos)",
+    "modulo": "general",
+    "prioridad": "baja",
+    "detalle": "En espera hasta tener fotos (Diego 15/11: «lo veo apresurado»). Va como bloque dentro de Asesoría. Necesita: capturas del Sobre nosotros de yurest.com (no se puede leer automático), fotos de Container y de los asesores, hitos con año. Sumar a Florencia Acosta cuando confirme."
   }
 ]
