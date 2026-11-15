@@ -117,5 +117,20 @@
     "modulo": "general",
     "prioridad": "alta",
     "detalle": "Diego 15/11: «esta función de preguntarle a la IA la quiero en mi web también, me encantó». Como Yulia de Yurest: consultas en lenguaje natural sobre ventas, costos, márgenes y consumos, con respuesta al instante y alertas (subas de precio de proveedores, desvíos de margen). Encaja en el chat de Anthony (la IA del producto). Yurest es la guía de producto (memoria: areas/yurest-referente)."
+  },
+  {
+    "clave": "2026-11-15-conc-01",
+    "tipo": "cambio",
+    "id": 56,
+    "nota": "v2 en testing (front #358, squash 5e25a70): ventana del pago −1/+3 días de la venta (antes 31), ±15% por propina, hasta 3 tickets por cupón y elige el de importe más cercano si dos pagos comparten la clave de 10 dígitos. Medido con Container Bar oct–nov reales."
+  },
+  {
+    "clave": "2026-11-15-conc-02",
+    "tipo": "tarea",
+    "titulo": "Conciliación: ventas de apps de delivery contra la liquidación de cada marketplace (Rappi, PedidosYa, Uber)",
+    "modulo": "administracion",
+    "prioridad": "normal",
+    "business_id": 147,
+    "detalle": "Diego 15/11: «Rappi, PedidosYa y Uber como forma de cobro hay que conciliarlo con los marketplace, no deberían estar en Mercado Pago». Hecho: ya no se cruzan contra MP (front #358; Container Bar 1–15/11: ventas pendientes 96 → 10). Falta: traer la liquidación de cada app (archivo o API) y conciliar contra esas ventas, con sus comisiones."
   }
 ]
