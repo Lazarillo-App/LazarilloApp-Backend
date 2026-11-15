@@ -34,23 +34,23 @@ function rangoDiario(ultimoGuardado, hoy = hoyAR()) {
 
 async function cuentas(businessId = null) {
   const { rows } = await pool.query(
-    `SELECT m.business_id, m.sucursal, f.hasta::text AS ultimo, m.historial_hasta::text AS historial_hasta,
+    `SELECT m.business_id, m.sucursal, m.mp_user_id, f.hasta::text AS ultimo, m.historial_hasta::text AS historial_hasta,
             m.historial_completo, m.version_filas
        FROM integraciones_mercadopago m
        LEFT JOIN conciliacion_fuentes f ON f.business_id = m.business_id AND f.sucursal = m.sucursal AND f.tipo = 'banco'
       WHERE ($1::int IS NULL OR m.business_id = $1)
-      ORDER BY m.business_id, m.sucursal`, [businessId]);
+      ORDER BY m.business_id, m.sucursal, m.conectado_at`, [businessId]);
   return rows;
 }
 
 /** Trae lo de una cuenta. Devuelve el resultado de sincronizarBanco (o el error). */
 async function traerCuenta(c) {
-  const clave = `${c.business_id}:${c.sucursal}`;
+  const clave = `${c.business_id}:${c.sucursal}:${c.mp_user_id}`;
   if (enCurso.has(clave)) return { saltada: 'en_curso' };
   enCurso.add(clave);
   try {
     const { desde, hasta } = rangoDiario(c.ultimo);
-    const r = await mp.sincronizarBanco(c.business_id, c.sucursal, desde, hasta);
+    const r = await mp.sincronizarBanco(c.business_id, c.sucursal, desde, hasta, { cuenta: c.mp_user_id });
     if (r.error) return { desde, hasta, ...r };
     if (!c.historial_completo) await recorrerHistorial(c);
     else if ((c.version_filas || 0) < mp.VERSION_FILAS) await mp.rederivarCuenta(c.business_id, c.sucursal);
@@ -84,16 +84,16 @@ async function recorrerHistorial(c) {
     : `${hoy.slice(0, 7)}-01`;
   let vacios = 0, meses = 0, crudos = 0;
   for (const m of mesesHaciaAtras(inicio, 36, hoy)) {
-    const r = await mp.sincronizarBanco(c.business_id, c.sucursal, m.desde, m.hasta, { sinReporte: true });
+    const r = await mp.sincronizarBanco(c.business_id, c.sucursal, m.desde, m.hasta, { sinReporte: true, cuenta: c.mp_user_id });
     if (r.error) { console.warn(`[mercadopago:historial] negocio ${c.business_id} ${m.desde}: ${r.error}`); return; }
     meses += 1; crudos += r.crudos || 0;
     vacios = r.crudos ? 0 : vacios + 1;
-    await pool.query('UPDATE integraciones_mercadopago SET historial_hasta = $3, historial_intento_at = now() WHERE business_id = $1 AND sucursal = $2',
-      [c.business_id, c.sucursal, m.desde]);
+    await pool.query('UPDATE integraciones_mercadopago SET historial_hasta = $3, historial_intento_at = now() WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $4',
+      [c.business_id, c.sucursal, m.desde, c.mp_user_id]);
     if (vacios >= 2) break;
   }
-  await pool.query('UPDATE integraciones_mercadopago SET historial_completo = true, version_filas = $3 WHERE business_id = $1 AND sucursal = $2',
-    [c.business_id, c.sucursal, mp.VERSION_FILAS]);
+  await pool.query('UPDATE integraciones_mercadopago SET historial_completo = true, version_filas = $3 WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $4',
+    [c.business_id, c.sucursal, mp.VERSION_FILAS, c.mp_user_id]);
   console.log(`[mercadopago:historial] negocio ${c.business_id} suc ${c.sucursal}: ${meses} meses, ${crudos} pagos guardados enteros`);
   // Pasa una sola vez por cuenta (al vincularla): un aviso para saber que Clientes y Movimientos ya están completos.
   if (crudos) {
@@ -123,7 +123,7 @@ async function traerTodas({ businessId = null, origen = 'cron' } = {}) {
 /** Segunda pasada del reporte para las que quedaron pendientes. */
 async function reintentarReportes(pendientes, origen = 'cron') {
   for (const c of pendientes) {
-    const r = await mp.aplicarReporte(c.business_id, c.sucursal, c.desde, c.hasta).catch((e) => ({ reporte: 'error', motivo: e.message }));
+    const r = await mp.aplicarReporte(c.business_id, c.sucursal, c.desde, c.hasta, { cuenta: c.mp_user_id }).catch((e) => ({ reporte: 'error', motivo: e.message }));
     console.log(`[mercadopago:${origen}] reporte negocio ${c.business_id} suc ${c.sucursal}: ${r.reporte || r.error}${r.motivo ? ` (${r.motivo})` : ''}`);
   }
 }

@@ -57,7 +57,7 @@ router.post('/conectar', manejar(async (req) => {
   return r;
 }));
 
-router.delete('/', manejar((req) => mp.desconectar(bid(req), req.sucursal)));
+router.delete('/', manejar((req) => mp.desconectar(bid(req), req.sucursal, req.query.cuenta || null)));
 
 router.post('/sincronizar', manejar((req) => mp.sincronizarBanco(bid(req), req.sucursal, req.body?.desde, req.body?.hasta)));
 
