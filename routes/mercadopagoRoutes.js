@@ -43,7 +43,12 @@ router.get('/autorizar', manejar(async (req) => {
   return { url: mp.urlAutorizacion(bid(req), req.user?.id, req.sucursal) };
 }));
 
-router.post('/conectar', manejar((req) => mp.conectar(bid(req), req.user?.id, req.body?.code, req.body?.state)));
+router.post('/conectar', manejar(async (req) => {
+  const r = await mp.conectar(bid(req), req.user?.id, req.body?.code, req.body?.state);
+  // Al vincular (Diego 15/11): se guarda el CUIT de la cuenta y se completa el de la sucursal si estaba vacío.
+  if (!r?.error) require('../services/clientesService').docsPropios(bid(req)).catch((e) => console.warn('[mercadopago] CUIT al vincular:', e.message));
+  return r;
+}));
 
 router.delete('/', manejar((req) => mp.desconectar(bid(req), req.sucursal)));
 
