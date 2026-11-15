@@ -18,13 +18,17 @@ const MEDIO = {
 /**
  * Documentos propios del negocio (14/11, Diego: «estás poniendo a un cliente del mismo CUIT del
  * negocio»): el CUIT/DNI de cada cuenta de Mercado Pago conectada (se pide a MP una vez y queda
- * guardado) y el CUIT cargado en el negocio, si hay. Lo que pagan esas cuentas no es un cliente.
+ * guardado), el CUIT de cada sucursal y el del negocio, si hay. Lo que pagan esas cuentas no es un cliente.
  */
 async function docsPropios(businessId) {
   const soloDigitos = (x) => String(x || '').replace(/\D/g, '');
   const docs = new Set();
   const neg = await pool.query(`SELECT props->>'tax_id' AS cuit FROM app_businesses WHERE id = $1`, [businessId]);
   if (soloDigitos(neg.rows[0]?.cuit)) docs.add(soloDigitos(neg.rows[0].cuit));
+  // CUIT de cada sucursal (Diego 14/11: «el perfil de cada sucursal tiene su CUIT, que puede o no ser
+  // el de la organización u otra sucursal»): se carga en Editar sucursal (props.cuit).
+  const sucs = await pool.query(`SELECT props->>'cuit' AS cuit FROM app_branches WHERE business_id = $1`, [businessId]);
+  sucs.rows.forEach((r) => { if (soloDigitos(r.cuit)) docs.add(soloDigitos(r.cuit)); });
   const { rows } = await pool.query(
     'SELECT sucursal, mp_doc FROM integraciones_mercadopago WHERE business_id = $1', [businessId]);
   for (const r of rows) {
