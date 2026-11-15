@@ -93,5 +93,12 @@
     "modulo": "resultados",
     "prioridad": "normal",
     "detalle": "Diego 15/11: «hoy no tenemos las ventas trabajadas, tendríamos que entrar en algún momento; el sector de ventas está muy básico». Surgió al comparar los rubros variables del Panel contra lo vendido (front #273): Mercaderías y Servicios ya se miden como % de ventas; Servicios para eventos no lo detecta porque las ventas de eventos no van separadas. Arrancar por relevar qué muestra hoy la pestaña Ventas y proponer qué tiene que ayudar a decidir (por día/turno, por agrupación, por PDV, ticket promedio, eventos aparte). Multi-POS: solo ventas del POS."
+  },
+  {
+    "clave": "2026-11-15-25",
+    "tipo": "cambio",
+    "titulo": "Web: sector Asesoría (servicios, cómo trabajamos, preguntas frecuentes)",
+    "estado": "en_curso",
+    "nota": "Front #346 en testing: menos aire entre los pasos y «Qué hacemos»; «¿Qué es el diagnóstico?» con el texto de Diego (Lazarillo de respaldo, identificar el problema); sección nueva «Nuestros principios · Así tomamos decisiones» con 6 principios de VALORES EQUIPO corregidos por Diego y su cita de equipos interdependientes. Sigue faltando que Diego confirme los 6 servicios y el resto de las preguntas frecuentes."
   }
 ]
