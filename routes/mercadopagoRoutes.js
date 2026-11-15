@@ -47,6 +47,9 @@ router.post('/conectar', manejar(async (req) => {
   const r = await mp.conectar(bid(req), req.user?.id, req.body?.code, req.body?.state);
   // Al vincular (Diego 15/11): se guarda el CUIT de la cuenta y se completa el de la sucursal si estaba vacío.
   if (!r?.error) require('../services/clientesService').docsPropios(bid(req)).catch((e) => console.warn('[mercadopago] CUIT al vincular:', e.message));
+  // Al vincular se trae el historial en segundo plano, sin esperar al cron (Diego 15/11: «ya está vinculado
+  // pero Clientes sigue vacío»). Avisa en la campana cuando termina.
+  if (!r?.error) require('../services/mercadopagoDiario').dispararNegocio(bid(req));
   return r;
 }));
 
