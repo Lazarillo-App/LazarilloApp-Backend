@@ -53,4 +53,7 @@ router.post('/sincronizar', manejar((req) => mp.sincronizarBanco(bid(req), req.s
 // vuelve a preguntar acá hasta que esté.
 router.post('/reporte', manejar((req) => mp.aplicarReporte(bid(req), req.sucursal, req.body?.desde, req.body?.hasta)));
 
+// Clientes (14/11): los que pagaron por Mercado Pago, de todas las sucursales del negocio.
+router.get('/clientes', manejar((req) => require('../services/clientesService').clientes(bid(req))));
+
 module.exports = router;
