@@ -131,4 +131,4 @@ async function clientes(businessId) {
   };
 }
 
-module.exports = { clientes };
+module.exports = { clientes, docsPropios };
