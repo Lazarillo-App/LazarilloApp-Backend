@@ -534,10 +534,19 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo, 
   const t = tokenListo || await tokenVigente(businessId, sucursal, cuenta);
   if (t.error) return t;
   try {
+    // Diagnóstico (15/11): MP rechaza la configuración del reporte y no sabíamos por qué; queda en el log
+    // con lo que respondió, para poder destrabarlo.
+    const det = (x) => (x == null ? '' : (typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 600));
     const cfg = await reportes.asegurarConfig(t.token);
-    if (cfg.error) return { reporte: 'error', motivo: cfg.error };
+    if (cfg.error) {
+      console.warn(`[mercadopago:reporte] negocio ${businessId} suc ${sucursal} cuenta ${t.fila?.mp_user_id}: ${cfg.error} ${det(cfg.detalle)}`);
+      return { reporte: 'error', motivo: cfg.error, detalle: det(cfg.detalle) };
+    }
     const b = await reportes.buscarOPedir(t.token, desde, hasta);
-    if (b.error) return { reporte: 'error', motivo: b.error };
+    if (b.error) {
+      console.warn(`[mercadopago:reporte] negocio ${businessId} suc ${sucursal} cuenta ${t.fila?.mp_user_id}: ${b.error} ${det(b.detalle)}`);
+      return { reporte: 'error', motivo: b.error, detalle: det(b.detalle) };
+    }
     if (b.pendiente) return { reporte: 'pendiente' };
     const d = await reportes.bajar(t.token, b.archivo);
     if (d.error) return { reporte: 'error', motivo: d.error };
