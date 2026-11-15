@@ -87,6 +87,7 @@ const detalleSelectJoin = (fuente, organizationId) => sql`
     ccm.nombre          AS "conceptoCajaManualNombre",
     rcm.nombre          AS "conceptoCajaManualRubroNombre",
     cb.comprobante      AS "comprobante",
+    cb.origen           AS "origenCompra",
     cb.codigo           AS "codigoProveedor",
     cb.business_id      AS "negocioCompra",
     cb.branch_id        AS "sucursalCompra"
@@ -108,6 +109,8 @@ const aFila = (r) => ({
   ...reshapeDetalle({ ...r, pdvCompraId: lugarCompra(r.negocioCompra, r.sucursalCompra) }),
   negocioCompra: r.negocioCompra,
   sucursalCompra: r.sucursalCompra,
+  // Cargada en Lazarillo: se puede eliminar desde el detalle (Diego 14/11/2026). Las de MaxiRest no.
+  esLazarillo: r.origenCompra === 'lazarillo',
 });
 
 // WHERE de la lista: tiene que traer exactamente las compras que suma la celda clickeada del pivot.
@@ -259,7 +262,8 @@ async function obtenerDetalleCompras({ organizationId, businessId, sucursal, sp 
         c.business_id AS "localIdOrigen", c.branch_id AS "puntoDeVentaIdOrigen",
         cc.codigo AS "conceptoCajaCodigo", cc.nombre AS "conceptoCajaNombre", rc.nombre AS "conceptoCajaRubroNombre",
         ccm.codigo AS "conceptoCajaManualCodigo", ccm.nombre AS "conceptoCajaManualNombre", rcm.nombre AS "conceptoCajaManualRubroNombre",
-        c.comprobante, c.codigo AS "codigoProveedor", c.business_id AS "negocioCompra", c.branch_id AS "sucursalCompra"
+        c.comprobante, c.codigo AS "codigoProveedor", c.business_id AS "negocioCompra", c.branch_id AS "sucursalCompra",
+        c.origen AS "origenCompra"
       FROM gestion_compras c
       LEFT JOIN gestion_proveedores p ON c."proveedorId" = p.id
       LEFT JOIN app_businesses neg    ON c.business_id = neg.id
