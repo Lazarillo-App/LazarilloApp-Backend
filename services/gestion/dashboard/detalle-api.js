@@ -87,6 +87,7 @@ const detalleSelectJoin = (fuente, organizationId) => sql`
     ccm.nombre          AS "conceptoCajaManualNombre",
     rcm.nombre          AS "conceptoCajaManualRubroNombre",
     cb.comprobante      AS "comprobante",
+    cb.origen           AS "origenCompra",
     cb.codigo           AS "codigoProveedor",
     cb.business_id      AS "negocioCompra",
     cb.branch_id        AS "sucursalCompra"
@@ -108,6 +109,8 @@ const aFila = (r) => ({
   ...reshapeDetalle({ ...r, pdvCompraId: lugarCompra(r.negocioCompra, r.sucursalCompra) }),
   negocioCompra: r.negocioCompra,
   sucursalCompra: r.sucursalCompra,
+  // Cargada en Lazarillo: se puede eliminar desde el detalle (Diego 14/11/2026). Las de MaxiRest no.
+  esLazarillo: r.origenCompra === 'lazarillo',
 });
 
 // WHERE de la lista: tiene que traer exactamente las compras que suma la celda clickeada del pivot.
