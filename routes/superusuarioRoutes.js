@@ -145,6 +145,12 @@ router.get('/tareas/:id', async (req, res, next) => {
 router.post('/tareas', async (req, res, next) => {
   try { responder(res, await tablero.crear(req.body || {}, req.user.id)); } catch (e) { next(e); }
 });
+router.get('/guia', async (_req, res, next) => {
+  try { responder(res, await tablero.leerGuia()); } catch (e) { next(e); }
+});
+router.put('/guia', async (req, res, next) => {
+  try { responder(res, await tablero.guardarGuia(req.body?.texto, req.user.id)); } catch (e) { next(e); }
+});
 router.post('/tareas/lote', async (req, res, next) => {
   try { responder(res, await tablero.crearLote(req.body?.tareas, req.user.id)); } catch (e) { next(e); }
 });
