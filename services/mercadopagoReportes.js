@@ -38,8 +38,12 @@ async function asegurarConfig(token, { llamar: ll = llamar } = {}) {
     const tiene = new Set((actual.data.columns || []).map((c) => c.key));
     const faltan = COLUMNAS.filter((k) => !tiene.has(k));
     if (!faltan.length) return { ok: true };
-    const cfg = { ...actual.data, columns: [...(actual.data.columns || []), ...faltan.map((key) => ({ key }))] };
-    delete cfg.scheduled;
+    // Solo los campos que la doc acepta en el PUT (15/11: mandar la config entera, con campos de solo
+    // lectura que devuelve el GET, puede ser lo que MP rechazaba). Los vacíos no se mandan.
+    const ACEPTA = ['file_name_prefix', 'frequency', 'separator', 'display_timezone', 'report_translation', 'notification_email_list',
+      'include_withdrawal_at_end', 'check_available_balance', 'compensate_detail', 'execute_after_withdrawal', 'sftp_info'];
+    const cfg = { columns: [...(actual.data.columns || []).map((c) => ({ key: c.key })), ...faltan.map((key) => ({ key }))] };
+    ACEPTA.forEach((k) => { const v = actual.data[k]; if (v != null && !(Array.isArray(v) && v.every((x) => x == null))) cfg[k] = v; });
     const r = await ll(url, { token, method: 'PUT', body: cfg });
     return r.ok ? { ok: true } : { error: 'mp_reporte_config', detalle: r.data };
   }
