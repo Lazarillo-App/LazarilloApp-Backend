@@ -17,3 +17,5 @@ BEGIN
     ALTER TABLE integraciones_mercadopago ADD CONSTRAINT integraciones_mercadopago_pkey PRIMARY KEY (business_id, sucursal, mp_user_id);
   END IF;
 END $$;
+-- Titular de cada cuenta (Diego 15/11: «que en Conexiones esté claro el CUIT y el titular de cada cuenta»).
+ALTER TABLE integraciones_mercadopago ADD COLUMN IF NOT EXISTS mp_titular text;

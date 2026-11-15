@@ -116,17 +116,75 @@ async function conectar(businessId, userId, code, state) {
   if (!(tok.user_id || yo?.id)) return { error: 'mp_sin_cuenta' };
   await pool.query(
     `INSERT INTO integraciones_mercadopago
-       (business_id, sucursal, mp_user_id, mp_nickname, mp_email, access_token, refresh_token, expira_at, live_mode, conectado_por, conectado_at, ultimo_sync_error, updated_at)
-     VALUES ($1, $10, $2, $3, $4, $5, $6, $7, $8, $9, now(), NULL, now())
+       (business_id, sucursal, mp_user_id, mp_nickname, mp_email, access_token, refresh_token, expira_at, live_mode, conectado_por, conectado_at, ultimo_sync_error, updated_at, mp_titular, mp_doc)
+     VALUES ($1, $10, $2, $3, $4, $5, $6, $7, $8, $9, now(), NULL, now(), $11, $12)
      ON CONFLICT (business_id, sucursal, mp_user_id) DO UPDATE SET
+       mp_titular = COALESCE(EXCLUDED.mp_titular, integraciones_mercadopago.mp_titular),
+       mp_doc = COALESCE(EXCLUDED.mp_doc, integraciones_mercadopago.mp_doc),
        mp_user_id = EXCLUDED.mp_user_id, mp_nickname = EXCLUDED.mp_nickname, mp_email = EXCLUDED.mp_email,
        access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token, expira_at = EXCLUDED.expira_at,
        live_mode = EXCLUDED.live_mode, conectado_por = EXCLUDED.conectado_por, conectado_at = now(),
        ultimo_sync_error = NULL, updated_at = now()`,
     [businessId, tok.user_id || yo?.id || null, yo?.nickname || null, yo?.email || null,
       encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null,
-      venceEn(tok.expires_in), tok.live_mode ?? null, userId || null, sucursal]);
+      venceEn(tok.expires_in), tok.live_mode ?? null, userId || null, sucursal, titularDe(yo), docDe(yo)]);
   return { ok: true, sucursal, cuenta: { user_id: tok.user_id || yo?.id || null, nickname: yo?.nickname || null, email: yo?.email || null } };
+}
+
+// Titular y CUIT/DNI de la cuenta, de /users/me (Diego 15/11: «que esté claro el CUIT y el titular de cada cuenta»).
+const titularDe = (yo) => {
+  if (!yo) return null;
+  const emp = yo.company?.corporate_name || yo.company?.brand_name;
+  const persona = [yo.first_name, yo.last_name].filter(Boolean).join(' ').trim();
+  return String(emp || persona || '').trim() || null;
+};
+const docDe = (yo) => String(yo?.identification?.number || '').replace(/\D/g, '') || null;
+
+/** Completa titular y CUIT de las cuentas que no los tienen (las conectadas antes de guardarlos). */
+async function completarDatosCuentas(businessId, sucursal, lista) {
+  for (const f of lista.filter((x) => !x.mp_titular || !x.mp_doc)) {
+    try {
+      const t = await tokenVigente(businessId, sucursal, f.mp_user_id);
+      if (t.error) continue;
+      const yo = await pedir(`${API}/users/me`, { token: t.token, timeout: 8000 });
+      const tit = titularDe(yo), doc = docDe(yo);
+      await pool.query(
+        `UPDATE integraciones_mercadopago SET mp_titular = COALESCE(mp_titular, $4), mp_doc = COALESCE(mp_doc, $5)
+          WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $3`, [businessId, sucursal, f.mp_user_id, tit, doc]);
+      f.mp_titular = f.mp_titular || tit; f.mp_doc = f.mp_doc || doc;
+    } catch (e) {
+      console.warn('[mercadopago] datos de la cuenta:', e.message);
+    }
+  }
+}
+
+/** La sucursal en app_branches: la principal (sucursal 0) o la de ese id. */
+async function sucursalFila(businessId, sucursal) {
+  const { rows } = await pool.query(
+    Number(sucursal) === 0
+      ? `SELECT id, name, props FROM app_branches WHERE business_id = $1 AND COALESCE((props->>'is_main')::boolean, false) LIMIT 1`
+      : 'SELECT id, name, props FROM app_branches WHERE business_id = $1 AND id = $2',
+    Number(sucursal) === 0 ? [businessId] : [businessId, sucursal]);
+  return rows[0] || null;
+}
+
+/**
+ * El CUIT de la sucursal sale de la cuenta que elige el dueño (Diego 15/11: «el CUIT de la sucursal: se elige
+ * qué cuenta manda, bien clarito»). Lo pisa a propósito (es una elección explícita) y deja un aviso.
+ */
+async function usarCuitDeCuenta(businessId, sucursal, cuenta) {
+  const f = await fila(businessId, sucursal, cuenta);
+  if (!f) return { error: 'mp_no_conectado' };
+  const d = String(f.mp_doc || '').replace(/\D/g, '');
+  if (d.length !== 11) return { error: 'cuenta_sin_cuit' };
+  const suc = await sucursalFila(businessId, sucursal);
+  if (!suc) return { error: 'sucursal_no_encontrada' };
+  const cuit = `${d.slice(0, 2)}-${d.slice(2, 10)}-${d.slice(10)}`;
+  const antes = suc.props?.cuit || null;
+  await pool.query(
+    `UPDATE app_branches SET props = COALESCE(props, '{}'::jsonb) || $3::jsonb, updated_at = NOW() WHERE business_id = $1 AND id = $2`,
+    [businessId, suc.id, JSON.stringify({ cuit, cuit_origen: 'mercadopago', cuit_cuenta: String(f.mp_user_id) })]);
+  return { ok: true, cuit, antes, sucursal: suc.name, cuenta: f.mp_nickname || f.mp_titular || String(f.mp_user_id) };
 }
 
 /** Las cuentas de MP de una sucursal, la primera conectada primero. */
@@ -146,11 +204,20 @@ async function fila(businessId, sucursal = 0, cuenta = null) {
 /** Lo que ve la pantalla (nunca los tokens). */
 async function estado(businessId, sucursal = 0) {
   const lista = await filas(businessId, sucursal);
+  if (lista.some((x) => !x.mp_titular || !x.mp_doc)) await completarDatosCuentas(businessId, sucursal, lista);
   const f = lista[0] || null;
+  const suc = lista.length ? await sucursalFila(businessId, sucursal).catch(() => null) : null;
+  const dig = (x) => String(x || '').replace(/\D/g, '');
+  const cuitSuc = suc?.props?.cuit || null;
+  // De qué cuenta sale el CUIT de la sucursal: la elegida, o la que tiene el mismo CUIT.
+  const manda = lista.find((x) => String(x.mp_user_id) === String(suc?.props?.cuit_cuenta || ''))
+    || lista.find((x) => cuitSuc && dig(x.mp_doc) === dig(cuitSuc)) || null;
   return {
+    cuit_sucursal: suc ? { sucursal: suc.name, cuit: cuitSuc, cuenta: manda ? manda.mp_user_id : null } : null,
     // Todas las cuentas de la sucursal; los campos de abajo (cuenta, ultimo_sync_…) son de la primera.
     cuentas: lista.map((x) => ({
       user_id: x.mp_user_id, nickname: x.mp_nickname, email: x.mp_email, conectado_at: x.conectado_at,
+      titular: x.mp_titular || null, doc: x.mp_doc || null,
       ultimo_sync_at: x.ultimo_sync_at || null, ultimo_sync_error: x.ultimo_sync_error || null,
       historial_completo: !!x.historial_completo,
     })),
@@ -711,7 +778,7 @@ function avisarDevoluciones(businessId, filas) {
 
 module.exports = {
   VERSION_FILAS, rederivarCuenta, traerYGuardar, derivarRango,
-  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, filas, sincronizarBanco, aplicarReporte,
+  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, filas, usarCuitDeCuenta, sincronizarBanco, aplicarReporte,
   // para tests
   _firmarEstado: firmarEstado, _verificarEstado: verificarEstado, _pagoAFila: pagoAFila, _traerCobros: traerCobros, _enAR: enAR,
   _pagoHechoAFila: pagoHechoAFila, _traerPagosHechos: traerPagosHechos,
