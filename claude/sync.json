@@ -1,0 +1,52 @@
+[
+  {
+    "clave": "2026-11-15-01",
+    "tipo": "cambio",
+    "id": 7,
+    "estado": "en_curso",
+    "nota": "Hecho (14-15/11): plantilla armada en Negocio DEMO (org 25): 15 rubros, 110 conceptos, 39 rubros de insumo y 4 variables de equilibrio (back #147, migración 129). El Panel muestra todos los rubros en $0 y los conceptos sin gastos al abrir el rubro (back #150, front #306). Falta: Diego depura la plantilla mirando DEMO; después, copiarla sola a cada negocio nuevo."
+  },
+  {
+    "clave": "2026-11-15-02",
+    "tipo": "tarea",
+    "titulo": "Menú lateral: «Lo que más usás» arriba",
+    "detalle": "Bloque arriba con los 3 módulos que más abre cada usuario (contado en el servidor, sirve en compu y celular); el resto del menú fijo. Para cuando haya más sectores (Diego 15/11).",
+    "modulo": "general",
+    "prioridad": "baja"
+  },
+  {
+    "clave": "2026-11-15-03",
+    "tipo": "tarea",
+    "titulo": "Rubro de insumo y concepto de caja: que el usuario elija una sola cosa",
+    "detalle": "Diego (15/11): las relaciones insumo → rubro de insumo → concepto → rubro de caja marean. En DEMO 19 de 31 rubros de insumo se llaman igual que su concepto. Propuesta: factura con insumos → se elige el rubro del insumo y el concepto se arma solo dentro de Mercaderías; gasto sin insumos → se elige el concepto; «corregir» de Sin rubro pregunta una sola cosa. Falta el OK de Diego y el mockup.",
+    "modulo": "resultados",
+    "prioridad": "normal"
+  },
+  {
+    "clave": "2026-11-15-04",
+    "tipo": "tarea",
+    "titulo": "Detalle de compras: eliminar una carga sin entrar a la factura",
+    "detalle": "Tacho al lado del lápiz, solo cargas de Lazarillo (las de MaxiRest, gris con el porqué). Borra la carga entera, pide confirmación y, si tiene pagos, ofrece eliminar con el pago; se puede restaurar desde Notificaciones. Back #154, front #314.",
+    "modulo": "resultados",
+    "prioridad": "normal",
+    "estado": "hecha"
+  },
+  {
+    "clave": "2026-11-15-05",
+    "tipo": "tarea",
+    "titulo": "Panel sin datos: solo Notas, Cargar Gastos y el primer paso",
+    "detalle": "Sin datos se ocultan período, Económica/Financiera, pestañas, ver por, $/%, rubros, Buscar y pantalla completa; vuelven con el primer dato. Front #317.",
+    "modulo": "resultados",
+    "prioridad": "normal",
+    "estado": "hecha"
+  },
+  {
+    "clave": "2026-11-15-06",
+    "tipo": "tarea",
+    "titulo": "Menú lateral: espacio entre opciones y buscador que filtra",
+    "detalle": "Los espacios estaban en unidades de MUI (96 px entre emoji y nombre): ahora entra todo en una pantalla (front #327). «Buscar una función» filtra por nombre y palabras clave, Enter abre el primero (front #329).",
+    "modulo": "general",
+    "prioridad": "normal",
+    "estado": "hecha"
+  }
+]
