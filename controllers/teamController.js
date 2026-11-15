@@ -20,6 +20,8 @@ const {
     ROLE_LEVEL,
 } = require('../services/auth/accessControl');
 const { logAudit } = require('../services/audit/auditLog');
+const { avisarAlEquipo } = require('../services/notificationService');
+const { limpiarAjustes, cantidadAjustes, getPermisos, getStaffPermisos } = require('../services/auth/permisos');
 
 // ────────────────────────────────────────────────────────────────────
 // Helpers
@@ -33,6 +35,41 @@ const makeFrontUrl = (p = '') => {
 
 const normEmail = (e = '') => String(e).trim().toLowerCase();
 
+const ROL_TXT = { owner: 'Dueño', admin: 'Administración', staff: 'Staff' };
+
+// Co-dueño (Diego 12/11/2026): ¿la persona es TITULAR (app_businesses.owner_id) del negocio
+// del alcance, o de algún negocio de su organización? El titular no se baja ni se quita:
+// primero pasa la titularidad a otro dueño.
+async function esTitularDe(db, userId, scopeType, scopeId) {
+    const { rows } = await db.query(
+        scopeType === 'business'
+            ? `SELECT 1 FROM app_businesses WHERE id = $2 AND owner_id = $1 LIMIT 1`
+            : `SELECT 1 FROM app_businesses WHERE organization_id = $2 AND owner_id = $1 LIMIT 1`,
+        [userId, scopeId]
+    );
+    return rows.length > 0;
+}
+
+// Aviso en la campanita (regla «todo ABM queda en Notificaciones»), en un negocio del alcance.
+async function avisarEquipo(req, scopeType, scopeId, title, metadata = {}) {
+    try {
+        let bid = scopeType === 'business' ? Number(scopeId) : null;
+        if (!bid) {
+            const { rows } = await pool.query(
+                `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY (id = $2) DESC, id LIMIT 1`,
+                [scopeId, Number(req.businessId) || 0]
+            );
+            bid = rows[0]?.id;
+        }
+        if (bid) await avisarAlEquipo({ businessId: bid, actorUserId: req.user?.id, type: 'equipo', title, metadata, incluirActor: true });
+    } catch (e) { console.warn('[team aviso]', e.message); }
+}
+async function nombreDe(userId) {
+    const { rows } = await pool.query(
+        `SELECT COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), split_part(email, '@', 1)) AS n FROM app_users WHERE id = $1`, [userId]);
+    return rows[0]?.n || 'alguien';
+}
+
 const INVITATION_TTL_DAYS = 7;
 
 function isValidScopeType(t) {
@@ -40,7 +77,8 @@ function isValidScopeType(t) {
 }
 
 function isValidRole(r) {
-    return r === 'admin' || r === 'staff';   // owner no se invita: nace por compra/creación
+    // owner = co-dueño (Diego 12/11/2026): solo lo da otro dueño. El TITULAR nace con la cuenta.
+    return r === 'admin' || r === 'staff' || r === 'owner';
 }
 
 /**
@@ -95,7 +133,7 @@ exports.listMembers = async (req, res, next) => {
         SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
                b.id AS scope_id, 'owner'::text AS role,
                u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
-               NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol,
+               NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol, '{}'::jsonb AS ajustes, TRUE AS es_titular,
                u.created_at, u.updated_at,
                u.email, u.name, u.account_status,
                u.invitation_expires_at, u.invitation_accepted_at,
@@ -118,7 +156,8 @@ exports.listMembers = async (req, res, next) => {
         SELECT * FROM (
           SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
                  ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
-                 ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol,
+                 ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol, ua.permissions AS ajustes, (ua.role = 'owner' AND EXISTS (SELECT 1 FROM app_businesses bt WHERE bt.owner_id = ua.user_id
+                    AND ((ua.scope_type = 'business' AND bt.id = ua.scope_id) OR (ua.scope_type = 'organization' AND bt.organization_id = ua.scope_id)))) AS es_titular,
                  ua.created_at, ua.updated_at,
                  u.email, u.name, u.account_status,
                  u.invitation_expires_at, u.invitation_accepted_at,
@@ -164,11 +203,19 @@ exports.listMembers = async (req, res, next) => {
         SELECT DISTINCT 'organization'::text AS scope_type, b.organization_id AS scope_id
           FROM app_businesses b
          WHERE b.owner_id = $1
-           AND b.organization_id IS NOT NULL
+           AND b.organization_id IS NOT NULL        UNION
+        -- Co-dueño a nivel organización (Diego 12/11/2026): ve también a la gente de cada
+        -- negocio de esa organización, igual que el titular.
+        SELECT DISTINCT 'business'::text AS scope_type, b.id AS scope_id
+          FROM user_assignments ua
+          JOIN app_businesses b ON b.organization_id = ua.scope_id
+         WHERE ua.user_id = $1 AND ua.revoked_at IS NULL
+           AND ua.scope_type = 'organization' AND ua.role = 'owner'
       )
       SELECT ua.id, ua.user_id, ua.scope_type, ua.scope_id,
              ua.role, COALESCE(ua.self_alias, ua.alias) AS alias, ua.granted_by_user_id, ua.sector_ids,
-             ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol,
+             ua.custom_role_id, (SELECT cr.nombre FROM app_custom_roles cr WHERE cr.id = ua.custom_role_id AND cr.deleted_at IS NULL) AS custom_role_nombre, ua.subrol, ua.permissions AS ajustes, (ua.role = 'owner' AND EXISTS (SELECT 1 FROM app_businesses bt WHERE bt.owner_id = ua.user_id
+                    AND ((ua.scope_type = 'business' AND bt.id = ua.scope_id) OR (ua.scope_type = 'organization' AND bt.organization_id = ua.scope_id)))) AS es_titular,
              ua.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
@@ -185,13 +232,16 @@ exports.listMembers = async (req, res, next) => {
       SELECT NULL::bigint AS id, b.owner_id AS user_id, 'business'::text AS scope_type,
              b.id AS scope_id, 'owner'::text AS role,
              u.name AS alias, NULL::bigint AS granted_by_user_id, NULL::int[] AS sector_ids,
-             NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol,
+             NULL::bigint AS custom_role_id, NULL::text AS custom_role_nombre, NULL::text AS subrol, '{}'::jsonb AS ajustes, TRUE AS es_titular,
              u.created_at,
              u.email, u.name, u.account_status,
              u.invitation_expires_at, u.invitation_accepted_at
         FROM app_businesses b
         JOIN app_users u ON u.id = b.owner_id
-       WHERE b.owner_id = $1
+       WHERE (b.owner_id = $1
+              -- Co-dueños y admins también ven al titular de los negocios que gestionan.
+              OR b.id IN (SELECT scope_id FROM visible_scopes WHERE scope_type = 'business')
+              OR b.organization_id IN (SELECT scope_id FROM visible_scopes WHERE scope_type = 'organization'))
          AND NOT EXISTS (
            SELECT 1 FROM user_assignments ua2
             WHERE ua2.scope_type = 'business'
@@ -385,9 +435,16 @@ exports.createInvitation = async (req, res, next) => {
 
         // Autorización del caller en TODOS los scopes elegidos (si falla en alguno,
         // assertManagerOnScope ya respondió 403 y cortamos acá).
+        if (role === 'owner' && customRoleId != null) {
+            return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
+        }
         for (const s of scopes) {
             const r = await assertManagerOnScope(uid, s.scopeType, s.scopeId, res);
             if (!r) return;
+            // Co-dueño: solo lo da otro dueño (Diego 12/11/2026).
+            if (role === 'owner' && r !== 'owner') {
+                return res.status(403).json({ ok: false, error: 'only_owner_assigns_owner' });
+            }
             if (tocaRolMedida && r !== 'owner' && role !== 'staff') {
                 return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
             }
@@ -533,6 +590,9 @@ exports.createInvitation = async (req, res, next) => {
         }
 
         await client.query('COMMIT');
+        for (const s of scopes) {
+            await avisarEquipo(req, s.scopeType, s.scopeId, `Acceso nuevo: ${aliasEfectivo} (${ROL_TXT[role] || role})`, { email: rawEmail, role });
+        }
 
         // Enviar mail (fuera de la transacción)
         const link = makeFrontUrl(
@@ -542,14 +602,14 @@ exports.createInvitation = async (req, res, next) => {
         const html = isNewUser
             ? `
         <p>Hola${alias?.trim() ? ' ' + alias.trim() : ''},</p>
-        <p>Fuiste invitado/a a colaborar en Lazarillo como <strong>${role === 'admin' ? 'administrador/a' : 'colaborador/a'}</strong>.</p>
+        <p>Fuiste invitado/a a colaborar en Lazarillo como <strong>${role === 'owner' ? 'dueño/a' : role === 'admin' ? 'administrador/a' : 'colaborador/a'}</strong>.</p>
         <p>Para activar tu cuenta y definir tu contraseña, abrí este enlace (válido por ${INVITATION_TTL_DAYS} días):</p>
         <p><a href="${link}">${link}</a></p>
         <p>Si no esperabas esta invitación, ignorá este mensaje.</p>
       `
             : `
         <p>Hola${alias?.trim() ? ' ' + alias.trim() : ''},</p>
-        <p>Te dieron un nuevo acceso en Lazarillo como <strong>${role === 'admin' ? 'administrador/a' : 'colaborador/a'}</strong>.</p>
+        <p>Te dieron un nuevo acceso en Lazarillo como <strong>${role === 'owner' ? 'dueño/a' : role === 'admin' ? 'administrador/a' : 'colaborador/a'}</strong>.</p>
         <p>Iniciá sesión con tu cuenta existente para empezar a trabajar.</p>
         <p>Si no tenés acceso, podés usar este enlace para definir/restablecer tu contraseña:</p>
         <p><a href="${link}">${link}</a></p>
@@ -680,10 +740,13 @@ exports.updateAssignment = async (req, res, next) => {
         if (subrol && !SUBROLES.includes(subrol)) return res.status(400).json({ ok: false, error: 'invalid_subrol' });
 
         if (!assignmentId) return res.status(400).json({ ok: false, error: 'invalid_id' });
-        if (alias == null && role == null && sectorIds === undefined && !tocaRolMedida && !tocaSubrol) {
+        // Ajustes solo para esta persona (Diego 14/11/2026): excepciones sobre el rol; null o {} = sin ajustes.
+        const tocaAjustes = Object.prototype.hasOwnProperty.call(req.body || {}, 'ajustes');
+        const ajustes = tocaAjustes ? limpiarAjustes(req.body.ajustes) : null;
+        if (alias == null && role == null && sectorIds === undefined && !tocaRolMedida && !tocaSubrol && !tocaAjustes) {
             return res.status(400).json({ ok: false, error: 'nothing_to_update' });
         }
-        if (role && !isValidRole(role) && role !== 'owner') {
+        if (role && !isValidRole(role)) {
             return res.status(400).json({ ok: false, error: 'invalid_role' });
         }
 
@@ -697,9 +760,21 @@ exports.updateAssignment = async (req, res, next) => {
         const callerRole = await assertManagerOnScope(uid, a.scope_type, a.scope_id, res);
         if (!callerRole) return;
 
-        // No se puede tocar al owner
-        if (a.role === 'owner') {
+        // Dueños (Diego 12/11/2026): a un dueño solo lo toca otro dueño; el titular no se baja
+        // (primero pasa la titularidad); dar el rol de dueño, solo un dueño.
+        if (a.role === 'owner' && callerRole !== 'owner') {
             return res.status(403).json({ ok: false, error: 'cannot_modify_owner' });
+        }
+        if (a.role === 'owner' && role != null && role !== 'owner' && await esTitularDe(pool, a.user_id, a.scope_type, a.scope_id)) {
+            return res.status(409).json({ ok: false, error: 'titular_pasa_primero' });
+        }
+        if (role === 'owner' && a.role !== 'owner' && callerRole !== 'owner') {
+            return res.status(403).json({ ok: false, error: 'only_owner_assigns_owner' });
+        }
+        // Ajustes de un admin: solo el dueño (como los roles a medida); de un staff, también un admin.
+        const rolParaAjustes = role != null ? role : a.role;
+        if (tocaAjustes && rolParaAjustes !== 'staff' && callerRole !== 'owner') {
+            return res.status(403).json({ ok: false, error: 'only_owner_assigns_roles' });
         }
         // Admin solo puede tocar a quienes él creó
         if (callerRole === 'admin' && a.granted_by_user_id !== uid) {
@@ -709,6 +784,9 @@ exports.updateAssignment = async (req, res, next) => {
         // Sector (Vista Operación) — solo tiene sentido para Staff dentro de un
         // negocio puntual, mismo criterio de validación que createInvitation.
         const finalRole = role != null ? role : a.role;
+        if (finalRole === 'owner' && tocaRolMedida && customRoleId != null) {
+            return res.status(400).json({ ok: false, error: 'invalid_custom_role' });
+        }
         if (sectorIds !== undefined && sectorIds.length) {
             if (finalRole !== 'staff' || a.scope_type !== 'business') {
                 return res.status(400).json({ ok: false, error: 'sector_requires_staff_business' });
@@ -776,6 +854,11 @@ exports.updateAssignment = async (req, res, next) => {
             sets.push(`sector_ids = $${i++}`);
             params.push(sectorIds.length ? sectorIds : null);
         }
+        if (tocaAjustes || (finalRole === 'owner' && a.role !== 'owner')) {
+            // El dueño no tiene ajustes: ve todo.
+            sets.push(`permissions = $${i++}::jsonb`);
+            params.push(JSON.stringify(finalRole === 'owner' ? {} : (ajustes || {})));
+        }
         if (tocaSubrol || (role != null && role !== 'staff') || (tocaRolMedida && finalRole === 'staff')) {
             // El subrol solo existe en Staff: al pasar a otro rol se suelta.
             if (subrol && finalRole !== 'staff') {
@@ -801,12 +884,21 @@ exports.updateAssignment = async (req, res, next) => {
             entityId: assignmentId,
             action: 'update',
             diff: {
-                before: { alias: a.alias, role: a.role, custom_role_id: a.custom_role_id ?? null, subrol: a.subrol ?? null },
-                after: { alias: updated[0].alias, role: updated[0].role, custom_role_id: updated[0].custom_role_id ?? null, subrol: updated[0].subrol ?? null },
+                before: { alias: a.alias, role: a.role, custom_role_id: a.custom_role_id ?? null, subrol: a.subrol ?? null, ajustes: a.permissions ?? {} },
+                after: { alias: updated[0].alias, role: updated[0].role, custom_role_id: updated[0].custom_role_id ?? null, subrol: updated[0].subrol ?? null, ajustes: updated[0].permissions ?? {} },
             },
         });
 
         await client.query('COMMIT');
+        if (role != null || tocaRolMedida || tocaSubrol || tocaAjustes) {
+            const quien = await nombreDe(a.user_id);
+            const antes = ROL_TXT[a.role] || a.role;
+            const despues = ROL_TXT[updated[0].role] || updated[0].role;
+            const n = cantidadAjustes(updated[0].permissions);
+            await avisarEquipo(req, a.scope_type, a.scope_id,
+                antes !== despues ? `Rol de ${quien}: ${antes} → ${despues}` : `Acceso de ${quien} modificado${n ? ` (${n} ajuste${n !== 1 ? 's' : ''} propio${n !== 1 ? 's' : ''})` : ''}`,
+                { assignment_id: assignmentId, user_id: a.user_id });
+        }
         return res.json({ ok: true, assignment: updated[0] });
     } catch (e) {
         try { await client.query('ROLLBACK'); } catch { }
@@ -835,7 +927,8 @@ exports.revokeAssignment = async (req, res, next) => {
         if (!rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
         const a = rows[0];
 
-        if (a.role === 'owner') {
+        // A un co-dueño lo puede quitar otro dueño; al titular, nadie (primero pasa la titularidad).
+        if (a.role === 'owner' && await esTitularDe(pool, a.user_id, a.scope_type, a.scope_id)) {
             return res.status(403).json({ ok: false, error: 'cannot_revoke_owner' });
         }
         if (a.user_id === uid) {
@@ -847,6 +940,9 @@ exports.revokeAssignment = async (req, res, next) => {
 
         if (callerRole === 'admin' && a.granted_by_user_id !== uid) {
             return res.status(403).json({ ok: false, error: 'forbidden' });
+        }
+        if (a.role === 'owner' && callerRole !== 'owner') {
+            return res.status(403).json({ ok: false, error: 'cannot_revoke_owner' });
         }
 
         await client.query('BEGIN');
@@ -867,6 +963,8 @@ exports.revokeAssignment = async (req, res, next) => {
         });
 
         await client.query('COMMIT');
+        await avisarEquipo(req, a.scope_type, a.scope_id, `Acceso quitado: ${await nombreDe(a.user_id)} (${ROL_TXT[a.role] || a.role})`,
+            { assignment_id: assignmentId, user_id: a.user_id });
         return res.json({ ok: true });
     } catch (e) {
         try { await client.query('ROLLBACK'); } catch { }
@@ -990,5 +1088,125 @@ exports.acceptInvitation = async (req, res, next) => {
         next(e);
     } finally {
         client.release();
+    }
+};
+
+/* ════════════════════════════════════════════════════════════════════
+   POST /api/team/titularidad  { businessId, userId, yoQuedo: 'owner'|'admin' }
+   Co-dueño (Diego 12/11/2026): la cuenta tiene un solo TITULAR (app_businesses.owner_id).
+   Solo el titular la pasa, y solo a alguien que ya es Dueño ahí. Si el negocio es de una
+   organización, pasan todos los negocios de la organización de los que es titular.
+   El que la deja sigue como Dueño (co-dueño) o pasa a Administración.
+═════════════════════════════════════════════════════════════════════ */
+exports.pasarTitularidad = async (req, res, next) => {
+    const client = await pool.connect();
+    try {
+        const uid = Number(req.user?.id);
+        const businessId = Number(req.body?.businessId);
+        const nuevo = Number(req.body?.userId);
+        const yoQuedo = req.body?.yoQuedo === 'admin' ? 'admin' : 'owner';
+        if (!businessId || !nuevo || nuevo === uid) return res.status(400).json({ ok: false, error: 'invalid_fields' });
+
+        const { rows: biz } = await pool.query(`SELECT id, owner_id, organization_id FROM app_businesses WHERE id = $1`, [businessId]);
+        if (!biz.length) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (Number(biz[0].owner_id) !== uid) return res.status(403).json({ ok: false, error: 'only_titular' });
+        const orgId = biz[0].organization_id ? Number(biz[0].organization_id) : null;
+
+        // Negocios que pasan: los de la organización de los que soy titular (o solo este).
+        const { rows: negocios } = await pool.query(
+            orgId
+                ? `SELECT id FROM app_businesses WHERE organization_id = $1 AND owner_id = $2`
+                : `SELECT id FROM app_businesses WHERE id = $1 AND owner_id = $2`,
+            [orgId || businessId, uid]
+        );
+        const ids = negocios.map((r) => Number(r.id));
+        // El nuevo titular tiene que ser Dueño en todos.
+        for (const id of ids) {
+            const { rows: r } = await pool.query(
+                `SELECT 1 FROM user_assignments ua
+                  WHERE ua.user_id = $1 AND ua.revoked_at IS NULL AND ua.role = 'owner'
+                    AND ((ua.scope_type = 'business' AND ua.scope_id = $2)
+                      OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $2)))
+                  LIMIT 1`, [nuevo, id]);
+            if (!r.length) return res.status(409).json({ ok: false, error: 'nuevo_no_es_duenio', businessId: id });
+        }
+
+        await client.query('BEGIN');
+        await client.query(`UPDATE app_businesses SET owner_id = $1 WHERE id = ANY($2::bigint[])`, [nuevo, ids]);
+        // El que la deja queda con una asignación propia (Dueño o Administración) en el mismo alcance.
+        const scopeType = orgId ? 'organization' : 'business';
+        const scopeId = orgId || businessId;
+        const { rows: mia } = await client.query(
+            `SELECT id FROM user_assignments WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3 AND revoked_at IS NULL LIMIT 1`,
+            [uid, scopeType, scopeId]);
+        if (mia.length) {
+            await client.query(
+                `UPDATE user_assignments SET role = $1, custom_role_id = NULL, subrol = NULL, sector_ids = NULL, permissions = '{}'::jsonb, updated_at = NOW() WHERE id = $2`,
+                [yoQuedo, mia[0].id]);
+        } else {
+            await client.query(
+                `INSERT INTO user_assignments (user_id, scope_type, scope_id, role, granted_by_user_id, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
+                [uid, scopeType, scopeId, yoQuedo, nuevo]);
+        }
+        await logAudit(client, {
+            userId: uid,
+            businessId: orgId ? null : businessId,
+            organizationId: orgId,
+            entityType: 'team_member',
+            entityId: nuevo,
+            action: 'update',
+            diff: { before: { titular: uid }, after: { titular: nuevo, anterior_queda: yoQuedo } },
+            metadata: { tipo: 'titularidad', negocios: ids },
+        });
+        await client.query('COMMIT');
+        await avisarEquipo(req, scopeType, scopeId,
+            `Titular de la cuenta: ${await nombreDe(uid)} → ${await nombreDe(nuevo)}`, { negocios: ids, anterior_queda: yoQuedo });
+        return res.json({ ok: true, negocios: ids, yoQuedo });
+    } catch (e) {
+        try { await client.query('ROLLBACK'); } catch { }
+        console.error('[pasarTitularidad]', e);
+        next(e);
+    } finally {
+        client.release();
+    }
+};
+
+/* ════════════════════════════════════════════════════════════════════
+   GET /api/team/assignments/:assignmentId/efectivos
+   Qué ve hoy esa persona (rol + sus ajustes), para «Crear un rol igual a…» (Diego 14/11/2026).
+═════════════════════════════════════════════════════════════════════ */
+exports.permisosEfectivos = async (req, res, next) => {
+    try {
+        const uid = req.user?.id;
+        const { rows } = await pool.query(`SELECT * FROM user_assignments WHERE id = $1 AND revoked_at IS NULL`, [Number(req.params.assignmentId)]);
+        if (!rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+        const a = rows[0];
+        const callerRole = await assertManagerOnScope(uid, a.scope_type, a.scope_id, res);
+        if (!callerRole) return;
+        let bid = a.scope_type === 'business' ? Number(a.scope_id) : null;
+        if (!bid) {
+            const { rows: b } = await pool.query(
+                `SELECT id FROM app_businesses WHERE organization_id = $1 ORDER BY (id = $2) DESC, id LIMIT 1`,
+                [a.scope_id, Number(req.businessId) || 0]);
+            bid = b[0]?.id;
+        }
+        // efectivo = lo que ve hoy (rol + ajustes); base = solo el rol; ajustes = sus excepciones.
+        const ajustes = limpiarAjustes(a.permissions);
+        if (a.role === 'staff') {
+            const sp = bid ? await getStaffPermisos(a.user_id, bid) : null;
+            const sb = bid ? await getStaffPermisos(a.user_id, bid, { sinAjustes: true }) : null;
+            return res.json({ ok: true, tipo: 'staff', permisos: sp?.permisos || {}, base: { permisos: sb?.permisos || {} }, ajustes });
+        }
+        if (a.role === 'owner') return res.json({ ok: true, tipo: 'owner' });
+        const p = bid ? await getPermisos(a.user_id, bid) : null;
+        const pb = bid ? await getPermisos(a.user_id, bid, { sinAjustes: true }) : null;
+        return res.json({
+            ok: true, tipo: 'admin', secciones: p?.secciones || {}, ocultos: p?.ocultos || [],
+            base: { secciones: pb?.secciones || {}, ocultos: pb?.ocultos || [] }, ajustes,
+        });
+    } catch (e) {
+        console.error('[permisosEfectivos]', e);
+        next(e);
     }
 };
