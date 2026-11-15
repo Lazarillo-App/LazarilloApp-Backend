@@ -220,6 +220,7 @@ async function estado(businessId, sucursal = 0) {
       titular: x.mp_titular || null, doc: x.mp_doc || null,
       ultimo_sync_at: x.ultimo_sync_at || null, ultimo_sync_error: x.ultimo_sync_error || null,
       historial_completo: !!x.historial_completo,
+      historial_hasta: x.historial_hasta ? new Date(x.historial_hasta).toISOString().slice(0, 10) : null,
     })),
     configurado: configurado(),
     conectado: !!f,
