@@ -202,8 +202,33 @@ async function fila(businessId, sucursal = 0, cuenta = null) {
 }
 
 /** Lo que ve la pantalla (nunca los tokens). */
+// Proveedor de cada cuenta (Diego 15/11/2026: «al asociar un banco lo tenemos que vincular con un proveedor»).
+// Los proveedores son de la organización. Si la cuenta no tiene, se sugiere el que tiene el CUIT de Mercado Pago.
+const CUIT_MP = '30703088534';
+async function proveedoresDe(businessId) {
+  const { rows } = await pool.query(
+    `SELECT p.codigo, p.nombre, regexp_replace(COALESCE(p.cuit, ''), '\\D', '', 'g') AS cuit
+       FROM gestion_proveedores p JOIN app_businesses b ON b.organization_id = p.organization_id
+      WHERE b.id = $1`, [businessId]);
+  return rows;
+}
+
+async function vincularProveedor(businessId, sucursal, cuenta, codPro) {
+  const f = await fila(businessId, sucursal, cuenta);
+  if (!f) return { error: 'mp_no_conectado' };
+  const provs = await proveedoresDe(businessId);
+  const p = codPro == null || codPro === '' ? null : provs.find((x) => String(x.codigo) === String(codPro));
+  if (codPro && !p) return { error: 'proveedor_no_encontrado' };
+  await pool.query('UPDATE integraciones_mercadopago SET proveedor_cod = $4, updated_at = now() WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $3',
+    [businessId, sucursal, f.mp_user_id, p ? String(p.codigo) : null]);
+  return { ok: true, cuenta: f.mp_nickname || String(f.mp_user_id), proveedor: p ? { codigo: p.codigo, nombre: p.nombre } : null };
+}
+
 async function estado(businessId, sucursal = 0) {
   const lista = await filas(businessId, sucursal);
+  const provs = lista.length ? await proveedoresDe(businessId).catch(() => []) : [];
+  const sugerido = provs.find((p) => p.cuit === CUIT_MP) || null;
+  const provDe = (cod) => { const p = cod != null ? provs.find((x) => String(x.codigo) === String(cod)) : null; return p ? { codigo: p.codigo, nombre: p.nombre } : null; };
   if (lista.some((x) => !x.mp_titular || !x.mp_doc)) await completarDatosCuentas(businessId, sucursal, lista);
   const f = lista[0] || null;
   const suc = lista.length ? await sucursalFila(businessId, sucursal).catch(() => null) : null;
@@ -218,6 +243,8 @@ async function estado(businessId, sucursal = 0) {
     cuentas: lista.map((x) => ({
       user_id: x.mp_user_id, nickname: x.mp_nickname, email: x.mp_email, conectado_at: x.conectado_at,
       titular: x.mp_titular || null, doc: x.mp_doc || null,
+      proveedor: provDe(x.proveedor_cod),
+      proveedor_sugerido: !x.proveedor_cod && sugerido ? { codigo: sugerido.codigo, nombre: sugerido.nombre } : null,
       ultimo_sync_at: x.ultimo_sync_at || null, ultimo_sync_error: x.ultimo_sync_error || null,
       historial_completo: !!x.historial_completo,
       historial_hasta: x.historial_hasta ? new Date(x.historial_hasta).toISOString().slice(0, 10) : null,
@@ -791,7 +818,7 @@ function avisarDevoluciones(businessId, filas) {
 
 module.exports = {
   VERSION_FILAS, rederivarCuenta, traerYGuardar, derivarRango,
-  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, filas, usarCuitDeCuenta, sincronizarBanco, aplicarReporte,
+  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, filas, usarCuitDeCuenta, vincularProveedor, sincronizarBanco, aplicarReporte,
   // para tests
   _firmarEstado: firmarEstado, _verificarEstado: verificarEstado, _pagoAFila: pagoAFila, _traerCobros: traerCobros, _enAR: enAR,
   _pagoHechoAFila: pagoHechoAFila, _traerPagosHechos: traerPagosHechos,
