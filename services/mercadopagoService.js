@@ -111,31 +111,116 @@ async function conectar(businessId, userId, code, state) {
   if (!tok || !tok.access_token) return { error: 'mp_sin_token' };
   let yo = null;
   try { yo = await pedir(`${API}/users/me`, { token: tok.access_token }); } catch { yo = null; }
+  // Varias cuentas por sucursal (Diego 15/11/2026): la clave es negocio + sucursal + cuenta. Volver a
+  // conectar la MISMA cuenta la actualiza; otra cuenta se suma al lado, sin pisar a la primera.
+  if (!(tok.user_id || yo?.id)) return { error: 'mp_sin_cuenta' };
   await pool.query(
     `INSERT INTO integraciones_mercadopago
-       (business_id, sucursal, mp_user_id, mp_nickname, mp_email, access_token, refresh_token, expira_at, live_mode, conectado_por, conectado_at, ultimo_sync_error, updated_at)
-     VALUES ($1, $10, $2, $3, $4, $5, $6, $7, $8, $9, now(), NULL, now())
-     ON CONFLICT (business_id, sucursal) DO UPDATE SET
+       (business_id, sucursal, mp_user_id, mp_nickname, mp_email, access_token, refresh_token, expira_at, live_mode, conectado_por, conectado_at, ultimo_sync_error, updated_at, mp_titular, mp_doc)
+     VALUES ($1, $10, $2, $3, $4, $5, $6, $7, $8, $9, now(), NULL, now(), $11, $12)
+     ON CONFLICT (business_id, sucursal, mp_user_id) DO UPDATE SET
+       mp_titular = COALESCE(EXCLUDED.mp_titular, integraciones_mercadopago.mp_titular),
+       mp_doc = COALESCE(EXCLUDED.mp_doc, integraciones_mercadopago.mp_doc),
        mp_user_id = EXCLUDED.mp_user_id, mp_nickname = EXCLUDED.mp_nickname, mp_email = EXCLUDED.mp_email,
        access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token, expira_at = EXCLUDED.expira_at,
        live_mode = EXCLUDED.live_mode, conectado_por = EXCLUDED.conectado_por, conectado_at = now(),
        ultimo_sync_error = NULL, updated_at = now()`,
     [businessId, tok.user_id || yo?.id || null, yo?.nickname || null, yo?.email || null,
       encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null,
-      venceEn(tok.expires_in), tok.live_mode ?? null, userId || null, sucursal]);
+      venceEn(tok.expires_in), tok.live_mode ?? null, userId || null, sucursal, titularDe(yo), docDe(yo)]);
   return { ok: true, sucursal, cuenta: { user_id: tok.user_id || yo?.id || null, nickname: yo?.nickname || null, email: yo?.email || null } };
 }
 
-async function fila(businessId, sucursal = 0) {
-  const { rows } = await pool.query(`SELECT *, ultimo_sync_desde::text AS sync_desde_txt, ultimo_sync_hasta::text AS sync_hasta_txt
-       FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2`, [businessId, sucursal]);
+// Titular y CUIT/DNI de la cuenta, de /users/me (Diego 15/11: «que esté claro el CUIT y el titular de cada cuenta»).
+const titularDe = (yo) => {
+  if (!yo) return null;
+  const emp = yo.company?.corporate_name || yo.company?.brand_name;
+  const persona = [yo.first_name, yo.last_name].filter(Boolean).join(' ').trim();
+  return String(emp || persona || '').trim() || null;
+};
+const docDe = (yo) => String(yo?.identification?.number || '').replace(/\D/g, '') || null;
+
+/** Completa titular y CUIT de las cuentas que no los tienen (las conectadas antes de guardarlos). */
+async function completarDatosCuentas(businessId, sucursal, lista) {
+  for (const f of lista.filter((x) => !x.mp_titular || !x.mp_doc)) {
+    try {
+      const t = await tokenVigente(businessId, sucursal, f.mp_user_id);
+      if (t.error) continue;
+      const yo = await pedir(`${API}/users/me`, { token: t.token, timeout: 8000 });
+      const tit = titularDe(yo), doc = docDe(yo);
+      await pool.query(
+        `UPDATE integraciones_mercadopago SET mp_titular = COALESCE(mp_titular, $4), mp_doc = COALESCE(mp_doc, $5)
+          WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $3`, [businessId, sucursal, f.mp_user_id, tit, doc]);
+      f.mp_titular = f.mp_titular || tit; f.mp_doc = f.mp_doc || doc;
+    } catch (e) {
+      console.warn('[mercadopago] datos de la cuenta:', e.message);
+    }
+  }
+}
+
+/** La sucursal en app_branches: la principal (sucursal 0) o la de ese id. */
+async function sucursalFila(businessId, sucursal) {
+  const { rows } = await pool.query(
+    Number(sucursal) === 0
+      ? `SELECT id, name, props FROM app_branches WHERE business_id = $1 AND COALESCE((props->>'is_main')::boolean, false) LIMIT 1`
+      : 'SELECT id, name, props FROM app_branches WHERE business_id = $1 AND id = $2',
+    Number(sucursal) === 0 ? [businessId] : [businessId, sucursal]);
   return rows[0] || null;
+}
+
+/**
+ * El CUIT de la sucursal sale de la cuenta que elige el dueño (Diego 15/11: «el CUIT de la sucursal: se elige
+ * qué cuenta manda, bien clarito»). Lo pisa a propósito (es una elección explícita) y deja un aviso.
+ */
+async function usarCuitDeCuenta(businessId, sucursal, cuenta) {
+  const f = await fila(businessId, sucursal, cuenta);
+  if (!f) return { error: 'mp_no_conectado' };
+  const d = String(f.mp_doc || '').replace(/\D/g, '');
+  if (d.length !== 11) return { error: 'cuenta_sin_cuit' };
+  const suc = await sucursalFila(businessId, sucursal);
+  if (!suc) return { error: 'sucursal_no_encontrada' };
+  const cuit = `${d.slice(0, 2)}-${d.slice(2, 10)}-${d.slice(10)}`;
+  const antes = suc.props?.cuit || null;
+  await pool.query(
+    `UPDATE app_branches SET props = COALESCE(props, '{}'::jsonb) || $3::jsonb, updated_at = NOW() WHERE business_id = $1 AND id = $2`,
+    [businessId, suc.id, JSON.stringify({ cuit, cuit_origen: 'mercadopago', cuit_cuenta: String(f.mp_user_id) })]);
+  return { ok: true, cuit, antes, sucursal: suc.name, cuenta: f.mp_nickname || f.mp_titular || String(f.mp_user_id) };
+}
+
+/** Las cuentas de MP de una sucursal, la primera conectada primero. */
+async function filas(businessId, sucursal = 0) {
+  const { rows } = await pool.query(`SELECT *, ultimo_sync_desde::text AS sync_desde_txt, ultimo_sync_hasta::text AS sync_hasta_txt
+       FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2 ORDER BY conectado_at NULLS LAST, mp_user_id`,
+  [businessId, sucursal]);
+  return rows;
+}
+
+/** Una cuenta: la pedida, o la primera de la sucursal. */
+async function fila(businessId, sucursal = 0, cuenta = null) {
+  const lista = await filas(businessId, sucursal);
+  return cuenta == null ? (lista[0] || null) : (lista.find((f) => String(f.mp_user_id) === String(cuenta)) || null);
 }
 
 /** Lo que ve la pantalla (nunca los tokens). */
 async function estado(businessId, sucursal = 0) {
-  const f = await fila(businessId, sucursal);
+  const lista = await filas(businessId, sucursal);
+  if (lista.some((x) => !x.mp_titular || !x.mp_doc)) await completarDatosCuentas(businessId, sucursal, lista);
+  const f = lista[0] || null;
+  const suc = lista.length ? await sucursalFila(businessId, sucursal).catch(() => null) : null;
+  const dig = (x) => String(x || '').replace(/\D/g, '');
+  const cuitSuc = suc?.props?.cuit || null;
+  // De qué cuenta sale el CUIT de la sucursal: la elegida, o la que tiene el mismo CUIT.
+  const manda = lista.find((x) => String(x.mp_user_id) === String(suc?.props?.cuit_cuenta || ''))
+    || lista.find((x) => cuitSuc && dig(x.mp_doc) === dig(cuitSuc)) || null;
   return {
+    cuit_sucursal: suc ? { sucursal: suc.name, cuit: cuitSuc, cuenta: manda ? manda.mp_user_id : null } : null,
+    // Todas las cuentas de la sucursal; los campos de abajo (cuenta, ultimo_sync_…) son de la primera.
+    cuentas: lista.map((x) => ({
+      user_id: x.mp_user_id, nickname: x.mp_nickname, email: x.mp_email, conectado_at: x.conectado_at,
+      titular: x.mp_titular || null, doc: x.mp_doc || null,
+      ultimo_sync_at: x.ultimo_sync_at || null, ultimo_sync_error: x.ultimo_sync_error || null,
+      historial_completo: !!x.historial_completo,
+    })),
     configurado: configurado(),
     conectado: !!f,
     cuenta: f ? { user_id: f.mp_user_id, nickname: f.mp_nickname, email: f.mp_email } : null,
@@ -149,14 +234,20 @@ async function estado(businessId, sucursal = 0) {
   };
 }
 
-async function desconectar(businessId, sucursal = 0) {
-  await pool.query('DELETE FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2', [businessId, sucursal]);
+/** Desconecta una cuenta. Con varias en la sucursal hay que decir cuál (nunca se borran todas de una). */
+async function desconectar(businessId, sucursal = 0, cuenta = null) {
+  const lista = await filas(businessId, sucursal);
+  if (!lista.length) return { error: 'mp_no_conectado' };
+  if (cuenta == null && lista.length > 1) return { error: 'elegi_cuenta' };
+  const id = cuenta ?? lista[0].mp_user_id;
+  await pool.query('DELETE FROM integraciones_mercadopago WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $3',
+    [businessId, sucursal, id]);
   return { ok: true };
 }
 
 /** Access token válido (lo renueva si vence en menos de 7 días). */
-async function tokenVigente(businessId, sucursal = 0) {
-  const f = await fila(businessId, sucursal);
+async function tokenVigente(businessId, sucursal = 0, cuenta = null) {
+  const f = await fila(businessId, sucursal, cuenta);
   if (!f) return { error: 'mp_no_conectado' };
   const access = decryptSecret(f.access_token);
   if (!access) return { error: 'mp_token_ilegible' };
@@ -168,8 +259,8 @@ async function tokenVigente(businessId, sucursal = 0) {
     const tok = await pedirTokens({ grant_type: 'refresh_token', refresh_token: refresh });
     await pool.query(
       `UPDATE integraciones_mercadopago SET access_token = $2, refresh_token = COALESCE($3, refresh_token),
-         expira_at = $4, updated_at = now() WHERE business_id = $1 AND sucursal = $5`,
-      [businessId, encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null, venceEn(tok.expires_in), sucursal]);
+         expira_at = $4, updated_at = now() WHERE business_id = $1 AND sucursal = $5 AND mp_user_id = $6`,
+      [businessId, encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null, venceEn(tok.expires_in), sucursal, f.mp_user_id]);
     return { token: tok.access_token, fila: f };
   } catch (e) {
     return vence > Date.now() ? { token: access, fila: f } : { error: 'mp_vencido', detalle: e.message };
@@ -408,9 +499,11 @@ async function escribirFuente(businessId, sucursal, tipo, filas, archivo, db = p
 }
 
 /** Egresos: reemplaza los de ese origen ('pago' | 'reporte') en el rango y deja el resto. */
-async function guardarEgresos(businessId, sucursal, desde, hasta, origen, nuevas, db = pool) {
+async function guardarEgresos(businessId, sucursal, desde, hasta, origen, nuevas, db = pool, cuenta = null) {
+  // Con varias cuentas, el reporte de una cuenta reemplaza solo lo de esa cuenta.
+  const deEsta = (x) => cuenta == null || x.cuenta == null || String(x.cuenta) === String(cuenta);
   const viejas = (await leerFuente(businessId, sucursal, 'egresos', db))
-    .filter((x) => !(x.origen === origen && x.fecha >= desde && x.fecha <= hasta));
+    .filter((x) => !(x.origen === origen && x.fecha >= desde && x.fecha <= hasta && deEsta(x)));
   const todas = [...viejas, ...nuevas].sort((a, b) => `${a.fecha} ${a.hora || ''}`.localeCompare(`${b.fecha} ${b.hora || ''}`));
   await escribirFuente(businessId, sucursal, 'egresos', todas, `Mercado Pago ${desde} a ${hasta}`, db);
   return todas.length;
@@ -421,11 +514,20 @@ async function guardarEgresos(businessId, sucursal, desde, hasta, origen, nuevas
  * impuestos, comisiones…). MP lo arma en unos minutos: la primera vez queda "pendiente" y el
  * front vuelve a preguntar.
  */
-async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo } = {}) {
+async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo, cuenta = null } = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(desde || '') || !/^\d{4}-\d{2}-\d{2}$/.test(hasta || '') || desde > hasta) {
     return { error: 'fechas_invalidas' };
   }
-  const t = tokenListo || await tokenVigente(businessId, sucursal);
+  if (!tokenListo && cuenta == null) {
+    const lista = await filas(businessId, sucursal);
+    if (lista.length > 1) {
+      const rs = [];
+      for (const c of lista) rs.push(await aplicarReporte(businessId, sucursal, desde, hasta, { cuenta: c.mp_user_id }));
+      const pend = rs.find((r) => r.reporte === 'pendiente');
+      return pend || rs.find((r) => r.reporte === 'listo') || rs[0];
+    }
+  }
+  const t = tokenListo || await tokenVigente(businessId, sucursal, cuenta);
   if (t.error) return t;
   try {
     const cfg = await reportes.asegurarConfig(t.token);
@@ -462,7 +564,8 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo }
           [businessId, sucursal, JSON.stringify(banco)]);
       }
     }
-    await guardarEgresos(businessId, sucursal, desde, hasta, 'reporte', egresos);
+    egresos.forEach((x) => { x.cuenta = t.fila.mp_user_id; });
+    await guardarEgresos(businessId, sucursal, desde, hasta, 'reporte', egresos, pool, t.fila.mp_user_id);
     return { reporte: 'listo', nombres: conNombre, egresos: egresos.length };
   } catch (e) {
     return { reporte: 'error', motivo: 'mp_reporte_fallo', detalle: e.message };
@@ -475,7 +578,7 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo }
 // mp_pagos (raw). Las filas que leen la conciliación y Movimientos bancarios (banco, egresos,
 // devoluciones) se arman desde ahí: sumar una columna = subir VERSION_FILAS y se rearman todas las
 // filas desde lo guardado, sin volver a pedirle nada a MP (mercadopagoDiario.js).
-const VERSION_FILAS = 2;
+const VERSION_FILAS = 3; // 3 (15/11): cada fila dice de qué cuenta de MP viene (varias cuentas por sucursal)
 const restarDiasIso = (iso, n) => { const d = new Date(`${iso}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
 
 /** Saca de lo que manda MP lo que pesa y no sirve (imágenes del QR). */
@@ -487,17 +590,18 @@ function aligerar(p) {
 }
 
 /** Guarda (o actualiza) los pagos tal cual vienen de MP. rol: 'cobro' (cobró la cuenta) | 'pago' (pagó). */
-async function guardarCrudos(businessId, sucursal, rol, pagos, db = pool) {
+async function guardarCrudos(businessId, sucursal, rol, pagos, db = pool, cuenta = null) {
   const lista = pagos.filter((p) => p && p.id != null);
   for (let i = 0; i < lista.length; i += 400) {
     const tanda = lista.slice(i, i + 400).map((p) => ({ ...aligerar(p), _fecha: enAR(p.date_created)?.fecha || null }));
     await db.query(
-      `INSERT INTO mp_pagos (business_id, sucursal, rol, mp_id, fecha, estado, raw, actualizado)
-       SELECT $1, $2, $3, (x->>'id')::bigint, (x->>'_fecha')::date, x->>'status', x - '_fecha', now()
+      `INSERT INTO mp_pagos (business_id, sucursal, rol, mp_id, fecha, estado, raw, actualizado, cuenta)
+       SELECT $1, $2, $3, (x->>'id')::bigint, (x->>'_fecha')::date, x->>'status', x - '_fecha', now(), $5::bigint
          FROM jsonb_array_elements($4::jsonb) x
        ON CONFLICT (business_id, sucursal, mp_id, rol) DO UPDATE
-         SET raw = EXCLUDED.raw, estado = EXCLUDED.estado, fecha = EXCLUDED.fecha, actualizado = now()`,
-      [businessId, sucursal, rol, JSON.stringify(tanda)]);
+         SET raw = EXCLUDED.raw, estado = EXCLUDED.estado, fecha = EXCLUDED.fecha, actualizado = now(),
+             cuenta = COALESCE(EXCLUDED.cuenta, mp_pagos.cuenta)`,
+      [businessId, sucursal, rol, JSON.stringify(tanda), cuenta]);
   }
   return lista.length;
 }
@@ -527,7 +631,7 @@ async function derivarRango(businessId, sucursal, mpUserId, desde, hasta) {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`mpfuentes:${businessId}:${sucursal}`]);
     const { rows } = await client.query(
-      `SELECT rol, raw, extra FROM mp_pagos
+      `SELECT rol, raw, extra, cuenta::text AS cuenta FROM mp_pagos
         WHERE business_id = $1 AND sucursal = $2
           AND (fecha BETWEEN ($3::date - 1) AND $4::date
                OR (rol = 'cobro' AND (raw->>'date_last_updated') >= $5::text AND (raw->>'date_last_updated') < $6::text))`,
@@ -535,13 +639,18 @@ async function derivarRango(businessId, sucursal, mpUserId, desde, hasta) {
     const enRango = (f) => f && f.fecha >= desde && f.fecha <= hasta;
     const banco = [], hechos = [], devol = [];
     rows.forEach((r) => {
+      // Todas las cuentas de la sucursal juntas; cada fila dice de qué cuenta es (varias cuentas, 15/11).
+      const cta = r.cuenta || (mpUserId != null ? String(mpUserId) : null);
       if (r.rol === 'cobro') {
         const f = conExtra(pagoAFila(r.raw), r.extra);
+        if (f && cta) f.cuenta = cta;
         if (enRango(f)) banco.push(f);
         const d = devolucionAFila(r.raw);
+        if (d && cta) d.cuenta = cta;
         if (d) devol.push(d);
       } else {
-        const f = pagoHechoAFila(r.raw, mpUserId);
+        const f = pagoHechoAFila(r.raw, cta);
+        if (f && cta) f.cuenta = cta;
         if (enRango(f)) hechos.push(f);
       }
     });
@@ -566,14 +675,14 @@ async function derivarRango(businessId, sucursal, mpUserId, desde, hasta) {
 async function traerYGuardar(t, businessId, sucursal, desde, hasta) {
   const quien = t.fila.mp_user_id;
   const cobros = await traerCrudos(t.token, { 'collector.id': quien }, desde, hasta, 'date_created');
-  await guardarCrudos(businessId, sucursal, 'cobro', cobros);
+  await guardarCrudos(businessId, sucursal, 'cobro', cobros, pool, quien);
   // Los que cambiaron en el rango (devoluciones y contracargos de cobros más viejos).
   const cambiados = await traerCrudos(t.token, { 'collector.id': quien }, desde, hasta, 'date_last_updated');
-  await guardarCrudos(businessId, sucursal, 'cobro', cambiados);
+  await guardarCrudos(businessId, sucursal, 'cobro', cambiados, pool, quien);
   let pagos = [];
   try {
     pagos = await traerCrudos(t.token, { 'payer.id': quien }, desde, hasta, 'date_created');
-    await guardarCrudos(businessId, sucursal, 'pago', pagos);
+    await guardarCrudos(businessId, sucursal, 'pago', pagos, pool, quien);
   } catch (e) {
     console.warn('[mercadopago] pagos hechos:', e.message);
   }
@@ -584,27 +693,51 @@ async function traerYGuardar(t, businessId, sucursal, desde, hasta) {
  * Trae TODO lo del período (guardado entero) y arma las filas de banco, egresos y devoluciones:
  * reemplaza lo que había de esas fechas (venga de archivo o de MP) y deja el resto.
  */
-async function sincronizarBanco(businessId, sucursal, desde, hasta, { sinReporte = false } = {}) {
+async function sincronizarBanco(businessId, sucursal, desde, hasta, { sinReporte = false, cuenta = null } = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(desde || '') || !/^\d{4}-\d{2}-\d{2}$/.test(hasta || '') || desde > hasta) {
     return { error: 'fechas_invalidas' };
   }
   if (diasEntre(desde, hasta).length > MAX_DIAS) return { error: 'periodo_muy_largo' };
-  const t = await tokenVigente(businessId, sucursal);
+  // Sin cuenta pedida y con varias en la sucursal: trae cada una y suma (una tras otra).
+  if (cuenta == null) {
+    const lista = await filas(businessId, sucursal);
+    if (lista.length > 1) {
+      const rs = [];
+      for (const c of lista) rs.push(await sincronizarBanco(businessId, sucursal, desde, hasta, { sinReporte, cuenta: c.mp_user_id }));
+      const ok = rs.filter((r) => !r.error);
+      if (!ok.length) return rs[0];
+      const suma = (k) => ok.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+      const ult = ok[ok.length - 1];
+      const rep = ok.find((r) => r.reporte === 'pendiente') || ok.find((r) => r.reporte === 'listo') || {};
+      return {
+        ok: true, desde, hasta, cuentas: lista.length, crudos: suma('crudos'), cobros: suma('cobros'), total: ult.total,
+        pagos_hechos: ult.pagos_hechos, devoluciones: ult.devoluciones, reporte: rep.reporte, egresos: suma('egresos'), nombres: suma('nombres'),
+        errores: rs.filter((r) => r.error).map((r) => r.error),
+      };
+    }
+  }
+  const t = await tokenVigente(businessId, sucursal, cuenta);
   if (t.error) return t;
   let traido;
   try {
     traido = await traerYGuardar(t, businessId, sucursal, desde, hasta);
   } catch (e) {
-    await pool.query('UPDATE integraciones_mercadopago SET ultimo_sync_error = $2, updated_at = now() WHERE business_id = $1 AND sucursal = $3',
-      [businessId, String(e.message || e).slice(0, 300), sucursal]);
+    await pool.query('UPDATE integraciones_mercadopago SET ultimo_sync_error = $2, updated_at = now() WHERE business_id = $1 AND sucursal = $3 AND mp_user_id = $4',
+      [businessId, String(e.message || e).slice(0, 300), sucursal, t.fila.mp_user_id]);
     return { error: 'mp_fallo_consulta', detalle: e.message };
   }
   const d = await derivarRango(businessId, sucursal, t.fila.mp_user_id, desde, hasta);
   if (d.devolucionesNuevas.length) avisarDevoluciones(businessId, d.devolucionesNuevas);
+  // El recorrido del historial (sinReporte) va mes por mes hacia atrás: no cuenta como «últimos traídos»
+  // (si no, Conexiones mostraba «del 01/09/2025 al 30/09/2025» aunque hoy ya estaba traído).
   await pool.query(
-    `UPDATE integraciones_mercadopago SET ultimo_sync_at = now(), ultimo_sync_desde = $2, ultimo_sync_hasta = $3,
-       ultimo_sync_error = NULL, updated_at = now() WHERE business_id = $1 AND sucursal = $4`, [businessId, desde, hasta, sucursal]);
-  const rep = sinReporte ? {} : await aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo: t });
+    sinReporte
+      ? `UPDATE integraciones_mercadopago SET ultimo_sync_error = NULL, updated_at = now()
+          WHERE business_id = $1 AND sucursal = $4 AND mp_user_id = $5 AND $2::date IS NOT NULL AND $3::date IS NOT NULL`
+      : `UPDATE integraciones_mercadopago SET ultimo_sync_at = now(), ultimo_sync_desde = $2, ultimo_sync_hasta = $3,
+       ultimo_sync_error = NULL, updated_at = now() WHERE business_id = $1 AND sucursal = $4 AND mp_user_id = $5`,
+    [businessId, desde, hasta, sucursal, t.fila.mp_user_id]);
+  const rep = sinReporte ? {} : await aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo: t, cuenta: t.fila.mp_user_id });
   return { ok: true, desde, hasta, crudos: traido.cobros, cobros: d.cobros, total: d.total, pagos_hechos: d.pagos_hechos, devoluciones: d.devoluciones, ...rep };
 }
 
@@ -645,7 +778,7 @@ function avisarDevoluciones(businessId, filas) {
 
 module.exports = {
   VERSION_FILAS, rederivarCuenta, traerYGuardar, derivarRango,
-  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, sincronizarBanco, aplicarReporte,
+  configurado, urlAutorizacion, conectar, estado, desconectar, tokenVigente, filas, usarCuitDeCuenta, sincronizarBanco, aplicarReporte,
   // para tests
   _firmarEstado: firmarEstado, _verificarEstado: verificarEstado, _pagoAFila: pagoAFila, _traerCobros: traerCobros, _enAR: enAR,
   _pagoHechoAFila: pagoHechoAFila, _traerPagosHechos: traerPagosHechos,

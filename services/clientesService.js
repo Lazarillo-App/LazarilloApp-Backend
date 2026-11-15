@@ -30,20 +30,20 @@ async function docsPropios(businessId) {
   const sucs = await pool.query(`SELECT props->>'cuit' AS cuit FROM app_branches WHERE business_id = $1`, [businessId]);
   sucs.rows.forEach((r) => { if (soloDigitos(r.cuit)) docs.add(soloDigitos(r.cuit)); });
   const { rows } = await pool.query(
-    'SELECT sucursal, mp_doc FROM integraciones_mercadopago WHERE business_id = $1', [businessId]);
+    'SELECT sucursal, mp_user_id, mp_doc FROM integraciones_mercadopago WHERE business_id = $1 ORDER BY conectado_at NULLS LAST', [businessId]);
   for (const r of rows) {
     let doc = soloDigitos(r.mp_doc);
     if (!doc) {
       try {
         const mp = require('./mercadopagoService');
-        const t = await mp.tokenVigente(businessId, r.sucursal);
+        const t = await mp.tokenVigente(businessId, r.sucursal, r.mp_user_id);
         if (!t.error) {
           const res = await fetch('https://api.mercadopago.com/users/me', { headers: { Authorization: `Bearer ${t.token}` } });
           const yo = res.ok ? await res.json() : null;
           doc = soloDigitos(yo?.identification?.number);
           if (doc) {
-            await pool.query('UPDATE integraciones_mercadopago SET mp_doc = $3 WHERE business_id = $1 AND sucursal = $2',
-              [businessId, r.sucursal, doc]);
+            await pool.query('UPDATE integraciones_mercadopago SET mp_doc = $3 WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $4',
+              [businessId, r.sucursal, doc, r.mp_user_id]);
           }
         }
       } catch (e) {
@@ -64,7 +64,9 @@ async function docsPropios(businessId) {
  */
 async function completarCuits(businessId, filas) {
   const { rows } = await pool.query(
-    'SELECT sucursal, mp_doc FROM integraciones_mercadopago WHERE business_id = $1 AND mp_doc IS NOT NULL', [businessId]);
+    // Varias cuentas en la misma sucursal (15/11, Diego: «ojo con el CUIT, que no pise el segundo al primero»):
+    // va la primera conectada primero y solo se completa lo vacío, así la segunda nunca reemplaza a la primera.
+    'SELECT sucursal, mp_doc FROM integraciones_mercadopago WHERE business_id = $1 AND mp_doc IS NOT NULL ORDER BY conectado_at NULLS LAST, mp_user_id', [businessId]);
   const fmt = (d) => `${d.slice(0, 2)}-${d.slice(2, 10)}-${d.slice(10)}`;
   const completados = [];
   for (const r of rows) {
@@ -116,9 +118,10 @@ async function clientes(businessId) {
             mode() WITHIN GROUP (ORDER BY m.medio) AS medio,
             array_agg(DISTINCT m.sucursal) AS sucursales
        FROM mp_pagos m
-       LEFT JOIN integraciones_mercadopago i ON i.business_id = m.business_id AND i.sucursal = m.sucursal
       WHERE m.business_id = $1 AND m.rol = 'cobro' AND m.estado = 'approved'
-        AND m.payer_id IS NOT NULL AND m.payer_id IS DISTINCT FROM i.mp_user_id::text
+        AND m.payer_id IS NOT NULL
+        -- ninguna cuenta propia del negocio (con varias por sucursal, una le transfiere a la otra)
+        AND m.payer_id NOT IN (SELECT mp_user_id::text FROM integraciones_mercadopago WHERE business_id = $1)
         AND (m.payer_doc IS NULL OR NOT (regexp_replace(m.payer_doc, '\\D', '', 'g') = ANY($2::text[])))
       GROUP BY m.payer_id`, [businessId, propios]);
   const rango = await pool.query(
@@ -127,7 +130,7 @@ async function clientes(businessId) {
   // Si hay alguna sin terminar y nadie la está trayendo, arranca acá (una sola instancia, ver asegurarHistorial).
   await require('./mercadopagoDiario').asegurarHistorial(businessId).catch((e) => console.warn('[clientes] historial:', e.message));
   const cuentas = await pool.query(
-    `SELECT sucursal, mp_nickname AS nombre, historial_completo AS completo, historial_hasta::text AS hasta,
+    `SELECT sucursal, mp_user_id::text AS cuenta, mp_nickname AS nombre, historial_completo AS completo, historial_hasta::text AS hasta,
             (NOT coalesce(historial_completo, false) AND historial_intento_at > now() - interval '15 minutes') AS trayendo,
             ultimo_sync_error AS error
        FROM integraciones_mercadopago WHERE business_id = $1 ORDER BY sucursal`, [businessId]);
