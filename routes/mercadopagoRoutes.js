@@ -66,6 +66,7 @@ router.post('/proveedor', manejar(async (req) => {
     require('../services/notificationService').avisarAbm(req, {
       businessId: bid(req), type: 'mp_proveedor',
       title: r.proveedor ? `Mercado Pago ${r.cuenta}: proveedor ${r.proveedor.nombre}` : `Mercado Pago ${r.cuenta}: sin proveedor`,
+      message: r.heredadas ? `También quedó en ${r.heredadas} cuenta${r.heredadas === 1 ? '' : 's'} más de la organización que no tenía${r.heredadas === 1 ? '' : 'n'} proveedor.` : null,
       metadata: { link: '/configuracion?tab=7' },
     });
   }

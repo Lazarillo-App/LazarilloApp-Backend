@@ -128,6 +128,7 @@ async function conectar(businessId, userId, code, state) {
     [businessId, tok.user_id || yo?.id || null, yo?.nickname || null, yo?.email || null,
       encryptSecret(tok.access_token), tok.refresh_token ? encryptSecret(tok.refresh_token) : null,
       venceEn(tok.expires_in), tok.live_mode ?? null, userId || null, sucursal, titularDe(yo), docDe(yo)]);
+  await heredarProveedor(businessId, await proveedorDeOrganizacion(businessId).catch(() => null)).catch(() => {});
   return { ok: true, sucursal, cuenta: { user_id: tok.user_id || yo?.id || null, nickname: yo?.nickname || null, email: yo?.email || null } };
 }
 
@@ -213,6 +214,26 @@ async function proveedoresDe(businessId) {
   return rows;
 }
 
+// El proveedor es de la ORGANIZACIÓN (Diego 15/11: «el proveedor tiene que ser de la organización porque usa
+// los mismos maestros»): el que ya eligió alguna cuenta de la organización es el de todas las que no tienen.
+const SQL_CUENTAS_ORG = `SELECT i.business_id, i.sucursal, i.mp_user_id, i.proveedor_cod
+   FROM integraciones_mercadopago i JOIN app_businesses b ON b.id = i.business_id
+  WHERE b.organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1)`;
+async function proveedorDeOrganizacion(businessId) {
+  const { rows } = await pool.query(
+    `SELECT proveedor_cod, count(*) AS n FROM (${SQL_CUENTAS_ORG}) c WHERE proveedor_cod IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 1`, [businessId]);
+  return rows[0]?.proveedor_cod || null;
+}
+async function heredarProveedor(businessId, codPro) {
+  if (!codPro) return 0;
+  const r = await pool.query(
+    `UPDATE integraciones_mercadopago i SET proveedor_cod = $2, updated_at = now()
+       FROM app_businesses b
+      WHERE b.id = i.business_id AND i.proveedor_cod IS NULL
+        AND b.organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1)`, [businessId, String(codPro)]);
+  return r.rowCount;
+}
+
 async function vincularProveedor(businessId, sucursal, cuenta, codPro) {
   const f = await fila(businessId, sucursal, cuenta);
   if (!f) return { error: 'mp_no_conectado' };
@@ -221,12 +242,19 @@ async function vincularProveedor(businessId, sucursal, cuenta, codPro) {
   if (codPro && !p) return { error: 'proveedor_no_encontrado' };
   await pool.query('UPDATE integraciones_mercadopago SET proveedor_cod = $4, updated_at = now() WHERE business_id = $1 AND sucursal = $2 AND mp_user_id = $3',
     [businessId, sucursal, f.mp_user_id, p ? String(p.codigo) : null]);
-  return { ok: true, cuenta: f.mp_nickname || String(f.mp_user_id), proveedor: p ? { codigo: p.codigo, nombre: p.nombre } : null };
+  const heredadas = p ? await heredarProveedor(businessId, p.codigo) : 0;
+  return { ok: true, cuenta: f.mp_nickname || String(f.mp_user_id), proveedor: p ? { codigo: p.codigo, nombre: p.nombre } : null, heredadas };
 }
 
 async function estado(businessId, sucursal = 0) {
   const lista = await filas(businessId, sucursal);
   const provs = lista.length ? await proveedoresDe(businessId).catch(() => []) : [];
+  // Si la organización ya tiene proveedor elegido, la cuenta que no tiene lo toma sola (no se pregunta dos veces).
+  const deOrg = lista.some((x) => !x.proveedor_cod) ? await proveedorDeOrganizacion(businessId).catch(() => null) : null;
+  if (deOrg) {
+    await heredarProveedor(businessId, deOrg).catch(() => {});
+    lista.forEach((x) => { if (!x.proveedor_cod) x.proveedor_cod = deOrg; });
+  }
   const sugerido = provs.find((p) => p.cuit === CUIT_MP) || null;
   const provDe = (cod) => { const p = cod != null ? provs.find((x) => String(x.codigo) === String(cod)) : null; return p ? { codigo: p.codigo, nombre: p.nombre } : null; };
   if (lista.some((x) => !x.mp_titular || !x.mp_doc)) await completarDatosCuentas(businessId, sucursal, lista);
