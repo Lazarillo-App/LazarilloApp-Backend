@@ -15,5 +15,7 @@ router.post('/invitations/:assignmentId/resend', authRequired, team.resendInvita
 // Assignments (edición / revocación)
 router.patch('/assignments/:assignmentId', authRequired, team.updateAssignment);
 router.delete('/assignments/:assignmentId', authRequired, team.revokeAssignment);
+router.get('/assignments/:assignmentId/efectivos', authRequired, team.permisosEfectivos);
+router.post('/titularidad', authRequired, team.pasarTitularidad);
 
 module.exports = router;
