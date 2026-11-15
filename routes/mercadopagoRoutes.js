@@ -87,6 +87,34 @@ router.post('/cuit-sucursal', manejar(async (req) => {
   return r;
 }));
 
+// Lo que descuenta Mercado Pago, al tablero (Diego 15/11/2026). Ver services/mpCargos.js.
+// La configuración es de la ORGANIZACIÓN (mismos maestros); el resumen, del negocio activo.
+const cargos = require('../services/mpCargos');
+router.get('/cargos', manejar((req) => cargos.resumen(bid(req), req.query.mes)));
+router.post('/cargos/config', manejar(async (req) => {
+  const r = await cargos.configurar(bid(req), req.body || {});
+  if (!r.error) {
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'mp_cargos_config',
+      title: `Mercado Pago · ${r.nombre}: ${[r.proveedor && `proveedor ${r.proveedor}`, r.concepto && `concepto ${r.concepto}`].filter(Boolean).join(' · ') || 'sin elegir'}`,
+      message: r.antes ? `Antes: ${[r.antes.proveedor_cod && `proveedor ${r.antes.proveedor_cod}`, r.antes.concepto_codigo && `concepto ${r.antes.concepto_codigo}`].filter(Boolean).join(' · ') || 'sin elegir'}` : null,
+      metadata: { link: '/movimientos-bancarios?tab=descuentos' },
+    });
+  }
+  return r;
+}));
+router.post('/cargos/activar', manejar(async (req) => {
+  const r = await cargos.activar(bid(req), req.body || {}, req.user?.email || String(req.user?.id || ''));
+  require('../services/notificationService').avisarAbm(req, {
+    businessId: bid(req), type: 'mp_cargos_activar',
+    title: r.activo ? `Mercado Pago: carga automática encendida desde ${r.desde}` : 'Mercado Pago: carga automática apagada',
+    metadata: { link: '/movimientos-bancarios?tab=descuentos' },
+  });
+  if (r.activo) setImmediate(() => cargos.cargarNegocio(bid(req)).catch((e) => console.error('[mp-cargos]', e.message)));
+  return r;
+}));
+router.post('/cargos/cargar', manejar((req) => cargos.cargarNegocio(bid(req))));
+
 router.post('/sincronizar', manejar((req) => mp.sincronizarBanco(bid(req), req.sucursal, req.body?.desde, req.body?.hasta)));
 
 // Reporte de liberaciones (nombres de pagadores y egresos): MP lo arma en unos minutos, el front

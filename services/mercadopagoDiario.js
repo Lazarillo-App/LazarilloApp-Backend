@@ -117,6 +117,12 @@ async function traerTodas({ businessId = null, origen = 'cron' } = {}) {
       r.error ? `error ${r.error}` : `cobros ${r.cobros ?? '-'} pagos ${r.pagos_hechos ?? '-'} devol ${r.devoluciones ?? '-'} reporte ${r.reporte || '-'}${r.motivo ? ` (${r.motivo})` : ''}`);
     if (r.reporte === 'pendiente') pendientes.push({ ...c, desde: r.desde, hasta: r.hasta });
   }
+  // Lo que descuenta Mercado Pago, al tablero (si la organización lo encendió): con los días ya traídos.
+  const cargos = require('./mpCargos');
+  for (const b of [...new Set(lista.map((c) => Number(c.business_id)))]) {
+    const r = await cargos.cargarNegocio(b).catch((e) => ({ error: e.message }));
+    if (r.cargados || r.pasados || r.error) console.log(`[mercadopago:${origen}] cargos negocio ${b}: cargados ${r.cargados ?? 0} pasados ${r.pasados ?? 0}${r.error ? ` error ${r.error}` : ''}`);
+  }
   return { cuentas: lista.length, pendientes };
 }
 
