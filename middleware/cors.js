@@ -25,6 +25,7 @@ const corsWithCache = cors({
     'X-Maxi-Token',
     'X-Cron-Secret',
     'X-Pantalla-Token', // TV de cocina (pantallasController)
+    'X-Ver-Como',       // «Ver como» una persona (middleware/verComoPersona.js)
   ],
   credentials: false,
   optionsSuccessStatus: 204,
