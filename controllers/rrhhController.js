@@ -589,12 +589,15 @@ async function putConfig(req, res) {
            WHERE espacio_id=$1 AND NOT (id = ANY($2::bigint[]))`, [espId, idsTurnos]
         );
         for (const t of turnosSobran) {
-          const { rows: conFilas } = await client.query(
-            'SELECT 1 FROM rrhh_filas WHERE turno_id=$1 LIMIT 1', [t.id]
+          // Se bloquea solo si alguna semana tiene días cargados en ese turno; las filas
+          // vacías (las 3 libres de cada semana nueva) se van con él (Diego 15/11/2026).
+          const { rows: conCeldas } = await client.query(
+            'SELECT 1 FROM rrhh_filas f JOIN rrhh_celdas c ON c.fila_id = f.id WHERE f.turno_id=$1 LIMIT 1', [t.id]
           );
-          if (conFilas.length) {
-            avisos.push(`El turno "${t.nombre}" tiene cronogramas cargados: no se borró.`);
+          if (conCeldas.length) {
+            avisos.push(`El turno "${t.nombre}" tiene días cargados en algún cronograma: no se borró.`);
           } else {
+            await client.query('DELETE FROM rrhh_filas WHERE turno_id=$1', [t.id]);
             await client.query('DELETE FROM rrhh_turnos WHERE id=$1', [t.id]);
           }
         }
@@ -605,12 +608,15 @@ async function putConfig(req, res) {
            AND NOT (id = ANY($2::bigint[]))`, [bizId, idsEspacios, branchId]
       );
       for (const e of espSobran) {
-        const { rows: conSemanas } = await client.query(
-          'SELECT 1 FROM rrhh_semanas WHERE espacio_id=$1 LIMIT 1', [e.id]
+        // Igual que los turnos: se bloquea solo con días cargados; semanas vacías se van con él.
+        const { rows: conCeldas } = await client.query(
+          `SELECT 1 FROM rrhh_semanas s JOIN rrhh_filas f ON f.semana_id = s.id
+             JOIN rrhh_celdas c ON c.fila_id = f.id WHERE s.espacio_id=$1 LIMIT 1`, [e.id]
         );
-        if (conSemanas.length) {
-          avisos.push(`El espacio "${e.nombre}" tiene cronogramas cargados: no se borró.`);
+        if (conCeldas.length) {
+          avisos.push(`El espacio "${e.nombre}" tiene días cargados en algún cronograma: no se borró.`);
         } else {
+          await client.query('DELETE FROM rrhh_semanas WHERE espacio_id=$1', [e.id]);
           await client.query('DELETE FROM rrhh_espacios WHERE id=$1', [e.id]);
         }
       }
