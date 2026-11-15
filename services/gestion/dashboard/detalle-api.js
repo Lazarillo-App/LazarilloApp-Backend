@@ -262,7 +262,8 @@ async function obtenerDetalleCompras({ organizationId, businessId, sucursal, sp 
         c.business_id AS "localIdOrigen", c.branch_id AS "puntoDeVentaIdOrigen",
         cc.codigo AS "conceptoCajaCodigo", cc.nombre AS "conceptoCajaNombre", rc.nombre AS "conceptoCajaRubroNombre",
         ccm.codigo AS "conceptoCajaManualCodigo", ccm.nombre AS "conceptoCajaManualNombre", rcm.nombre AS "conceptoCajaManualRubroNombre",
-        c.comprobante, c.codigo AS "codigoProveedor", c.business_id AS "negocioCompra", c.branch_id AS "sucursalCompra"
+        c.comprobante, c.codigo AS "codigoProveedor", c.business_id AS "negocioCompra", c.branch_id AS "sucursalCompra",
+        c.origen AS "origenCompra"
       FROM gestion_compras c
       LEFT JOIN gestion_proveedores p ON c."proveedorId" = p.id
       LEFT JOIN app_businesses neg    ON c.business_id = neg.id
