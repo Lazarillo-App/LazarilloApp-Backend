@@ -185,6 +185,8 @@ app.use('/api/superusuarios', authRequired, superusuarioRoutes);
 
 // Guard global de /api (después de /api/cron y /api/admin)
 app.use('/api', authRequired, loadActiveBusiness);
+// «Ver como» una persona: las lecturas del dueño se resuelven como esa persona (solo GET).
+app.use('/api', require('./middleware/verComoPersona'));
 
 // Verificar estado de cuenta activa (después de auth, antes de las rutas de negocio)
 app.use('/api', requireActiveAccount);
