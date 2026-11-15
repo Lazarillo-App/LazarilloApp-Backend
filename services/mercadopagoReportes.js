@@ -40,8 +40,9 @@ async function asegurarConfig(token, { llamar: ll = llamar } = {}) {
     if (!faltan.length) return { ok: true };
     // Solo los campos que la doc acepta en el PUT (15/11: mandar la config entera, con campos de solo
     // lectura que devuelve el GET, puede ser lo que MP rechazaba). Los vacíos no se mandan.
-    const ACEPTA = ['file_name_prefix', 'frequency', 'separator', 'display_timezone', 'report_translation', 'notification_email_list',
-      'include_withdrawal_at_end', 'check_available_balance', 'compensate_detail', 'execute_after_withdrawal', 'sftp_info'];
+    // 15/11 (log real de FC): MP devolvía «Invalid execute_after_withdrawal» con el valor que él mismo da en
+    // el GET. Se manda lo mínimo que hace falta; el resto de la config de la cuenta queda como está.
+    const ACEPTA = ['file_name_prefix', 'frequency', 'separator', 'display_timezone', 'report_translation', 'include_withdrawal_at_end'];
     const cfg = { columns: [...(actual.data.columns || []).map((c) => ({ key: c.key })), ...faltan.map((key) => ({ key }))] };
     ACEPTA.forEach((k) => { const v = actual.data[k]; if (v != null && !(Array.isArray(v) && v.every((x) => x == null))) cfg[k] = v; });
     const r = await ll(url, { token, method: 'PUT', body: cfg });
