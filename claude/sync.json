@@ -161,5 +161,11 @@
     "titulo": "Web: «Mirá cómo funciona» con capturas de la app",
     "estado": "hecha",
     "nota": "Front #362 en testing: 3 pestañas con capturas (números y nombres cambiados) y puntos de las guías de Anthony. Las imágenes van en base64 partido en pedazos de 5 KB (src/componentes/landing-demos) porque el conector de GitHub solo sube texto."
+  },
+  {
+    "clave": "2026-11-15-29",
+    "tipo": "cambio",
+    "titulo": "Web: «Mirá cómo funciona» con capturas de la app",
+    "nota": "Front #364: 7 pestañas (Costos y precios, En el celular, Clientes, Cobros, Conciliación, Cocina, Equipo), pasos corregidos para que caigan sobre el dato. Datos cambiados y sin el nombre del negocio. Para la captura de Conciliación se trajeron las fuentes de noviembre en Container Bar (con OK de Diego)."
   }
 ]
