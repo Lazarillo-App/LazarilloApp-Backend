@@ -73,5 +73,12 @@
     "modulo": "general",
     "prioridad": "baja",
     "detalle": "En espera hasta tener fotos (Diego 15/11: «lo veo apresurado»). Va como bloque dentro de Asesoría. Necesita: capturas del Sobre nosotros de yurest.com (no se puede leer automático), fotos de Container y de los asesores, hitos con año. Sumar a Florencia Acosta cuando confirme."
+  },
+  {
+    "clave": "2026-11-15-24",
+    "tipo": "cambio",
+    "titulo": "Web: sector Asesoría (servicios, cómo trabajamos, preguntas frecuentes)",
+    "estado": "en_curso",
+    "nota": "Hecho en testing (front #341 y #342): la web pasa a 2 pestañas, El sistema (/) y Asesoría (/asesoria), con menú de texto junto al logo e Ingresar como texto (Diego eligió la opción A). Asesoría tiene Software hay mucho + 3 pasos, 6 servicios, el equipo, 5 preguntas frecuentes y «Pedí tu diagnóstico». Falta que Diego confirme los servicios (sobre todo Auditoría de la operación) y las respuestas de las preguntas, escritas como borrador inspirado en Plus."
   }
 ]
