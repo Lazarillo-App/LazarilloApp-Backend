@@ -36,7 +36,11 @@ const manejar = (fn) => async (req, res) => {
   }
 };
 
-router.get('/estado', manejar((req) => mp.estado(bid(req), req.sucursal)));
+// Al abrir Movimientos bancarios: si una cuenta no terminó su historial y nadie lo está trayendo, arranca.
+router.get('/estado', manejar((req) => {
+  require('../services/mercadopagoDiario').asegurarHistorial(bid(req)).catch((e) => console.warn('[mercadopago] historial:', e.message));
+  return mp.estado(bid(req), req.sucursal);
+}));
 
 router.get('/autorizar', manejar(async (req) => {
   if (!mp.configurado()) return { error: 'mp_sin_configurar' };
@@ -49,7 +53,7 @@ router.post('/conectar', manejar(async (req) => {
   if (!r?.error) require('../services/clientesService').docsPropios(bid(req)).catch((e) => console.warn('[mercadopago] CUIT al vincular:', e.message));
   // Al vincular se trae el historial en segundo plano, sin esperar al cron (Diego 15/11: «ya está vinculado
   // pero Clientes sigue vacío»). Avisa en la campana cuando termina.
-  if (!r?.error) require('../services/mercadopagoDiario').dispararNegocio(bid(req));
+  if (!r?.error) require('../services/mercadopagoDiario').asegurarHistorial(bid(req)).catch((e) => console.warn('[mercadopago] historial al vincular:', e.message));
   return r;
 }));
 
