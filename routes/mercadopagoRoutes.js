@@ -59,6 +59,19 @@ router.post('/conectar', manejar(async (req) => {
 
 router.delete('/', manejar((req) => mp.desconectar(bid(req), req.sucursal, req.query.cuenta || null)));
 
+// Proveedor de la cuenta (Diego 15/11: «al asociar un banco lo tenemos que vincular con un proveedor»).
+router.post('/proveedor', manejar(async (req) => {
+  const r = await mp.vincularProveedor(bid(req), req.sucursal, req.body?.cuenta, req.body?.codPro);
+  if (!r.error) {
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'mp_proveedor',
+      title: r.proveedor ? `Mercado Pago ${r.cuenta}: proveedor ${r.proveedor.nombre}` : `Mercado Pago ${r.cuenta}: sin proveedor`,
+      metadata: { link: '/configuracion?tab=7' },
+    });
+  }
+  return r;
+}));
+
 // Qué cuenta define el CUIT de la sucursal (Diego 15/11: «se elige qué cuenta manda, bien clarito»).
 router.post('/cuit-sucursal', manejar(async (req) => {
   const r = await mp.usarCuitDeCuenta(bid(req), req.sucursal, req.body?.cuenta);
