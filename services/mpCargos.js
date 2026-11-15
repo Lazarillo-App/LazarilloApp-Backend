@@ -33,9 +33,13 @@ const GRUPOS = [
 ];
 const GRUPO = Object.fromEntries(GRUPOS.map((g) => [g.grupo, g]));
 
-// Clasificación de un cargo (alias ch). NULL = no es costo del negocio.
+// Clasificación de un cargo (alias ch, cobro p). NULL = no es costo del negocio. En un cobro son nuestros los que
+// paga el que cobra (collector); en un PAGO que hicimos, los que paga el pagador (p. ej. el 0,6% de una
+// transferencia que mandamos). Los cargos del que cobra en un pago nuestro son del otro (verificado oct 2026:
+// la «IGET» de $102.609 de FC era de un pago a un tercero).
 const CASE_GRUPO = `CASE
-  WHEN COALESCE(ch->'accounts'->>'from', '') NOT IN ('collector', 'application_owner') THEN NULL
+  WHEN NOT ((p.rol = 'cobro' AND COALESCE(ch->'accounts'->>'from', '') IN ('collector', 'application_owner'))
+          OR (p.rol = 'pago' AND ch->'accounts'->>'from' = 'payer')) THEN NULL
   WHEN ch->>'name' LIKE 'tax%' AND ch->>'name' LIKE '%debitos_creditos%' THEN 'imp_debcred'
   WHEN ch->>'name' LIKE 'tax%' AND ch->>'name' LIKE '%iget%' THEN 'imp_iget'
   WHEN ch->>'name' LIKE 'tax%' THEN 'imp_iibb'
@@ -52,7 +56,7 @@ function sqlDiario(businessId, desde, hasta) {
     WITH c AS (
       SELECT p.business_id, p.sucursal, p.cuenta, ch, ${sql.raw(CASE_GRUPO)} AS grupo
         FROM mp_pagos p, jsonb_array_elements(COALESCE(p.raw->'charges_details', '[]'::jsonb)) ch
-       WHERE p.business_id = ${businessId} AND p.rol = 'cobro' AND p.cuenta IS NOT NULL
+       WHERE p.business_id = ${businessId} AND p.rol IN ('cobro', 'pago') AND p.cuenta IS NOT NULL
          AND p.fecha >= ${desde}::date - 180 AND p.fecha <= ${hasta}::date + 1
     ), mov AS (
       SELECT business_id, sucursal, cuenta, grupo,
