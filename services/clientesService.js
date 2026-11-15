@@ -52,7 +52,53 @@ async function docsPropios(businessId) {
     }
     if (doc) docs.add(doc);
   }
+  await completarCuits(businessId, rows.map((r) => ({ ...r, mp_doc: r.mp_doc || null }))).catch((e) => console.warn('[clientes] completar CUIT:', e.message));
   return [...docs];
+}
+
+/**
+ * Completa solo el CUIT del local y de la sucursal con el de su cuenta de Mercado Pago, si estaba
+ * vacío (Diego 15/11: «¿no debería estar cargado ahí?»). Sucursal 0 = el negocio y su sucursal
+ * principal; > 0 = esa sucursal. Nunca pisa un CUIT cargado a mano. Deja marcado el origen para
+ * que el formulario diga de dónde salió, y un aviso en la campana si completó algo.
+ */
+async function completarCuits(businessId, filas) {
+  const { rows } = await pool.query(
+    'SELECT sucursal, mp_doc FROM integraciones_mercadopago WHERE business_id = $1 AND mp_doc IS NOT NULL', [businessId]);
+  const fmt = (d) => `${d.slice(0, 2)}-${d.slice(2, 10)}-${d.slice(10)}`;
+  const completados = [];
+  for (const r of rows) {
+    const d = String(r.mp_doc || '').replace(/\D/g, '');
+    if (d.length !== 11) continue;
+    const extra = JSON.stringify({ cuit: fmt(d), cuit_origen: 'mercadopago' });
+    if (Number(r.sucursal) === 0) {
+      const n = await pool.query(
+        `UPDATE app_businesses SET props = COALESCE(props, '{}'::jsonb) || jsonb_build_object('tax_id', $2::text, 'tax_id_origen', 'mercadopago')
+          WHERE id = $1 AND COALESCE(props->>'tax_id', '') = '' RETURNING name`, [businessId, fmt(d)]);
+      const b = await pool.query(
+        `UPDATE app_branches SET props = COALESCE(props, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+          WHERE business_id = $1 AND COALESCE((props->>'is_main')::boolean, false) AND COALESCE(props->>'cuit', '') = '' RETURNING name`,
+        [businessId, extra]);
+      [...n.rows, ...b.rows].forEach((x) => completados.push(x.name));
+    } else {
+      const b = await pool.query(
+        `UPDATE app_branches SET props = COALESCE(props, '{}'::jsonb) || $3::jsonb, updated_at = NOW()
+          WHERE id = $2 AND business_id = $1 AND COALESCE(props->>'cuit', '') = '' RETURNING name`,
+        [businessId, r.sucursal, extra]);
+      b.rows.forEach((x) => completados.push(x.name));
+    }
+  }
+  if (completados.length) {
+    const { avisarAlEquipoSinEsperar } = require('./notificationService');
+    const nombres = [...new Set(completados)];
+    avisarAlEquipoSinEsperar({
+      businessId, type: 'cuit_desde_mercadopago',
+      title: `CUIT completado desde Mercado Pago: ${nombres.join(', ')}`,
+      message: 'Se tomó el CUIT de la cuenta de Mercado Pago conectada. Se puede cambiar en Editar sucursal.',
+      metadata: { link: '/configuracion?tab=3' },
+    });
+  }
+  return completados;
 }
 
 async function clientes(businessId) {
