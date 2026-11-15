@@ -95,6 +95,16 @@ async function recorrerHistorial(c) {
   await pool.query('UPDATE integraciones_mercadopago SET historial_completo = true, version_filas = $3 WHERE business_id = $1 AND sucursal = $2',
     [c.business_id, c.sucursal, mp.VERSION_FILAS]);
   console.log(`[mercadopago:historial] negocio ${c.business_id} suc ${c.sucursal}: ${meses} meses, ${crudos} pagos guardados enteros`);
+  // Pasa una sola vez por cuenta (al vincularla): un aviso para saber que Clientes y Movimientos ya están completos.
+  if (crudos) {
+    const { avisarAlEquipoSinEsperar } = require('./notificationService');
+    avisarAlEquipoSinEsperar({
+      businessId: c.business_id, type: 'mercadopago_historial', incluirActor: false,
+      title: `Mercado Pago: historial traído (${crudos.toLocaleString('es-AR')} movimientos, ${meses} meses)`,
+      message: 'Ya están en Clientes y en Movimientos bancarios.',
+      metadata: { link: '/clientes', sucursal: c.sucursal },
+    });
+  }
 }
 
 /** Todas las cuentas conectadas (cron diario). Una por vez: no satura la API de MP. */

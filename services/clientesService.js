@@ -123,7 +123,12 @@ async function clientes(businessId) {
       GROUP BY m.payer_id`, [businessId, propios]);
   const rango = await pool.query(
     `SELECT min(fecha)::text AS desde, max(fecha)::text AS hasta FROM mp_pagos WHERE business_id = $1 AND rol = 'cobro'`, [businessId]);
+  // Cuentas de MP vinculadas: si alguna todavía no terminó de traer su historial, la pantalla lo dice.
+  const cuentas = await pool.query(
+    `SELECT sucursal, mp_nickname AS nombre, historial_completo AS completo, historial_hasta::text AS hasta
+       FROM integraciones_mercadopago WHERE business_id = $1 ORDER BY sucursal`, [businessId]);
   return {
+    cuentas: cuentas.rows,
     propios, // CUIT/DNI de las cuentas propias, que no cuentan como clientes
     desde: rango.rows[0]?.desde || null,
     hasta: rango.rows[0]?.hasta || null,
