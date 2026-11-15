@@ -100,5 +100,22 @@
     "titulo": "Web: sector Asesoría (servicios, cómo trabajamos, preguntas frecuentes)",
     "estado": "en_curso",
     "nota": "Front #346 en testing: menos aire entre los pasos y «Qué hacemos»; «¿Qué es el diagnóstico?» con el texto de Diego (Lazarillo de respaldo, identificar el problema); sección nueva «Nuestros principios · Así tomamos decisiones» con 6 principios de VALORES EQUIPO corregidos por Diego y su cita de equipos interdependientes. Sigue faltando que Diego confirme los 6 servicios y el resto de las preguntas frecuentes."
+  },
+  {
+    "clave": "2026-11-15-92",
+    "tipo": "tarea",
+    "titulo": "Web: «Preguntale a la IA qué es Lazarillo» (botones a ChatGPT, Claude, Google IA, Perplexity y Grok)",
+    "modulo": "general",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "detalle": "Diego 15/11: idea tomada de Yurest («Pide a la IA un resumen»). Franja antes del cierre de la web con 5 botones que abren cada IA con la pregunta ya escrita (nombra www.lazarillo.com.ar para no confundirlo con el Lazarillo de Tormes). Sumado public/llms.txt y texto para robots sin JavaScript en index.html, porque la web es una SPA y una IA que no corre JS no veía nada. Front #356 en testing. Lo que contesten depende de lo que lean: Lazarillo todavía no aparece en buscadores; se ve recién cuando pase a main (lazarillo.com.ar)."
+  },
+  {
+    "clave": "2026-11-15-93",
+    "tipo": "tarea",
+    "titulo": "Anthony: preguntarle a la IA dentro de la app con los datos del negocio (tipo Yulia de Yurest)",
+    "modulo": "general",
+    "prioridad": "alta",
+    "detalle": "Diego 15/11: «esta función de preguntarle a la IA la quiero en mi web también, me encantó». Como Yulia de Yurest: consultas en lenguaje natural sobre ventas, costos, márgenes y consumos, con respuesta al instante y alertas (subas de precio de proveedores, desvíos de margen). Encaja en el chat de Anthony (la IA del producto). Yurest es la guía de producto (memoria: areas/yurest-referente)."
   }
 ]
