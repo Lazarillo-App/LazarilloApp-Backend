@@ -15,3 +15,9 @@ test('nunca más de 92 días por vuelta', () => {
 test('sin nada guardado, los últimos 10 días', () => {
   assert.deepStrictEqual(rangoDiario(null, '2026-11-14'), { desde: '2026-11-04', hasta: '2026-11-14' });
 });
+test('historial: meses hacia atrás, el actual hasta hoy', () => {
+  const { mesesHaciaAtras } = require('./mercadopagoDiario');
+  assert.deepStrictEqual(mesesHaciaAtras('2026-11-01', 3, '2026-11-14'), [
+    { desde: '2026-11-01', hasta: '2026-11-14' }, { desde: '2026-10-01', hasta: '2026-10-31' }, { desde: '2026-09-01', hasta: '2026-09-30' }]);
+  assert.deepStrictEqual(mesesHaciaAtras('2026-03-01', 2, '2026-11-14')[1], { desde: '2026-02-01', hasta: '2026-02-28' });
+});

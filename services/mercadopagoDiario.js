@@ -7,6 +7,9 @@
 //  - El punto del header (POST /pulso/actualizar): lo mismo, para un negocio, en segundo plano.
 // Qué días: desde lo último que ya hay guardado (o hace 10 días, lo que sea antes; así se
 // actualizan devoluciones y acreditaciones recientes), hasta hoy. Tope 92 días por vuelta.
+// Además, una vez por cuenta (Diego 14/11: «debe traer todo»): el HISTORIAL completo hacia atrás,
+// mes por mes, guardando cada pago entero, hasta 2 meses seguidos sin movimientos (tope 36). Y si
+// cambió la forma de armar las filas (VERSION_FILAS), se rearman todas desde lo guardado.
 'use strict';
 
 const pool = require('../config/db');
@@ -31,7 +34,8 @@ function rangoDiario(ultimoGuardado, hoy = hoyAR()) {
 
 async function cuentas(businessId = null) {
   const { rows } = await pool.query(
-    `SELECT m.business_id, m.sucursal, f.hasta::text AS ultimo
+    `SELECT m.business_id, m.sucursal, f.hasta::text AS ultimo, m.historial_hasta::text AS historial_hasta,
+            m.historial_completo, m.version_filas
        FROM integraciones_mercadopago m
        LEFT JOIN conciliacion_fuentes f ON f.business_id = m.business_id AND f.sucursal = m.sucursal AND f.tipo = 'banco'
       WHERE ($1::int IS NULL OR m.business_id = $1)
@@ -47,12 +51,50 @@ async function traerCuenta(c) {
   try {
     const { desde, hasta } = rangoDiario(c.ultimo);
     const r = await mp.sincronizarBanco(c.business_id, c.sucursal, desde, hasta);
+    if (r.error) return { desde, hasta, ...r };
+    if (!c.historial_completo) await recorrerHistorial(c);
+    else if ((c.version_filas || 0) < mp.VERSION_FILAS) await mp.rederivarCuenta(c.business_id, c.sucursal);
     return { desde, hasta, ...r };
   } catch (e) {
     return { error: e.message };
   } finally {
     enCurso.delete(clave);
   }
+}
+
+/** Meses hacia atrás desde un mes dado (YYYY-MM-01): [{ desde, hasta }] del más nuevo al más viejo. */
+function mesesHaciaAtras(desdeMes, cuantos, hoy = hoyAR()) {
+  const out = [];
+  const d = new Date(`${desdeMes}T12:00:00Z`);
+  for (let i = 0; i < cuantos; i++) {
+    const ini = d.toISOString().slice(0, 10);
+    const f = new Date(d); f.setUTCMonth(f.getUTCMonth() + 1); f.setUTCDate(0);
+    const fin = f.toISOString().slice(0, 10);
+    out.push({ desde: ini, hasta: fin > hoy ? hoy : fin });
+    d.setUTCMonth(d.getUTCMonth() - 1);
+  }
+  return out;
+}
+
+/** Historial completo, una vez por cuenta: mes por mes hacia atrás, guardando todo entero. */
+async function recorrerHistorial(c) {
+  const hoy = hoyAR();
+  const inicio = c.historial_hasta
+    ? mesesHaciaAtras(`${c.historial_hasta.slice(0, 7)}-01`, 2, hoy)[1].desde
+    : `${hoy.slice(0, 7)}-01`;
+  let vacios = 0, meses = 0, crudos = 0;
+  for (const m of mesesHaciaAtras(inicio, 36, hoy)) {
+    const r = await mp.sincronizarBanco(c.business_id, c.sucursal, m.desde, m.hasta, { sinReporte: true });
+    if (r.error) { console.warn(`[mercadopago:historial] negocio ${c.business_id} ${m.desde}: ${r.error}`); return; }
+    meses += 1; crudos += r.crudos || 0;
+    vacios = r.crudos ? 0 : vacios + 1;
+    await pool.query('UPDATE integraciones_mercadopago SET historial_hasta = $3 WHERE business_id = $1 AND sucursal = $2',
+      [c.business_id, c.sucursal, m.desde]);
+    if (vacios >= 2) break;
+  }
+  await pool.query('UPDATE integraciones_mercadopago SET historial_completo = true, version_filas = $3 WHERE business_id = $1 AND sucursal = $2',
+    [c.business_id, c.sucursal, mp.VERSION_FILAS]);
+  console.log(`[mercadopago:historial] negocio ${c.business_id} suc ${c.sucursal}: ${meses} meses, ${crudos} pagos guardados enteros`);
 }
 
 /** Todas las cuentas conectadas (cron diario). Una por vez: no satura la API de MP. */
@@ -94,4 +136,4 @@ function dispararNegocio(businessId) {
   });
 }
 
-module.exports = { corridaDiaria, dispararNegocio, traerTodas, rangoDiario };
+module.exports = { corridaDiaria, dispararNegocio, traerTodas, rangoDiario, mesesHaciaAtras };

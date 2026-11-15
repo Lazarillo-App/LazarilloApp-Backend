@@ -98,3 +98,9 @@ test('devoluciones: total, parcial, contracargo y disputa; un cobro normal no', 
   assert.strictEqual(mp._devolucionAFila({ ...base, status: 'approved' }), null);
   assert.strictEqual(mp._devolucionAFila({ ...base, status: 'rejected' }), null);
 });
+
+test('la clave de MaxiRest: primeros 9 dígitos y el último del número de operación', () => {
+  const f = mp._pagoAFila({ id: 188388539089, status: 'approved', transaction_amount: 40000, date_approved: '2026-11-13T15:26:00.000-03:00', payment_type_id: 'bank_transfer' });
+  assert.strictEqual(f.op, '188388539089');
+  assert.strictEqual(f.claveMx, '1883885399'); // cupón del 22 de Container Bar
+});
