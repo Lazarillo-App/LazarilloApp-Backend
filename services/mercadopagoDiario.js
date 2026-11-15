@@ -88,7 +88,7 @@ async function recorrerHistorial(c) {
     if (r.error) { console.warn(`[mercadopago:historial] negocio ${c.business_id} ${m.desde}: ${r.error}`); return; }
     meses += 1; crudos += r.crudos || 0;
     vacios = r.crudos ? 0 : vacios + 1;
-    await pool.query('UPDATE integraciones_mercadopago SET historial_hasta = $3 WHERE business_id = $1 AND sucursal = $2',
+    await pool.query('UPDATE integraciones_mercadopago SET historial_hasta = $3, historial_intento_at = now() WHERE business_id = $1 AND sucursal = $2',
       [c.business_id, c.sucursal, m.desde]);
     if (vacios >= 2) break;
   }
@@ -146,4 +146,20 @@ function dispararNegocio(businessId) {
   });
 }
 
-module.exports = { corridaDiaria, dispararNegocio, traerTodas, rangoDiario, mesesHaciaAtras };
+/**
+ * Si alguna cuenta del negocio tiene el historial incompleto y nadie lo está trayendo (sin intento en los
+ * últimos 15 minutos), lo arranca. El UPDATE con condición hace que lo tome una sola instancia del back.
+ * Lo llama Clientes al abrirse (y en cada vuelta mientras espera): así una cuenta vinculada antes de que
+ * existiera el disparo al vincular, o un historial que se cortó (reinicio del server), arranca solo.
+ */
+async function asegurarHistorial(businessId) {
+  const { rows } = await pool.query(
+    `UPDATE integraciones_mercadopago SET historial_intento_at = now()
+      WHERE business_id = $1 AND NOT coalesce(historial_completo, false)
+        AND (historial_intento_at IS NULL OR historial_intento_at < now() - interval '15 minutes')
+      RETURNING sucursal`, [businessId]);
+  if (rows.length) dispararNegocio(businessId);
+  return rows.length;
+}
+
+module.exports = { corridaDiaria, dispararNegocio, traerTodas, rangoDiario, mesesHaciaAtras, asegurarHistorial };

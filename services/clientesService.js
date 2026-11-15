@@ -124,8 +124,12 @@ async function clientes(businessId) {
   const rango = await pool.query(
     `SELECT min(fecha)::text AS desde, max(fecha)::text AS hasta FROM mp_pagos WHERE business_id = $1 AND rol = 'cobro'`, [businessId]);
   // Cuentas de MP vinculadas: si alguna todavía no terminó de traer su historial, la pantalla lo dice.
+  // Si hay alguna sin terminar y nadie la está trayendo, arranca acá (una sola instancia, ver asegurarHistorial).
+  await require('./mercadopagoDiario').asegurarHistorial(businessId).catch((e) => console.warn('[clientes] historial:', e.message));
   const cuentas = await pool.query(
-    `SELECT sucursal, mp_nickname AS nombre, historial_completo AS completo, historial_hasta::text AS hasta
+    `SELECT sucursal, mp_nickname AS nombre, historial_completo AS completo, historial_hasta::text AS hasta,
+            (NOT coalesce(historial_completo, false) AND historial_intento_at > now() - interval '15 minutes') AS trayendo,
+            ultimo_sync_error AS error
        FROM integraciones_mercadopago WHERE business_id = $1 ORDER BY sucursal`, [businessId]);
   return {
     cuentas: cuentas.rows,
