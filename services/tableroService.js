@@ -36,7 +36,7 @@ function validarCambios(c = {}, { nueva = false } = {}) {
     if (!PRIORIDADES.includes(c.prioridad)) return { error: 'prioridad_invalida' };
     campos.prioridad = c.prioridad;
   }
-  for (const col of ['asignado_a', 'business_id', 'pedido_id']) {
+  for (const col of ['asignado_a', 'business_id', 'pedido_id', 'solicitante_id']) {
     if (c[col] === undefined) continue;
     const r = idOpcional(c[col]);
     if (!r.ok) return { error: col === 'asignado_a' ? 'asignado_invalido' : `${col}_invalido` };
@@ -53,13 +53,15 @@ const nombre = (alias) => `coalesce(${alias}.display_name, ${alias}.name, ${alia
 const SELECT_TAREA = `
   SELECT t.id, t.titulo, t.detalle, t.estado, t.prioridad, t.asignado_a, t.creado_por, t.hecha_por,
          t.hecha_at, t.created_at, t.updated_at, t.modulo, t.business_id, t.pedido_id, b.name AS negocio,
+         t.solicitante_id, ${nombre('us')} AS solicitante_nombre,
          ${nombre('ua')} AS asignado_nombre, ${nombre('uc')} AS creado_nombre, ${nombre('uh')} AS hecha_nombre,
          (SELECT COUNT(*)::int FROM super_tareas_notas n WHERE n.tarea_id = t.id) AS notas
     FROM super_tareas t
     LEFT JOIN app_users ua ON ua.id = t.asignado_a
     LEFT JOIN app_users uc ON uc.id = t.creado_por
     LEFT JOIN app_users uh ON uh.id = t.hecha_por
-    LEFT JOIN app_businesses b ON b.id = t.business_id`;
+    LEFT JOIN app_businesses b ON b.id = t.business_id
+    LEFT JOIN app_users us ON us.id = t.solicitante_id`;
 
 const ORDEN = `ORDER BY CASE t.prioridad WHEN 'alta' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, t.updated_at DESC`;
 
@@ -88,12 +90,12 @@ async function crear(datos, userId) {
   const c = v.campos;
   const { rows } = await pool.query(
     `INSERT INTO super_tareas (titulo, detalle, estado, prioridad, asignado_a, creado_por, hecha_por, hecha_at,
-                               modulo, business_id, pedido_id)
+                               modulo, business_id, pedido_id, solicitante_id)
      VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $3 = 'hecha' THEN $6::bigint END, CASE WHEN $3 = 'hecha' THEN now() END,
-             $7, $8, $9)
+             $7, $8, $9, $10)
      RETURNING id`,
     [c.titulo, c.detalle ?? null, c.estado || 'pendiente', c.prioridad || 'normal', c.asignado_a ?? null, userId,
-     c.modulo || 'general', c.business_id ?? null, c.pedido_id ?? null]);
+     c.modulo || 'general', c.business_id ?? null, c.pedido_id ?? null, c.solicitante_id ?? userId]);
   const tarea = await detalle(rows[0].id);
   await actividad.registrar(userId, 'tarea', 'agregó una tarea', { titulo: tarea.titulo, detalle: tarea.detalle, tarea_id: tarea.id });
   return { tarea };
@@ -114,16 +116,31 @@ async function crearLote(lista, userId) {
     await client.query('BEGIN');
     for (const c of filas) {
       const { rows } = await client.query(
-        `INSERT INTO super_tareas (titulo, detalle, estado, prioridad, asignado_a, creado_por, modulo, business_id, pedido_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        `INSERT INTO super_tareas (titulo, detalle, estado, prioridad, asignado_a, creado_por, modulo, business_id, pedido_id, solicitante_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
         [c.titulo, c.detalle ?? null, c.estado === 'hecha' ? 'pendiente' : (c.estado || 'pendiente'), c.prioridad || 'normal',
-         c.asignado_a ?? null, userId, c.modulo || 'general', c.business_id ?? null, c.pedido_id ?? null]);
+         c.asignado_a ?? null, userId, c.modulo || 'general', c.business_id ?? null, c.pedido_id ?? null, c.solicitante_id ?? userId]);
       ids.push(rows[0].id);
     }
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
   await actividad.registrar(userId, 'tarea', `agregó ${ids.length} pendientes`, { titulo: `${ids.length} pendientes`, ids });
   return { creadas: ids.length, ids };
+}
+
+/** Guía del proyecto: qué queremos lograr y cómo trabajamos (un solo texto). */
+async function leerGuia() {
+  const { rows } = await pool.query(
+    `SELECT g.texto, g.updated_at, ${nombre('u')} AS updated_nombre FROM super_guia g LEFT JOIN app_users u ON u.id = g.updated_by WHERE g.id = 1`);
+  return { guia: rows[0] || { texto: '' } };
+}
+async function guardarGuia(texto, userId) {
+  const t = String(texto ?? '').slice(0, 60000);
+  await pool.query(
+    `INSERT INTO super_guia (id, texto, updated_by, updated_at) VALUES (1, $1, $2, now())
+     ON CONFLICT (id) DO UPDATE SET texto = EXCLUDED.texto, updated_by = EXCLUDED.updated_by, updated_at = now()`, [t, userId]);
+  await actividad.registrar(userId, 'guia', 'actualizó la guía del proyecto', { titulo: 'Guía del proyecto' });
+  return leerGuia();
 }
 
 const NOMBRE_PRIORIDAD = { alta: '★★★', normal: '★★', baja: '★' };
@@ -140,6 +157,7 @@ function describirCambios(c, tarea) {
   }
   if (c.prioridad) partes.push(`cambió la prioridad a ${NOMBRE_PRIORIDAD[c.prioridad]}`);
   if (c.modulo) partes.push('la pasó de módulo');
+  if (c.solicitante_id !== undefined) partes.push('cambió quién lo pidió');
   if (c.business_id !== undefined) partes.push(c.business_id ? `la marcó de ${tarea?.negocio || 'un negocio'}` : 'la marcó para todos');
   if (c.titulo !== undefined || c.detalle !== undefined) partes.push('editó la tarea');
   return partes.join(' y ');
@@ -196,5 +214,5 @@ async function borrarNota(tareaId, notaId, userId) {
 
 module.exports = {
   ESTADOS, PRIORIDADES, MODULOS, validarCambios, describirCambios,
-  listar, detalle, crear, crearLote, actualizar, borrar, agregarNota, borrarNota,
+  listar, detalle, crear, crearLote, leerGuia, guardarGuia, actualizar, borrar, agregarNota, borrarNota,
 };
