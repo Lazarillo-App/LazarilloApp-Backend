@@ -96,7 +96,7 @@ async function configDe(organizationId, businessId) {
     db.one(sql`SELECT activo, to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`),
     db.many(sql`SELECT grupo, proveedor_cod, concepto_codigo FROM mp_cargos_config WHERE organization_id = ${organizationId}`),
     db.one(sql`SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId} AND LOWER(TRIM(nombre)) = 'mercado libre' ORDER BY id LIMIT 1`),
-    db.many(sql`SELECT sucursal, mp_user_id::text AS cuenta, proveedor_cod, COALESCE(nickname, email, mp_user_id::text) AS nombre FROM integraciones_mercadopago WHERE business_id = ${businessId}`),
+    db.many(sql`SELECT sucursal, mp_user_id::text AS cuenta, proveedor_cod, COALESCE(mp_nickname, mp_email, mp_user_id::text) AS nombre FROM integraciones_mercadopago WHERE business_id = ${businessId}`),
     db.many(sql`SELECT codigo, nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId}`),
   ]);
   const elegido = Object.fromEntries(filas.map((f) => [f.grupo, f]));
