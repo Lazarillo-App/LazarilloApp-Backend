@@ -19,6 +19,8 @@ const { onboardBusiness } = require('../services/businessOnboarding');
 const { authRequired } = require('../middleware/authMiddleware');
 const loadBusiness = require('../middleware/loadBusiness');
 const { requireBusinessAccessParam } = require('../middleware/requireBusinessAccess');
+// El negocio de la URL manda sobre el activo al guardar datos y marca de un negocio (16/11/2026).
+const negocioDeLaUrl = require('../middleware/negocioDeLaUrl');
 const { refreshMenu } = require('../controllers/maxiMenuController');
 const viewPrefsCtrl = require('../controllers/viewPrefsController');
 const { searchPadrino } = require('../controllers/articulosABMController');
@@ -65,7 +67,7 @@ const upload = multer({
 });
 
 /* ───────── Logo: subir archivo ───────── */
-router.post('/:id/logo', upload.any(), (req, res, next) => {
+router.post('/:id/logo', negocioDeLaUrl, upload.any(), (req, res, next) => {
   // Buscar el archivo en cualquier campo
   const file = req.files?.find(f =>
     f.fieldname === 'file' ||
@@ -159,7 +161,7 @@ router.post('/:id/logo', upload.any(), (req, res, next) => {
 router.get('/:id/maxi-articles-proxy', ensureFn('maxiArticlesProxy', maxiArticlesProxy));
 
 /* ───────── Branding URL directa ───────── */
-router.patch('/:id/branding-url', ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
+router.patch('/:id/branding-url', negocioDeLaUrl, ensureFn('businesses.setBrandingUrl', businesses.setBrandingUrl));
 
 /* ───────── MAXI: ping (usa sales.maxiPing) ───────── */
 router.get('/:id/maxi-ping', ensureFn('sales.maxiPing', sales.maxiPing));
@@ -563,8 +565,8 @@ router.patch('/:id/config-costeo', ensureFn('artABM.saveConfigCosteo', artABM.sa
 
 /* Por :id */
 router.get('/:id', cacheJson(60), ensureFn('businesses.getOne', businesses.getOne));
-router.patch('/:id', ensureFn('businesses.update', businesses.update));
-router.patch('/:id/onboarding', ensureFn('businesses.setOnboardingFlag', businesses.setOnboardingFlag));
+router.patch('/:id', negocioDeLaUrl, ensureFn('businesses.update', businesses.update));
+router.patch('/:id/onboarding', negocioDeLaUrl, ensureFn('businesses.setOnboardingFlag', businesses.setOnboardingFlag));
 router.delete('/:id', ensureFn('businesses.remove', businesses.remove));
 router.post('/:id/select', ensureFn('businesses.select', businesses.select));
 
