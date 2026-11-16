@@ -74,7 +74,7 @@ const recetaProposalsRoutes = require('./routes/recetaProposalsRoutes');
 const maxiPriceListsRoutes = require('./routes/maxiPriceListsRoutes');
 const teamRoutes = require('./routes/teamRoutes');
 const rolesRoutes = require('./routes/rolesRoutes');
-const { requireSeccion } = require('./services/auth/permisos');
+const { requireSeccion, requireEdicionSeccion } = require('./services/auth/permisos');
 const meRoutes = require('./routes/meRoutes');
 const superusuarioRoutes = require('./routes/superusuarioRoutes');
 const aiRoutes = require('./routes/aiRoutes');
@@ -202,6 +202,20 @@ app.use('/api/soporte', require('./routes/soporteRoutes'));
 // rutas con auth
 app.use('/api/team', teamRoutes);
 app.use('/api/roles', rolesRoutes);
+
+// Recetas en roles a medida (tablero #45, 16/11/2026): antes el permiso se aplicaba solo en el
+// front. Un rol con Recetas «ver» o sin Recetas no puede escribir recetas, fotos, métodos de
+// cocción ni tableros (plazas) llamando a la API directo. Las lecturas siguen abiertas porque
+// Resultados y otras pantallas leen costos de recetas. Dueño, admin completo y staff: no cambia
+// (req.permisos = null; el staff sigue con blockStaffWrite y las propuestas).
+// Va ANTES de los routers montados en /api/businesses genérico (imports, métodos de cocción).
+const edicionRecetas = requireEdicionSeccion('recetas', { lecturas: ['/insumos-usados'] });
+app.use('/api/businesses/:businessId/recetas', edicionRecetas);
+app.use('/api/businesses/:businessId/metodos-coccion', edicionRecetas);
+app.use('/api/businesses/:businessId/articles/:articleId/receta', edicionRecetas);
+app.use('/api/businesses/:businessId/insumos/:insumoId/receta', edicionRecetas);
+app.use('/api/businesses/:businessId/plazas', edicionRecetas);
+app.use('/api/recetas', edicionRecetas);
 
 // módulos sin :businessId en la URL
 app.use('/api/insumos', resolveInsumoBusiness, insumosRoutes);

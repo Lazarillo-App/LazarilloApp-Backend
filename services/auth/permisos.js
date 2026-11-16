@@ -125,6 +125,18 @@ function requireSeccion(seccion) {
   };
 }
 
+/** Middleware: deja leer siempre y corta las ESCRITURAS si el rol a medida no edita la sección.
+ *  Para rutas que también leen otras pantallas (ej. el costo de las recetas en Resultados), donde
+ *  cortar los GET rompería a un rol que no ve la sección pero sí esas pantallas. `lecturas` = rutas
+ *  POST que solo consultan (relativas al montaje, ej. '/insumos-usados'). Tablero #45 (16/11/2026). */
+function requireEdicionSeccion(seccion, { lecturas = [] } = {}) {
+  return (req, res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || lecturas.includes(req.path)) return next();
+    if (puedeSeccion(req.permisos, seccion, 'editar')) return next();
+    return res.status(403).json({ error: 'sin_permiso', seccion, modo: 'editar' });
+  };
+}
+
 // ── Staff y sus subroles (Diego 11/11/2026) ──────────────────────────────────────────────
 // Qué puede hacer un Staff. Por defecto NO (clave ausente = false); el dueño habilita en Roles.
 // aprobar_equipo convierte al subrol en «jefe» de sus sectores (da el OK antes del admin).
@@ -183,5 +195,5 @@ const sqlEsJefe = (a) => `(${a}.role = 'staff' AND (${a}.subrol = 'jefe' OR EXIS
   SELECT 1 FROM app_custom_roles xj WHERE xj.id = ${a}.custom_role_id AND xj.deleted_at IS NULL
      AND xj.base_role = 'staff' AND COALESCE((xj.permisos_staff->>'aprobar_equipo')::boolean, FALSE))))`;
 
-module.exports = { SECCIONES, normalizarRol, ADMINISTRACION_DEFAULT, administracionDefault, getPermisos, puedeSeccion, estaOculto, requireSeccion,
+module.exports = { SECCIONES, normalizarRol, ADMINISTRACION_DEFAULT, administracionDefault, getPermisos, puedeSeccion, estaOculto, requireSeccion, requireEdicionSeccion,
   STAFF_KEYS, JEFE_DEFAULT, limpiarStaff, getStaffPermisos, sqlEsJefe, limpiarAjustes, aplicarAjustes, cantidadAjustes };
