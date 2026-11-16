@@ -172,6 +172,9 @@ app.use('/api/public/demo', publicDemoRoutes);
 // Pantallas de TV de las plazas (sin login: token propio de la TV, solo lectura de su plaza).
 app.use('/api/public/pantalla', publicPantallaRoutes);
 
+// Tablero de tareas para Claude: solo lectura, con su propio token (CLAUDE_TOKEN), sin login.
+app.use('/api/claude', require('./routes/claudeRoutes'));
+
 /* ----------- CRON sin JWT (X-Cron-Secret) ----------- */
 app.use('/api/cron', adminCronRoutes);
 
