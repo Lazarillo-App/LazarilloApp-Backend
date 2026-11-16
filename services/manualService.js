@@ -24,7 +24,8 @@ function limpiarSecciones(lista) {
     id: SLUG.test(String(s?.id || '')) ? String(s.id) : `seccion-${i + 1}`,
     titulo: txt(s?.titulo, 160),
     texto: txt(s?.texto, 6000),
-    imagen: /^https:\/\//.test(String(s?.imagen || '')) ? txt(s.imagen, 600) : '',
+    // https://… o una imagen propia del manual (/api/manual/imagen/:id, sirve en testing y producción).
+    imagen: /^(https:\/\/|\/api\/manual\/imagen\/\d+$)/.test(String(s?.imagen || '')) ? txt(s.imagen, 600) : '',
     pie: txt(s?.pie, 240),
     tip: txt(s?.tip, 600),
   }));
@@ -57,4 +58,16 @@ async function borrar(id, userId) {
   return { borrado: id };
 }
 
-module.exports = { listar, leer, guardar, borrar };
+/** Guarda una imagen del manual y devuelve su ruta (/api/manual/imagen/:id). */
+async function guardarImagen(file, userId) {
+  const { rows } = await pool.query(
+    'INSERT INTO manual_imagenes (mime, datos, bytes, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
+    [file.mimetype, file.buffer, file.size, userId]);
+  return `/api/manual/imagen/${rows[0].id}`;
+}
+async function leerImagen(id) {
+  const { rows } = await pool.query('SELECT mime, datos FROM manual_imagenes WHERE id = $1', [Number(id) || 0]);
+  return rows[0] || null;
+}
+
+module.exports = { listar, leer, guardar, borrar, guardarImagen, leerImagen };
