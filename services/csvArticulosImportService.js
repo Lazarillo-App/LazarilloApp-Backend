@@ -35,6 +35,16 @@ function safeInt(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Rubro / subrubro de un artículo: puede venir como CÓDIGO (MaxiRest: COD_RUA, se cruza con el
+// listado de rubros) o directamente como NOMBRE (otros POS: columna «Familia» con «BEBIDAS»).
+// Antes se pasaba todo a número y el nombre se perdía (usuaria 16/11/2026, alta de un negocio).
+function codigoONombre(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return { cod: null, nombre: null };
+  if (/^\d+(\.0+)?$/.test(s)) return { cod: parseInt(s, 10), nombre: null };
+  return { cod: null, nombre: s.replace(/\s+/g, ' ').slice(0, 120) };
+}
+
 function parseNum(v) {
   if (v == null || v === '') return null;
   const n = parseFloat(String(v).replace(/\./g, '').replace(',', '.').replace(/[^\d.\-]/g, ''));
@@ -178,15 +188,17 @@ function parseArticulosFile(filePath, mapeo = {}) {
       cod = nextManualId--;
     }
 
-    const codRubro = safeInt(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro']));
-    const codSubrubro = safeInt(resolverCampo(row, mapeo, 'subrubro', ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro']));
+    const rubro = codigoONombre(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro', 'familia', 'rubro']));
+    const subrubro = codigoONombre(resolverCampo(row, mapeo, 'subrubro', ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro', 'subfamilia', 'subrubro']));
     const precio = parseNum(resolverCampo(row, mapeo, 'precio', ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])) ?? 0;
 
     out.push({
       articulo_id: cod,
       nombre,
-      cod_rubro: codRubro,
-      cod_subrubro: codSubrubro,
+      cod_rubro: rubro.cod,
+      rubro_nombre: rubro.nombre,
+      cod_subrubro: subrubro.cod,
+      subrubro_nombre: subrubro.nombre,
       precio,
     });
   }
@@ -308,12 +320,12 @@ async function importPaired({
       let p = 1;
 
       for (const it of chunk) {
-        const rubroNombre = it.cod_rubro != null
+        const rubroNombre = it.rubro_nombre || (it.cod_rubro != null
           ? rubroNombreByCod.get(it.cod_rubro) || `Rubro ${it.cod_rubro}`
-          : 'Sin categoría';
-        const subrubroNombre = it.cod_subrubro != null
+          : 'Sin categoría');
+        const subrubroNombre = it.subrubro_nombre || (it.cod_subrubro != null
           ? subrubroNombreByCod.get(it.cod_subrubro) || null
-          : null;
+          : null);
 
         values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},'{}'::jsonb,NOW(),$${p + 6},'csv')`);
         params.push(targetBizId, it.articulo_id, it.nombre, rubroNombre, subrubroNombre, it.precio, batchId);
@@ -485,4 +497,5 @@ async function importArticulosFromFile({ businessId, filePath, mapeo = {} }) {
   }
 }
 
-module.exports = { importPaired, importArticulosFromFile, parseFile, normalizarMapeo };
+module.exports = {
+  _codigoONombre: codigoONombre, importPaired, importArticulosFromFile, parseFile, normalizarMapeo };
