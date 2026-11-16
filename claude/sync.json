@@ -167,5 +167,15 @@
     "tipo": "cambio",
     "titulo": "Web: «Mirá cómo funciona» con capturas de la app",
     "nota": "Front #364: 7 pestañas (Costos y precios, En el celular, Clientes, Cobros, Conciliación, Cocina, Equipo), pasos corregidos para que caigan sobre el dato. Datos cambiados y sin el nombre del negocio. Para la captura de Conciliación se trajeron las fuentes de noviembre en Container Bar (con OK de Diego)."
+  },
+  {
+    "clave": "2026-11-16-01",
+    "tipo": "tarea",
+    "titulo": "Sin carga: mirar 12 meses para atrás, no solo 3",
+    "detalle": "Diego (15/11): Sin carga solo mostraba los últimos 3 meses y quedaban gastos sin cargar de antes (Container Bar: agosto 2026 a diciembre 2025, ~95 gastos, ~$11 M). Ahora mira 12 meses y muestra el mes en curso + los anteriores con algo pendiente. Consulta reescrita: 0,68 s con 12 meses (antes 0,55 s con 3; sin reescribir eran 1,03 s). Back: PR de esta rama.",
+    "modulo": "compras",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]

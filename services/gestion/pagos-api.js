@@ -137,21 +137,23 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
       FROM b2 GROUP BY clave, mes
     ),
     obj AS (SELECT unnest(${meses}::date[]) AS m),
+    -- El mismo cruce trae los meses anteriores (recurrencia) y el mes mirado (si ya está cargado):
+    -- antes era un NOT EXISTS contra pm que con 12 meses comparaba 2 M de filas (15/11/2026).
     r AS (
-      SELECT o.m, x.clave, COUNT(*) AS n,
-             (array_agg(x.imp ORDER BY x.mes DESC))[1] AS ultimo,
-             (array_agg(x.proveedor ORDER BY x.mes DESC))[1] AS proveedor,
-             (array_agg(x.proveedor_id ORDER BY x.mes DESC))[1] AS proveedor_id,
-             (array_agg(x.concepto ORDER BY x.mes DESC))[1] AS concepto,
-             (array_agg(x.concepto_codigo ORDER BY x.mes DESC))[1] AS concepto_codigo,
-             (array_agg(x.rubro ORDER BY x.mes DESC))[1] AS rubro,
-             AVG(x.dia) AS dia, BOOL_OR(x.vencido) AS vencido,
-             (array_agg(x.imp_total ORDER BY x.mes DESC))[1] AS ultimo_total,
-             (array_agg(x.pdv_origen ORDER BY x.mes DESC))[1] AS pdv_origen
+      SELECT o.m, x.clave, COUNT(*) FILTER (WHERE x.mes < o.m) AS n,
+             (array_agg(x.imp ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS ultimo,
+             (array_agg(x.proveedor ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS proveedor,
+             (array_agg(x.proveedor_id ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS proveedor_id,
+             (array_agg(x.concepto ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS concepto,
+             (array_agg(x.concepto_codigo ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS concepto_codigo,
+             (array_agg(x.rubro ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS rubro,
+             AVG(x.dia) FILTER (WHERE x.mes < o.m) AS dia, BOOL_OR(x.vencido) FILTER (WHERE x.mes < o.m) AS vencido,
+             (array_agg(x.imp_total ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS ultimo_total,
+             (array_agg(x.pdv_origen ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS pdv_origen
       FROM obj o
-      JOIN pm x ON x.mes < o.m AND x.mes >= o.m - make_interval(months => ${RECURRENTE_VENTANA})
+      JOIN pm x ON x.mes <= o.m AND x.mes >= o.m - make_interval(months => ${RECURRENTE_VENTANA})
       GROUP BY o.m, x.clave
-      HAVING COUNT(*) >= ${RECURRENTE_MIN}
+      HAVING COUNT(*) FILTER (WHERE x.mes < o.m) >= ${RECURRENTE_MIN} AND NOT BOOL_OR(x.mes = o.m)
     ),
     n12 AS (
       SELECT o.m, x.clave, COUNT(*) AS n FROM obj o
@@ -172,7 +174,6 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
     LEFT JOIN n12 ON n12.m = r.m AND n12.clave = r.clave
     LEFT JOIN h12 ON h12.m = r.m
     WHERE r.ultimo > 0
-      AND NOT EXISTS (SELECT 1 FROM pm WHERE pm.clave = r.clave AND pm.mes = r.m)
       -- "Ya no va": la clave sola; "Este mes no": la clave con "@YYYY-MM".
       AND NOT EXISTS (SELECT 1 FROM gestion_sin_carga_descartes d WHERE ${enLugar('d', businessId, sucursal)}
                         AND d.clave IN (r.clave, r.clave || '@' || to_char(r.m, 'YYYY-MM')))
@@ -217,8 +218,8 @@ async function obtenerSinCarga({ organizationId, businessId, sucursal }) {
     // "Feriados" (sueldos) solo en meses con feriados. Año sin calendario: se muestra.
     && !(esConceptoFeriado(f.concepto) && feriadosDelMes(f.mes)?.length === 0));
   const ids = [...new Set(vivas.map((f) => f.proveedor_id).filter((x) => x != null))];
-  const [ya, mo] = objetivo[objetivo.length - 1].split('-').map(Number);
-  const t = ya * 12 + (mo - 1) - 6;
+  const [ya, mo] = objetivo[0].split('-').map(Number);
+  const t = ya * 12 + (mo - 1) - 8; // qué se le compra: los últimos 9 meses
   const desde = `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, '0')}-01`;
   const compras = ids.length ? await db.many(queCompraSql({ organizationId, businessId, ids, desde })) : [];
   const queCompra = new Map();
@@ -242,7 +243,9 @@ async function obtenerSinCarga({ organizationId, businessId, sucursal }) {
       queCompra: f.proveedor_id != null ? queCompra.get(f.proveedor_id) ?? null : null,
     });
   }
-  return { hoy, meses, descartes };
+  // 12 meses para atrás (Diego 15/11/2026: quedaban gastos sin cargar de antes de los 3 últimos);
+  // se ven el mes en curso y los anteriores que tienen algo pendiente.
+  return { hoy, meses: meses.filter((m, i) => i === 0 || m.items.length), descartes };
 }
 
 const descarteSchema = z.object({
