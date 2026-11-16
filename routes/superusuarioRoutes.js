@@ -170,27 +170,20 @@ router.delete('/tareas/:id/notas/:notaId', async (req, res, next) => {
 // Manual de Lazarillo (16/11/2026): capítulos e imágenes. La lectura para todos está en /api/manual.
 const manual = require('../services/manualService');
 const multer = require('multer');
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const cloudinary = require('../config/cloudinary');
+// Imágenes del Manual en la base (manual_imagenes): sirven igual en testing y en producción.
 const subirImagen = multer({
-  storage: new CloudinaryStorage({
-    cloudinary,
-    params: async () => ({
-      folder: 'lazarillo/manual',
-      allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
-      transformation: [{ width: 1600, crop: 'limit', quality: 'auto' }],
-      public_id: `manual_${Date.now()}`,
-    }),
-  }),
-  limits: { fileSize: 8 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 3 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => cb(null, /image\/(png|jpe?g|webp)/i.test(file.mimetype)),
 });
 router.get('/manual', async (_req, res, next) => {
   try { responder(res, await manual.listar({ conBorradores: true })); } catch (e) { next(e); }
 });
-router.post('/manual/imagen', subirImagen.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ ok: false, error: 'falta_imagen' });
-  res.json({ ok: true, url: req.file.path });
+router.post('/manual/imagen', subirImagen.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok: false, error: 'falta_imagen' });
+    res.json({ ok: true, url: await manual.guardarImagen(req.file, req.user.id) });
+  } catch (e) { next(e); }
 });
 router.put('/manual/:id', async (req, res, next) => {
   try { responder(res, await manual.guardar(req.params.id, req.body, req.user.id)); } catch (e) { next(e); }
