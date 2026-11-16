@@ -220,3 +220,38 @@ exports.geocode = async (req, res) => {
     res.status(500).json({ error: 'internal' });
   }
 };
+
+// Buscador de direcciones (tablero #55, Diego 14/11/2026: en «Editar sucursal» la ciudad y la calle
+// se escribían a mano). Geocoding API, que es lo más barato por búsqueda (no pide datos del lugar
+// como Places): devuelve hasta 5 direcciones de Argentina con calle, número, ciudad y coordenadas.
+function direccionDe(r) {
+  const comps = (r.address_components || []).map((c) => ({ longText: c.long_name, shortText: c.short_name, types: c.types }));
+  const loc = r.geometry?.location || {};
+  return {
+    direccion: r.formatted_address || '',
+    calle: pickComponent(comps, ['route']),
+    numero: pickComponent(comps, ['street_number']),
+    ciudad: pickComponent(comps, ['locality', 'sublocality', 'administrative_area_level_2']),
+    provincia: pickComponent(comps, ['administrative_area_level_1']),
+    lat: loc.lat ?? null,
+    lng: loc.lng ?? null,
+    place_id: r.place_id || null,
+  };
+}
+exports._direccionDe = direccionDe; // para tests
+
+exports.direcciones = async (req, res) => {
+  try {
+    if (!process.env.GOOGLE_MAPS_API_KEY) return res.status(500).json({ error: 'places_not_configured' });
+    const text = String(req.query.text || '').trim().slice(0, 200);
+    if (text.length < 4) return res.json({ resultados: [] });
+    const url = `${GEOCODE_URL}?address=${encodeURIComponent(text)}&components=country:AR&language=es&region=ar&key=${process.env.GOOGLE_MAPS_API_KEY}`;
+    const resp = await fetch(url);
+    if (!resp.ok) return res.status(502).json({ error: 'places_upstream_error' });
+    const data = await resp.json();
+    res.json({ resultados: (data.results || []).slice(0, 5).map(direccionDe) });
+  } catch (e) {
+    console.error('[places/direcciones] error:', e);
+    res.status(500).json({ error: 'internal' });
+  }
+};
