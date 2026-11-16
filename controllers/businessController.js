@@ -289,6 +289,9 @@ exports.update = async (req, res) => {
   );
 
   const saved = attachBranding(rows[0]);
+  // GET /businesses/:id tiene caché de 60 s: sin esto, lo que se relee enseguida (el tema, la lista
+  // de negocios) volvía con el logo y los colores viejos (usuaria 16/11/2026: «vuelve al azul y sin logo»).
+  try { invalidateCacheForBiz(businessId); } catch { /* sin caché */ }
 
   // Cambió el desperdicio global: el costo de cada ingrediente lo lleva adentro, así que se
   // recalculan todas las recetas del negocio (en segundo plano, sin demorar la respuesta).
@@ -631,6 +634,7 @@ exports.uploadLogo = async (req, res, next) => {
              updated_at = now()
        WHERE id=$1
     `, [biz.id, publicUrl]);
+    try { invalidateCacheForBiz(biz.id); } catch { /* sin caché */ }
 
     res.json({ ok: true, business_id: biz.id, logo_url: publicUrl });
   } catch (e) {
@@ -910,6 +914,7 @@ exports.setBrandingUrl = async (req, res, next) => {
                       )
        WHERE id = $1
     `, [biz.id, val]);
+    try { invalidateCacheForBiz(biz.id); } catch { /* sin caché */ }
 
     res.json({ ok: true, url: val, business_id: biz.id });
   } catch (e) { next(e); }
