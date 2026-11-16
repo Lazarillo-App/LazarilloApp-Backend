@@ -123,6 +123,12 @@ async function traerTodas({ businessId = null, origen = 'cron' } = {}) {
     const r = await cargos.cargarNegocio(b).catch((e) => ({ error: e.message }));
     if (r.cargados || r.pasados || r.error) console.log(`[mercadopago:${origen}] cargos negocio ${b}: cargados ${r.cargados ?? 0} pasados ${r.pasados ?? 0}${r.error ? ` error ${r.error}` : ''}`);
   }
+  // Nombre de los clientes que MP no mandó, desde el POS (CUPON = operación de MP → CLINOMBRE). Tablero #57.
+  const nombresPos = require('./nombresDesdePos');
+  for (const b of [...new Set(lista.map((c) => Number(c.business_id)))]) {
+    const r = await nombresPos.completar(b).catch((e) => ({ error: e.message }));
+    if (r.completados || r.error) console.log(`[mercadopago:${origen}] nombres desde el POS negocio ${b}: ${r.completados ?? 0} de ${r.buscados ?? 0}${r.error ? ` error ${r.error}` : ''}`);
+  }
   return { cuentas: lista.length, pendientes };
 }
 
