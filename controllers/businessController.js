@@ -639,7 +639,7 @@ exports.uploadLogo = async (req, res, next) => {
     res.json({ ok: true, business_id: biz.id, logo_url: publicUrl });
   } catch (e) {
     console.error('❌ Error uploadLogo:', e);
-    next(e);
+    return res.status(500).json({ error: 'logo_save_failed', message: e?.message || e?.error?.message || String(e).slice(0, 300) });
   }
 };
 /* ───────────────── Maxi: helpers para endpoints públicos de prueba ───────────────── */

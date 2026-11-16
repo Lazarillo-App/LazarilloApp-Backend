@@ -67,7 +67,18 @@ const upload = multer({
 });
 
 /* ───────── Logo: subir archivo ───────── */
-router.post('/:id/logo', negocioDeLaUrl, upload.any(), (req, res, next) => {
+// La subida a Cloudinary falla con errores que no siempre traen `message` (llegaba al front como
+// «internal_error» sin pista, usuaria 16/11/2026): acá se responde con el motivo real.
+function subirLogo(req, res, next) {
+  upload.any()(req, res, (err) => {
+    if (!err) return next();
+    const detalle = err.message || err.error?.message || (typeof err === 'string' ? err : '') || JSON.stringify(err).slice(0, 300);
+    console.error('❌ Subida de logo:', detalle, { http_code: err.http_code || err.error?.http_code, code: err.code, name: err.name });
+    const status = err.code === 'LIMIT_FILE_SIZE' || err.code === 'UNSUPPORTED_TYPE' ? 400 : 502;
+    return res.status(status).json({ error: 'logo_upload_failed', message: detalle, code: err.code || err.http_code || null });
+  });
+}
+router.post('/:id/logo', negocioDeLaUrl, subirLogo, (req, res, next) => {
   // Buscar el archivo en cualquier campo
   const file = req.files?.find(f =>
     f.fieldname === 'file' ||
