@@ -188,8 +188,13 @@ function parseArticulosFile(filePath, mapeo = {}) {
       cod = nextManualId--;
     }
 
-    const rubro = codigoONombre(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro', 'familia', 'rubro']));
-    const subrubro = codigoONombre(resolverCampo(row, mapeo, 'subrubro', ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro', 'subfamilia', 'subrubro']));
+    // «Rubro (nombre)» / «Subrubro (nombre)» elegidos en el mapeo: el texto tal cual, aunque sea un número.
+    const rubroNom = cleanStr(resolverCampo(row, mapeo, 'rubro_nombre', []));
+    const subNom = cleanStr(resolverCampo(row, mapeo, 'subrubro_nombre', []));
+    const rubro = rubroNom ? { cod: null, nombre: rubroNom.slice(0, 120) }
+      : codigoONombre(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro', 'familia', 'rubro']));
+    const subrubro = subNom ? { cod: null, nombre: subNom.slice(0, 120) }
+      : codigoONombre(resolverCampo(row, mapeo, 'subrubro', ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro', 'subfamilia', 'subrubro']));
     const precio = parseNum(resolverCampo(row, mapeo, 'precio', ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])) ?? 0;
 
     out.push({
@@ -402,7 +407,7 @@ async function importPaired({
 // (pedido de la usuaria, 2026-11-09): si el archivo trae código se usa; si no, se toma nombre y
 // precio y el código se asigna solo (negativo, como un artículo creado a mano, siguiendo al menor
 // que ya tenga el negocio para no pisar ninguno). Rubro/subrubro pueden venir como texto o código.
-const CAMPOS_ARTICULO = ['codigo', 'nombre', 'precio', 'rubro', 'subrubro'];
+const CAMPOS_ARTICULO = ['codigo', 'nombre', 'precio', 'rubro', 'subrubro', 'rubro_nombre', 'subrubro_nombre'];
 
 // El front manda { campo: columna }; resolverCampo espera { columna: campo }. Se aceptan los dos.
 function normalizarMapeo(mapeo) {
@@ -448,8 +453,10 @@ async function importArticulosFromFile({ businessId, filePath, mapeo = {} }) {
       if (vistos.has(cod)) { errors.push({ row: i + 2, error: `Código repetido en el archivo: ${cod}` }); continue; }
       vistos.add(cod);
       const precio = parseNum(resolverCampo(row, m, 'precio', ['precio', 'precio1', 'price', 'precio_venta', 'pvp', 'importe'])) ?? 0;
-      const rubro = texto(resolverCampo(row, m, 'rubro', ['rubro', 'categoria', 'categoría', 'familia', 'grupo']), rubroPorCod) || 'Sin categoría';
-      const subrubro = texto(resolverCampo(row, m, 'subrubro', ['subrubro', 'subcategoria', 'subcategoría', 'subfamilia']), subPorCod) || 'Sin subrubro';
+      const rubro = cleanStr(resolverCampo(row, m, 'rubro_nombre', []))
+        || texto(resolverCampo(row, m, 'rubro', ['rubro', 'categoria', 'categoría', 'familia', 'grupo']), rubroPorCod) || 'Sin categoría';
+      const subrubro = cleanStr(resolverCampo(row, m, 'subrubro_nombre', []))
+        || texto(resolverCampo(row, m, 'subrubro', ['subrubro', 'subcategoria', 'subcategoría', 'subfamilia']), subPorCod) || 'Sin subrubro';
       items.push({ articulo_id: cod, nombre: nombre.slice(0, 200), categoria: rubro, subrubro, precio });
     }
 
