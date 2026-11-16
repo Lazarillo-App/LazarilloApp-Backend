@@ -17,7 +17,8 @@ describe("sin carga", () => {
     expect(estaAtrasado("2026-11-02", "2026-10-28")).toBe(false);
   });
   it("meses a mirar cruzan el año", () => {
-    expect(mesesObjetivo("2026-01-10")).toEqual(["2026-01-01", "2025-12-01", "2025-11-01"]);
+    expect(mesesObjetivo("2026-01-10", 3)).toEqual(["2026-01-01", "2025-12-01", "2025-11-01"]);
+    expect(mesesObjetivo("2026-01-10")).toHaveLength(12);
   });
   it("los chicos se ocultan salvo que se pidan", () => {
     const it = (ultimo) => ({ ultimo });

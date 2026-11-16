@@ -9,7 +9,7 @@
 
 const RECURRENTE_MIN = 3;
 const RECURRENTE_VENTANA = 4;
-const MESES_A_MIRAR = 3; // el mes en curso y los dos anteriores
+const MESES_A_MIRAR = 12; // el mes en curso y los 11 anteriores (Diego 15/11/2026: antes 3)
 const CHICO = 1000;
 
 /** Clave de descarte: "Ya no va" = la clave sola; "Este mes no" = clave + "@YYYY-MM". */
