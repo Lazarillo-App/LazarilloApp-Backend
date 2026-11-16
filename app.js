@@ -186,6 +186,14 @@ app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 // Super usuarios de Lazarillo: no dependen de un negocio activo (van antes del guard global).
 app.use('/api/superusuarios', authRequired, superusuarioRoutes);
 // Manual de Lazarillo (16/11/2026): lo leen todos los usuarios con sesión.
+// Las imágenes del manual van sin sesión (las pide un <img>); no cambian nunca: caché larga.
+app.get('/api/manual/imagen/:id', async (req, res, next) => {
+  try {
+    const img = await require('./services/manualService').leerImagen(req.params.id);
+    if (!img) return res.status(404).end();
+    res.set('Content-Type', img.mime).set('Cache-Control', 'public, max-age=31536000, immutable').send(img.datos);
+  } catch (e) { next(e); }
+});
 app.use('/api/manual', authRequired, require('./routes/manualRoutes'));
 
 // Guard global de /api (después de /api/cron y /api/admin)
