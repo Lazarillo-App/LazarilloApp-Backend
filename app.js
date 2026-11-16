@@ -185,6 +185,8 @@ app.use('/admin', adminRebuildAgg);
 app.use('/api/admin', authRequired, requireAppAdmin, adminRoutes);
 // Super usuarios de Lazarillo: no dependen de un negocio activo (van antes del guard global).
 app.use('/api/superusuarios', authRequired, superusuarioRoutes);
+// Manual de Lazarillo (16/11/2026): lo leen todos los usuarios con sesión.
+app.use('/api/manual', authRequired, require('./routes/manualRoutes'));
 
 // Guard global de /api (después de /api/cron y /api/admin)
 app.use('/api', authRequired, loadActiveBusiness);
