@@ -35,6 +35,16 @@ function safeInt(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Rubro / subrubro de un artículo: puede venir como CÓDIGO (MaxiRest: COD_RUA, se cruza con el
+// listado de rubros) o directamente como NOMBRE (otros POS: columna «Familia» con «BEBIDAS»).
+// Antes se pasaba todo a número y el nombre se perdía (usuaria 16/11/2026, alta de un negocio).
+function codigoONombre(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return { cod: null, nombre: null };
+  if (/^\d+(\.0+)?$/.test(s)) return { cod: parseInt(s, 10), nombre: null };
+  return { cod: null, nombre: s.replace(/\s+/g, ' ').slice(0, 120) };
+}
+
 function parseNum(v) {
   if (v == null || v === '') return null;
   const n = parseFloat(String(v).replace(/\./g, '').replace(',', '.').replace(/[^\d.\-]/g, ''));
@@ -178,15 +188,22 @@ function parseArticulosFile(filePath, mapeo = {}) {
       cod = nextManualId--;
     }
 
-    const codRubro = safeInt(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro']));
-    const codSubrubro = safeInt(resolverCampo(row, mapeo, 'subrubro', ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro']));
+    // «Rubro (nombre)» / «Subrubro (nombre)» elegidos en el mapeo: el texto tal cual, aunque sea un número.
+    const rubroNom = cleanStr(resolverCampo(row, mapeo, 'rubro_nombre', []));
+    const subNom = cleanStr(resolverCampo(row, mapeo, 'subrubro_nombre', []));
+    const rubro = rubroNom ? { cod: null, nombre: rubroNom.slice(0, 120) }
+      : codigoONombre(resolverCampo(row, mapeo, 'rubro', ['cod_rua', 'codrua', 'cod_ru', 'rubro_codigo', 'cod_rubro', 'familia', 'rubro']));
+    const subrubro = subNom ? { cod: null, nombre: subNom.slice(0, 120) }
+      : codigoONombre(resolverCampo(row, mapeo, 'subrubro', ['cod_sua', 'codsua', 'subrubro_codigo', 'cod_subrubro', 'subfamilia', 'subrubro']));
     const precio = parseNum(resolverCampo(row, mapeo, 'precio', ['precio1', 'precio', 'price', 'precio_venta', 'precio_ref', 'p_ref', 'precio2'])) ?? 0;
 
     out.push({
       articulo_id: cod,
       nombre,
-      cod_rubro: codRubro,
-      cod_subrubro: codSubrubro,
+      cod_rubro: rubro.cod,
+      rubro_nombre: rubro.nombre,
+      cod_subrubro: subrubro.cod,
+      subrubro_nombre: subrubro.nombre,
       precio,
     });
   }
@@ -308,12 +325,12 @@ async function importPaired({
       let p = 1;
 
       for (const it of chunk) {
-        const rubroNombre = it.cod_rubro != null
+        const rubroNombre = it.rubro_nombre || (it.cod_rubro != null
           ? rubroNombreByCod.get(it.cod_rubro) || `Rubro ${it.cod_rubro}`
-          : 'Sin categoría';
-        const subrubroNombre = it.cod_subrubro != null
+          : 'Sin categoría');
+        const subrubroNombre = it.subrubro_nombre || (it.cod_subrubro != null
           ? subrubroNombreByCod.get(it.cod_subrubro) || null
-          : null;
+          : null);
 
         values.push(`($${p},$${p + 1},$${p + 2},$${p + 3},$${p + 4},$${p + 5},'{}'::jsonb,NOW(),$${p + 6},'csv')`);
         params.push(targetBizId, it.articulo_id, it.nombre, rubroNombre, subrubroNombre, it.precio, batchId);
@@ -390,7 +407,7 @@ async function importPaired({
 // (pedido de la usuaria, 2026-11-09): si el archivo trae código se usa; si no, se toma nombre y
 // precio y el código se asigna solo (negativo, como un artículo creado a mano, siguiendo al menor
 // que ya tenga el negocio para no pisar ninguno). Rubro/subrubro pueden venir como texto o código.
-const CAMPOS_ARTICULO = ['codigo', 'nombre', 'precio', 'rubro', 'subrubro'];
+const CAMPOS_ARTICULO = ['codigo', 'nombre', 'precio', 'rubro', 'subrubro', 'rubro_nombre', 'subrubro_nombre'];
 
 // El front manda { campo: columna }; resolverCampo espera { columna: campo }. Se aceptan los dos.
 function normalizarMapeo(mapeo) {
@@ -436,8 +453,10 @@ async function importArticulosFromFile({ businessId, filePath, mapeo = {} }) {
       if (vistos.has(cod)) { errors.push({ row: i + 2, error: `Código repetido en el archivo: ${cod}` }); continue; }
       vistos.add(cod);
       const precio = parseNum(resolverCampo(row, m, 'precio', ['precio', 'precio1', 'price', 'precio_venta', 'pvp', 'importe'])) ?? 0;
-      const rubro = texto(resolverCampo(row, m, 'rubro', ['rubro', 'categoria', 'categoría', 'familia', 'grupo']), rubroPorCod) || 'Sin categoría';
-      const subrubro = texto(resolverCampo(row, m, 'subrubro', ['subrubro', 'subcategoria', 'subcategoría', 'subfamilia']), subPorCod) || 'Sin subrubro';
+      const rubro = cleanStr(resolverCampo(row, m, 'rubro_nombre', []))
+        || texto(resolverCampo(row, m, 'rubro', ['rubro', 'categoria', 'categoría', 'familia', 'grupo']), rubroPorCod) || 'Sin categoría';
+      const subrubro = cleanStr(resolverCampo(row, m, 'subrubro_nombre', []))
+        || texto(resolverCampo(row, m, 'subrubro', ['subrubro', 'subcategoria', 'subcategoría', 'subfamilia']), subPorCod) || 'Sin subrubro';
       items.push({ articulo_id: cod, nombre: nombre.slice(0, 200), categoria: rubro, subrubro, precio });
     }
 
@@ -485,4 +504,5 @@ async function importArticulosFromFile({ businessId, filePath, mapeo = {} }) {
   }
 }
 
-module.exports = { importPaired, importArticulosFromFile, parseFile, normalizarMapeo };
+module.exports = {
+  _codigoONombre: codigoONombre, importPaired, importArticulosFromFile, parseFile, normalizarMapeo };
