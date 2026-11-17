@@ -138,6 +138,10 @@ app.use((req, res, next) => {
 
 app.use(morgan('➡️ :method :url :status :response-time ms'));
 
+// Tablero #51: todo alta/baja/modificación que sale bien deja su aviso al equipo (agrupado por persona
+// y área). Va antes de las rutas: solo escucha el final de la respuesta.
+app.use(require('./services/avisosABM').avisosABM);
+
 /* ----------- uploads públicos ----------- */
 const uploadsDir = path.join(__dirname, 'uploads');
 const logosDir = path.join(uploadsDir, 'logos');

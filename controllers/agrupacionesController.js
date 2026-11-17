@@ -714,6 +714,7 @@ exports.agregarArticulosAgrupacion = async (req, res) => {
       const yaEstaban = new Set(base.map((a) => Number(a?.id)));
       const nuevos = incoming.filter((a) => !yaEstaban.has(Number(a?.id)));
       if (nuevos.length) {
+        res.locals.avisado = true; // services/avisosABM.js no lo repite
         const nombres = nuevos.map((a) => String(a?.nombre || '').trim()).filter(Boolean);
         avisarAlEquipoSinEsperar({
           businessId: requestBusinessId, actorUserId: req.user?.id, type: 'discontinue',

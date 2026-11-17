@@ -390,5 +390,12 @@
     "tipo": "cambio",
     "id": 7,
     "nota": "Mairene + Claude 17/11: la Plantilla se copia sola desde DEMO (org 25 / negocio 225), tal como esté en el momento, así Diego puede seguir depurándola. Organización sin NI UN concepto y sin MaxiRest (ni credenciales Maxi, ni POS Maxirest en el alta, ni kit vinculado): se copian rubros y conceptos de caja; y a cada negocio, si no los tiene, visibilidad de rubros, variables del punto de equilibrio y rubros de insumo con su concepto (si ya tiene rubros, p. ej. de Fudo, toman el concepto del que se llama igual). Corre al entrar al Panel y cuando llegan compras de un POS. Back: services/gestion/conceptos/plantilla.js. Ojo Diego: la visibilidad en Resultados de «Mov. societarios» sale de cómo esté en DEMO."
+  },
+  {
+    "clave": "2026-11-17-mv-51-abm",
+    "tipo": "cambio",
+    "id": 51,
+    "estado": "en_curso",
+    "nota": "Mairene + Claude 17/11: un solo middleware (services/avisosABM.js, montado en app.js) mira cada alta/baja/modificación que sale bien y la cruza con una tabla de reglas: Agrupaciones, Artículos/Precios/Listas, Insumos, Gestión (facturas, gastos, pagos, proveedores, conceptos, medios de pago, reparto, empleados, ARCA) y Configuración (costeo, logo, credenciales Maxi, divisiones, rubros visibles, equilibrio). Lo de una misma persona en la misma área en 30 min es UN aviso que se actualiza («Artículos: 4 cambios — 3 artículos editados, 1 rubro renombrado»). Discontinuar insumos (mover a Discontinuados) avisa con los nombres. Lo que ya avisaba (alta/baja de artículos, insumos manuales, mermas, equipo, datos del negocio) queda afuera para no duplicar. Las agrupaciones antes avisaban solo en el navegador de quien hacía el cambio. Falta: probarlo con dos usuarios."
   }
 ]
