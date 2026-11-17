@@ -18,6 +18,7 @@ const pool = require('../config/db');
 const { PDV_MAP, refrescarPdvMap } = require('./maxiPdvMap');
 const { syncVentasDeNegocio } = require('./maxiPipelineSalesSync');
 const { syncComprasDeNegocio } = require('./maxiPipelinePurchasesSync');
+const { syncSalidasStockDeNegocio } = require('./maxiPipelineStockSync');
 
 const CANDADO_RECETAS = 7_310_000; // + businessId
 const enCurso = new Set();
@@ -43,9 +44,12 @@ async function correrRecetas(businessId, origen = 'pulso') {
     let ventas = null; let compras = null;
     try { ventas = await syncVentasDeNegocio(businessId); } catch (e) { errores.push(`ventas: ${e?.message || e}`); }
     try { compras = await syncComprasDeNegocio(businessId); } catch (e) { errores.push(`compras: ${e?.message || e}`); }
+    // Salidas de stock sin venta (informe 27, pendiente #109): no frena ventas ni compras si falla.
+    let stock = null;
+    try { stock = await syncSalidasStockDeNegocio(businessId); } catch (e) { errores.push(`stock: ${e?.message || e}`); }
     if (errores.length) console.error(`[recetas-kit] ${origen} ${businessId}: ${errores.join(' · ')}`);
     console.log(`[recetas-kit] ${origen} ${businessId} ${Date.now() - t0}ms`,
-      JSON.stringify({ ventas: resumir(ventas), compras: resumir(compras) }).slice(0, 600));
+      JSON.stringify({ ventas: resumir(ventas), compras: resumir(compras), stock: resumir(stock) }).slice(0, 700));
     if (errores.length && !ventas && !compras) throw new Error(errores.join(' · '));
     return { ventas, compras, errores };
   } finally {
@@ -91,17 +95,29 @@ async function hayNovedades(businessId, porEsquema) {
     const { rows } = await pool.query(
       `SELECT MAX(cargado) AS c FROM "${schema}"._cargas
         WHERE pdv = ANY($1::text[])
-          AND (tabla LIKE 'i12\\_%' OR tabla LIKE 'i25\\_%' OR tabla LIKE 'i80\\_%')`,
+          AND (tabla LIKE 'i12\\_%' OR tabla LIKE 'i25\\_%' OR tabla LIKE 'i80\\_%' OR tabla LIKE 'i27\\_%')`,
       [pdvs]
     );
     const c = rows[0]?.c ? new Date(rows[0].c) : null;
     if (c && (!ultimaCarga || c > ultimaCarga)) ultimaCarga = c;
   }
   if (!ultimaCarga) return false;
+  // Primera vez con salidas de stock (pendiente #109): si el negocio todavía no tiene ninguna,
+  // corre una pasada aunque no haya ventas nuevas (después ya entra por la fecha de carga).
+  const { rows: st } = await pool.query('SELECT EXISTS (SELECT 1 FROM stock_salidas WHERE business_id = $1) AS hay', [businessId]).catch(() => ({ rows: [{ hay: true }] }));
+  if (!st[0]?.hay) {
+    for (const [schema, pdvs] of Object.entries(porEsquema)) {
+      if (!/^[a-z_][a-z0-9_]*$/.test(schema)) continue;
+      const { rows: c27 } = await pool.query(
+        `SELECT EXISTS (SELECT 1 FROM "${schema}"._cargas WHERE pdv = ANY($1::text[]) AND tabla LIKE 'i27\\_%') AS hay`, [pdvs]);
+      if (c27[0]?.hay) return true;
+    }
+  }
   const { rows } = await pool.query(
     `SELECT GREATEST(
        (SELECT MAX(updated_at) FROM sales_daily_items WHERE business_id = $1 AND source = 'maxi'),
-       (SELECT MAX(synced_at) FROM purchases WHERE business_id = $1 AND source = 'maxi')
+       (SELECT MAX(synced_at) FROM purchases WHERE business_id = $1 AND source = 'maxi'),
+       (SELECT MAX(updated_at) FROM stock_salidas WHERE business_id = $1 AND source = 'maxi')
      ) AS u`,
     [businessId]
   );
