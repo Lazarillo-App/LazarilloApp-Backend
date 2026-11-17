@@ -342,6 +342,14 @@ async function armarVista(plaza, bizId, articleId = null) {
     const eqsDe = new Map();
     for (const e of eqRows) { if (!eqsDe.has(e.insumo_id)) eqsDe.set(e.insumo_id, []); eqsDe.get(e.insumo_id).push(e); }
     const { rows: cols } = await pool.query('SELECT ref, color, mostrar, alias FROM despacho_colores WHERE business_id = $1', [bizId]);
+    // Observación del PRODUCTO (Diego 17/11/2026: «los productos tienen una observación propia, más allá de la
+    // de cada ingrediente»): la última del hilo de observaciones de su receta.
+    const { rows: obsRows } = ids.length ? await pool.query(
+      `SELECT DISTINCT ON (r.article_id) r.article_id, o.texto
+         FROM receta_observaciones o JOIN recetas r ON r.id = o.receta_id
+        WHERE r.business_id = $1 AND r.article_id = ANY($2::int[]) AND COALESCE(r.active, TRUE)
+        ORDER BY r.article_id, o.created_at DESC, o.id DESC`, [bizId, ids]) : { rows: [] };
+    const obsDe = new Map(obsRows.map((o) => [o.article_id, String(o.texto || '').trim()]));
     const colorDe = new Map(cols.filter((c) => c.color != null).map((c) => [c.ref, Number(c.color)]));
     const mostrarDe = new Map(cols.filter((c) => c.mostrar).map((c) => [c.ref, c.mostrar]));
     const aliasDe = new Map(cols.filter((c) => c.alias).map((c) => [c.ref, c.alias]));
@@ -388,7 +396,7 @@ async function armarVista(plaza, bizId, articleId = null) {
       // Lo que no está en el orden guardado (ingrediente nuevo en la receta) va al final, en el orden de la receta.
       const lugar = new Map(todos.map((r, i) => [r.key, pos.has(r.key) ? pos.get(r.key) : 1e6 + i]));
       todos.sort((a, b) => lugar.get(a.key) - lugar.get(b.key));
-      return { articleId: p.article_id, nombre: p.nombre, renglones: todos };
+      return { articleId: p.article_id, nombre: p.nombre, obs: obsDe.get(p.article_id) || '', renglones: todos };
     });
     return { plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza }, productos };
 }
