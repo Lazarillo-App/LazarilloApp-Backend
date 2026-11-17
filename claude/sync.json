@@ -273,5 +273,13 @@
     "id": 51,
     "asignado_a": 4,
     "nota": "La toman Mairene + Claude (tarde del 17/11)."
+  },
+  {
+    "clave": "2026-11-17-90",
+    "tipo": "tarea",
+    "titulo": "Unidades: sumar los movimientos de stock + filtro Todo / Ventas / Stock",
+    "modulo": "recetas",
+    "prioridad": "alta",
+    "detalle": "Diego 17/11. Hoy las unidades salen solo del informe de ventas del POS (i12, ticket) y no cuentan las salidas sin venta (MaxiRest i27: Comida de personal, BigBox, Publicidad, Consumo empleados/dueños, errores de delivery, roturas). Container Bar oct-2026: 1.508 unidades de movimientos vs 8.274 vendidas con precio (~18%); las 6.206 líneas a $0 de i12 (Cubierto, guarniciones) NO son movimientos. Pedido: sumarlas como «salidas sin venta» con un filtro Todo / Ventas / Stock donde se muestren unidades, y usarlas en el consumo teórico (ventas × receta, ver pendiente #2). Multi-POS: los movimientos de stock son propios de cada POS (o se cargan en Lazarillo); el filtro vale aunque el POS no los mande. Relacionado: #49 tarjeta de movimientos de stock en el celular."
   }
 ]
