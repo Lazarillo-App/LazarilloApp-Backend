@@ -559,6 +559,7 @@ router.get('/:id/articles/:articleId', ensureFn('artABM.obtenerArticulo', artABM
 router.patch('/:id/articles/:articleId', blockStaffWrite, ensureFn('artABM.actualizarArticulo', artABM.actualizarArticulo));
 
 // Editar Insumo (manual o agregar equivalencia externa)
+router.put('/:id/articles/clasificacion', blockStaffWrite, ensureFn('artABM.asignarClasificacion', artABM.asignarClasificacion));
 router.put('/:id/articles/rubros/rename', blockStaffWrite, ensureFn('artABM.renombrarRubro', artABM.renombrarRubro));
 router.put('/:id/articles/subrubros/rename', blockStaffWrite, ensureFn('artABM.renombrarSubrubro', artABM.renombrarSubrubro));
 
