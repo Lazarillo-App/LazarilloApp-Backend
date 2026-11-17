@@ -563,7 +563,13 @@ async function guardarEgresos(businessId, sucursal, desde, hasta, origen, nuevas
   const deEsta = (x) => cuenta == null || x.cuenta == null || String(x.cuenta) === String(cuenta);
   const viejas = (await leerFuente(businessId, sucursal, 'egresos', db))
     .filter((x) => !(x.origen === origen && x.fecha >= desde && x.fecha <= hasta && deEsta(x)));
-  const todas = [...viejas, ...nuevas].sort((a, b) => `${a.fecha} ${a.hora || ''}`.localeCompare(`${b.fecha} ${b.hora || ''}`));
+  // 17/11: un pago hecho desde la cuenta viene por la búsqueda de pagos (mpp<id>) y también en el reporte
+  // («payment» con el mismo id): queda el de la búsqueda, que trae a quién se pagó.
+  const unidas = [...viejas, ...nuevas];
+  const deBusqueda = new Set(unidas.filter((x) => x.origen === 'pago').map((x) => String(x.id)));
+  const todas = unidas
+    .filter((x) => !(x.origen === 'reporte' && x.mpId && /^payment$/i.test(String(x.detalle || '')) && deBusqueda.has(`mpp${x.mpId}`)))
+    .sort((a, b) => `${a.fecha} ${a.hora || ''}`.localeCompare(`${b.fecha} ${b.hora || ''}`));
   await escribirFuente(businessId, sucursal, 'egresos', todas, `Mercado Pago ${desde} a ${hasta}`, db);
   return todas.length;
 }

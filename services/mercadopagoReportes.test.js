@@ -84,3 +84,12 @@ test('un pago que hizo la cuenta es un egreso; lo que se paga a sí misma no', (
   assert.strictEqual(mp._pagoHechoAFila({ ...base, collector_id: 55 }, 55), null);
   assert.strictEqual(mp._pagoHechoAFila({ ...base, collector_id: 999, operation_type: 'money_transfer' }, 55).tipo, 'Transferencia');
 });
+
+test('reporte: la reserva no es otra salida y la hora pasa a Argentina', () => {
+  const csv = 'DATE,SOURCE_ID,RECORD_TYPE,DESCRIPTION,NET_CREDIT_AMOUNT,NET_DEBIT_AMOUNT\n'
+    + '2026-11-04T13:30:00.000-04:00,111,release,reserve_for_payout,0,448414.44\n'
+    + '2026-11-04T13:30:00.000-04:00,111,release,payout,0,448414.44\n'
+    + '2026-11-04T23:30:00.000-04:00,222,release,payment,0,100\n';
+  const e = r.analizar(r.parsearCSV(csv)).egresos.map((x) => [x.fecha, x.hora, x.detalle, x.imp]);
+  assert.deepStrictEqual(e, [['2026-11-04', '14:30', 'payout', 448414.44], ['2026-11-05', '00:30', 'payment', 100]]);
+});
