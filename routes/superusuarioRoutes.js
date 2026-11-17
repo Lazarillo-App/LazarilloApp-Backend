@@ -9,6 +9,7 @@ const tablero = require('../services/tableroService');
 const actividad = require('../services/superActividadService');
 const telegram = require('../utils/telegram');
 const pool = require('../config/db');
+const { avisarAlEquipoSinEsperar } = require('../services/notificationService');
 
 router.use(requireSuperusuario);
 
@@ -101,6 +102,39 @@ router.delete('/ajustes/:id', async (req, res, next) => {
     if (!out?.error && rows[0]) {
       await actividad.registrar(req.user.id, 'ajuste', 'borró un ajuste a medida',
         { titulo: `${rows[0].clave} (${rows[0].alcance}${rows[0].scope_id ? ` #${rows[0].scope_id}` : ''})` });
+    }
+    responder(res, out);
+  } catch (e) { next(e); }
+});
+// Funciones por negocio (Diego 17/11/2026): qué áreas y funciones ve cada negocio.
+const NOMBRE_FUNCION = { operacion: 'Operación', rentabilidad: 'Rentabilidad', administracion: 'Administración',
+  tableros: 'Tableros', rrhh: 'RRHH', resultados: 'Resultados', recetas: 'Recetas', stock: 'Stock', compras: 'Compras',
+  conciliacion: 'Conciliación', 'movimientos-bancarios': 'Movimientos bancarios', clientes: 'Clientes' };
+router.get('/funciones', async (_req, res, next) => {
+  try { responder(res, await ajustes.funciones()); } catch (e) { next(e); }
+});
+router.put('/funciones', async (req, res, next) => {
+  try {
+    const { business_id: bid = null, ocultos, antes = [] } = req.body || {};
+    const out = await ajustes.guardarFunciones(bid, ocultos === undefined ? [] : ocultos, req.user.id);
+    if (!out?.error) {
+      const ahora = out.ocultos || [];
+      const prev = Array.isArray(antes) ? antes : [];
+      const prendio = prev.filter((x) => !ahora.includes(x)).map((x) => NOMBRE_FUNCION[x] || x);
+      const apago = ahora.filter((x) => !prev.includes(x)).map((x) => NOMBRE_FUNCION[x] || x);
+      const partes = [prendio.length && `activó ${prendio.join(', ')}`, apago.length && `ocultó ${apago.join(', ')}`].filter(Boolean);
+      const que = out.ocultos === null ? 'volvió al default' : (partes.join(' y ') || 'guardó');
+      let negocio = 'todos los negocios';
+      if (bid) {
+        const { rows } = await pool.query('SELECT name FROM app_businesses WHERE id = $1', [Number(bid)]);
+        negocio = rows[0]?.name || `#${bid}`;
+        // Al equipo del cliente le llega a la campanita (regla «todo ABM a Notificaciones»).
+        if (partes.length) {
+          avisarAlEquipoSinEsperar({ businessId: Number(bid), actorUserId: req.user.id, type: 'cuenta_funciones',
+            title: `Lazarillo ${partes.join(' y ')}`, metadata: { kind: 'cuenta_funciones', ocultos: ahora } });
+        }
+      }
+      await actividad.registrar(req.user.id, 'ajuste', `${que} en ${negocio}`, { titulo: 'Funciones por negocio' });
     }
     responder(res, out);
   } catch (e) { next(e); }
