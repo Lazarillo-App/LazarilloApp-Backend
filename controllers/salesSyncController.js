@@ -754,6 +754,28 @@ exports.salesSummary = async (req, res, next) => {
           ${branchFilter}
         GROUP BY sdi.article_id
         HAVING SUM(sdi.qty) > 0
+      ),
+      -- Salidas de stock sin venta (stock_salidas, pendiente #109): comida de personal, BigBox,
+      -- publicidad, roturas… Los pases entre puntos de venta no se suman. El front elige qué
+      -- unidades mostrar (Todo / Ventas / Stock) sin volver a pedir.
+      st AS (
+        SELECT ss.article_id, SUM(ss.qty)::numeric AS stock_qty
+          FROM stock_salidas ss
+         WHERE ss.business_id = $1
+           AND ss.day BETWEEN $2::date AND $3::date
+           AND NOT ss.transferencia
+           ${articleFilter.replace(/sdi\./g, 'ss.')}
+           ${groupFilter.replace(/sdi\./g, 'ss.')}
+           ${branchFilter.replace(/sdi\./g, 'ss.')}
+         GROUP BY ss.article_id
+        HAVING SUM(ss.qty) > 0
+      ),
+      todo AS (
+        SELECT COALESCE(a.article_id, st.article_id) AS article_id,
+               COALESCE(a.total_qty, 0) AS total_qty, COALESCE(a.total_amount, 0) AS total_amount,
+               COALESCE(a.days_with_sales, 0) AS days_with_sales, a.first_sale, a.last_sale,
+               COALESCE(st.stock_qty, 0) AS stock_qty
+          FROM agg a FULL JOIN st ON st.article_id = a.article_id
       )
       SELECT
         agg.article_id,
@@ -766,8 +788,9 @@ exports.salesSummary = async (req, res, next) => {
         agg.total_amount,
         agg.days_with_sales,
         agg.first_sale,
-        agg.last_sale
-      FROM agg
+        agg.last_sale,
+        agg.stock_qty
+      FROM todo agg
       LEFT JOIN LATERAL (
         SELECT nombre FROM maxi_articles
         WHERE articulo_id = agg.article_id
@@ -790,8 +813,9 @@ exports.salesSummary = async (req, res, next) => {
     const totals = rows.reduce((acc, row) => {
       acc.total_qty += Number(row.total_qty || 0);
       acc.total_amount += Number(row.total_amount || 0);
+      acc.stock_qty += Number(row.stock_qty || 0);
       return acc;
-    }, { total_qty: 0, total_amount: 0 });
+    }, { total_qty: 0, total_amount: 0, stock_qty: 0 });
 
     res.json({
       ok: true,
