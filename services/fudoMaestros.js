@@ -502,7 +502,8 @@ async function sincronizarMaestros(con, api, { hoy }) {
   }
   if (traer.compras) {
     const hasta = hoy;
-    const desde = con.compras_hasta ? sumarDias(String(con.compras_hasta).slice(0, 10), -DIAS_REPASO_COMPRAS) : sumarDias(hoy, -DIAS_COMPRAS);
+    const guardado = require('./fudoService')._diaDe(con.compras_hasta);
+    const desde = guardado ? sumarDias(guardado, -DIAS_REPASO_COMPRAS) : sumarDias(hoy, -DIAS_COMPRAS);
     const pags = await api.todas(`/expenses?filter[date]=${encodeURIComponent(`and(gte.${desde},lte.${hasta})`)}`
       + '&include=expenseItems,expenseItems.ingredient,provider,expenseCategory,commercialDocument'
       + '&fields[expense]=amount,canceled,commercialDocument,date,description,expenseCategory,expenseItems,provider,receiptNumber,status'

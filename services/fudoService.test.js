@@ -106,3 +106,12 @@ test('sugerencia: por código si existe, si no por nombre; ambiguo no sugiere', 
   assert.strictEqual(s.has('3'), false);
   assert.strictEqual(s.has('4'), false);
 });
+
+test('día de una columna DATE: Date local del driver, texto ISO o nada', () => {
+  const { _diaDe } = require('./fudoService');
+  assert.strictEqual(_diaDe(new Date(2026, 10, 16)), '2026-11-16'); // así la entrega node-pg
+  assert.strictEqual(_diaDe('2026-11-16'), '2026-11-16');
+  assert.strictEqual(_diaDe('2026-11-16T00:00:00.000Z'), '2026-11-16');
+  assert.strictEqual(_diaDe(null), null);
+  assert.strictEqual(_diaDe(new Date('basura')), null);
+});

@@ -53,6 +53,22 @@ function sumarDias(dia, n) {
   return new Date(new Date(`${dia}T00:00:00Z`).getTime() + n * 86_400_000).toISOString().slice(0, 10);
 }
 
+/**
+ * Día YYYY-MM-DD de una columna DATE. node-pg la entrega como Date a la medianoche LOCAL del servidor
+ * (no hay setTypeParser en config/db.js): String(fecha).slice(0, 10) daba «Mon Nov 16» y rompía la
+ * segunda pasada. Se usan los componentes locales, que son los que armó el driver.
+ */
+function diaDe(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    const p = (n) => String(n).padStart(2, '0');
+    return `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())}`;
+  }
+  const m = String(v).match(/^\d{4}-\d{2}-\d{2}/);
+  return m ? m[0] : null;
+}
+
 function hoyAr() {
   return diaLocal(new Date().toISOString());
 }
@@ -442,9 +458,13 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
   if (!con) return { ok: false, error: 'fudo_no_conectado' };
   enCurso.add(bid);
   try {
-    const ayer = sumarDias(hoyAr(), -1);
-    const h = hasta || ayer;
-    const d = desde || (con.ventas_hasta ? sumarDias(String(con.ventas_hasta).slice(0, 10), -DIAS_REPASO) : sumarDias(h, -DIAS_HISTORIAL));
+    const hoy = hoyAr();
+    const ayer = sumarDias(hoy, -1);
+    // La pasada de la noche trae hasta ayer (día cerrado). «Traer ahora» y la primera conexión traen
+    // también lo de hoy, para ver algo enseguida; la noche lo completa (repasa los últimos días).
+    const h = hasta || (origen === 'cron' ? ayer : hoy);
+    const desdeGuardado = diaDe(con.ventas_hasta);
+    const d = desde || (desdeGuardado ? sumarDias(desdeGuardado, -DIAS_REPASO) : sumarDias(ayer, -DIAS_HISTORIAL));
     const productos = await traerProductos(con);
     // Artículos, insumos, recetas y compras (lo que el cliente eligió traer). Si falla, las ventas
     // igual se traen: el error queda anotado y se reintenta la próxima pasada.
@@ -473,7 +493,7 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
       `UPDATE integraciones_fudo SET ultimo_sync_at = now(), ultimo_sync_error = NULL,
               ventas_hasta = GREATEST(COALESCE(ventas_hasta, $2::date), $2::date), updated_at = now()
         WHERE business_id = $1`,
-      [bid, h]
+      [bid, h < ayer ? h : ayer] // hoy todavía no está completo
     );
     await avisarSinVincular(bid);
     console.log(`[fudo] negocio ${bid} (${origen}): ${productos.productos} productos, ${ventas.ventas} ventas ${d}..${h}, ${volcado.filas} filas`);
@@ -514,7 +534,7 @@ async function estado(businessId) {
     conectado: true,
     branch_id: con.branch_id,
     conectado_at: con.conectado_at,
-    ventas_hasta: con.ventas_hasta,
+    ventas_hasta: diaDe(con.ventas_hasta),
     ultimo_sync_at: con.ultimo_sync_at,
     ultimo_sync_error: con.ultimo_sync_error,
     sincronizando: enCurso.has(Number(businessId)),
@@ -687,5 +707,5 @@ module.exports = {
   estado, conectar, desconectar, sincronizar, cambiarTraer, listarProductos, vincular, corridaDiaria,
   // para tests
   _diaLocal: diaLocal, _filtroCierre: filtroCierre, _tramos: tramos, _ventasAFilas: ventasAFilas,
-  _normalizar: normalizar, _sugerir: sugerir, _normalizarTraer: normalizarTraer,
+  _normalizar: normalizar, _sugerir: sugerir, _diaDe: diaDe, _normalizarTraer: normalizarTraer,
 };
