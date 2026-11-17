@@ -27,7 +27,7 @@ const { canonicalUnit } = require('./unidades');
 
 const PROVEEDOR_BASE = 8000000000; // suppliers.id de Fudo: fuera de MaxiRest (código) y del Panel (9e9)
 const DIAS_COMPRAS = 90;
-const DIAS_REPASO_COMPRAS = 7;
+const DIAS_REPASO_COMPRAS = 30; // los gastos se suelen cargar tarde (factura de hace semanas); compras_externas evita repetir
 
 const txt = (v) => (v == null ? '' : String(v).trim());
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);

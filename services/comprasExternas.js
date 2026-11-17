@@ -74,8 +74,10 @@ function registrosDeCompra(compra, { insumos, conceptoSinInsumo, puntoDeVentaId 
 
 // ───────────────────────── base ─────────────────────────
 
-async function proveedorDe(organizationId, p, nombreOrigen) {
-  const nombre = txt(p?.nombre).slice(0, 120) || `Proveedor de ${nombreOrigen}`;
+async function proveedorDe(organizationId, p, nombreOrigen, categoria) {
+  // Sin proveedor en el sistema (pasa con alquiler, sueldos…): el proveedor se llama como la categoría,
+  // así cada gasto tiene su propio concepto y no se mezclan todos en un «proveedor de Fudo».
+  const nombre = (txt(p?.nombre) || txt(categoria) || `Gastos de ${nombreOrigen}`).slice(0, 120);
   const cuit = soloDigitos(p?.cuit);
   const { rows } = await pool.query(
     `SELECT id, codigo, nombre, cuit, "conceptoCodigo" FROM gestion_proveedores WHERE organization_id = $1
@@ -152,13 +154,20 @@ async function importarCompras({ businessId, branchId = null, origen, compras, d
 
   for (const compra of pendientes) {
     const externoId = String(compra.externoId);
+    let prov = null;
     try {
-      const prov = dryRun ? { id: 0, codigo: '?', nombre: compra.proveedor?.nombre, conceptoCodigo: null } : await proveedorDe(organizationId, compra.proveedor, nombreOrigen);
-      // ¿Ya está en el Panel (cargada a mano, de MaxiRest o de ARCA)? Mismo proveedor y fecha.
+      prov = dryRun ? { id: 0, codigo: '?', nombre: compra.proveedor?.nombre, conceptoCodigo: null } : await proveedorDe(organizationId, compra.proveedor, nombreOrigen, compra.categoria);
+      // ¿Ya está en el Panel (cargada a mano, de MaxiRest o de ARCA)? Mismo proveedor y fecha. Se cuenta:
+      // facturas de ese proveedor ese día en el Panel menos las ya emparejadas con este sistema (las que
+      // cargó él y las que ya marcó repetidas). Así dos compras del mismo proveedor el mismo día entran
+      // las dos, y una cargada a mano «se come» una sola.
       const { rows: rep } = dryRun ? { rows: [] } : await pool.query(
-        `SELECT 1 FROM gestion_compras WHERE business_id = $1 AND codigo = $2 AND COALESCE("fechaManual", fecha)::date = $3::date LIMIT 1`,
-        [bid, prov.codigo, compra.fecha]);
-      if (rep.length) {
+        `SELECT (SELECT COUNT(DISTINCT comprobante) FROM gestion_compras
+                  WHERE business_id = $1 AND codigo = $2 AND COALESCE("fechaManual", fecha)::date = $3::date)
+              - (SELECT COUNT(*) FROM compras_externas
+                  WHERE business_id = $1 AND proveedor_id = $4 AND fecha = $3::date) AS libres`,
+        [bid, prov.codigo, compra.fecha, prov.id]);
+      if (Number(rep[0]?.libres) > 0) {
         out.repetidas++;
         await pool.query(
           `INSERT INTO compras_externas (business_id, origen, externo_id, estado, proveedor_id, fecha, total)
@@ -189,8 +198,8 @@ async function importarCompras({ businessId, branchId = null, origen, compras, d
       if (e?.status === 409) {
         out.repetidas++;
         await pool.query(
-          `INSERT INTO compras_externas (business_id, origen, externo_id, estado, fecha, total) VALUES ($1, $2, $3, 'repetida', $4, $5)
-           ON CONFLICT DO NOTHING`, [bid, origen, externoId, compra.fecha, compra.total]).catch(() => {});
+          `INSERT INTO compras_externas (business_id, origen, externo_id, estado, proveedor_id, fecha, total) VALUES ($1, $2, $3, 'repetida', $4, $5, $6)
+           ON CONFLICT DO NOTHING`, [bid, origen, externoId, prov?.id ?? null, compra.fecha, compra.total]).catch(() => {});
         continue;
       }
       out.errores++;
