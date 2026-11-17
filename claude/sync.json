@@ -238,5 +238,40 @@
     "tipo": "cambio",
     "id": 44,
     "nota": "Revisado por Mairene + Claude (17/11): las pestañas Propios / Soporte entraron con la #99 y soltar / volver a activar una cuenta con la #103. Si no falta nada más, se puede cerrar."
+  },
+  {
+    "clave": "2026-11-17-mv-b-44",
+    "tipo": "cambio",
+    "id": 44,
+    "estado": "hecha",
+    "nota": "Cerrada por Mairene + Claude (17/11): pestañas Propios / Soporte con la #99 y soltar / volver a activar una cuenta con la #103."
+  },
+  {
+    "clave": "2026-11-17-mv-b-5",
+    "tipo": "cambio",
+    "id": 5,
+    "asignado_a": 4,
+    "nota": "La toman Mairene + Claude (tarde del 17/11)."
+  },
+  {
+    "clave": "2026-11-17-mv-b-4",
+    "tipo": "cambio",
+    "id": 4,
+    "asignado_a": 4,
+    "nota": "La toman Mairene + Claude (tarde del 17/11)."
+  },
+  {
+    "clave": "2026-11-17-mv-b-3",
+    "tipo": "cambio",
+    "id": 3,
+    "asignado_a": 4,
+    "nota": "La toman Mairene + Claude (tarde del 17/11)."
+  },
+  {
+    "clave": "2026-11-17-mv-b-51",
+    "tipo": "cambio",
+    "id": 51,
+    "asignado_a": 4,
+    "nota": "La toman Mairene + Claude (tarde del 17/11)."
   }
 ]
