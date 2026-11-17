@@ -55,3 +55,24 @@ test('sugerencia de concepto: mismo nombre, pistas por palabras y palabra princi
   assert.strictEqual(sugerirConcepto('Zzzz', conceptos), null);
   assert.strictEqual(sugerirConcepto('', conceptos), null);
 });
+
+test('sugerencia de concepto con los nombres de la Plantilla Lazarillo (DEMO)', () => {
+  const { sugerirConcepto } = require('./gestion/organizar-api');
+  const nombres = ['Almacén', 'Aceites', 'Bebidas con alcohol', 'Bebidas sin alcohol', 'Vinos / champagnes', 'Carnes', 'Verdulería',
+    'Frutas', 'Lácteos', 'Quesos y fiambres', 'Panadería', 'Energía eléctrica', 'Gas', 'Agua', 'Internet', 'Telefonía', 'Contador',
+    'Alquiler', 'Ingresos brutos', 'Mantenimiento general', 'Art. de limpieza', 'Papelera', 'Liquidación sueldo'];
+  const conceptos = nombres.map((nombre, i) => ({ codigo: String(1001 + i), nombre }));
+  const cod = (n) => conceptos.find((c) => c.nombre === n).codigo;
+  assert.strictEqual(sugerirConcepto('Verduleria', conceptos), cod('Verdulería'));
+  assert.strictEqual(sugerirConcepto('Verduras', conceptos), cod('Verdulería'));
+  assert.strictEqual(sugerirConcepto('Cervezas', conceptos), cod('Bebidas con alcohol'));
+  assert.strictEqual(sugerirConcepto('Gaseosas', conceptos), cod('Bebidas sin alcohol'));
+  assert.strictEqual(sugerirConcepto('Fiambres', conceptos), cod('Quesos y fiambres'));
+  assert.strictEqual(sugerirConcepto('Edenor', conceptos), cod('Energía eléctrica'));
+  assert.strictEqual(sugerirConcepto('Movistar', conceptos), cod('Telefonía'));
+  assert.strictEqual(sugerirConcepto('Estudio contable', conceptos), cod('Contador'));
+  assert.strictEqual(sugerirConcepto('ARBA', conceptos), cod('Ingresos brutos'));
+  assert.strictEqual(sugerirConcepto('Limpieza', conceptos), cod('Art. de limpieza'));
+  assert.strictEqual(sugerirConcepto('Packaging', conceptos), cod('Papelera'));
+  assert.strictEqual(sugerirConcepto('Pan', conceptos), cod('Panadería'));
+});

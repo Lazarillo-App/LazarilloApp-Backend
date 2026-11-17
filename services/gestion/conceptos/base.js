@@ -1,5 +1,8 @@
 // services/gestion/conceptos/base.js
 //
+// RESPALDO: lo normal es la Plantilla Lazarillo copiada de DEMO (plantilla.js). Esto se usa solo si
+// DEMO no está (base local, tests).
+//
 // Conceptos de caja básicos para un negocio que no tiene ninguno (Diego 17/11/2026: «si no hay
 // conceptos de caja, crearlos y asociarlos»). Un negocio con MaxiRest trae los suyos del maestro: acá
 // solo se crean si la organización no tiene NI UN concepto, así nunca se mezclan con los de MaxiRest.

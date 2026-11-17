@@ -131,18 +131,11 @@ async function importarCompras({ businessId, branchId = null, origen, compras, d
   const pendientes = compras.filter((c) => !hechas.has(String(c.externoId)));
   if (!pendientes.length) return out;
 
-  // Sin conceptos de caja (negocio sin MaxiRest): se crean los básicos para que el Panel quede armado.
+  // Sin conceptos de caja (negocio sin MaxiRest): se copia la Plantilla Lazarillo (tablero #7) para
+  // que el Panel quede armado y los rubros de insumo tengan su concepto.
   if (!dryRun) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const r = await require('./gestion/conceptos/base').asegurarConceptosBase(client, organizationId);
-      await client.query('COMMIT');
-      out.conceptosCreados = r.creados;
-    } catch (e) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw e;
-    } finally { client.release(); }
+    const r = await require('./gestion/conceptos/plantilla').asegurarPlantillaSola(pool, { organizationId, businessId: bid });
+    out.conceptosCreados = r.creados;
   }
   const { rows: cc } = await pool.query('SELECT codigo, nombre FROM gestion_conceptos_caja WHERE organization_id = $1', [organizationId]);
   const conceptosValidos = new Set(cc.map((c) => c.codigo));

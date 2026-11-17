@@ -377,5 +377,18 @@
     "tipo": "guia_parche",
     "buscar": "De todos los POS se toman solo las VENTAS; compras, gastos y pagos se\nhacen en Lazarillo.",
     "reemplazar": "De cada POS se trae TODO lo que el cliente tenga cargado ahí (Mairene y Diego,\n17/11): ventas siempre, y artículos, insumos/recetas y compras si los sigue\nusando en su POS — la primera vez y después lo nuevo y los cambios, sin pisar lo\neditado en Lazarillo. Hay clientes que gestionan casi todo en Lazarillo y otros\nque siguen en su POS y en Lazarillo solo miran: el camino queda abierto para\nartículos, insumos, compras y ventas. Una compra que ya está cargada en\nLazarillo (mismo proveedor —CUIT o nombre— y fecha) no se repite. Un negocio\ntiene un solo POS. Las integraciones solo LEEN: nada sale de Lazarillo hacia el\nPOS (no somos API todavía)."
+  },
+  {
+    "clave": "2026-11-17-mv-40-hecha",
+    "tipo": "cambio",
+    "id": 40,
+    "estado": "hecha",
+    "nota": "Hecha (Mairene + Claude, 16-17/11): Fudo por su API pública, solo lectura. Al elegir Fudo en el alta pide API Key + Secret con el paso a paso real de Fudo y «Qué traer» (ventas siempre; artículos, insumos/recetas y compras opcionales). Trae ventas → Artículos y Resultados (gestion_ventas, un cobro por pago), artículos/insumos/recetas sin pisar lo editado, y los gastos como facturas EDITABLES del Panel por el camino común de compras de cualquier sistema (services/comprasExternas.js) + «Organizá tus gastos» en Resultados. Pasada cada noche 4:30 y «Traer ahora». Probado en un negocio de prueba contra la demo de Fudo. Waitry queda para otra tarea."
+  },
+  {
+    "clave": "2026-11-17-mv-07-plantilla",
+    "tipo": "cambio",
+    "id": 7,
+    "nota": "Mairene + Claude 17/11: la Plantilla se copia sola desde DEMO (org 25 / negocio 225), tal como esté en el momento, así Diego puede seguir depurándola. Organización sin NI UN concepto y sin MaxiRest (ni credenciales Maxi, ni POS Maxirest en el alta, ni kit vinculado): se copian rubros y conceptos de caja; y a cada negocio, si no los tiene, visibilidad de rubros, variables del punto de equilibrio y rubros de insumo con su concepto (si ya tiene rubros, p. ej. de Fudo, toman el concepto del que se llama igual). Corre al entrar al Panel y cuando llegan compras de un POS. Back: services/gestion/conceptos/plantilla.js. Ojo Diego: la visibilidad en Resultados de «Mov. societarios» sale de cómo esté en DEMO."
   }
 ]

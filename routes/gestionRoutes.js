@@ -23,6 +23,9 @@ const arca = require('../services/gestion/arca/api');
 const actividad = require('../services/gestion/actividad-api');
 const { db: gestionDb, sql: gestionSql } = require('../services/gestion/db');
 const { asegurarOrganizacion } = require('../services/gestion/organizacion-auto');
+const { asegurarPlantillaSola } = require('../services/gestion/conceptos/plantilla');
+const pool = require('../config/db');
+const plantillaVista = new Set(); // negocios ya revisados en este proceso
 
 router.use(requireBusinessRole('admin'));
 
@@ -44,6 +47,18 @@ router.use(async (req, res, next) => {
     return res.status(409).json({ error: 'business_sin_organizacion', message: 'El Panel necesita que el negocio pertenezca a una organización.' });
   }
   req.gestion = { organizationId, businessId: Number(req.businessId) };
+  // Plantilla Lazarillo (tablero #7): un negocio sin conceptos arranca con la estructura de DEMO. Una
+  // vez por negocio y por proceso; si falla, el Panel igual abre (se reintenta en el próximo pedido).
+  if (!plantillaVista.has(req.gestion.businessId)) {
+    plantillaVista.add(req.gestion.businessId);
+    try {
+      const r = await asegurarPlantillaSola(pool, req.gestion);
+      if (r.creados) console.log(`[plantilla] org ${organizationId} negocio ${req.gestion.businessId}: ${r.creados} conceptos (${r.origen})`);
+    } catch (e) {
+      plantillaVista.delete(req.gestion.businessId);
+      console.error('[plantilla]', req.gestion.businessId, e?.message || e);
+    }
+  }
   next();
 });
 
