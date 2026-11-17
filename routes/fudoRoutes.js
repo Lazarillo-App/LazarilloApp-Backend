@@ -33,8 +33,9 @@ const manejar = (fn) => async (req, res) => {
 
 router.get('/estado', manejar((req) => fudo.estado(bid(req))));
 router.post('/conectar', manejar((req) => fudo.conectar(bid(req), req.user?.id, {
-  apiKey: req.body?.apiKey, apiSecret: req.body?.apiSecret, branchId: req.body?.branchId,
+  apiKey: req.body?.apiKey, apiSecret: req.body?.apiSecret, branchId: req.body?.branchId, traer: req.body?.traer,
 })));
+router.patch('/traer', manejar((req) => fudo.cambiarTraer(bid(req), req.user?.id, req.body?.traer)));
 router.delete('/', manejar((req) => fudo.desconectar(bid(req), req.user?.id)));
 router.post('/sincronizar', manejar(async (req) => {
   // En segundo plano: la primera carga de 3 meses puede tardar más que un pedido HTTP.
