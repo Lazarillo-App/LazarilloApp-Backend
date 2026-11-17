@@ -352,6 +352,8 @@ const PORT = process.env.PORT || 4000;
     require('./services/tareasUnicas/promosDuplicadas').programar();
     // Pendientes de desarrollo que deja Claude en claude/sync.json (sin login, Diego 15/11/2026).
     require('./services/claudeSync').programar();
+    // Primera carga de salidas de stock sin venta (informe 27) — pendiente #109, 17/11/2026.
+    require('./services/tareasUnicas/salidasStockInicial').programar();
   } catch (err) {
     console.error('❌ Error ejecutando migraciones:', err);
     process.exit(1);
