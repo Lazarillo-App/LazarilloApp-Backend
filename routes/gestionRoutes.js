@@ -178,6 +178,10 @@ router.patch('/dashboard/ventas/:rowId', responder((req) =>
 const usuarioDe = (req) => req.user?.email ?? String(req.user?.id ?? '');
 const idDe = (req) => Number(req.params.id);
 // Sin rubro · por qué (Diego 06/11/2026): lo que cae en Sin rubro, agrupado por causa.
+// «Organizá tus gastos» (17/11/2026): rubros de insumo y proveedores → concepto de caja, con sugerencias.
+const organizar = require('../services/gestion/organizar-api');
+router.get('/organizar', responder((req) => organizar.obtenerOrganizar(req.gestion)));
+router.put('/organizar/proveedor/:id', responder((req) => organizar.editarProveedorConcepto({ ...req.gestion, id: req.params.id, body: req.body })));
 router.get('/sin-rubro', responder((req) => sinRubro.obtenerSinRubro({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
 router.put('/sin-rubro/rubro-insumo/:codigo', responder((req) => sinRubro.editarRubroInsumo({ ...req.gestion, codigo: req.params.codigo, body: req.body })));
 router.put('/sin-rubro/insumo/:id', responder((req) => sinRubro.editarInsumo({ ...req.gestion, id: idDe(req), body: req.body })));

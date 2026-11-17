@@ -427,45 +427,40 @@ async function hashActual(client, recetaId) {
   return rows.map((r) => `${r.k}:${r.c}:${r.u}`).sort().join('|');
 }
 
-async function aplicarCompras(bid, branchId, facturas, desde, hasta) {
-  const { rows: cargadas } = await pool.query(
-    `SELECT p.fecha::date::text AS fecha, s.cuit, s.nombre
-       FROM purchases p LEFT JOIN suppliers s ON s.business_id = p.business_id AND s.id = p.proveedor_id
-      WHERE p.business_id = $1 AND p.source IS DISTINCT FROM 'fudo' AND p.fecha::date BETWEEN $2::date AND $3::date`,
-    [bid, desde, hasta]);
-  const nuevas = facturas.filter((f) => !yaCargada(f, cargadas));
-  const salteadas = facturas.length - nuevas.length;
-
+/**
+ * Gastos de Fudo → facturas de Lazarillo por el camino común de compras de cualquier sistema
+ * (services/comprasExternas.js): entran al Panel editables, con concepto de caja y con sus costos.
+ * Antes (17/11, primeras horas) se escribían directo en purchases con source 'fudo': esas filas se
+ * quitan, porque ahora los costos salen de la factura del Panel (si no, quedarían dos veces).
+ */
+async function aplicarCompras(bid, branchId, facturas) {
   const { rows: ins } = await pool.query('SELECT fudo_id, insumo_id FROM fudo_insumos WHERE business_id = $1 AND insumo_id IS NOT NULL', [bid]);
-  const insumoMap = new Map(ins.map((i) => [Number(i.fudo_id), Number(i.insumo_id)]));
-  const { upsertPurchasesEnCliente } = require('./purchasesStore');
-
-  const client = await pool.connect();
-  let r = { inserted: 0, updated: 0, items: 0 };
-  try {
-    await client.query('BEGIN');
-    const provs = new Map();
-    for (const f of nuevas) if (f.proveedor) provs.set(f.proveedor, f);
-    for (const [id, f] of provs) {
-      await client.query(
-        `INSERT INTO suppliers (id, business_id, nombre, razon_social, cuit, updated_at) VALUES ($1, $2, $3, $5, $4, NOW())
-         ON CONFLICT (business_id, id) DO UPDATE SET nombre = EXCLUDED.nombre, cuit = COALESCE(EXCLUDED.cuit, suppliers.cuit), updated_at = NOW()`,
-        [id, bid, f.proveedorNombre, f.cuit, f.proveedorNombre]);
-    }
-    // Gastos borrados o anulados en Fudo (y los que ahora están cargados en Lazarillo) se van.
-    await client.query(
-      `DELETE FROM purchases WHERE business_id = $1 AND source = 'fudo' AND fecha::date BETWEEN $2::date AND $3::date
-         AND NOT (factura_key = ANY($4::text[]))`,
-      [bid, desde, hasta, nuevas.map((f) => f.numero)]);
-    if (nuevas.length) r = await upsertPurchasesEnCliente(client, bid, nuevas, insumoMap, branchId, { source: 'fudo' });
-    await client.query('COMMIT');
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw e;
-  } finally {
-    client.release();
+  const insumoDe = new Map(ins.map((i) => [String(i.fudo_id), Number(i.insumo_id)]));
+  const compras = facturas.map((f) => ({
+    externoId: f.numero.replace(/^FUDO-/, ''),
+    fecha: f.fecha,
+    total: f.total,
+    categoria: f.categoria,
+    comprobante: f.comprobante,
+    proveedor: { nombre: f.proveedorNombre, cuit: f.cuit },
+    renglones: f.items.map((it) => ({
+      insumoId: it.insumo != null ? insumoDe.get(String(it.insumo)) ?? null : null,
+      nombre: it.referencia, cantidad: it.cantidad, neto: it.preciotot,
+    })),
+  }));
+  const { rows: viejas } = await pool.query("SELECT id FROM purchases WHERE business_id = $1 AND source = 'fudo'", [bid]);
+  if (viejas.length) {
+    await pool.query("DELETE FROM purchases WHERE business_id = $1 AND source = 'fudo'", [bid]);
+    const { rows: tocados } = await pool.query(
+      'SELECT DISTINCT insumo_id FROM fudo_insumos WHERE business_id = $1 AND insumo_id IS NOT NULL', [bid]);
+    const { actualizarPreciosDeInsumos } = require('./purchasesStore');
+    const client = await pool.connect();
+    try {
+      await actualizarPreciosDeInsumos(client, { businessId: bid, insumoIds: tocados.map((t) => Number(t.insumo_id)) });
+    } finally { client.release(); }
   }
-  return { traidas: nuevas.length, salteadas, nuevas: r.inserted, actualizadas: r.updated, renglones: r.items };
+  const r = await require('./comprasExternas').importarCompras({ businessId: bid, branchId, origen: 'fudo', compras });
+  return { traidas: compras.length, nuevas: r.nuevas, salteadas: r.repetidas, errores: r.errores, sinConcepto: r.sinConcepto };
 }
 
 // ───────────────────────── entrada ─────────────────────────
@@ -510,7 +505,7 @@ async function sincronizarMaestros(con, api, { hoy }) {
       + '&fields[expenseItem]=canceled,detail,price,ingredient,quantity&fields[expenseCategory]=name&fields[provider]=name');
     const buscar = indice(pags);
     const facturas = datos(pags).map((g) => facturaDeGasto(g, buscar)).filter(Boolean);
-    out.compras = await aplicarCompras(bid, con.branch_id ?? null, facturas, desde, hasta);
+    out.compras = await aplicarCompras(bid, con.branch_id ?? null, facturas);
     await pool.query('UPDATE integraciones_fudo SET compras_hasta = $2 WHERE business_id = $1', [bid, hasta]);
   }
   return out;
