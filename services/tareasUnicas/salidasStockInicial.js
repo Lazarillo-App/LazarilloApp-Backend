@@ -11,7 +11,8 @@ const pool = require('../../config/db');
 const { PDV_MAP, refrescarPdvMap } = require('../maxiPdvMap');
 const { syncSalidasStockDeNegocio } = require('../maxiPipelineStockSync');
 
-const NOMBRE = 'salidas_stock_inicial_20261117';
+// _b: segunda pasada después de arreglar codigo/cantidad en texto (Palermo suites daba error).
+const NOMBRE = 'salidas_stock_inicial_20261117_b';
 
 async function correr() {
   await pool.query(`CREATE TABLE IF NOT EXISTS lz_tareas_unicas (
