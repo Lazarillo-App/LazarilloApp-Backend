@@ -490,8 +490,9 @@ exports.createOrganization = async (req, res, next) => {
 
     // Crear organización
     const { rows: orgRows } = await client.query(
-      `INSERT INTO organizations (name, display_name, created_by, created_at, updated_at)
-       VALUES ($1, $1, $2, NOW(), NOW())
+      // Soporte Lazarillo activo SIEMPRE en cuentas nuevas: al principio necesitan mucho soporte (usuaria 17/11/2026).
+      `INSERT INTO organizations (name, display_name, created_by, soporte_activo, created_at, updated_at)
+       VALUES ($1, $1, $2, true, NOW(), NOW())
        RETURNING *`,
       [name.trim(), uid]
     );

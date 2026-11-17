@@ -25,8 +25,9 @@ async function asegurarOrganizacion(businessId, userId = null) {
     if (rows[0].organization_id) { await client.query('COMMIT'); return Number(rows[0].organization_id); }
     const nombre = String(rows[0].name || 'Mi negocio').trim() || 'Mi negocio';
     const { rows: org } = await client.query(
-      `INSERT INTO organizations (name, display_name, created_by, created_at, updated_at)
-       VALUES ($1, $1, $2, NOW(), NOW()) RETURNING id`, [nombre, userId || null]);
+      // Soporte Lazarillo activo SIEMPRE en cuentas nuevas: al principio necesitan mucho soporte (usuaria 17/11/2026).
+      `INSERT INTO organizations (name, display_name, created_by, soporte_activo, created_at, updated_at)
+       VALUES ($1, $1, $2, true, NOW(), NOW()) RETURNING id`, [nombre, userId || null]);
     await client.query('UPDATE app_businesses SET organization_id = $1 WHERE id = $2', [org[0].id, bizId]);
     await client.query('COMMIT');
     console.log(`[organizacion-auto] negocio ${bizId} → organización ${org[0].id} "${nombre}"`);
