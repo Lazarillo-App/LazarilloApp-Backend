@@ -1098,7 +1098,7 @@ exports.listMine = async (req, res) => {
     //  3) user_assignments scope='business'
     //  4) user_assignments scope='organization' → expandido a todos sus negocios
     const { rows } = await pool.query(`
-      WITH accessible AS (
+      WITH propios AS (
         SELECT b.id
           FROM app_businesses b
          WHERE b.owner_id = $1
@@ -1122,14 +1122,25 @@ exports.listMine = async (req, res) => {
          WHERE ua.user_id = $1
            AND ua.scope_type = 'organization'
            AND ua.revoked_at IS NULL
-      )
+      ),
+      -- 5) Soporte Lazarillo: los super usuarios ven las cuentas con soporte activo (Diego 16/11/2026)
+      soporte AS (
+        SELECT b.id
+          FROM app_businesses b
+          JOIN organizations o ON o.id = b.organization_id AND o.soporte_activo
+          JOIN app_users u ON u.id = $1 AND u.es_superusuario
+      ),
+      accessible AS (SELECT id FROM propios UNION SELECT id FROM soporte)
       SELECT DISTINCT
              b.id, b.name, b.slug, b.props, b.owner_id,
              b.organization_id, b.created_from, b.created_at,
-             o.name AS organization_name
+             o.name AS organization_name,
+             (b.id NOT IN (SELECT id FROM propios)) AS soporte,
+             coalesce(ow.display_name, ow.name, ow.email) AS owner_nombre
         FROM app_businesses b
         JOIN accessible a ON a.id = b.id
         LEFT JOIN organizations o ON o.id = b.organization_id
+        LEFT JOIN app_users ow ON ow.id = b.owner_id
        ORDER BY b.created_at ASC
     `, [uid]);
 

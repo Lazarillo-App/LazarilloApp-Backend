@@ -7,6 +7,8 @@
 //   1) app_businesses.owner_id === userId            → role 'owner' (legacy/compat)
 //   2) assignment scope='business' scope_id=bizId    → role del assignment
 //   3) assignment scope='organization' scope_id=orgId del business → role del assignment (heredado)
+//   4) super usuario + organización con soporte_activo → 'owner' (Soporte Lazarillo, Diego 16/11/2026:
+//      los super usuarios entran como dueños a las cuentas con soporte, sin sumarse al equipo)
 //
 // Jerarquía de roles: owner > admin > staff
 // El nivel efectivo es el MÁS ALTO encontrado entre todas las fuentes.
@@ -58,8 +60,16 @@ async function getEffectiveRole(userId, businessId) {
        WHERE ua.user_id = $1
          AND ua.scope_type = 'organization'
          AND ua.revoked_at IS NULL
+    ),
+    soporte_role AS (
+      SELECT 'owner'::text AS role
+        FROM biz
+        JOIN organizations o ON o.id = biz.organization_id AND o.soporte_activo
+        JOIN app_users u ON u.id = $1 AND u.es_superusuario
     )
     SELECT role FROM owner_role
+    UNION ALL
+    SELECT role FROM soporte_role
     UNION ALL
     SELECT role FROM biz_role
     UNION ALL
@@ -135,6 +145,19 @@ async function listAccessibleBusinesses(userId) {
      WHERE ua.user_id = $1
        AND ua.scope_type = 'organization'
        AND ua.revoked_at IS NULL
+
+    UNION
+
+    -- 4) Soporte Lazarillo: super usuario en una cuenta con soporte activo
+    SELECT
+      b.id AS business_id,
+      'owner'::text AS role,
+      'soporte'::text AS source,
+      NULL::text AS alias,
+      NULL::bigint AS assignment_id
+      FROM app_businesses b
+      JOIN organizations o ON o.id = b.organization_id AND o.soporte_activo
+      JOIN app_users u ON u.id = $1 AND u.es_superusuario
     `,
     [userId]
   );
@@ -163,6 +186,11 @@ async function getEffectiveRoleOnScope(userId, scopeType, scopeId) {
          AND ua.scope_type = 'organization'
          AND ua.scope_id = $2
          AND ua.revoked_at IS NULL
+      UNION ALL
+      SELECT 'owner'::text AS role
+        FROM organizations o
+        JOIN app_users u ON u.id = $1 AND u.es_superusuario
+       WHERE o.id = $2 AND o.soporte_activo
       UNION ALL
       SELECT 'owner'::text AS role
         FROM app_businesses
