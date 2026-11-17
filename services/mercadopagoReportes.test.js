@@ -53,7 +53,9 @@ test('si ya hay un reporte de ese rango no se pide otro; si no hay, se pide', as
   };
   const b = r._inicioAR('2026-11-01'); const e = r._finAR('2026-11-13');
   assert.deepStrictEqual(await r.buscarOPedir('T', '2026-11-01', '2026-11-13', { llamar: llamarCon([{ begin_date: b, end_date: e, status: 'processed', file_name: 'x.csv' }]) }), { listo: true, archivo: 'x.csv' });
-  assert.deepStrictEqual(await r.buscarOPedir('T', '2026-11-01', '2026-11-13', { llamar: llamarCon([{ begin_date: b, end_date: e, status: 'pending' }]) }), { pendiente: true });
+  assert.strictEqual((await r.buscarOPedir('T', '2026-11-01', '2026-11-13', { llamar: llamarCon([{ begin_date: b, end_date: e, status: 'pending' }]) })).pendiente, true);
+  // Uno listo que cubre el rango (pedido más largo, o MP guardó las fechas con otro formato) también sirve.
+  assert.deepStrictEqual(await r.buscarOPedir('T', '2026-11-01', '2026-11-13', { llamar: llamarCon([{ begin_date: '2026-10-31T00:00:00-03:00', end_date: '2026-11-15T23:59:59-03:00', status: 'enabled', file_name: 'y.csv' }]) }), { listo: true, archivo: 'y.csv' });
   llamadas.length = 0;
   assert.deepStrictEqual(await r.buscarOPedir('T', '2026-11-01', '2026-11-13', { llamar: llamarCon([]) }), { pendiente: true });
   assert.ok(llamadas.includes('POST /v1/account/release_report'));

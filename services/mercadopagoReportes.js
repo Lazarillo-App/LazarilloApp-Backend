@@ -84,10 +84,20 @@ async function buscarOPedir(token, desde, hasta, { llamar: ll = llamar } = {}) {
   const e = finAR(hasta);
   const lista = await ll(`${API}/v1/account/release_report/list`, { token });
   if (!lista.ok) return { error: 'mp_reporte_lista', detalle: lista.data };
-  const items = (Array.isArray(lista.data) ? lista.data : []).filter((x) => mismaFecha(x.begin_date, b) && mismaFecha(x.end_date, e));
-  const listo = items.find((x) => x.file_name && (!x.status || /processed|ready|done/i.test(x.status)));
+  const todos = Array.isArray(lista.data) ? lista.data : [];
+  const items = todos.filter((x) => mismaFecha(x.begin_date, b) && mismaFecha(x.end_date, e));
+  const esListo = (x) => x.file_name && (!x.status || /processed|ready|done|enabled/i.test(x.status));
+  // 17/11 (quedaba «armando reporte» sin fin): también sirve uno listo que CUBRA el rango, aunque MP haya
+  // guardado las fechas con otro formato o se haya pedido uno más largo.
+  const cubre = (x) => Date.parse(x.begin_date) <= Date.parse(b) + 1000 && Date.parse(x.end_date) >= Date.parse(e) - 1000;
+  const listo = items.find(esListo) || todos.filter((x) => esListo(x) && cubre(x)).sort((x, y) => Date.parse(x.begin_date) - Date.parse(y.begin_date)).pop();
   if (listo) return { listo: true, archivo: listo.file_name };
-  if (items.some((x) => !/error|deleted|failed/i.test(String(x.status || '')))) return { pendiente: true };
+  const enCurso = items.filter((x) => !/error|deleted|failed/i.test(String(x.status || '')));
+  if (enCurso.length) {
+    // Diagnóstico: qué dice MP del pedido mientras espera (estado y fechas, sin datos de la cuenta).
+    const ver = (x) => `${x.status || '-'} ${x.begin_date}→${x.end_date}${x.file_name ? ' con archivo' : ''}`;
+    return { pendiente: true, detalle: `${enCurso.length} pedido(s): ${enCurso.slice(0, 3).map(ver).join(' | ')} · últimos de la cuenta: ${todos.slice(-3).map(ver).join(' | ')}` };
+  }
   const r = await ll(`${API}/v1/account/release_report`, { token, method: 'POST', body: { begin_date: b, end_date: e } });
   if (r.status === 202 || r.ok) return r.status === 203 ? { error: 'mp_reporte_no_creado' } : { pendiente: true };
   return { error: 'mp_reporte_no_creado', detalle: r.data };
