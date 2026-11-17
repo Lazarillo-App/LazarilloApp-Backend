@@ -319,5 +319,19 @@
     "seccion": "ventas-costo-precio",
     "buscar": "- **Ventas** del período elegido. El 👁 deja solo los que vendieron y **U / $** cambia entre unidades y pesos.",
     "reemplazar": "- **Ventas** del período elegido. El 👁 deja solo los que vendieron. El chip de abajo elige qué ver: **Unidades · Ventas** (lo que se vendió por el POS), **Unidades · Stock** (lo que salió sin venta: comida de personal, BigBox, publicidad, roturas…), **Unidades · Todo** (las dos juntas) o **Pesos ($)**. El título de la columna cambia a Ventas, Salidas o Unidades. Los pases entre puntos de venta no cuentan como salida."
+  },
+  {
+    "clave": "2026-11-17-94",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "ventas-costo-precio",
+    "buscar": "**Unidades · Todo** (las dos juntas)",
+    "reemplazar": "**Unidades · Todo** (las dos juntas; es la que se ve de entrada)"
+  },
+  {
+    "clave": "2026-11-17-95",
+    "tipo": "cambio",
+    "id": 109,
+    "nota": "17/11: salidas cargadas solas al arrancar (back #203): Container Bar 19.571 u, Comercio 31.655, Container FC 230; Bar oct-2026 1.520 (pases entre PDV aparte). Consulta de salidas del summary: 1,2 ms. Palermo suites daba error (codigo/cantidad en texto) → corregido y recargado. Diego: Todo por defecto (front). Manual y paso a paso actualizados (back #204, front #387). Falta: sumar salidas al consumo teórico (#2)."
   }
 ]
