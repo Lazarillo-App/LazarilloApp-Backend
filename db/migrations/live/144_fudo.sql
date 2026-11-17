@@ -1,4 +1,4 @@
--- 143: conexión con Fudo por su API oficial (usuaria 17/11/2026). De Fudo se traen SOLO ventas
+-- 144: conexión con Fudo por su API oficial (usuaria 17/11/2026). De Fudo se traen SOLO ventas
 -- (regla multi-POS de la Guía) y nada sale de Lazarillo hacia Fudo: la API es de solo lectura y solo
 -- se hacen pedidos GET. El cliente habilita «API Pública General» en Fudo, crea un usuario para
 -- Lazarillo y pega su apiKey/apiSecret en Configuración › Conexiones (o en el alta del negocio).
