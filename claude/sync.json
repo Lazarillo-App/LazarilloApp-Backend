@@ -371,5 +371,11 @@
     "nuevo_titulo": "Food cost: teórico (ventas × receta) y real con stock",
     "detalle": "Diego 17/11: a desarrollar. Dos food cost, lado a lado:\n1) TEÓRICO: unidades × receta (lo que tendría que haber costado). Usa las unidades en «Todo» (ventas + salidas de stock, #109), para que comida de personal y BigBox no parezcan desperdicio. Hoy no existe: solo está el costo % de cada receta por artículo.\n2) REAL: (stock inicial + compras − stock final) ÷ ventas. NO es un tipo aparte del de hoy: el actual «por compras» (compras ÷ ventas) es el paso previo de este mismo food cost; cuando haya relevamiento de stock inicial y final (módulo Stock), el mismo chip pasa a usarlo. Mientras no haya stock, se ve como hoy y se aclara que es aproximado.\nLa diferencia real − teórico es lo que se pierde (mermas, desperdicio, faltantes). Diego recordaba un tercer tipo; candidato a confirmar: food cost OBJETIVO (los costos objetivo de cada artículo ponderados por lo vendido). Relacionado: #2.",
     "nota": "17/11: Diego aclaró que «por compras» y «real» son el mismo food cost (el de compras es el paso previo, sin stock). Título y detalle corregidos."
+  },
+  {
+    "clave": "2026-11-17-mv-guia-pos-todo",
+    "tipo": "guia_parche",
+    "buscar": "De todos los POS se toman solo las VENTAS; compras, gastos y pagos se\nhacen en Lazarillo.",
+    "reemplazar": "De cada POS se trae TODO lo que el cliente tenga cargado ahí (Mairene y Diego,\n17/11): ventas siempre, y artículos, insumos/recetas y compras si los sigue\nusando en su POS — la primera vez y después lo nuevo y los cambios, sin pisar lo\neditado en Lazarillo. Hay clientes que gestionan casi todo en Lazarillo y otros\nque siguen en su POS y en Lazarillo solo miran: el camino queda abierto para\nartículos, insumos, compras y ventas. Una compra que ya está cargada en\nLazarillo (mismo proveedor —CUIT o nombre— y fecha) no se repite. Un negocio\ntiene un solo POS. Las integraciones solo LEEN: nada sale de Lazarillo hacia el\nPOS (no somos API todavía)."
   }
 ]
