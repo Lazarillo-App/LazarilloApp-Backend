@@ -593,10 +593,10 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo, 
     // con lo que respondió, para poder destrabarlo.
     const det = (x) => (x == null ? '' : (typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 600));
     const cfg = await reportes.asegurarConfig(t.token);
-    if (cfg.error) {
-      console.warn(`[mercadopago:reporte] negocio ${businessId} suc ${sucursal} cuenta ${t.fila?.mp_user_id}: ${cfg.error} ${det(cfg.detalle)}`);
-      return { reporte: 'error', motivo: cfg.error, detalle: det(cfg.detalle) };
-    }
+    // 17/11 (Lautaro: «en las salidas hay pagos de proveedores que no están»): las transferencias a CBU/CVU
+    // de otros bancos solo vienen en este reporte. Si MP no acepta cambiar la configuración, el reporte se
+    // pide igual con la que la cuenta ya tiene: mejor algunas columnas menos que ninguna salida.
+    if (cfg.error) console.warn(`[mercadopago:reporte] negocio ${businessId} suc ${sucursal} cuenta ${t.fila?.mp_user_id}: ${cfg.error} ${det(cfg.detalle)} · se pide igual`);
     const b = await reportes.buscarOPedir(t.token, desde, hasta);
     if (b.error) {
       console.warn(`[mercadopago:reporte] negocio ${businessId} suc ${sucursal} cuenta ${t.fila?.mp_user_id}: ${b.error} ${det(b.detalle)}`);
