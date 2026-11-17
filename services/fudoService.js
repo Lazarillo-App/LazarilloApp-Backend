@@ -407,6 +407,26 @@ async function avisarSinVincular(businessId) {
   });
 }
 
+/** Un aviso por pasada con lo que entró de Fudo (regla de la Guía: lotes = un aviso con cantidad). */
+async function avisarMaestros(businessId, m) {
+  const partes = [];
+  const n = (x, uno, varios) => (x ? `${x} ${x === 1 ? uno : varios}` : null);
+  partes.push(n(m.articulos?.nuevos, 'artículo nuevo', 'artículos nuevos'));
+  partes.push(n(m.articulos?.actualizados, 'artículo actualizado', 'artículos actualizados'));
+  partes.push(n(m.insumos?.nuevos, 'insumo nuevo', 'insumos nuevos'));
+  partes.push(n(m.insumos?.actualizados, 'insumo actualizado', 'insumos actualizados'));
+  partes.push(n((m.recetas?.nuevas || 0) + (m.recetas?.actualizadas || 0), 'receta', 'recetas'));
+  partes.push(n(m.compras?.nuevas, 'compra nueva', 'compras nuevas'));
+  const texto = partes.filter(Boolean);
+  if (!texto.length) return;
+  await avisar(businessId, {
+    type: 'fudo_maestros',
+    title: 'Llegaron datos de Fudo',
+    message: `${texto.join(', ')}.${m.compras?.salteadas ? ` ${m.compras.salteadas} compra${m.compras.salteadas === 1 ? '' : 's'} ya estaba${m.compras.salteadas === 1 ? '' : 'n'} cargada${m.compras.salteadas === 1 ? '' : 's'} en Lazarillo y no se repitió.` : ''}`,
+    metadata: { ...m, articulos: m.articulos && { ...m.articulos, vinculadosIds: undefined } },
+  });
+}
+
 // ───────────────────────── sincronizar ─────────────────────────
 
 const enCurso = new Set();
@@ -426,10 +446,29 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
     const h = hasta || ayer;
     const d = desde || (con.ventas_hasta ? sumarDias(String(con.ventas_hasta).slice(0, 10), -DIAS_REPASO) : sumarDias(h, -DIAS_HISTORIAL));
     const productos = await traerProductos(con);
+    // Artículos, insumos, recetas y compras (lo que el cliente eligió traer). Si falla, las ventas
+    // igual se traen: el error queda anotado y se reintenta la próxima pasada.
+    let maestros = null;
+    let errorMaestros = null;
+    try {
+      maestros = await require('./fudoMaestros').sincronizarMaestros(con, cliente(con), { hoy: hoyAr() });
+      await pool.query('UPDATE integraciones_fudo SET maestros_at = now(), maestros_resumen = $2 WHERE business_id = $1', [bid, JSON.stringify(maestros)]);
+      await avisarMaestros(bid, maestros);
+    } catch (e) {
+      errorMaestros = e;
+      console.error(`[fudo] negocio ${bid} maestros:`, e.message);
+    }
     const ventas = await traerVentas(con, d, h);
-    // Se vuelcan todos los días del rango (también los que quedaron sin ventas, para limpiar 'fudo').
-    const dias = tramos(d, h, 1).map(([x]) => x);
-    const volcado = await volcar(bid, dias);
+    // Se vuelcan todos los días del rango (también los que quedaron sin ventas, para limpiar 'fudo'),
+    // más los días viejos de los productos que se acaban de vincular solos.
+    const dias = new Set(tramos(d, h, 1).map(([x]) => x));
+    const ids = maestros?.articulos?.vinculadosIds || [];
+    if (ids.length) {
+      const { rows } = await pool.query('SELECT DISTINCT day::text AS day FROM fudo_ventas_dia WHERE business_id = $1 AND fudo_id = ANY($2::text[])', [bid, ids]);
+      for (const r of rows) dias.add(r.day);
+    }
+    const volcado = await volcar(bid, [...dias].sort());
+    if (errorMaestros) throw errorMaestros;
     await pool.query(
       `UPDATE integraciones_fudo SET ultimo_sync_at = now(), ultimo_sync_error = NULL,
               ventas_hasta = GREATEST(COALESCE(ventas_hasta, $2::date), $2::date), updated_at = now()
@@ -438,7 +477,7 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
     );
     await avisarSinVincular(bid);
     console.log(`[fudo] negocio ${bid} (${origen}): ${productos.productos} productos, ${ventas.ventas} ventas ${d}..${h}, ${volcado.filas} filas`);
-    return { ok: true, desde: d, hasta: h, productos, ventas: ventas.ventas, dias: ventas.dias.length, filas: volcado.filas };
+    return { ok: true, desde: d, hasta: h, productos, maestros, ventas: ventas.ventas, dias: ventas.dias.length, filas: volcado.filas };
   } catch (e) {
     await pool.query('UPDATE integraciones_fudo SET ultimo_sync_at = now(), ultimo_sync_error = $2, updated_at = now() WHERE business_id = $1',
       [bid, String(e.message).slice(0, 500)]).catch(() => {});
@@ -479,12 +518,41 @@ async function estado(businessId) {
     ultimo_sync_at: con.ultimo_sync_at,
     ultimo_sync_error: con.ultimo_sync_error,
     sincronizando: enCurso.has(Number(businessId)),
+    traer: normalizarTraer(con.traer),
+    maestros_at: con.maestros_at,
+    maestros_resumen: con.maestros_resumen,
     ...rows[0],
   };
 }
 
 /** Valida las claves pidiendo un token y guarda la conexión. La primera carga corre en segundo plano. */
-async function conectar(businessId, userId, { apiKey, apiSecret, branchId = null } = {}) {
+/** Qué trae el negocio de Fudo. Las ventas siempre (regla de la usuaria 17/11): no se pueden apagar. */
+const TRAER_DEFAULT = { ventas: true, articulos: true, insumos: true, compras: true };
+function normalizarTraer(t) {
+  const o = { ...TRAER_DEFAULT };
+  if (t && typeof t === 'object') for (const k of ['articulos', 'insumos', 'compras']) if (k in t) o[k] = !!t[k];
+  o.ventas = true;
+  return o;
+}
+
+async function cambiarTraer(businessId, userId, traer) {
+  const t = normalizarTraer(traer);
+  const { rows } = await pool.query('UPDATE integraciones_fudo SET traer = $2, updated_at = now() WHERE business_id = $1 RETURNING traer',
+    [businessId, JSON.stringify(t)]);
+  if (!rows[0]) return { error: 'fudo_no_conectado' };
+  const nombres = { articulos: 'artículos', insumos: 'insumos y recetas', compras: 'compras' };
+  const si = Object.keys(nombres).filter((k) => t[k]).map((k) => nombres[k]);
+  await avisar(businessId, {
+    actorUserId: userId,
+    type: 'fudo_traer',
+    title: 'Cambió lo que se trae de Fudo',
+    message: `Además de las ventas, Lazarillo trae de Fudo: ${si.length ? si.join(', ') : 'nada más'}.`,
+    metadata: { traer: t },
+  });
+  return { ok: true, traer: t };
+}
+
+async function conectar(businessId, userId, { apiKey, apiSecret, branchId = null, traer = null } = {}) {
   const key = String(apiKey || '').trim();
   const secret = String(apiSecret || '').trim();
   if (!key || !secret) return { error: 'faltan_claves' };
@@ -502,19 +570,19 @@ async function conectar(businessId, userId, { apiKey, apiSecret, branchId = null
   }
   const { rows: previa } = await pool.query('SELECT 1 FROM integraciones_fudo WHERE business_id = $1', [businessId]);
   await pool.query(
-    `INSERT INTO integraciones_fudo (business_id, branch_id, api_key, api_secret, token, token_exp, conectado_por, conectado_at, ultimo_sync_error, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, now(), NULL, now())
+    `INSERT INTO integraciones_fudo (business_id, branch_id, api_key, api_secret, token, token_exp, conectado_por, conectado_at, ultimo_sync_error, traer, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now(), NULL, $8, now())
      ON CONFLICT (business_id) DO UPDATE SET
        branch_id = EXCLUDED.branch_id, api_key = EXCLUDED.api_key, api_secret = EXCLUDED.api_secret,
        token = EXCLUDED.token, token_exp = EXCLUDED.token_exp, conectado_por = EXCLUDED.conectado_por,
-       conectado_at = now(), ultimo_sync_error = NULL, updated_at = now()`,
-    [businessId, branch, encryptSecret(key), encryptSecret(secret), encryptSecret(tok.token), tok.exp, userId || null]
+       conectado_at = now(), ultimo_sync_error = NULL, traer = EXCLUDED.traer, updated_at = now()`,
+    [businessId, branch, encryptSecret(key), encryptSecret(secret), encryptSecret(tok.token), tok.exp, userId || null, JSON.stringify(normalizarTraer(traer))]
   );
   await avisar(businessId, {
     actorUserId: userId,
     type: 'fudo_conectado',
     title: previa[0] ? 'Se volvió a conectar Fudo' : 'Se conectó Fudo',
-    message: 'Lazarillo trae las ventas de Fudo todas las noches. La primera vez trae los últimos 3 meses.',
+    message: 'Lazarillo trae de Fudo las ventas (y lo que se eligió: artículos, insumos, compras) todas las noches. La primera vez trae los últimos 3 meses.',
   });
   setImmediate(() => {
     sincronizar(businessId, { origen: 'conexion' }).catch((e) => console.error('[fudo] primera carga', businessId, e.message));
@@ -616,8 +684,8 @@ async function corridaDiaria() {
 }
 
 module.exports = {
-  estado, conectar, desconectar, sincronizar, listarProductos, vincular, corridaDiaria,
+  estado, conectar, desconectar, sincronizar, cambiarTraer, listarProductos, vincular, corridaDiaria,
   // para tests
   _diaLocal: diaLocal, _filtroCierre: filtroCierre, _tramos: tramos, _ventasAFilas: ventasAFilas,
-  _normalizar: normalizar, _sugerir: sugerir,
+  _normalizar: normalizar, _sugerir: sugerir, _normalizarTraer: normalizarTraer,
 };
