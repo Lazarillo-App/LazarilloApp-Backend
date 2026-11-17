@@ -1355,6 +1355,61 @@ exports.searchPadrino = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUT /businesses/:id/articles/clasificacion
+// Body: { ids: number[], campo: 'rubro' | 'subrubro', valor: string }
+// Asigna el mismo rubro (o subrubro) a muchos artículos de una vez, desde el ⋮ de un
+// rubro/subrubro del panel (Diego 16/11/2026). Convención invertida del proyecto:
+//   Rubro UI    = maxi_articles.subrubro  / app_articles.rubro
+//   Subrubro UI = maxi_articles.categoria / app_articles.subrubro
+// Una sola consulta por tabla y un solo aviso en la campanita.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.asignarClasificacion = async (req, res, next) => {
+  const bizId = getBusinessId(req);
+  const campo = String(req.body?.campo || '');
+  const valor = String(req.body?.valor ?? '').trim();
+  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter((n) => Number.isFinite(n) && n !== 0))];
+  if (!Number.isFinite(bizId) || !['rubro', 'subrubro'].includes(campo) || !valor || !ids.length || ids.length > 5000 || valor.length > 120) {
+    return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  }
+  const maxiIds = ids.filter((n) => n > 0);
+  const appIds = ids.filter((n) => n < 0);
+  const colMaxi = campo === 'rubro' ? 'subrubro' : 'categoria';
+  const colApp = campo === 'rubro' ? 'rubro' : 'subrubro';
+  const storageBizId = await resolveStorageBizId(bizId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const r1 = maxiIds.length ? await client.query(
+      `UPDATE maxi_articles SET ${colMaxi} = $1, updated_at = NOW()
+        WHERE business_id = $2 AND articulo_id = ANY($3::int[]) AND ${colMaxi} IS DISTINCT FROM $1`,
+      [valor, storageBizId, maxiIds]) : { rowCount: 0 };
+    const r2 = appIds.length ? await client.query(
+      `UPDATE app_articles SET ${colApp} = $1, updated_at = NOW()
+        WHERE business_id = $2 AND id = ANY($3::int[]) AND ${colApp} IS DISTINCT FROM $1`,
+      [valor, storageBizId, appIds]) : { rowCount: 0 };
+    await client.query('COMMIT');
+    invalidateCacheForBiz(bizId);
+    if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+    const n = r1.rowCount + r2.rowCount;
+    if (n > 0) {
+      avisarAlEquipoSinEsperar({
+        businessId: bizId, actorUserId: req.user?.id, type: 'articulo_update',
+        title: `${campo === 'rubro' ? 'Rubro' : 'Subrubro'} «${valor}» asignado a ${n} artículo${n === 1 ? '' : 's'}`,
+        metadata: { kind: 'articulo_update', scope: 'articulo', ids, campo, valor },
+      });
+    }
+    return res.json({ ok: true, actualizados: n });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { }
+    console.error('[asignarClasificacion]', e.message);
+    next(e);
+  } finally {
+    client.release();
+  }
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /businesses/:id/articles/rubros/rename
 // Body: { old: string, new: string }
 // Renombra el "rubro" UI (que en DB es maxi_articles.subrubro y app_articles.rubro).
