@@ -333,5 +333,35 @@
     "tipo": "cambio",
     "id": 109,
     "nota": "17/11: salidas cargadas solas al arrancar (back #203): Container Bar 19.571 u, Comercio 31.655, Container FC 230; Bar oct-2026 1.520 (pases entre PDV aparte). Consulta de salidas del summary: 1,2 ms. Palermo suites daba error (codigo/cantidad en texto) → corregido y recargado. Diego: Todo por defecto (front). Manual y paso a paso actualizados (back #204, front #387). Falta: sumar salidas al consumo teórico (#2)."
+  },
+  {
+    "clave": "2026-11-17-96",
+    "tipo": "tarea",
+    "titulo": "Food cost en sus 3 tipos: teórico (ventas × receta), por compras y real con stock",
+    "modulo": "recetas",
+    "prioridad": "alta",
+    "estado": "pendiente",
+    "detalle": "Diego 17/11: a desarrollar. Tres food cost, lado a lado:\n1) TEÓRICO: unidades × receta (lo que tendría que haber costado). Usa las unidades en «Todo» (ventas + salidas de stock, #109), para que comida de personal y BigBox no parezcan desperdicio. Hoy no existe: solo está el costo % de cada receta por artículo.\n2) POR COMPRAS (el que se ve hoy): compras de mercadería ÷ ventas del período. Es aproximado: para ser exacto necesita el relevamiento de stock inicial y final.\n3) REAL: (stock inicial + compras − stock final) ÷ ventas. Necesita contar el stock al principio y al final del período (módulo Stock).\nLa diferencia real − teórico es lo que se pierde (mermas, desperdicio, faltantes). Relacionado: #2 (punto de equilibrio con consumo teórico)."
+  },
+  {
+    "clave": "2026-11-17-97",
+    "tipo": "cambio",
+    "id": 109,
+    "estado": "hecha",
+    "nota": "Hecha: filtro Todo / Ventas / Stock con datos reales (back #199 #203 #205, front #383 #387 #388; Manual y paso a paso). Lo del consumo teórico pasa a «Food cost en sus 3 tipos: teórico (ventas × receta), por compras y real con stock»."
+  },
+  {
+    "clave": "2026-11-17-98",
+    "tipo": "cambio",
+    "id": 2,
+    "nota": "17/11: el consumo teórico (unidades Todo × receta) se arma en «Food cost en sus 3 tipos: teórico (ventas × receta), por compras y real con stock»; este punto de equilibrio lo usa."
+  },
+  {
+    "clave": "2026-11-17-99",
+    "tipo": "manual_seccion",
+    "capitulo": "food-cost",
+    "seccion": "el-panel",
+    "buscar": "**▦** muestra los números y **∿** el gráfico mes a mes.",
+    "reemplazar": "**▦** muestra los números y **∿** el gráfico mes a mes.\n\nOjo: hoy es el food cost **por compras** (lo que compraste ÷ lo que vendiste). Para que sea exacto hace falta contar el **stock al principio y al final** del período: real = stock inicial + compras − stock final. Lo que compraste y quedó en la cámara no se consumió ese mes."
   }
 ]
