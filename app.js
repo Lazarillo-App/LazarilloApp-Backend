@@ -278,6 +278,7 @@ app.use('/api/businesses/:businessId/mercadopago', (req, res, next) => {
   return next();
 }, require('./routes/mercadopagoRoutes'));
 app.use('/api/businesses/:businessId/mercadolibre', require('./routes/mercadolibreRoutes'));
+app.use('/api/businesses/:businessId/fudo', require('./routes/fudoRoutes'));
 app.use('/api/businesses/:businessId/pulso', pulsoRoutes);
 app.use('/api/businesses/:businessId/kit', kitAppRoutes);
 
