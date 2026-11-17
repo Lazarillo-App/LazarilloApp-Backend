@@ -173,8 +173,8 @@ async function codigoDeRubro(client, businessId, nombre, cache) {
   if (codigo == null) {
     codigo = rows.reduce((m, r) => Math.max(m, Number(r.codigo) || 0), 0) + 1;
     await client.query(
-      `INSERT INTO insumo_rubros (business_id, codigo, codigo_maxi, nombre, activo) VALUES ($1, $2, $2, $3, true)
-       ON CONFLICT (business_id, codigo) DO NOTHING`, [businessId, codigo, nombre]);
+      `INSERT INTO insumo_rubros (business_id, codigo, codigo_maxi, nombre, activo) VALUES ($1, $2, $4, $3, true)
+       ON CONFLICT (business_id, codigo) DO NOTHING`, [businessId, codigo, nombre, codigo]);
   }
   cache.set(k, codigo);
   return codigo;
@@ -391,8 +391,8 @@ async function aplicarRecetas(bid, recetasPorProducto) {
       } else {
         const { rows } = await client.query(
           `INSERT INTO recetas (article_id, business_id, nombre, descripcion, porciones, porcentaje_venta, costo_total, active, origen, created_at, updated_at)
-           SELECT $1, $2, nombre, '', 1, 0, 0, TRUE, 'fudo', NOW(), NOW() FROM maxi_articles WHERE business_id = $2 AND articulo_id = $1
-           ON CONFLICT (article_id, business_id) DO NOTHING RETURNING id`, [articleId, bid]);
+           SELECT $1, $2, nombre, '', 1, 0, 0, TRUE, 'fudo', NOW(), NOW() FROM maxi_articles WHERE business_id = $3 AND articulo_id = $4
+           ON CONFLICT (article_id, business_id) DO NOTHING RETURNING id`, [articleId, bid, bid, articleId]);
         if (!rows[0]) continue;
         recetaId = rows[0].id;
         nuevas++;
@@ -448,9 +448,9 @@ async function aplicarCompras(bid, branchId, facturas, desde, hasta) {
     for (const f of nuevas) if (f.proveedor) provs.set(f.proveedor, f);
     for (const [id, f] of provs) {
       await client.query(
-        `INSERT INTO suppliers (id, business_id, nombre, razon_social, cuit, updated_at) VALUES ($1, $2, $3, $3, $4, NOW())
+        `INSERT INTO suppliers (id, business_id, nombre, razon_social, cuit, updated_at) VALUES ($1, $2, $3, $5, $4, NOW())
          ON CONFLICT (business_id, id) DO UPDATE SET nombre = EXCLUDED.nombre, cuit = COALESCE(EXCLUDED.cuit, suppliers.cuit), updated_at = NOW()`,
-        [id, bid, f.proveedorNombre, f.cuit]);
+        [id, bid, f.proveedorNombre, f.cuit, f.proveedorNombre]);
     }
     // Gastos borrados o anulados en Fudo (y los que ahora están cargados en Lazarillo) se van.
     await client.query(
