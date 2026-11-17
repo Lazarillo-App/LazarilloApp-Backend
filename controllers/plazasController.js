@@ -76,17 +76,14 @@ async function puedeVer(req, plaza) {
 // para arriba»): dueño/admin todos los del negocio; el jefe, los sectores que conduce.
 async function sectoresGestionables(req, bizId) {
   if (esGestor(req)) {
-    let { rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]);
-    // Negocio sin sectores (Diego 16/11/2026, Renato: «no me deja agregar una plaza»): el dueño no
-    // tenía cómo crear la primera plaza. Se crea el sector fijo «Todos» (todo el negocio), igual que
-    // hace Configuración › Sectores la primera vez que se abre (sectoresController.ensureSectorTodos).
-    if (!rows.length && bizId) {
-      await pool.query(
-        `INSERT INTO sectores (business_id, nombre, color, es_fijo)
-         SELECT $1, 'Todos', '#3b82f6', TRUE
-          WHERE NOT EXISTS (SELECT 1 FROM sectores WHERE business_id = $1 AND es_fijo = TRUE)`, [bizId]);
-      ({ rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]));
-    }
+    // Negocio sin sectores propios (Diego 16/11/2026, Renato: «no me deja agregar una plaza»; y 17/11:
+    // «Todos debería llamarse Cocina»): se crea solo el sector «Cocina» para poder armar la primera
+    // plaza. «Todos» (fijo, todo el negocio) no cuenta: es del alcance de Staff, no un puesto.
+    await pool.query(
+      `INSERT INTO sectores (business_id, nombre, color, es_fijo)
+       SELECT $1, 'Cocina', NULL, FALSE
+        WHERE NOT EXISTS (SELECT 1 FROM sectores WHERE business_id = $1 AND COALESCE(es_fijo, FALSE) = FALSE)`, [bizId]);
+    const { rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]);
     return rows.map((r) => Number(r.id));
   }
   if (req.businessRole !== 'staff') return [];
@@ -144,11 +141,13 @@ exports.list = async (req, res, next) => {
         ORDER BY s.nombre, p.orden, p.nombre`, params);
     const gestionables = await sectoresGestionables(req, bizId);
     const { rows: secs } = gestionables.length ? await pool.query(
-      'SELECT id, nombre FROM sectores WHERE business_id = $1 AND id = ANY($2::int[]) ORDER BY nombre', [bizId, gestionables]) : { rows: [] };
+      // «Todos» (fijo) no se ofrece para plazas: es el alcance de Staff, no un puesto (Diego 17/11/2026).
+      `SELECT id, nombre FROM sectores WHERE business_id = $1 AND id = ANY($2::int[]) AND COALESCE(es_fijo, FALSE) = FALSE
+        ORDER BY nombre`, [bizId, gestionables]) : { rows: [] };
     res.json({ ok: true,
       plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos,
         puedeEditar: gestionables.includes(Number(r.sector_id)) })),
-      puedeCrear: secs.length > 0, sectores: secs.map((x) => ({ id: x.id, nombre: x.nombre })) });
+      puedeCrear: secs.length > 0, puedeCrearSector: esGestor(req), sectores: secs.map((x) => ({ id: x.id, nombre: x.nombre })) });
   } catch (e) { next(e); }
 };
 
@@ -224,6 +223,26 @@ async function congelarOrden(plazaId) {
       WHERE pp.plaza_id = $1
      ON CONFLICT (plaza_id, article_id) DO NOTHING`, [plazaId]);
 }
+
+/** POST /businesses/:businessId/plazas/sectores  { nombre } — crear un sector desde el editor de la plaza
+ *  (Diego 17/11/2026: «los sectores no estaría bueno que se creen desde ahí?»). Solo dueño/admin; nace
+ *  sin alcance de Staff (se completa en Configuración › Sectores si hace falta). */
+exports.crearSector = async (req, res, next) => {
+  try {
+    const bizId = num(req.businessId);
+    if (!esGestor(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const nombre = String(req.body?.nombre || '').trim().slice(0, 40);
+    if (!nombre) return res.status(400).json({ ok: false, error: 'nombre_requerido' });
+    const { rows: igual } = await pool.query(
+      'SELECT id, nombre FROM sectores WHERE business_id = $1 AND lower(nombre) = lower($2) LIMIT 1', [bizId, nombre]);
+    if (igual.length) return res.json({ ok: true, sector: { id: igual[0].id, nombre: igual[0].nombre }, existia: true });
+    const { rows } = await pool.query(
+      `INSERT INTO sectores (business_id, nombre, color, es_fijo) VALUES ($1, $2, NULL, FALSE) RETURNING id`, [bizId, nombre]);
+    avisarAbm(req, { businessId: bizId, type: 'sector_create', title: `Sector nuevo: ${nombre}`,
+      metadata: { scope: 'sector', ids: [rows[0].id] } });
+    res.status(201).json({ ok: true, sector: { id: rows[0].id, nombre } });
+  } catch (e) { next(e); }
+};
 
 /** POST /businesses/:businessId/plazas  { sectorId, nombre, articleIds } */
 exports.create = async (req, res, next) => {
