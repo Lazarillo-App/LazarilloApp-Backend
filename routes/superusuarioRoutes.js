@@ -158,6 +158,16 @@ router.get('/buscar-alcance', async (req, res, next) => {
 });
 
 // Avisos del panel (solapa "Admins" de la campana): todo lo que hace el equipo acá.
+// Soporte Lazarillo por cuenta (tablero #103): listar y prender/apagar. Al soltar, los super
+// usuarios dejan de ver la cuenta; el cliente recibe el aviso en la campanita.
+const soporteCuentas = require('../services/soporteCuentasService');
+router.get('/soporte-cuentas', async (_req, res, next) => {
+  try { responder(res, await soporteCuentas.listar()); } catch (e) { next(e); }
+});
+router.patch('/soporte-cuentas/:orgId', async (req, res, next) => {
+  try { responder(res, await soporteCuentas.cambiar(req.params.orgId, req.body?.activo, req.user.id)); } catch (e) { next(e); }
+});
+
 router.get('/actividad', async (req, res, next) => {
   try { responder(res, await actividad.listar(req.user.id, req.query.limite)); } catch (e) { next(e); }
 });

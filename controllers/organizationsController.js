@@ -67,6 +67,7 @@ exports.getMyOrganization = async (req, res, next) => {
          o.display_name,
          o.maxi_codcli,
          o.settings,
+         o.soporte_activo,   -- Soporte Lazarillo: el Equipo del cliente lo muestra (tablero #104)
          o.created_at,
          o.updated_at,
          json_agg(
