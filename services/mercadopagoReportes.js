@@ -143,7 +143,17 @@ const num = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 const fechaDe = (v) => (String(v || '').match(/\d{4}-\d{2}-\d{2}/) || [''])[0];
-const horaDe = (v) => (String(v || '').match(/T(\d{2}:\d{2})/) || ['', ''])[1];
+const fechaAR = (v) => fechaDe(enAR(v) || v);
+// 17/11: el reporte viene en la zona de la cuenta (GMT-04 por defecto) y Lautaro veía todo una hora antes.
+// Con zona en el texto se pasa a la hora de Argentina; sin zona queda como viene.
+const fmtAR = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Argentina/Buenos_Aires', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+const enAR = (v) => {
+  const t = String(v || '');
+  if (!/T\d{2}:\d{2}.*(Z|[+-]\d{2}:?\d{2})$/.test(t)) return null;
+  const ms = Date.parse(t);
+  return Number.isFinite(ms) ? fmtAR.format(new Date(ms)).replace(' ', 'T') : null;
+};
+const horaDe = (v) => ((enAR(v) || String(v || '')).match(/T(\d{2}:\d{2})/) || ['', ''])[1];
 
 // Qué es cada débito, en palabras.
 function tipoEgreso(desc) {
@@ -177,9 +187,12 @@ function analizar(filas) {
     if (id && nombre && num(f.NET_CREDIT_AMOUNT) > 0) nombres.set(id, nombre);
     const doc = String(f.PAYER_ID_NUMBER || '').replace(/\s+/g, '').trim();
     if (id && doc && num(f.NET_CREDIT_AMOUNT) > 0) docs.set(id, doc);
-    const fecha = fechaDe(f.DATE) || fechaDe(f.TRANSACTION_DATE);
+    const fecha = fechaAR(f.DATE) || fechaAR(f.TRANSACTION_DATE);
     if (!fecha) continue;
     const debito = Math.abs(num(f.NET_DEBIT_AMOUNT));
+    // 17/11: «reserve_for_payout/payment/refund…» es la plata que MP aparta antes de mandar el retiro o el pago:
+    // el mismo importe vuelve a aparecer como payout/payment. No es otra salida (duplicaba 41 de 42 en el Bar).
+    if (/^reserve_for_/i.test(String(f.DESCRIPTION || ''))) continue;
     if (debito > 0) {
       const base = `mpr:${id || fecha}:${String(f.DESCRIPTION || '').toLowerCase()}`;
       const n = (vistos.get(base) || 0) + 1;
