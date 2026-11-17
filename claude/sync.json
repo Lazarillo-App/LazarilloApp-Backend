@@ -238,5 +238,22 @@
     "tipo": "cambio",
     "id": 44,
     "nota": "Revisado por Mairene + Claude (17/11): las pestañas Propios / Soporte entraron con la #99 y soltar / volver a activar una cuenta con la #103. Si no falta nada más, se puede cerrar."
+  },
+  {
+    "clave": "2026-11-17-tz-01",
+    "tipo": "tarea",
+    "modulo": "resultados",
+    "prioridad": "alta",
+    "titulo": "Zoom propio en el Panel de Resultados (A− / A+)",
+    "detalle": "Pedido de Diego (17/11): Martín no ve bien el tablero de resultados y usa el zoom del navegador, que le rompe la navegación (cambia los anchos y el header). Sumar un A− 100% A+ que agrande solo el contenido del panel (no el header), recordado en el navegador, como el que ya tienen las plazas de Tableros (front feat/tableros-zoom-rubros). Probar a 1100–1920 y que los gráficos se redibujen bien."
+  },
+  {
+    "clave": "2026-11-17-tz-02",
+    "tipo": "tarea",
+    "modulo": "tableros",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "titulo": "Plazas: zoom de tarjetas y rubros plegables / ocultos en el editor",
+    "detalle": "Pedido de Diego (17/11). Zoom A− 100% A+ (80–200%) solo para las tarjetas de la plaza, recordado en el navegador. Editor de plaza: rubros/subrubros plegables (arrancan abiertos) y ojito para ocultarlos al armar plazas; los ocultos quedan como chips arriba de la lista y vuelven con un toque (por negocio, en este navegador). Front: rama feat/tableros-zoom-rubros."
   }
 ]
