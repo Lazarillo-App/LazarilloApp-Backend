@@ -45,6 +45,12 @@ async function asegurarConfig(token, { llamar: ll = llamar } = {}) {
     const ACEPTA = ['file_name_prefix', 'frequency', 'separator', 'display_timezone', 'report_translation', 'include_withdrawal_at_end'];
     const cfg = { columns: [...(actual.data.columns || []).map((c) => ({ key: c.key })), ...faltan.map((key) => ({ key }))] };
     ACEPTA.forEach((k) => { const v = actual.data[k]; if (v != null && !(Array.isArray(v) && v.every((x) => x == null))) cfg[k] = v; });
+    // 17/11 (logs de FC y Mairene): sin execute_after_withdrawal MP sigue diciendo «Invalid execute_after_withdrawal»
+    // (lo valida aunque no se mande). Va explícito, como en el ejemplo de la doc: false = no arma un reporte tras
+    // cada retiro. include_withdrawal_at_end también como booleano.
+    cfg.execute_after_withdrawal = false;
+    cfg.include_withdrawal_at_end = actual.data.include_withdrawal_at_end === true;
+    if (!cfg.file_name_prefix) cfg.file_name_prefix = 'lazarillo';
     const r = await ll(url, { token, method: 'PUT', body: cfg });
     return r.ok ? { ok: true } : { error: 'mp_reporte_config', detalle: r.data };
   }
