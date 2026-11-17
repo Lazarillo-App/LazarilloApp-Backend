@@ -8,6 +8,7 @@ const pantallas = require('../controllers/pantallasController');
 router.get('/', ctrl.list);
 router.get('/articulos', ctrl.articulos);
 router.put('/colores', ctrl.guardarColor);
+router.post('/sectores', ctrl.crearSector);
 router.post('/', ctrl.create);
 router.get('/:id/vista', ctrl.vista);
 router.put('/:id/fichas/:articleId/item', ctrl.editarItem);
