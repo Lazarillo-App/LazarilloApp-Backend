@@ -158,6 +158,70 @@ function ventasAFilas(respuestas) {
   return { filas: lista, ventas: ventasContadas, diferencia: Math.round(diferencia * 100) / 100 };
 }
 
+const TIPO_VENTA = { 'EAT-IN': 'Salón', TAKEAWAY: 'Para llevar', DELIVERY: 'Delivery' };
+
+/** Instante ISO (UTC) → «YYYY-MM-DD HH:MM:SS» de Argentina, como guarda el kit las ventas del panel. */
+function horaLocal(iso) {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  return new Date(t + OFFSET_AR * 3600_000).toISOString().slice(0, 19).replace('T', ' ');
+}
+
+/**
+ * Ventas de Fudo → filas de gestion_ventas (panel de Resultados de Diego, el mismo que llena el kit de
+ * MaxiRest con el informe 22): una fila por cobro (medio de pago) de cada venta cerrada, con su canal
+ * (tipo), hora, personas y cliente. Sin cobros registrados: una fila por el total, sin forma de cobro.
+ * rowId «fudo-<venta>-<pago>»: estable entre lecturas, así una corrección manual (importeTrabajado/
+ * importeManual) no se pierde. El descuento de la venta va en su primera fila.
+ */
+function cobrosDeVentas(respuestas) {
+  const incluidos = new Map();
+  const ventas = [];
+  for (const r of respuestas) {
+    for (const x of r?.included || []) incluidos.set(`${x.type}:${x.id}`, x);
+    for (const v of r?.data || []) ventas.push(v);
+  }
+  const buscar = (ref) => (ref ? incluidos.get(`${ref.type}:${ref.id}`) : null);
+  const filas = [];
+  for (const v of ventas) {
+    const a = v.attributes || {};
+    if (a.saleState && a.saleState !== 'CLOSED') continue;
+    const cuando = a.closedAt || a.createdAt;
+    const fecha = horaLocal(cuando);
+    if (!fecha) continue;
+    // Descuento = lo que suman los ítems no cancelados menos el total cobrado (si da positivo).
+    const bruto = (v.relationships?.items?.data || []).map(buscar)
+      .filter((it) => it && !it.attributes?.canceled).reduce((s2, it) => s2 + num(it.attributes?.price), 0);
+    const descuento = Math.max(0, Math.round((bruto - num(a.total)) * 100) / 100);
+    const base = {
+      comprobant: `Fudo ${v.id}`,
+      hora: fecha.slice(11, 16),
+      tipo: TIPO_VENTA[a.saleType] || a.saleType || null,
+      cub: a.people == null ? null : String(a.people),
+      cliNombre: a.customerName || null,
+      total: num(a.total),
+      fecha,
+    };
+    const pagos = (v.relationships?.payments?.data || []).map(buscar).filter((p) => p && !p.attributes?.canceled);
+    if (!pagos.length) {
+      filas.push({ ...base, rowId: `fudo-${v.id}-0`, cobro: null, codCobro: null, importe: num(a.total), descuento });
+      continue;
+    }
+    pagos.forEach((p, i) => {
+      const pm = buscar(p.relationships?.paymentMethod?.data);
+      filas.push({
+        ...base,
+        rowId: `fudo-${v.id}-${p.id}`,
+        cobro: pm?.attributes?.name || null,
+        codCobro: pm ? `FUDO-${pm.id}` : null,
+        importe: num(p.attributes?.amount),
+        descuento: i === 0 ? descuento : 0,
+      });
+    });
+  }
+  return filas;
+}
+
 /** Nombre comparable: minúsculas, sin acentos ni signos, espacios simples. */
 function normalizar(s) {
   return String(s || '')
@@ -316,8 +380,10 @@ async function traerVentas(con, desde, hasta) {
   const dias = new Set();
   for (const [d, h] of tramos(desde, hasta)) {
     const ruta = `/sales?filter[closedAt]=${encodeURIComponent(filtroCierre(d, h))}`
-      + `&filter[saleState]=${encodeURIComponent('in.(CLOSED)')}&include=items,discounts`;
-    const r = ventasAFilas(await api.todas(ruta));
+      + `&filter[saleState]=${encodeURIComponent('in.(CLOSED)')}&include=items,discounts,payments,payments.paymentMethod`;
+    const paginas = await api.todas(ruta);
+    const r = ventasAFilas(paginas);
+    const cobros = cobrosDeVentas(paginas);
     ventas += r.ventas;
     diferencia += r.diferencia;
 
@@ -330,6 +396,32 @@ async function traerVentas(con, desde, hasta) {
           `INSERT INTO fudo_ventas_dia (business_id, day, fudo_id, qty, amount)
            SELECT $1, * FROM UNNEST($2::date[], $3::text[], $4::numeric[], $5::numeric[])`,
           [bid, r.filas.map((f) => f.day), r.filas.map((f) => f.fudo_id), r.filas.map((f) => f.qty), r.filas.map((f) => f.amount)]
+        );
+      }
+      // Panel de Resultados (gestion_ventas): se van las de Fudo de estos días que ya no están (anuladas
+      // en Fudo) y se escriben/actualizan las demás. importeTrabajado e importeManual no se tocan.
+      await client.query(
+        `DELETE FROM gestion_ventas WHERE business_id = $1 AND "rowId" LIKE 'fudo-%'
+           AND fecha >= $2::date AND fecha < $3::date + 1 AND NOT ("rowId" = ANY($4::text[]))`,
+        [bid, d, h, cobros.map((c) => c.rowId)]
+      );
+      if (cobros.length) {
+        await client.query(
+          `INSERT INTO gestion_ventas (business_id, branch_id, "rowId", comprobant, hora, tipo, cub, cobro, "codCobro",
+                                      importe, "importeTrabajado", total, descuento, "cliNombre", fecha)
+           SELECT $1, $2::bigint, t."rowId", t.comprobant, t.hora, t.tipo, t.cub, t.cobro, t."codCobro",
+                  t.importe, t.importe, t.total, t.descuento, t."cliNombre", t.fecha
+             FROM UNNEST($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
+                         $10::numeric[], $11::numeric[], $12::numeric[], $13::text[], $14::timestamp[])
+               AS t("rowId", comprobant, hora, tipo, cub, cobro, "codCobro", importe, total, descuento, "cliNombre", fecha)
+           ON CONFLICT (business_id, "rowId") DO UPDATE SET
+             comprobant = EXCLUDED.comprobant, hora = EXCLUDED.hora, tipo = EXCLUDED.tipo, cub = EXCLUDED.cub,
+             cobro = EXCLUDED.cobro, "codCobro" = EXCLUDED."codCobro", importe = EXCLUDED.importe, total = EXCLUDED.total,
+             descuento = EXCLUDED.descuento, "cliNombre" = EXCLUDED."cliNombre", fecha = EXCLUDED.fecha`,
+          [bid, con.branch_id ?? null, cobros.map((c) => c.rowId), cobros.map((c) => c.comprobant), cobros.map((c) => c.hora),
+            cobros.map((c) => c.tipo), cobros.map((c) => c.cub), cobros.map((c) => c.cobro), cobros.map((c) => c.codCobro),
+            cobros.map((c) => c.importe), cobros.map((c) => c.total), cobros.map((c) => c.descuento), cobros.map((c) => c.cliNombre),
+            cobros.map((c) => c.fecha)]
         );
       }
       await client.query('COMMIT');
@@ -706,6 +798,6 @@ async function corridaDiaria() {
 module.exports = {
   estado, conectar, desconectar, sincronizar, cambiarTraer, listarProductos, vincular, corridaDiaria,
   // para tests
-  _diaLocal: diaLocal, _filtroCierre: filtroCierre, _tramos: tramos, _ventasAFilas: ventasAFilas,
+  _diaLocal: diaLocal, _cobrosDeVentas: cobrosDeVentas, _filtroCierre: filtroCierre, _tramos: tramos, _ventasAFilas: ventasAFilas,
   _normalizar: normalizar, _sugerir: sugerir, _diaDe: diaDe, _normalizarTraer: normalizarTraer,
 };

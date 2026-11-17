@@ -115,3 +115,26 @@ test('día de una columna DATE: Date local del driver, texto ISO o nada', () => 
   assert.strictEqual(_diaDe(null), null);
   assert.strictEqual(_diaDe(new Date('basura')), null);
 });
+
+test('cobros para el panel de Resultados: una fila por pago, canal, hora local y descuento', () => {
+  const { _cobrosDeVentas } = require('./fudoService');
+  const filas = _cobrosDeVentas([{
+    data: [
+      { type: 'Sale', id: '3', attributes: { closedAt: '2026-11-17T15:14:46Z', total: 58050, saleState: 'CLOSED', saleType: 'EAT-IN', people: 3 },
+        relationships: { items: { data: [{ type: 'Item', id: '7' }] }, payments: { data: [{ type: 'Payment', id: '3' }, { type: 'Payment', id: '9' }] } } },
+      { type: 'Sale', id: '5', attributes: { closedAt: '2026-11-17T16:00:00Z', total: 1000, saleState: 'IN-COURSE' }, relationships: {} },
+    ],
+    included: [
+      { type: 'Item', id: '7', attributes: { price: 64500, quantity: 3 } },
+      { type: 'Payment', id: '3', attributes: { amount: 50000 }, relationships: { paymentMethod: { data: { type: 'PaymentMethod', id: '1' } } } },
+      { type: 'Payment', id: '9', attributes: { amount: 8050 }, relationships: { paymentMethod: { data: { type: 'PaymentMethod', id: '4' } } } },
+      { type: 'PaymentMethod', id: '1', attributes: { name: 'Efectivo' } },
+      { type: 'PaymentMethod', id: '4', attributes: { name: 'Tarj. Débito' } },
+    ],
+  }]);
+  assert.strictEqual(filas.length, 2);
+  assert.deepStrictEqual(filas[0], { comprobant: 'Fudo 3', hora: '12:14', tipo: 'Salón', cub: '3', cliNombre: null, total: 58050,
+    fecha: '2026-11-17 12:14:46', rowId: 'fudo-3-3', cobro: 'Efectivo', codCobro: 'FUDO-1', importe: 50000, descuento: 6450 });
+  assert.strictEqual(filas[1].descuento, 0);
+  assert.strictEqual(filas[1].cobro, 'Tarj. Débito');
+});
