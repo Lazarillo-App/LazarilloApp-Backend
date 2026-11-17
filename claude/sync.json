@@ -177,5 +177,66 @@
     "prioridad": "normal",
     "estado": "hecha",
     "business_id": 147
+  },
+  {
+    "clave": "2026-11-17-mv-45",
+    "tipo": "cambio",
+    "id": 45,
+    "nota": "Hecho por Mairene + Claude (16/11). Back aa22393: requireEdicionSeccion('recetas') corta las escrituras de recetas, fotos, métodos de cocción, elaborados, imports y plazas si el rol a medida no tiene Recetas en «editar». Las lecturas siguen abiertas (Resultados lee costos). Insumos queda afuera porque Compras también crea insumos. Falta: modo solo lectura en el front para roles con Recetas «ver»."
+  },
+  {
+    "clave": "2026-11-17-mv-55",
+    "tipo": "cambio",
+    "id": 55,
+    "nota": "Hecho por Mairene + Claude (16/11). Back b603b89: GET /api/places/direcciones (Geocoding de Google, solo AR, hasta 5 resultados, la clave queda en el back). Front db255ba: BuscadorDireccion en Editar sucursal completa ciudad, calle y coordenadas; busca tras una pausa al escribir. Usa la GOOGLE_MAPS_API_KEY del asistente de alta."
+  },
+  {
+    "clave": "2026-11-17-mv-84",
+    "tipo": "cambio",
+    "id": 84,
+    "nota": "Hecho por Mairene + Claude (16/11). Front 94d34a0: Clientes usa MenuColumna + filtrosColumna como Movimientos bancarios; los valores de cada lista se cuentan sobre lo que dejan las otras columnas; Sucursal cuenta cada sucursal por separado."
+  },
+  {
+    "clave": "2026-11-17-mv-101",
+    "tipo": "cambio",
+    "id": 101,
+    "nota": "Hecho por Mairene + Claude (17/11). Front: Configuración › Organización muestra solo la organización del negocio activo (antes dibujaba todas las del usuario, con sus QR)."
+  },
+  {
+    "clave": "2026-11-17-mv-98",
+    "tipo": "cambio",
+    "id": 98,
+    "nota": "Hecho por Mairene + Claude (17/11). Front: altas de insumo y artículo y tarjetas de Configuración dicen «código en tu punto de venta» en vez de «Código Maxi» / «sincronizar con Maxi»."
+  },
+  {
+    "clave": "2026-11-17-mv-102",
+    "tipo": "cambio",
+    "id": 102,
+    "nota": "Hecho por Mairene + Claude (17/11). Front: ConfigHistorialTab traduce las claves (items → Ingredientes, costoTotal → Costo total, porcentajeVenta → % costo objetivo, porciones → Rendimiento…) y formatea $ y %. Una clave sin traducción se pasa a palabras."
+  },
+  {
+    "clave": "2026-11-17-mv-103",
+    "tipo": "cambio",
+    "id": 103,
+    "nota": "Hecho por Mairene + Claude (17/11). Back 3894f7c: GET/PATCH /superusuarios/soporte-cuentas; cada cambio va a la Actividad de admins y avisa en la campanita de cada negocio de la cuenta. Front: pestaña «Soporte de cuentas» en el panel super (interruptor, confirmación al soltar, tarjetas en celular). Abierto: que el cliente pueda soltarlo solo desde Mi equipo."
+  },
+  {
+    "clave": "2026-11-17-mv-104",
+    "tipo": "cambio",
+    "id": 104,
+    "nota": "Hecho por Mairene + Claude (17/11). Front: Mi equipo muestra «Soporte Lazarillo activo» cuando la cuenta lo tiene (/me/organization ahora devuelve soporte_activo)."
+  },
+  {
+    "clave": "2026-11-17-mv-21",
+    "tipo": "cambio",
+    "id": 21,
+    "estado": "hecha",
+    "nota": "Ya estaba resuelto en el front #137 (10/11, useFoodCostKpi: las ventas sin artículo cuentan como «Sin rubro») y las tablas de Artículos suman __sinArticulo. La rama fix/ventas-articulos-inexistentes quedó vieja y se puede borrar. (Mairene + Claude, 17/11)"
+  },
+  {
+    "clave": "2026-11-17-mv-44",
+    "tipo": "cambio",
+    "id": 44,
+    "nota": "Revisado por Mairene + Claude (17/11): las pestañas Propios / Soporte entraron con la #99 y soltar / volver a activar una cuenta con la #103. Si no falta nada más, se puede cerrar."
   }
 ]
