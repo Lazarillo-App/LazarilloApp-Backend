@@ -31,10 +31,17 @@ async function leerPdv(pdv, schema) {
   const grupos = [];
   for (const t of tablas) {
     const { rows } = await pool.query(
-      `SELECT fecha::date AS day, COALESCE(codigo, 0)::bigint AS article_id, MAX(nombre) AS article_name,
-              COALESCE(TRIM(concepto), '') AS concepto, -SUM(cantidad)::numeric AS qty
-         FROM "${schema}"."${t}"
-        WHERE pdv = $1 AND fecha IS NOT NULL AND cantidad < 0 AND COALESCE(codigo, 0) <> 0
+      // Según el kit, codigo y cantidad pueden venir como número o como texto (Palermo suites):
+      // se normalizan antes de comparar.
+      `WITH f AS (
+         SELECT fecha::date AS day,
+                CASE WHEN TRIM(codigo::text) ~ '^[0-9]+$' THEN TRIM(codigo::text)::bigint ELSE 0 END AS article_id,
+                nombre, COALESCE(TRIM(concepto::text), '') AS concepto,
+                CASE WHEN TRIM(cantidad::text) ~ '^-?[0-9]+([.,][0-9]+)?$' THEN REPLACE(TRIM(cantidad::text), ',', '.')::numeric ELSE 0 END AS cantidad
+           FROM "${schema}"."${t}"
+          WHERE pdv = $1 AND fecha IS NOT NULL)
+       SELECT day, article_id, MAX(nombre) AS article_name, concepto, -SUM(cantidad)::numeric AS qty
+         FROM f WHERE cantidad < 0 AND article_id <> 0
         GROUP BY 1, 2, 4`,
       [pdv]
     );
