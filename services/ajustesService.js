@@ -84,6 +84,7 @@ async function guardarFunciones(businessId, ocultos, userId) {
   if (bid !== null && !(Number.isInteger(bid) && bid > 0)) return { error: 'negocio_invalido' };
   if (ocultos === null && bid !== null) {
     await pool.query(`DELETE FROM ajustes_alcance WHERE clave = 'modulos_ocultos' AND alcance = 'negocio' AND scope_id = $1`, [bid]);
+    require('../middleware/requireFuncion').limpiarCache();
     return { ok: true, ocultos: null };
   }
   if (!Array.isArray(ocultos) || ocultos.some((x) => !IDS_FUNCIONES.includes(x))) return { error: 'funciones_invalidas' };
@@ -91,6 +92,7 @@ async function guardarFunciones(businessId, ocultos, userId) {
   const out = await guardar({ clave: 'modulos_ocultos', alcance: bid ? 'negocio' : 'global', scope_id: bid, valor: lista,
     nota: 'Funciones por negocio' }, userId);
   if (out.error) return out;
+  require('../middleware/requireFuncion').limpiarCache();
   return { ok: true, ocultos: lista };
 }
 
