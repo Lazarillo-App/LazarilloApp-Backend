@@ -130,6 +130,7 @@ exports.list = async (req, res, next) => {
     }
     const { rows } = await pool.query(
       `SELECT p.id, p.nombre, p.sector_id, s.nombre AS sector_nombre,
+              (SELECT count(*)::int FROM pantallas pa WHERE pa.plaza_id = p.id AND pa.business_id = p.business_id AND pa.deleted_at IS NULL) AS tvs,
               COALESCE(json_agg(json_build_object('articleId', pp.article_id,
                 'nombre', (SELECT ma.nombre FROM maxi_articles ma WHERE ma.articulo_id = pp.article_id AND ma.business_id = p.business_id LIMIT 1))
                 ORDER BY pp.orden, pp.article_id) FILTER (WHERE pp.article_id IS NOT NULL), '[]') AS productos
@@ -145,7 +146,7 @@ exports.list = async (req, res, next) => {
       `SELECT id, nombre FROM sectores WHERE business_id = $1 AND id = ANY($2::int[]) AND COALESCE(es_fijo, FALSE) = FALSE
         ORDER BY nombre`, [bizId, gestionables]) : { rows: [] };
     res.json({ ok: true,
-      plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos,
+      plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos, tvs: r.tvs,
         puedeEditar: gestionables.includes(Number(r.sector_id)) })),
       puedeCrear: secs.length > 0, puedeCrearSector: esGestor(req), sectores: secs.map((x) => ({ id: x.id, nombre: x.nombre })) });
   } catch (e) { next(e); }
