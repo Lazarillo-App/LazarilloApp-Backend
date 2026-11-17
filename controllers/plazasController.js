@@ -15,6 +15,7 @@ const { recalcularCostoRecetas } = require('../services/costoRecetaService');
 const { createOrUpdateProposal, snapshotReceta } = require('../services/recetaProposals');
 const { normalizarCantidadUnidad, canonicalUnit } = require('../services/unidades');
 const { logAudit } = require('../services/audit/auditLog');
+const { avisarAbm } = require('../services/notificationService');
 
 // ── Unidades de un ingrediente (panel «En esta receta» de la plaza, Diego 11/11/2026) ──
 // Cada unidad se mide en su familia (peso en gr, volumen en ml, unidades en u) para poder pasar
@@ -75,7 +76,17 @@ async function puedeVer(req, plaza) {
 // para arriba»): dueño/admin todos los del negocio; el jefe, los sectores que conduce.
 async function sectoresGestionables(req, bizId) {
   if (esGestor(req)) {
-    const { rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]);
+    let { rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]);
+    // Negocio sin sectores (Diego 16/11/2026, Renato: «no me deja agregar una plaza»): el dueño no
+    // tenía cómo crear la primera plaza. Se crea el sector fijo «Todos» (todo el negocio), igual que
+    // hace Configuración › Sectores la primera vez que se abre (sectoresController.ensureSectorTodos).
+    if (!rows.length && bizId) {
+      await pool.query(
+        `INSERT INTO sectores (business_id, nombre, color, es_fijo)
+         SELECT $1, 'Todos', '#3b82f6', TRUE
+          WHERE NOT EXISTS (SELECT 1 FROM sectores WHERE business_id = $1 AND es_fijo = TRUE)`, [bizId]);
+      ({ rows } = await pool.query('SELECT id FROM sectores WHERE business_id = $1', [bizId]));
+    }
     return rows.map((r) => Number(r.id));
   }
   if (req.businessRole !== 'staff') return [];
@@ -227,6 +238,8 @@ exports.create = async (req, res, next) => {
     const { rows } = await pool.query(
       `INSERT INTO plazas (business_id, sector_id, nombre) VALUES ($1, $2, $3) RETURNING id`, [bizId, sectorId, nombre]);
     await guardarProductos(rows[0].id, req.body?.articleIds);
+    avisarAbm(req, { businessId: bizId, type: 'plaza_create', title: `Plaza nueva: ${nombre}`,
+      metadata: { scope: 'plaza', ids: [rows[0].id] } });
     res.status(201).json({ ok: true, id: rows[0].id });
   } catch (e) { next(e); }
 };
@@ -259,6 +272,8 @@ exports.remove = async (req, res, next) => {
       'UPDATE plazas SET deleted_at = NOW() WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL',
       [num(req.params.id), num(req.businessId)]);
     if (!rowCount) return res.status(404).json({ ok: false, error: 'not_found' });
+    avisarAbm(req, { businessId: bizId, type: 'plaza_delete', title: `Plaza eliminada: ${plaza.nombre}`,
+      metadata: { scope: 'plaza', ids: [plaza.id] } });
     res.json({ ok: true });
   } catch (e) { next(e); }
 };
