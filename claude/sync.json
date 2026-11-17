@@ -298,5 +298,12 @@
     "estado": "hecha",
     "titulo": "Plazas: zoom de tarjetas y rubros plegables / ocultos en el editor",
     "detalle": "Pedido de Diego (17/11). Zoom A− 100% A+ (80–200%) solo para las tarjetas de la plaza, recordado en el navegador. Editor de plaza: rubros/subrubros plegables (arrancan abiertos) y ojito para ocultarlos al armar plazas; los ocultos quedan como chips arriba de la lista y vuelven con un toque (por negocio, en este navegador). Front: rama feat/tableros-zoom-rubros."
+  },
+  {
+    "clave": "2026-11-17-91",
+    "tipo": "cambio",
+    "id": 109,
+    "estado": "en_curso",
+    "nota": "17/11: hecho back #199 (tabla stock_salidas, sync del informe 27 junto a ventas/compras, stock_qty en /sales/summary; pases entre PDV no se suman) + front #383 (chip del encabezado Ventas → Unidades · Todo / Ventas / Stock y Pesos; título Ventas/Unidades/Salidas; sin volver a pedir). Probado con salidas simuladas en el navegador. Falta: que se llene stock_salidas — el reloj de recetas solo corre en producción; en testing hace falta el «actualizar» del pulso. Después: medir el summary con datos y sumar las salidas al consumo teórico (#2)."
   }
 ]
