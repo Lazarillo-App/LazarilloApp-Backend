@@ -860,8 +860,10 @@ async function editarEmpleado(req, res) {
 }
 
 /* ───────────────────────── nómina compartida ─────────────────────────
- * GET    /nomina/candidatos  → negocios de la cartera del usuario (menos este)
- *                              con cuántos empleados tiene su nómina.
+ * GET    /nomina/candidatos  → negocios del MISMO DUEÑO que este (owner_id), a los que
+ *                              el usuario tiene acceso, con cuántos empleados tiene su
+ *                              nómina. Un super usuario/soporte ve muchas carteras: no
+ *                              se le ofrecen negocios de otros dueños (Diego 17/11/2026).
  * PUT    /nomina/vinculo     body { origenBusinessId } → este negocio pasa a usar
  *                              la nómina de ese (siempre se guarda la raíz).
  * DELETE /nomina/vinculo     → deja de compartir (si no hay cronogramas cargados).
@@ -880,7 +882,8 @@ async function candidatosNomina(req, res) {
        LEFT JOIN rrhh_nomina_vinculo v ON v.business_id = b.id
        LEFT JOIN app_businesses o ON o.id = v.origen_business_id
        WHERE b.id = ANY($1::bigint[])
-       ORDER BY empleados DESC, b.name`, [ids]
+         AND b.owner_id = (SELECT owner_id FROM app_businesses WHERE id = $2)
+       ORDER BY empleados DESC, b.name`, [ids, Number(req.businessId)]
     );
     return res.json({ ok: true, negocios: rows });
   } catch (e) {
@@ -896,6 +899,13 @@ async function vincularNomina(req, res) {
   try {
     if (!(await getEffectiveRole(req.user?.id, pedido))) {
       return res.status(403).json({ ok: false, error: 'sin_acceso_al_origen', message: 'Ese negocio no es de tu cartera.' });
+    }
+    const { rows: mismoDueno } = await pool.query(
+      `SELECT 1 FROM app_businesses a JOIN app_businesses o ON o.owner_id = a.owner_id
+        WHERE a.id = $1 AND o.id = $2`, [bizId, pedido]
+    );
+    if (!mismoDueno.length) {
+      return res.status(403).json({ ok: false, error: 'otro_dueno', message: 'Solo se comparte la nómina entre negocios del mismo dueño.' });
     }
     const raiz = await nominaDe(pedido);
     if (raiz === bizId) return res.status(400).json({ ok: false, error: 'ciclo', message: 'Ese negocio ya usa la nómina de este.' });
