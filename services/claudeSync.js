@@ -11,7 +11,7 @@
 // Tipos:
 //   { clave, tipo: 'tarea', titulo, detalle?, modulo?, prioridad?, estado?, business_id?, solicitante_id? }
 //      → crea el pendiente; si ya hay uno con ese título, no lo duplica (le suma el detalle como nota).
-//   { clave, tipo: 'cambio', id | titulo, estado?, prioridad?, modulo?, detalle?, nota? }
+//   { clave, tipo: 'cambio', id | titulo, nuevo_titulo?, estado?, prioridad?, modulo?, detalle?, nota? }
 //      → cambia una tarea existente y/o le agrega una nota.
 //   { clave, tipo: 'guia', texto }  → reemplaza la Guía del proyecto.
 //   { clave, tipo: 'guia_parche', buscar, reemplazar }
@@ -52,7 +52,9 @@ async function aplicar(e) {
     const id = await buscarTarea(e);
     if (!id) return { error: 'no_encontrada' };
     const cambios = {};
+    // nuevo_titulo (no «titulo»: ese sirve para BUSCAR la tarea cuando no hay id).
     for (const k of ['estado', 'prioridad', 'modulo', 'detalle', 'asignado_a', 'business_id']) if (e[k] !== undefined) cambios[k] = e[k];
+    if (e.nuevo_titulo) cambios.titulo = e.nuevo_titulo;
     const out = {};
     if (Object.keys(cambios).length) out.cambio = await tablero.actualizar(id, cambios, CLAUDE_USER_ID);
     if (e.nota) out.nota = await tablero.agregarNota(id, e.nota, CLAUDE_USER_ID);
