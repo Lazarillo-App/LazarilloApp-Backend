@@ -263,10 +263,20 @@ app.use('/api/businesses', metodosCoccionRoutes);
 app.use('/api/businesses/:businessId/notifications', notificationsRoutes);
 app.use('/api/businesses/:businessId/sync', syncRoutes);
 app.use('/api/businesses/:businessId/dashboard-store', dashboardStoreRoutes);
-app.use('/api/businesses/:businessId/rrhh', requireSeccion('rrhh'), rrhhRoutes);
+// Funciones por negocio (Diego 17/11/2026): lo oculto para el negocio también se corta acá.
+const { requireFuncion } = require('./middleware/requireFuncion');
+const funcionAdministracion = requireFuncion('conciliacion', 'movimientos-bancarios', 'clientes');
+const funcionClientes = requireFuncion('clientes');
+app.use('/api/businesses/:businessId/rrhh', requireFuncion('rrhh'), requireSeccion('rrhh'), rrhhRoutes);
 app.use('/api/businesses/:businessId/gestion', gestionRoutes);
-app.use('/api/businesses/:businessId/conciliacion', require('./routes/conciliacionRoutes'));
-app.use('/api/businesses/:businessId/mercadopago', require('./routes/mercadopagoRoutes'));
+app.use('/api/businesses/:businessId/conciliacion', funcionAdministracion, require('./routes/conciliacionRoutes'));
+// Mercado Pago: la conexión y los cargos (los usa el Panel) quedan siempre; lo que alimenta la
+// conciliación y los clientes se corta si esas funciones están ocultas.
+app.use('/api/businesses/:businessId/mercadopago', (req, res, next) => {
+  if (/^\/(sincronizar|reporte)(\/|$)/.test(req.path)) return funcionAdministracion(req, res, next);
+  if (/^\/clientes(\/|$)/.test(req.path)) return funcionClientes(req, res, next);
+  return next();
+}, require('./routes/mercadopagoRoutes'));
 app.use('/api/businesses/:businessId/mercadolibre', require('./routes/mercadolibreRoutes'));
 app.use('/api/businesses/:businessId/pulso', pulsoRoutes);
 app.use('/api/businesses/:businessId/kit', kitAppRoutes);
