@@ -602,7 +602,10 @@ async function aplicarReporte(businessId, sucursal, desde, hasta, { tokenListo, 
       console.warn(`[mercadopago:reporte] negocio ${businessId} suc ${sucursal} cuenta ${t.fila?.mp_user_id}: ${b.error} ${det(b.detalle)}`);
       return { reporte: 'error', motivo: b.error, detalle: det(b.detalle) };
     }
-    if (b.pendiente) return { reporte: 'pendiente' };
+    if (b.pendiente) {
+      console.log(`[mercadopago:reporte] negocio ${businessId} suc ${sucursal} cuenta ${t.fila?.mp_user_id}: pendiente ${desde}→${hasta} ${det(b.detalle)}`);
+      return { reporte: 'pendiente' };
+    }
     const d = await reportes.bajar(t.token, b.archivo);
     if (d.error) return { reporte: 'error', motivo: d.error };
     const { nombres, docs, egresos } = reportes.analizar(reportes.parsearCSV(d.csv));
