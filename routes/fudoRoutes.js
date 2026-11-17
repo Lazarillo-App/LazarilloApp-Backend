@@ -7,7 +7,11 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const { requireBusinessRole } = require('../middleware/authMiddleware');
 const fudo = require('../services/fudoService');
+const negocioDeLaUrl = require('../middleware/negocioDeLaUrl');
 
+// El negocio es el de la URL, no el activo: en el alta el negocio recién creado puede no ser todavía
+// el activo. negocioDeLaUrl verifica el acceso a ESE negocio y carga su rol.
+router.use((req, res, next) => { req.params.id = req.params.businessId; negocioDeLaUrl(req, res, next); });
 router.use(requireBusinessRole('admin'));
 router.use((req, res, next) => {
   if (Number(req.params.businessId) !== Number(req.businessId)) return res.status(403).json({ error: 'business_mismatch' });

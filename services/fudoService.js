@@ -550,7 +550,12 @@ async function listarProductos(businessId) {
       ORDER BY (p.articulo_id IS NULL) DESC, COALESCE(v.amount, 0) DESC, lower(p.nombre)`,
     [businessId]
   );
-  return { productos: rows };
+  // Artículos del negocio, para elegir el vínculo (los mismos que Ventas resuelve por articulo_id).
+  const { rows: articulos } = await pool.query(
+    'SELECT articulo_id AS id, nombre, categoria FROM maxi_articles WHERE business_id = $1 ORDER BY lower(nombre)',
+    [businessId]
+  );
+  return { productos: rows, articulos };
 }
 
 /**
