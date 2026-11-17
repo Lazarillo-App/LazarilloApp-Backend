@@ -305,5 +305,19 @@
     "id": 109,
     "estado": "en_curso",
     "nota": "17/11: hecho back #199 (tabla stock_salidas, sync del informe 27 junto a ventas/compras, stock_qty en /sales/summary; pases entre PDV no se suman) + front #383 (chip del encabezado Ventas → Unidades · Todo / Ventas / Stock y Pesos; título Ventas/Unidades/Salidas; sin volver a pedir). Probado con salidas simuladas en el navegador. Falta: que se llene stock_salidas — el reloj de recetas solo corre en producción; en testing hace falta el «actualizar» del pulso. Después: medir el summary con datos y sumar las salidas al consumo teórico (#2)."
+  },
+  {
+    "clave": "2026-11-17-92",
+    "tipo": "guia_parche",
+    "buscar": "Guías de Anthony (primera vez): toda pantalla nueva sale con su guía paso a\npaso (Siguiente / Omitir), en src/componentes/asistente/guias.js.",
+    "reemplazar": "Manual y paso a paso: toda función nueva (no solo una pantalla nueva) sale,\nen el MISMO cambio, con su lugar en el Manual (capítulo/sección de\nmanual_capitulos) y en el paso a paso de Anthony (guias.js y los pasos del\nsector). Se resuelve en el momento, no queda para después; si de verdad no se\npuede, se anota en Pendientes (módulo, ★) diciendo por qué (Diego 17/11/2026).\nCómo corregir el Manual sin sesión: entrada manual_seccion en claude/sync.json.\n\nGuías de Anthony (primera vez): toda pantalla nueva sale con su guía paso a\npaso (Siguiente / Omitir), en src/componentes/asistente/guias.js."
+  },
+  {
+    "clave": "2026-11-17-93",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "ventas-costo-precio",
+    "buscar": "- **Ventas** del período elegido. El 👁 deja solo los que vendieron y **U / $** cambia entre unidades y pesos.",
+    "reemplazar": "- **Ventas** del período elegido. El 👁 deja solo los que vendieron. El chip de abajo elige qué ver: **Unidades · Ventas** (lo que se vendió por el POS), **Unidades · Stock** (lo que salió sin venta: comida de personal, BigBox, publicidad, roturas…), **Unidades · Todo** (las dos juntas) o **Pesos ($)**. El título de la columna cambia a Ventas, Salidas o Unidades. Los pases entre puntos de venta no cuentan como salida."
   }
 ]
