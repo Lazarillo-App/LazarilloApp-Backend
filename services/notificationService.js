@@ -36,6 +36,8 @@ const ALLOWED_TYPES = new Set([
   'insumo_bonificacion', 'insumo_uso', 'insumo_import', 'insumo_reemplazo',
   // Usuarios (Diego 12/11/2026)
   'usuario_email',
+  // Funciones visibles del negocio, las prende/apaga Lazarillo (Diego 17/11/2026)
+  'cuenta_funciones',
 ]);
 
 function safeType(type) {
