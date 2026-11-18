@@ -39,6 +39,19 @@ async function main() {
     for (const n of negocios) {
       const pdvs = pdvsDeNegocio(n.id);
       console.log(`\n================ ${n.id} ${n.name} · PDV: ${pdvs.map((p) => `${p.pdv}(${p.schema}, sucursal ${p.branchId ?? 'principal'})`).join(', ') || 'ninguno'}`);
+      // --- Estado del kit: ¿PC vinculada (se actualiza desde Lazarillo) o Drive? ¿Cuándo subió cada informe?
+      const { rows: pcs } = await c.query(
+        `SELECT id, pc_nombre, pdv, esquema, motor_ver, ultimo_contacto, ultima_carga, ultima_carga_detalle, revocado_en
+           FROM kit_pcs WHERE business_id = $1 ORDER BY ultimo_contacto DESC NULLS LAST`, [n.id]);
+      console.log('[kit] PC vinculadas a Lazarillo (si no hay ninguna, el kit se actualiza desde el Drive):'); console.table(pcs);
+      const { rows: vers } = await c.query(`SELECT version, publicado_en, notas FROM kit_versiones ORDER BY publicado_en DESC LIMIT 3`);
+      console.log('[kit] últimas versiones publicadas en el servidor:'); console.table(vers);
+      for (const { pdv, schema } of pdvs) {
+        const { rows: cg } = await c.query(
+          `SELECT tabla, filas, pc, cargado FROM "${schema}"."_cargas" WHERE pdv = $1 AND (tabla LIKE 'i27%' OR tabla LIKE 'i12%') ORDER BY cargado DESC`, [pdv]).catch(() => ({ rows: [] }));
+        console.log(`[kit] últimas cargas de i12/i27 del pdv ${pdv}:`); console.table(cg);
+      }
+
       const kitVentas = new Map(); const kitStock = new Map(); const nombres = new Map();
       const add = (m, k, v) => m.set(k, (m.get(k) || 0) + Number(v || 0));
 
