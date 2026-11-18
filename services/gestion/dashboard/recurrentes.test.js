@@ -35,6 +35,8 @@ describe('clientesRecurrentes', () => {
     expect(col.esteMes).toBe(true);
     expect(esc.esteMes).toBe(false);
     expect(l[0].cliente).toBe('luraghi marta alicia'); // de mayor a menor
+    expect(col.historial).toEqual([]);
+    expect(col.promedio).toBe(0);
   });
 
   it('un mes en que todavía no era cliente se sugiere prendido', async () => {
@@ -59,11 +61,13 @@ describe('clientesRecurrentes', () => {
 
   it('detecta al que saltea algún mes (BigBox: 10 de 12) y no al que factura de vez en cuando', async () => {
     const l = await correr([], [
-      { cliente: 'bigbox s.a', nombre: 'BIGBOX S.A', n: 10, desde: '2025-11-01', esperado: '2360000', meses_con: [1, 2, 3, 5, 6, 7, 9, 10, 11, 12], primer_mes: '2025-11-01' },
+      { cliente: 'bigbox s.a', nombre: 'BIGBOX S.A', n: 10, desde: '2025-11-01', esperado: '2360000', historial: [{ mes: '2025-11', imp: '1000000' }, { mes: '2025-12', imp: 3000000 }], meses_con: [1, 2, 3, 5, 6, 7, 9, 10, 11, 12], primer_mes: '2025-11-01' },
       { cliente: 'centro cristiano', nombre: 'Centro', n: 3, desde: '2026-06-01', esperado: '900000', meses_con: [6, 7, 9], primer_mes: '2026-06-01' },
     ]);
     expect(l.map((c) => c.cliente)).toEqual(['bigbox s.a']);
     expect(l[0].detectado).toBe(true);
+    expect(l[0].promedio).toBe(2000000);
+    expect(l[0].historial[1]).toEqual({ mes: '2025-12', imp: 3000000 });
   });
 
   it('mesAtras cruza el año', () => {
