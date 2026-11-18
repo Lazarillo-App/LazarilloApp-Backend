@@ -251,14 +251,24 @@ function armarCalendario(s, fechas) {
   return { tipo, nombre, factor: factorDe };
 }
 
+/**
+ * @param dias [{ fecha, total, rec? }] — rec: lo que ese día facturaron los clientes recurrentes.
+ * @param recurrentes [{ cliente, esperado, ya }] — facturas grandes que se repiten todos los meses
+ *   (Diego 18/11/2026: el colegio y la escuelita de FC). El modelo proyecta las ventas SIN ellas
+ *   (no son ventas del día: una factura de $4 M no dice nada del ritmo) y después se suma lo que
+ *   ya se les facturó en el mes más lo que falta facturarles.
+ */
 function proyectarMes(
   dias,
   corte,
   guardadas = [],
   fechas = [],
+  recurrentes = [],
 ) {
   if (!dias.length) return null;
-  const s = armarSerie(dias);
+  const s = armarSerie(dias.map((d) => ({ fecha: d.fecha, total: d.total - (d.rec ?? 0) })));
+  // Serie completa: para comparar con lo que de verdad cerró cada mes.
+  const sReal = armarSerie(dias);
   const corteMs = aMs(corte);
   const cal = armarCalendario(s, fechas);
   const e = estimar(s, corteMs, "semanas");
@@ -283,8 +293,8 @@ function proyectarMes(
   const lyFin = Date.UTC(e.anio - 1, e.mes - 1, lyDias);
   const lyCorte = Date.UTC(e.anio - 1, e.mes - 1, Math.min(e.diasTranscurridos, lyDias));
   const hayLy = s.primerDia <= lyInicio;
-  const cierreLy = hayLy ? sumaRango(s, lyInicio, lyFin) : 0;
-  const lyHasta = hayLy ? sumaRango(s, lyInicio, lyCorte) : 0;
+  const cierreLy = hayLy ? sumaRango(sReal, lyInicio, lyFin) : 0;
+  const lyHasta = hayLy ? sumaRango(sReal, lyInicio, lyCorte) : 0;
 
   // Backtest: los meses anteriores, cortados el mismo día del mes.
   const errBt = { unico: [], semanas: [], dias_mes: [], calendario: [] };
@@ -315,7 +325,7 @@ function proyectarMes(
     const clave = `${g.anio}-${g.mes}`;
     if (!realMes.has(clave)) {
       const ini = Date.UTC(g.anio, g.mes - 1, 1);
-      realMes.set(clave, ini >= s.primerDia ? sumaRango(s, ini, Date.UTC(g.anio, g.mes - 1, diasDelMes(g.anio, g.mes))) : 0);
+      realMes.set(clave, ini >= sReal.primerDia ? sumaRango(sReal, ini, Date.UTC(g.anio, g.mes - 1, diasDelMes(g.anio, g.mes))) : 0);
     }
     const real = realMes.get(clave);
     if (real <= 0 || !errG[g.metodo]) continue;
@@ -361,11 +371,19 @@ function proyectarMes(
     }
   }
 
+  // Facturas recurrentes: lo ya facturado este mes + lo que falta facturarles (Diego 18/11/2026).
+  const recur = recurrentes.map((r) => ({ ...r, pendiente: Math.max(0, r.esperado - r.ya) }));
+  const recYa = recur.reduce((a, r) => a + r.ya, 0);
+  const recPendiente = recur.reduce((a, r) => a + r.pendiente, 0);
+  const extra = recYa + recPendiente;
+  const facturado = e.facturado + recYa;
+  for (const m of METODOS) proyecciones[m] += extra;
+
   // Lo ya facturado es seguro: el rango nunca baja de ahí.
   const rango = backtest
-    ? { min: elegido.proyeccion * (1 - backtest.errorMetodo), max: elegido.proyeccion * (1 + backtest.errorMetodo) }
+    ? { min: elegido.proyeccion * (1 - backtest.errorMetodo) + extra, max: elegido.proyeccion * (1 + backtest.errorMetodo) + extra }
     : null;
-  if (rango && rango.min < e.facturado) rango.min = e.facturado;
+  if (rango && rango.min < facturado) rango.min = facturado;
 
   return {
     anio: e.anio,
@@ -374,22 +392,23 @@ function proyectarMes(
     diasMes: e.diasMes,
     diasTranscurridos: e.diasTranscurridos,
     diasRestantes: e.diasMes - e.diasTranscurridos,
-    facturado: e.facturado,
-    estimadoRestante: elegido.restante,
-    proyeccion: elegido.proyeccion,
+    facturado,
+    estimadoRestante: elegido.restante + recPendiente,
+    proyeccion: elegido.proyeccion + extra,
     metodo,
     proyecciones,
     ritmo: e.ritmo,
     estacional: eUnico.estacional,
     ritmoEstacional: eUnico.ritmoEstacional,
     restantesPorDia: orden.map((d) => ({ dow: d, cantidad: cuenta.get(d) })),
-    reglaDeTres: e.reglaDeTres,
-    mismoRitmoAnioAnterior: hayLy && lyHasta > 0 && cierreLy > 0 ? cierreLy * (e.facturado / lyHasta) : null,
+    reglaDeTres: e.reglaDeTres + extra,
+    mismoRitmoAnioAnterior: hayLy && lyHasta > 0 && cierreLy > 0 ? cierreLy * (facturado / lyHasta) : null,
     cierreAnioAnterior: hayLy && cierreLy > 0 ? cierreLy : null,
     backtest,
     rango,
     conCalendario: !!cal,
     fechasRestantes,
+    recurrentes: recur,
   };
 }
 

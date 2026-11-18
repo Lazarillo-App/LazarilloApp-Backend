@@ -201,3 +201,32 @@ describe('calendario (fechas especiales de RRHH)', () => {
     expect(con.proyecciones.calendario < sin.proyecciones.unico).toBe(true);
   });
 });
+
+// Facturas recurrentes (Diego 18/11/2026): el colegio de FC factura $4 M un día del mes.
+describe('proyectarMes con facturas recurrentes', () => {
+  // Ventas regulares + una factura de 4000 el día 10 de cada mes.
+  const regulares = serie('2025-09-01', '2026-10-31');
+  const conFactura = regulares.map((d) => (d.fecha.endsWith('-10') ? { ...d, total: d.total + 4000, rec: 4000 } : { ...d, rec: 0 }));
+  const cierreReal = sumaMes(conFactura, '2026-10');
+
+  it('antes de facturarse: proyecta las ventas sin la factura y le suma lo esperado', () => {
+    const hasta = conFactura.filter((d) => d.fecha <= '2026-10-05');
+    const p = proyectarMes(hasta, '2026-10-05', [], [], [{ cliente: 'colegio', esperado: 4000, ya: 0 }]);
+    expect(p.proyeccion).toBeCloseTo(cierreReal, 6);
+    expect(p.recurrentes[0].pendiente).toBe(4000);
+    expect(p.estimadoRestante).toBeCloseTo(cierreReal - p.facturado, 6);
+  });
+
+  it('ya facturada: no la suma dos veces ni la toma como ritmo del mes', () => {
+    const hasta = conFactura.filter((d) => d.fecha <= '2026-10-12');
+    const p = proyectarMes(hasta, '2026-10-12', [], [], [{ cliente: 'colegio', esperado: 4000, ya: 4000 }]);
+    expect(p.proyeccion).toBeCloseTo(cierreReal, 6);
+    expect(p.recurrentes[0].pendiente).toBe(0);
+    expect(p.facturado).toBeCloseTo(sumaMes(hasta, '2026-10'), 6);
+  });
+
+  it('sin recurrentes da lo mismo que antes', () => {
+    const hasta = regulares.filter((d) => d.fecha <= '2026-10-12');
+    expect(proyectarMes(hasta, '2026-10-12').proyeccion).toBeCloseTo(proyectarMes(hasta, '2026-10-12', [], [], []).proyeccion, 6);
+  });
+});
