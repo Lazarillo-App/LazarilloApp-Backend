@@ -4,8 +4,9 @@ from gen11 import r2
 warnings.filterwarnings('ignore')
 
 # El 27 y el 28 salen de la misma tabla (mxmvs) pero NO con las mismas reglas:
-#   27 (detallado) -> una fila por remito y articulo: se DEDUPLICA por
-#      (remito, codigo) quedandose con el primero, y se descarta el codigo 0.
+#   27 (detallado) -> una fila por remito y articulo: los renglones repetidos de
+#      (remito, codigo) se SUMAN en el primero (18/11/2026; antes se descartaban),
+#      y se descarta el codigo 0.
 #   28 (resumido)  -> una fila por remito, y el importe suma TODAS las lineas,
 #      sin deduplicar y SIN descartar el codigo 0.
 # En los dos casos van solo los movimientos de ARTICULOS (artins = 'A').
@@ -69,7 +70,14 @@ def _armar(d, maps, resumen):
 
 def generar_27(B, anio, salida=None, hasta=None):
     w, maps = _cargar(B, anio, hasta)
-    d = w[w.codigo != '0']
+    d = w[w.codigo != '0'].copy()
+    # Mismo articulo en varios renglones del mismo remito (Comida de Personal: un renglon por
+    # empleado): se SUMAN cantidad e importe en la primera fila. Antes se quedaba solo la primera
+    # y se perdian las demas (Comercio 9-15/11/2026: 356 salidas contra 529 de MaxiRest).
+    # Sigue siendo una fila por (remito, codigo), asi que el formato no cambia.
+    g = d.groupby(['remito','codigo'], sort=False)
+    d['cant'] = g['cant'].transform('sum')
+    d['P'] = g['P'].transform('sum')
     d = d[~d.duplicated(subset=['remito','codigo'], keep='first')]
     d = d.sort_values(['f','REMITO','idn'], kind='stable').reset_index(drop=True)
     return _guardar(_armar(d, maps, False), salida)

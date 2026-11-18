@@ -448,5 +448,11 @@
     "tipo": "cambio",
     "titulo": "Proyección de ventas: sumar las facturas grandes que se repiten todos los meses",
     "nota": "Por PDV y con temporada (Diego 18/11): los meses en que se espera cada cliente los sugiere Lazarillo con lo que facturó el año pasado (FC Principal: colegio sin ene/feb, escuelita sin ene/nov) y se corrigen en «Facturas que se repiten» desde el tooltip de la proyección (prender/apagar meses, monto fijo, agregar o sacar clientes). Queda en Notificaciones. Migración 148."
+  },
+  {
+    "clave": "2026-11-18-mv-109-gen27",
+    "tipo": "cambio",
+    "id": 109,
+    "nota": "Mairene + Claude 18/11: las unidades «Todo» de Comercio (9–15/11) no daban con MaxiRest. Ventas exactas, pero salidas de stock 356 en Lazarillo contra 529 en Maxi (Comida de Personal 225/296, PROMEDON 76/153, Evento/Cena 26/45). Causa: gen27.py deduplicaba (remito, código) quedándose con el primer renglón, y en Comida de Personal el mismo artículo va en varios renglones del mismo remito (uno por empleado). Cambio: ahora SUMA cantidad e importe de los renglones repetidos en la primera fila (sigue una fila por remito y código, mismo formato). Como cada carga reemplaza el año, se corrige para atrás en la próxima corrida de cada PC. Diego: si algo necesita el 27 idéntico al de MaxiRest, avisá y lo volvemos atrás. Las PC que leen del Drive necesitan el mismo cambio allá. Diagnóstico: node db/scripts/diag-unidades-semana.js <negocio> <desde> <hasta> [palabras]."
   }
 ]
