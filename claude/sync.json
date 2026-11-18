@@ -432,5 +432,11 @@
     "id": 10,
     "estado": "en_curso",
     "nota": "Mairene + Claude 18/11 (back 03f1d2f, front 424f085): borrar un aumento de Tu canasta deja aviso al equipo «Se borró el aumento de precios del dd/mm/aaaa» con «Deshacer ›» en la campana, que lo vuelve a anotar en la misma sucursal (reactiva uno detectado o recrea uno manual). Falta probarlo."
+  },
+  {
+    "clave": "2026-11-18-mv-109-gen27",
+    "tipo": "cambio",
+    "id": 109,
+    "nota": "Mairene + Claude 18/11: las unidades «Todo» de Comercio (9–15/11) no daban con MaxiRest. Ventas exactas, pero salidas de stock 356 en Lazarillo contra 529 en Maxi (Comida de Personal 225/296, PROMEDON 76/153, Evento/Cena 26/45). Causa: gen27.py deduplicaba (remito, código) quedándose con el primer renglón, y en Comida de Personal el mismo artículo va en varios renglones del mismo remito (uno por empleado). Cambio: ahora SUMA cantidad e importe de los renglones repetidos en la primera fila (sigue una fila por remito y código, mismo formato). Como cada carga reemplaza el año, se corrige para atrás en la próxima corrida de cada PC. Diego: si algo necesita el 27 idéntico al de MaxiRest, avisá y lo volvemos atrás. Las PC que leen del Drive necesitan el mismo cambio allá. Diagnóstico: node db/scripts/diag-unidades-semana.js <negocio> <desde> <hasta> [palabras]."
   }
 ]
