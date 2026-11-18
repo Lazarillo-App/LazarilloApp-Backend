@@ -372,7 +372,8 @@ function proyectarMes(
   }
 
   // Facturas recurrentes: lo ya facturado este mes + lo que falta facturarles (Diego 18/11/2026).
-  const recur = recurrentes.map((r) => ({ ...r, pendiente: Math.max(0, r.esperado - r.ya) }));
+  // esteMes false = el usuario (o la historia) dice que este mes no factura: no se espera nada.
+  const recur = recurrentes.map((r) => ({ ...r, pendiente: r.esteMes === false ? 0 : Math.max(0, r.esperado - r.ya) }));
   const recYa = recur.reduce((a, r) => a + r.ya, 0);
   const recPendiente = recur.reduce((a, r) => a + r.pendiente, 0);
   const extra = recYa + recPendiente;
