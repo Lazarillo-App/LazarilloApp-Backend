@@ -17,8 +17,8 @@ Module._load = origLoad;
 
 // FC Principal al 15/11/2026 (datos reales de la base).
 const FILAS = [
-  { cliente: 'escuelita de futbolgol', nombre: 'Escuelita de FutbolGOL', n4: 4, esperado: '2700000', meses_con: [2, 3, 4, 5, 6, 7, 8, 9, 10, 12], primer_mes: '2025-10-01' },
-  { cliente: 'luraghi marta alicia', nombre: 'LURAGHI MARTA ALICIA', n4: 4, esperado: '4426000', meses_con: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12], primer_mes: '2025-10-01' },
+  { cliente: 'escuelita de futbolgol', nombre: 'Escuelita de FutbolGOL', n: 10, desde: '2025-12-01', esperado: '2700000', meses_con: [2, 3, 4, 5, 6, 7, 8, 9, 10, 12], primer_mes: '2025-10-01' },
+  { cliente: 'luraghi marta alicia', nombre: 'LURAGHI MARTA ALICIA', n: 10, desde: '2025-11-01', esperado: '4426000', meses_con: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12], primer_mes: '2025-10-01' },
 ];
 const correr = (config = [], filas = FILAS, ya = []) => {
   respuestas = [config, filas, ya];
@@ -38,7 +38,7 @@ describe('clientesRecurrentes', () => {
   });
 
   it('un mes en que todavía no era cliente se sugiere prendido', async () => {
-    const nuevo = [{ cliente: 'club', nombre: 'Club', n4: 3, esperado: '1000', meses_con: [8, 9, 10], primer_mes: '2026-08-01' }];
+    const nuevo = [{ cliente: 'club', nombre: 'Club', n: 3, desde: '2026-08-01', esperado: '1000', meses_con: [8, 9, 10], primer_mes: '2026-08-01' }];
     const [c] = await correr([], nuevo);
     expect(c.meses).toEqual([true, true, true, true, true, true, true, true, true, true, true, true]);
   });
@@ -55,6 +55,15 @@ describe('clientesRecurrentes', () => {
     expect(l[0].esperado).toBe(3600000);
     expect(l[0].esperadoFijo).toBe(true);
     expect(l[0].esperadoAuto).toBe(2700000);
+  });
+
+  it('detecta al que saltea algún mes (BigBox: 10 de 12) y no al que factura de vez en cuando', async () => {
+    const l = await correr([], [
+      { cliente: 'bigbox s.a', nombre: 'BIGBOX S.A', n: 10, desde: '2025-11-01', esperado: '2360000', meses_con: [1, 2, 3, 5, 6, 7, 9, 10, 11, 12], primer_mes: '2025-11-01' },
+      { cliente: 'centro cristiano', nombre: 'Centro', n: 3, desde: '2026-06-01', esperado: '900000', meses_con: [6, 7, 9], primer_mes: '2026-06-01' },
+    ]);
+    expect(l.map((c) => c.cliente)).toEqual(['bigbox s.a']);
+    expect(l[0].detectado).toBe(true);
   });
 
   it('mesAtras cruza el año', () => {

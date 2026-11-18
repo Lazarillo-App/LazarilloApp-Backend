@@ -2,9 +2,12 @@
 // facturan una vez por mes $3-4 M. La proyección de ventas las proyecta aparte (no son ritmo del día)
 // y las espera solo en los meses en que suelen facturar.
 //
-// Lazarillo los detecta solo, por PDV: en 3 de los últimos 4 meses cerrados el cliente facturó
-// (facturas ≥ 0,5 % de las ventas del mes) entre 2 % y 15 % del mes. Más del 15 % no es una factura
-// aparte (en Palermo «palermo suites» es el 96 % de las ventas).
+// Lazarillo los detecta solo, por PDV, con una sola regla para todos: desde que apareció (en los
+// últimos 12 meses cerrados) el cliente facturó entre el 1 % y el 15 % de las ventas del mes en al
+// menos 2 de cada 3 meses, y como mínimo 3 veces (facturas ≥ 0,5 % de las ventas del mes). Así entra
+// el que factura casi siempre aunque saltee un mes (BigBox en Bar: 10 de 12) y también un cliente
+// nuevo (3 de 3). Más del 15 % no es una factura aparte (en Palermo «palermo suites» es el 96 %).
+// Probado el 18/11/2026 en todos los negocios: salen BigBox (Bar), escuelita y colegio (FC), nada más.
 // Meses sugeridos: los que facturó en los últimos 12 meses cerrados; un mes en que todavía no era
 // cliente se sugiere prendido. El usuario corrige meses / monto o agrega / saca clientes por PDV
 // (gestion_clientes_recurrentes). Funciona igual con cualquier POS que traiga el cliente de la venta.
@@ -51,7 +54,7 @@ async function clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }) 
   // meses eran 312 ms).
   const desde13 = mesAtras(mesActual, 13);
   const desde12 = mesAtras(mesActual, 12);
-  const desde4 = mesAtras(mesActual, 4);
+  const EN_RANGO = sql`mes >= ${desde12}::date AND imp BETWEEN 0.01 * tot AND 0.15 * tot`;
   const rango = [...base, sql`v.fecha >= ${desde13}::date`, sql`v.fecha < ${mesActual}::date`];
   const filas = await db.many(sql`
     WITH meses AS (
@@ -66,20 +69,25 @@ async function clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }) 
     )
     SELECT cliente,
            (array_agg(nombre ORDER BY mes DESC))[1] AS nombre,
-           COUNT(*) FILTER (WHERE mes >= ${desde4}::date AND imp BETWEEN 0.02 * tot AND 0.15 * tot) AS n4,
+           COUNT(*) FILTER (WHERE ${EN_RANGO}) AS n,
+           to_char(MIN(mes) FILTER (WHERE ${EN_RANGO}), 'YYYY-MM-DD') AS desde,
            (array_agg(imp ORDER BY mes DESC) FILTER (WHERE mes >= ${desde12}::date))[1] AS esperado,
            array_agg(DISTINCT EXTRACT(MONTH FROM mes)::int) FILTER (WHERE mes >= ${desde12}::date) AS meses_con,
            to_char(MIN(mes), 'YYYY-MM-DD') AS primer_mes
     FROM cm
     WHERE cliente IS NOT NULL AND NOT (cliente = ANY(${GENERICOS}::text[]))
     GROUP BY cliente
-    HAVING COUNT(*) FILTER (WHERE mes >= ${desde4}::date AND imp BETWEEN 0.02 * tot AND 0.15 * tot) >= 3
+    HAVING COUNT(*) FILTER (WHERE ${EN_RANGO}) >= 3
         OR cliente = ANY(${agregados}::text[])
   `);
 
-  const porCliente = new Map(filas.map((f) => [f.cliente, f]));
+  // Meses cerrados desde que apareció (inclusive) → hay que estar en 2 de cada 3.
+  const lapso = (desde) => (desde ? (Number(mesActual.slice(0, 4)) - Number(desde.slice(0, 4))) * 12 + Number(mesActual.slice(5, 7)) - Number(desde.slice(5, 7)) : 0);
+  const detecta = (f) => Number(f.n) >= 3 && Number(f.n) * 3 >= 2 * lapso(f.desde);
+  const agregadosSet = new Set(agregados);
+  const porCliente = new Map(filas.filter((f) => detecta(f) || agregadosSet.has(f.cliente)).map((f) => [f.cliente, f]));
   // Agregados a mano que no facturaron en 13 meses: igual se listan (con su monto fijo).
-  for (const c of agregados) if (!porCliente.has(c)) porCliente.set(c, { cliente: c, nombre: cfg.get(c)?.nombre, n4: 0, esperado: null, meses_con: [], primer_mes: null });
+  for (const c of agregados) if (!porCliente.has(c)) porCliente.set(c, { cliente: c, nombre: cfg.get(c)?.nombre, n: 0, desde: null, esperado: null, meses_con: [], primer_mes: null });
 
   const claves = [...porCliente.keys()];
   const ya = claves.length ? await db.many(sql`
@@ -109,7 +117,7 @@ async function clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }) 
     lista.push({
       cliente: f.cliente,
       nombre: c?.nombre || f.nombre || f.cliente,
-      detectado: Number(f.n4) >= 3,
+      detectado: detecta(f),
       configurado: !!c,
       meses,
       sugeridos,
