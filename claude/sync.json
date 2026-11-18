@@ -442,5 +442,11 @@
     "prioridad": "normal",
     "estado": "hecha",
     "business_id": 204
+  },
+  {
+    "clave": "2026-11-18-claude-02",
+    "tipo": "cambio",
+    "titulo": "Proyección de ventas: sumar las facturas grandes que se repiten todos los meses",
+    "nota": "Por PDV y con temporada (Diego 18/11): los meses en que se espera cada cliente los sugiere Lazarillo con lo que facturó el año pasado (FC Principal: colegio sin ene/feb, escuelita sin ene/nov) y se corrigen en «Facturas que se repiten» desde el tooltip de la proyección (prender/apagar meses, monto fijo, agregar o sacar clientes). Queda en Notificaciones. Migración 148."
   }
 ]

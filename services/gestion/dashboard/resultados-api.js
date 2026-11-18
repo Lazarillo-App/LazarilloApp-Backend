@@ -16,6 +16,8 @@ const { fuenteCompras } = require('./fuente-compras');
 const { toNumber } = require('./pivot-utils');
 const { MONTH_IDXS } = require('./constants');
 const { proyectarMes, debeProyectar, METODOS } = require('./proyeccion');
+const recurrentesApi = require('./recurrentes');
+const { clientesRecurrentes } = recurrentesApi;
 const { cambioValido } = require('./equilibrio-config');
 const { aggregateFlujoCajaPorMes } = require('./flujo-caja-agg');
 const { findPrimerArqueo } = require('./primer-arqueo');
@@ -62,43 +64,11 @@ async function obtenerProyeccion({ businessId, params }) {
   const [uy, um] = ultimo.split("-").map(Number);
   const desde = new Date(Date.UTC(uy - 2, um - 3, 1)).toISOString().slice(0, 10);
 
-  // Facturas recurrentes (Diego 18/11/2026: en FC el colegio y la escuelita, $3-4 M por mes que todavía
-  // pueden no estar pero se sabe que vienen). Cliente recurrente = en 3 de los últimos 4 meses cerrados
-  // sus facturas grandes (cada una ≥ 0,5 % de las ventas del mes) sumaron entre 2 % y 15 % del mes (más
-  // que eso no es una factura aparte: en Palermo «palermo suites» es el 96 % de las ventas). Se espera lo
-  // del último mes en que facturó. Funciona igual con cualquier POS que traiga el cliente de la venta.
+  // Facturas que se repiten todos los meses (Diego 18/11/2026): detectadas por Lazarillo y corregidas
+  // por el usuario, por PDV (ver recurrentes.js). Se proyectan aparte y solo en sus meses.
   const mesActual = `${ultimo.slice(0, 7)}-01`;
-  const imp = sql`COALESCE(v."importeManual", v.importe)`;
   const cli = sql`lower(trim(COALESCE(NULLIF(v."cliRazon", ''), v."cliNombre")))`;
-  const recurrentes = await db.many(sql`
-    WITH meses AS (
-      SELECT date_trunc('month', v.fecha)::date AS mes, SUM(${imp}) AS tot
-      FROM gestion_ventas v
-      WHERE ${sql.join([...base, sql`v.fecha >= ${mesActual}::date - interval '4 months'`, sql`v.fecha < ${mesActual}::date`], " AND ")}
-      GROUP BY 1
-    ),
-    cm AS (
-      SELECT m.mes, ${cli} AS cliente, SUM(${imp}) AS imp, MIN(m.tot) AS tot
-      FROM gestion_ventas v
-      JOIN meses m ON m.mes = date_trunc('month', v.fecha)::date
-      WHERE ${sql.join([...base, sql`v.fecha >= ${mesActual}::date - interval '4 months'`, sql`v.fecha < ${mesActual}::date`], " AND ")}
-        AND ${imp} >= 0.005 * m.tot
-      GROUP BY 1, 2
-    ),
-    rec AS (
-      SELECT cliente, (array_agg(imp ORDER BY mes DESC))[1] AS esperado
-      FROM cm
-      WHERE cliente IS NOT NULL AND cliente NOT IN ('', 'consumidor final', 'cf') AND imp BETWEEN 0.02 * tot AND 0.15 * tot
-      GROUP BY cliente
-      HAVING COUNT(*) >= 3
-    )
-    SELECT rec.cliente, rec.esperado,
-           COALESCE((SELECT SUM(${imp}) FROM gestion_ventas v
-                     WHERE ${sql.join([...base, sql`v.fecha >= ${mesActual}::date`, sql`v.fecha < ${ultimo}::date + 1`], " AND ")}
-                       AND ${cli} = rec.cliente), 0) AS ya
-    FROM rec
-    ORDER BY rec.esperado DESC
-  `).catch((err) => {
+  const recurrentes = await clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }).catch((err) => {
     console.error("No se pudieron leer los clientes recurrentes", err);
     return [];
   });
@@ -148,7 +118,7 @@ async function obtenerProyeccion({ businessId, params }) {
     ultimo,
     guardadas.map((g) => ({ anio: g.anio, mes: g.mes, metodo: g.metodo, proyeccion: toNumber(g.proyeccion) })),
     fechas.map((f) => ({ fecha: f.fecha, tipo: f.tipo, nombre: f.nombre, fijo: !!f.fijo })),
-    recurrentes.map((r) => ({ cliente: r.cliente, esperado: toNumber(r.esperado), ya: toNumber(r.ya) })),
+    recurrentes.map((r) => ({ cliente: r.cliente, nombre: r.nombre, esperado: r.esperado, ya: r.ya, esteMes: r.esteMes })),
   );
 
   // Se guarda la de hoy (los dos métodos). Mismo corte = se actualiza, no se duplica.
@@ -678,11 +648,20 @@ async function obtenerResumenMes({ organizationId, businessId, anio, mes, sucurs
   return { ventas: v, gastos, resultado: v - gastos, rubros: lista };
 }
 
+// Editor de «Facturas que se repiten» (Diego 18/11/2026).
+const conDatos = (fn) => async (args) => {
+  try { return await fn(args); } catch (e) { if (e.datos) throw new ErrorDatos(e.message); throw e; }
+};
+const obtenerRecurrentes = conDatos(recurrentesApi.obtenerRecurrentes);
+const guardarRecurrentes = conDatos(recurrentesApi.guardarRecurrentes);
+
 module.exports = {
   ErrorDatos,
   obtenerAnual,
   obtenerResumenMes,
   obtenerProyeccion,
+  obtenerRecurrentes,
+  guardarRecurrentes,
   obtenerEquilibrio,
   obtenerEquilibrioVariables,
   guardarEquilibrioVariables,
