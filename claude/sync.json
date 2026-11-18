@@ -397,5 +397,40 @@
     "id": 51,
     "estado": "en_curso",
     "nota": "Mairene + Claude 17/11: un solo middleware (services/avisosABM.js, montado en app.js) mira cada alta/baja/modificación que sale bien y la cruza con una tabla de reglas: Agrupaciones, Artículos/Precios/Listas, Insumos, Gestión (facturas, gastos, pagos, proveedores, conceptos, medios de pago, reparto, empleados, ARCA) y Configuración (costeo, logo, credenciales Maxi, divisiones, rubros visibles, equilibrio). Lo de una misma persona en la misma área en 30 min es UN aviso que se actualiza («Artículos: 4 cambios — 3 artículos editados, 1 rubro renombrado»). Discontinuar insumos (mover a Discontinuados) avisa con los nombres. Lo que ya avisaba (alta/baja de artículos, insumos manuales, mermas, equipo, datos del negocio) queda afuera para no duplicar. Las agrupaciones antes avisaban solo en el navegador de quien hacía el cambio. Falta: probarlo con dos usuarios."
+  },
+  {
+    "clave": "2026-11-18-mv-15",
+    "tipo": "cambio",
+    "id": 15,
+    "estado": "hecha",
+    "nota": "Ya estaba hecho (revisado 18/11): descuento por línea en %, $ por unidad o $ sobre el total (front dfd3347 #30 y ab2bcae #40), más el descuento general de la factura repartido por neto (115b599 #31) y el descuento recordado por proveedor e insumo (aad8532 #38)."
+  },
+  {
+    "clave": "2026-11-18-mv-16",
+    "tipo": "cambio",
+    "id": 16,
+    "estado": "hecha",
+    "nota": "Ya estaba hecho (revisado 18/11, front dfd3347 #30): ordenar registros arrastrando y un solo registro abierto a la vez; abrir otro (✎ o ⚠) confirma el que estaba abierto si está completo, descarta uno vacío y no deja si está a medio cargar (abrirLinea en ModalCargaFactura.jsx)."
+  },
+  {
+    "clave": "2026-11-18-mv-17",
+    "tipo": "cambio",
+    "id": 17,
+    "estado": "hecha",
+    "nota": "Ya estaba hecho (revisado 18/11, front dfd3347 #30 y b734af8 #44): «+ Crear proveedor» primero en el desplegable, Enter tabula en los desplegables y el proveedor abre su ficha compartida (con cuenta corriente)."
+  },
+  {
+    "clave": "2026-11-18-mv-110",
+    "tipo": "cambio",
+    "id": 110,
+    "estado": "en_curso",
+    "nota": "Mairene + Claude 18/11 (front 1cddf0c): A− 100 % A+ al lado de pantalla completa (se ve también maximizado), de 80 a 150 %, recordado en el navegador (panel.zoom). Agranda las tarjetas y el contenido de la tabla con CSS zoom, no el header ni las barras. Los gráficos de evolución son cajas, escalan parejo. Falta probarlo en 1100–1920 con datos reales."
+  },
+  {
+    "clave": "2026-11-18-mv-10",
+    "tipo": "cambio",
+    "id": 10,
+    "estado": "en_curso",
+    "nota": "Mairene + Claude 18/11 (back 03f1d2f, front 424f085): borrar un aumento de Tu canasta deja aviso al equipo «Se borró el aumento de precios del dd/mm/aaaa» con «Deshacer ›» en la campana, que lo vuelve a anotar en la misma sucursal (reactiva uno detectado o recrea uno manual). Falta probarlo."
   }
 ]
