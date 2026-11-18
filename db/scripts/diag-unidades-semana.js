@@ -8,6 +8,8 @@
 //
 // Uso (Render Shell):  node db/scripts/diag-unidades-semana.js comercio 2026-11-09 2026-11-15
 //                      (el primer argumento es parte del nombre del negocio, o su id)
+//   Detalle por artículo: agregar un 4.º argumento con palabras del nombre, separadas por coma:
+//   node db/scripts/diag-unidades-semana.js 210 2026-11-09 2026-11-15 palier,braseada,bondiola,pechuga,mila
 'use strict';
 require('dotenv').config();
 const pool = require('../../config/db');
@@ -96,6 +98,36 @@ async function main() {
       }).filter((f) => Math.abs(f.maxi_todo - f.lz_todo) > 0.001).sort((a, b) => Math.abs(b.maxi_todo - b.lz_todo) - Math.abs(a.maxi_todo - a.lz_todo));
       console.log(`[comparación] artículos con diferencia (${filas.length}); los 40 mayores:`);
       console.table(filas.slice(0, 40));
+
+      // --- Detalle de artículos por nombre (4.º argumento: palabras separadas por coma)
+      const palabras = String(process.argv[5] || '').split(',').map((x) => x.trim()).filter(Boolean);
+      if (palabras.length) {
+        const coincide = (nm) => palabras.some((p) => String(nm || '').toLowerCase().includes(p.toLowerCase()));
+        const det = [...ids].filter((id) => coincide(nombres.get(id))).map((id) => ({
+          codigo: id, nombre: (nombres.get(id) || '').slice(0, 40),
+          ventas: kitVentas.get(id) || 0, stock: kitStock.get(id) || 0, todo: (kitVentas.get(id) || 0) + (kitStock.get(id) || 0),
+          lazarillo_todo: (lzV.get(id) || 0) + (lzS.get(id)?.q || 0),
+        })).sort((a, b) => a.nombre.localeCompare(b.nombre));
+        console.log(`\n[detalle] artículos que contienen: ${palabras.join(', ')} (cada código por separado)`);
+        console.table(det);
+        for (const { pdv, schema } of pdvs) {
+          for (const t of await tablas(c, schema, 'i27_mov_de_stock_detallado_por_remito')) {
+            const { rows } = await c.query(
+              `SELECT fecha::date AS dia, ${cod('codigo')} AS codigo, nombre, concepto, ${num('cantidad')}::float8 AS cantidad, medida
+                 FROM "${schema}"."${t}" WHERE pdv = $1 AND fecha::date BETWEEN $2::date AND $3::date AND ${num('cantidad')} < 0
+                ORDER BY nombre, fecha`, [pdv, desde, hasta]);
+            const r = rows.filter((x) => coincide(x.nombre)).map((x) => ({ ...x, dia: x.dia?.toISOString?.().slice(0, 10) }));
+            console.log(`[detalle] salidas de stock en ${t} (${r.length} renglones):`); console.table(r);
+          }
+          for (const t of await tablas(c, schema, 'i12_ventas_por_articulo_ranking_detallado_por_dia')) {
+            const { rows } = await c.query(
+              `SELECT fecha::date AS dia, ${cod('codigo')} AS codigo, nombre, ${num('unidades')}::float8 AS unidades
+                 FROM "${schema}"."${t}" WHERE pdv = $1 AND fecha::date BETWEEN $2::date AND $3::date ORDER BY nombre, fecha`, [pdv, desde, hasta]);
+            const r = rows.filter((x) => coincide(x.nombre)).map((x) => ({ ...x, dia: x.dia?.toISOString?.().slice(0, 10) }));
+            console.log(`[detalle] ventas en ${t} (${r.length} renglones):`); console.table(r);
+          }
+        }
+      }
     }
     await c.query('ROLLBACK');
   } finally {
