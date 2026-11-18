@@ -432,5 +432,15 @@
     "id": 10,
     "estado": "en_curso",
     "nota": "Mairene + Claude 18/11 (back 03f1d2f, front 424f085): borrar un aumento de Tu canasta deja aviso al equipo «Se borró el aumento de precios del dd/mm/aaaa» con «Deshacer ›» en la campana, que lo vuelve a anotar en la misma sucursal (reactiva uno detectado o recrea uno manual). Falta probarlo."
+  },
+  {
+    "clave": "2026-11-18-claude-01",
+    "tipo": "tarea",
+    "titulo": "Proyección de ventas: sumar las facturas grandes que se repiten todos los meses",
+    "detalle": "Diego (18/11): en FC el colegio (Luraghi, ~$4,4 M) y la escuelita (~$3,6 M) se facturan una vez por mes y la proyección no los esperaba. Ahora un cliente que en 3 de los últimos 4 meses facturó entre 2 % y 15 % del mes (facturas ≥ 0,5 %) se proyecta aparte: no cuenta para el ritmo diario y se suma lo que facturó el mes pasado si todavía no está. Backtest FC (60 cortes, sep-25 a oct-26): error 6,9 % → 5,0 %. Noviembre FC: $88,3 M → $96,0 M. El tooltip lista las facturas que faltan. Consulta: 7 ms.",
+    "modulo": "resultados",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "business_id": 204
   }
 ]
