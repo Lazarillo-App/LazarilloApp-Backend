@@ -73,6 +73,7 @@ async function clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }) 
            to_char(MIN(mes) FILTER (WHERE ${EN_RANGO}), 'YYYY-MM-DD') AS desde,
            (array_agg(imp ORDER BY mes DESC) FILTER (WHERE mes >= ${desde12}::date))[1] AS esperado,
            array_agg(DISTINCT EXTRACT(MONTH FROM mes)::int) FILTER (WHERE mes >= ${desde12}::date) AS meses_con,
+           json_agg(json_build_object('mes', to_char(mes, 'YYYY-MM'), 'imp', round(imp)) ORDER BY mes) FILTER (WHERE mes >= ${desde12}::date) AS historial,
            to_char(MIN(mes), 'YYYY-MM-DD') AS primer_mes
     FROM cm
     WHERE cliente IS NOT NULL AND NOT (cliente = ANY(${GENERICOS}::text[]))
@@ -112,6 +113,7 @@ async function clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }) 
       return !f.primer_mes || vez < f.primer_mes;
     });
     const meses = c && mesesValidos(c.meses) ? c.meses : sugeridos;
+    const historial = (f.historial ?? []).map((h) => ({ mes: h.mes, imp: toNumber(h.imp) }));
     const esperadoAuto = f.esperado != null ? toNumber(f.esperado) : 0;
     const esperado = c?.esperado != null ? toNumber(c.esperado) : esperadoAuto;
     lista.push({
@@ -125,6 +127,9 @@ async function clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }) 
       esperadoFijo: c?.esperado != null,
       esperado,
       ya: yaDe.get(f.cliente) ?? 0,
+      // Lo facturado mes a mes (últimos 12 cerrados) y el promedio de los meses en que facturó.
+      historial,
+      promedio: historial.length ? Math.round(historial.reduce((a, h) => a + h.imp, 0) / historial.length) : 0,
       esteMes: !!meses[mesNum - 1],
     });
   }
