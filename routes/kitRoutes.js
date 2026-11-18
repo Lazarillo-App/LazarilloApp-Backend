@@ -105,6 +105,27 @@ router.post('/cargas', conLlave, async (req, res, next) => {
   }
 });
 
+// ARCA automático (18/11/2026, services/arcaConexion.js): la PC guarda CUIT y clave del cliente
+// cifradas SOLO en ella; acá solo viajan la CUIT, el pedido de qué traer y el CSV de Mis Comprobantes.
+//   GET  /api/kit/arca/tarea      → { tarea: { desde, hasta, motivo } | null }
+//   POST /api/kit/arca/vincular   { cuit }  la PC quedó con la clave guardada
+//   POST /api/kit/arca/desvincular
+//   POST /api/kit/arca/subir      { texto, desde?, hasta?, origen: robot | descargas }
+//   POST /api/kit/arca/error      { mensaje, tipo?: clave | otro }
+const arcaKit = require('../services/arcaConexion');
+const arcaManejar = (fn) => async (req, res, next) => {
+  try {
+    const r = await fn(req);
+    if (r && r.error && !('ok' in r)) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) { next(e); }
+};
+router.get('/arca/tarea', conLlave, arcaManejar((req) => arcaKit.tareaPara(req.kitPc)));
+router.post('/arca/vincular', conLlave, arcaManejar((req) => arcaKit.vincularPc(req.kitPc, req.body || {})));
+router.post('/arca/desvincular', conLlave, arcaManejar((req) => arcaKit.desvincularPc(req.kitPc)));
+router.post('/arca/subir', conLlave, arcaManejar((req) => arcaKit.subir(req.kitPc, req.body || {})));
+router.post('/arca/error', conLlave, arcaManejar((req) => arcaKit.informarError(req.kitPc, req.body || {})));
+
 router.get('/motor', conLlave, async (req, res, next) => {
   try {
     const m = await versiones.manifiesto();
