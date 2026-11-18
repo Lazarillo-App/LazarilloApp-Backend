@@ -153,7 +153,7 @@ router.get('/dashboard/canasta', responder((req) =>
 router.post('/dashboard/canasta/aumentos', responder((req) =>
   api.anotarAumento({ ...ambito(req), body: req.body })));
 router.delete('/dashboard/canasta/aumentos', responder((req) =>
-  api.borrarAumento({ ...ambito(req), body: req.body })));
+  api.borrarAumento({ ...ambito(req), body: req.body, actorUserId: req.user?.id, sucursalParam: paramsDe(req).get('sucursal') })));
 router.get('/m/resumen', responder((req) =>
   api.obtenerResumenMes({ ...ambito(req), anio: entero(paramsDe(req), 'anio'), mes: entero(paramsDe(req), 'mes') })));
 router.get('/m/detalle', responder((req) => detalleVentas.obtenerDetalleVentas({ ...ambito(req), sp: paramsDe(req) })));

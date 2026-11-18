@@ -529,13 +529,22 @@ async function anotarAumento({ businessId, sucursal, body }) {
 
 // Saca un aumento mal anotado (o mal detectado). Uno detectado se marca descartado (si se borrara,
 // la próxima detección lo volvería a agregar).
-async function borrarAumento({ businessId, sucursal, body }) {
+// Tablero #10: borrar un aumento queda en Notificaciones con «Deshacer» (lo vuelve a anotar en la
+// misma sucursal; anotarAumento reactiva uno detectado o recrea uno manual).
+async function borrarAumento({ businessId, sucursal, body, actorUserId = null, sucursalParam = null }) {
   const suc = await sucursalDeAumentos(businessId, sucursal);
   const d = leerAumento(body, suc);
   if (!d) throw new ErrorDatos("Datos inválidos");
   const donde = sql`business_id = ${businessId} AND branch_id IS NOT DISTINCT FROM ${suc}::bigint AND fecha = ${d.fecha}::date`;
   await db.execute(sql`UPDATE gestion_aumentos_precio SET descartado = true WHERE ${donde} AND origen = 'detectado'`);
   await db.execute(sql`DELETE FROM gestion_aumentos_precio WHERE ${donde} AND origen = 'manual'`);
+  const [a, m, dd] = d.fecha.split("-");
+  require("../../notificationService").avisarAlEquipo({
+    businessId, actorUserId, type: "aumento_borrado",
+    title: `Se borró el aumento de precios del ${dd}/${m}/${a}`,
+    message: "Si fue un error, tocá Deshacer y vuelve a quedar anotado.",
+    metadata: { kind: "aumento_borrado", fecha: d.fecha, sucursal: sucursalParam ?? null },
+  }).catch((e) => console.error("[aumentos] aviso", e?.message || e));
   return { ok: true };
 }
 
