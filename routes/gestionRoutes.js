@@ -138,6 +138,7 @@ router.get('/dashboard/proyeccion', responder((req) =>
   api.obtenerProyeccion({ businessId: req.gestion.businessId, params: parseVentasParams(paramsDe(req)) })));
 // Facturas que se repiten todos los meses, por PDV (Diego 18/11/2026).
 router.get('/dashboard/recurrentes', responder((req) => api.obtenerRecurrentes(ambito(req))));
+router.get('/dashboard/recurrentes/clientes', responder((req) => api.clientesDelPos(ambito(req))));
 router.put('/dashboard/recurrentes', responder((req) =>
   api.guardarRecurrentes({ ...ambito(req), body: req.body, actorUserId: req.user?.id })));
 router.get('/dashboard/equilibrio', responder((req) =>

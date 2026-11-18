@@ -654,6 +654,7 @@ const conDatos = (fn) => async (args) => {
 };
 const obtenerRecurrentes = conDatos(recurrentesApi.obtenerRecurrentes);
 const guardarRecurrentes = conDatos(recurrentesApi.guardarRecurrentes);
+const clientesDelPos = conDatos(recurrentesApi.clientesDelPos);
 
 module.exports = {
   ErrorDatos,
@@ -662,6 +663,7 @@ module.exports = {
   obtenerProyeccion,
   obtenerRecurrentes,
   guardarRecurrentes,
+  clientesDelPos,
   obtenerEquilibrio,
   obtenerEquilibrioVariables,
   guardarEquilibrioVariables,

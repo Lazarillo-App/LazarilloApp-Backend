@@ -137,6 +137,33 @@ async function clientesRecurrentes({ businessId, sucursal, mesActual, ultimo }) 
   return lista;
 }
 
+/**
+ * Clientes del POS para «+ Agregar cliente» (Diego 18/11/2026): los que figuran en las ventas del PDV
+ * (informe 22 en MaxiRest; cualquier POS que traiga el cliente) en los últimos 24 meses. Solo ventas
+ * con cliente. Con lo facturado en el último mes que tuvo y en cuántos de los últimos 12 facturó.
+ * Bar/FC: ~800 clientes, 33 ms.
+ */
+async function clientesDelPos({ businessId, sucursal }) {
+  const base = buildPivotConditions({ tableAlias: 'v', hasFechaManual: false, businessId, sucursal });
+  const filas = await db.many(sql`
+    WITH cm AS (
+      SELECT ${CLI} AS cliente, MIN(${RAW}) AS nombre, date_trunc('month', v.fecha)::date AS mes, SUM(${IMP}) AS imp
+      FROM gestion_ventas v
+      WHERE ${sql.join([...base, sql`v.fecha >= date_trunc('month', now()) - interval '24 months'`], ' AND ')}
+        AND COALESCE(NULLIF(v."cliRazon", ''), v."cliNombre") IS NOT NULL
+      GROUP BY 1, 3
+    )
+    SELECT cliente, (array_agg(nombre ORDER BY mes DESC))[1] AS nombre,
+           COUNT(*) FILTER (WHERE mes >= date_trunc('month', now()) - interval '12 months') AS meses,
+           (array_agg(imp ORDER BY mes DESC))[1] AS ultimo, to_char(MAX(mes), 'YYYY-MM') AS "ultimoMes"
+    FROM cm
+    WHERE cliente IS NOT NULL AND NOT (cliente = ANY(${GENERICOS}::text[]))
+    GROUP BY cliente
+    ORDER BY MAX(mes) DESC, (array_agg(imp ORDER BY mes DESC))[1] DESC
+  `);
+  return { clientes: filas.map((f) => ({ cliente: f.cliente, nombre: f.nombre || f.cliente, meses: Number(f.meses), ultimo: Math.round(toNumber(f.ultimo)), ultimoMes: f.ultimoMes })) };
+}
+
 /** GET: para el editor (meses, montos y lo que sugiere Lazarillo). */
 async function obtenerRecurrentes({ businessId, sucursal }) {
   const ult = await db.one(sql`
@@ -191,4 +218,4 @@ async function guardarRecurrentes({ businessId, sucursal, body, actorUserId = nu
   return { ok: true, guardados: filas.length };
 }
 
-module.exports = { clientesRecurrentes, obtenerRecurrentes, guardarRecurrentes, mesAtras, NOMBRE_MES };
+module.exports = { clientesRecurrentes, clientesDelPos, obtenerRecurrentes, guardarRecurrentes, mesAtras, NOMBRE_MES };
