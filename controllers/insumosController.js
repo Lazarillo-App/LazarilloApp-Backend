@@ -909,7 +909,7 @@ exports.actualizar = async (req, res) => {
       // El costo por local (de las compras de cada local) dejaría las recetas con el precio viejo:
       // mientras rija el manual, todos los locales usan este. La próxima compra los vuelve a armar.
       await pool.query(`DELETE FROM insumo_costos_local WHERE insumo_id = $1`, [id]);
-      await propagarCostoInsumo(Number(id), Number(rows[0].business_id));
+      await propagarCostoInsumo(Number(id), Number(rows[0].business_id), pool);
       const fmt = (v) => `$${Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 2 })}`;
       avisarAlEquipoSinEsperar({
         businessId, actorUserId: req.user?.id, type: 'insumo_update',
