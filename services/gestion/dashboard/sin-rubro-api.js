@@ -156,7 +156,7 @@ async function obtenerSinRubro({ organizationId, businessId, sucursal, anio }) {
     WITH x AS (
       SELECT TRIM(etiqueta) AS etiqueta, concepto::text AS concepto, COUNT(*)::int AS n
         FROM insumo_rubro_conceptos
-       WHERE organization_id = ${organizationId} AND NULLIF(TRIM(etiqueta), '') IS NOT NULL
+       WHERE organization_id = ${organizationId} AND NULLIF(TRIM(etiqueta), '') IS NOT NULL AND concepto <> ''
        GROUP BY TRIM(etiqueta), concepto)
     SELECT etiqueta, SUM(n)::int AS usos,
            (ARRAY_AGG(concepto ORDER BY n DESC, concepto))[1] AS concepto
@@ -190,13 +190,29 @@ const conceptoDeLaOrg = async (organizationId, crudo) => {
  * body { concepto } = siempre el mismo · body { alternativas: [{ etiqueta, concepto }, …] } (2 o más) =
  * depende de la compra: al cargar se pregunta y lo ya cargado queda «se decide en cada compra».
  */
-async function editarRubroInsumo({ organizationId, codigo, body }) {
+// «Cada compra» (Diego 19/11/2026, ej. luminarias): el rubro no tiene concepto fijo ni opciones; en cada
+// compra se elige cualquier concepto. Se guarda como una fila marca (concepto vacío) para que todo lo que
+// ya trata «depende de la compra» (Sin rubro, carga, puente a costos) lo trate igual.
+const CADA_COMPRA = 'Cada compra';
+
+async function editarRubroInsumo({ organizationId, businessId, actorUserId = null, codigo, body }) {
   const cod = String(codigo ?? '').trim();
   if (!/^\d+$/.test(cod) || cod === '0') throw rechazo('Rubro inválido');
   const enOrg = sql`business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})`;
   const existe = await db.one(sql`SELECT 1 AS ok FROM insumo_rubros WHERE codigo_maxi::text = ${cod} AND ${enOrg} LIMIT 1`);
   if (!existe) throw rechazo('No existe ese rubro de insumo', 404);
-  if (Array.isArray(body?.alternativas)) {
+  const nombreRubro = (await db.one(sql`SELECT MAX(TRIM(nombre)) AS n FROM insumo_rubros WHERE codigo_maxi::text = ${cod} AND ${enOrg}`))?.n || cod;
+  let resumen;
+  if (body?.cadaCompra === true) {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`DELETE FROM insumo_rubro_conceptos WHERE organization_id = ${organizationId} AND rubro_codigo = ${cod}`);
+      await tx.execute(sql`
+        INSERT INTO insumo_rubro_conceptos (organization_id, rubro_codigo, etiqueta, concepto, orden)
+        VALUES (${organizationId}, ${cod}, ${CADA_COMPRA}, '', 0)`);
+      await tx.execute(sql`UPDATE insumo_rubros SET cpto_caja_lazarillo = NULL WHERE codigo_maxi::text = ${cod} AND ${enOrg}`);
+    });
+    resumen = 'el concepto se elige en cada compra';
+  } else if (Array.isArray(body?.alternativas)) {
     const alts = [];
     for (const a of body.alternativas) {
       const etiqueta = String(a?.etiqueta ?? '').trim().slice(0, 40);
@@ -214,6 +230,7 @@ async function editarRubroInsumo({ organizationId, codigo, body }) {
       }
       await tx.execute(sql`UPDATE insumo_rubros SET cpto_caja_lazarillo = NULL WHERE codigo_maxi::text = ${cod} AND ${enOrg}`);
     });
+    resumen = `depende de la compra: ${alts.map((a) => a.etiqueta).join(' / ')}`;
   } else {
     const concepto = await conceptoDeLaOrg(organizationId, body?.concepto);
     await db.transaction(async (tx) => {
@@ -234,7 +251,15 @@ async function editarRubroInsumo({ organizationId, codigo, body }) {
                      AND regexp_replace(TRIM(i.codigo_maxi::text), '\\.0+$', '') = regexp_replace(TRIM(d.codigo::text), '\\.0+$', '')))`);
     });
   }
+  if (!resumen) resumen = `concepto ${body?.concepto}`;
   await resincronizarOrganizacion(organizationId);
+  if (businessId) {
+    require('../../notificationService').avisarAlEquipo({
+      businessId, actorUserId, type: 'rubro_insumo_concepto',
+      title: `Rubro ${nombreRubro}: ${resumen}`.slice(0, 120), message: `Concepto de caja del rubro de insumo «${nombreRubro}»: ${resumen}.`,
+      metadata: { kind: 'rubro_insumo_concepto', rubro: cod },
+    }).catch((e) => console.error('[sin-rubro] aviso', e?.message || e));
+  }
   return { ok: true };
 }
 
