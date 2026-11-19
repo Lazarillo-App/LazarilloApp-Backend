@@ -11,7 +11,7 @@ const pool = require('../config/db');
 const { getEffectiveRole } = require('../services/auth/accessControl');
 const { writeArticleReceta, writeElaboradoReceta } = require('../services/recetaWrite');
 const { crearPropuestaDiscontinuarInsumo } = require('../services/recetaProposals');
-const { createSyncNotification, createSyncNotificationForBusinessUsers } = require('../services/notificationService');
+const { createSyncNotification, createSyncNotificationForBusinessUsers, avisarAlEquipoSinEsperar } = require('../services/notificationService');
 const { SQL_ESPERA_JEFE, sectoresQueConduce, puedeDecidirComoJefe } = require('../services/jefeCocina');
 const { logAudit } = require('../services/audit/auditLog');
 
@@ -40,6 +40,87 @@ function computeCostoAprox(payload) {
   const unidad = payload.rendimientoUnidad || payload.rendimiento_unidad || 'u';
   return { total, porUnidad: total / porciones, unidad };
 }
+
+/**
+ * Marca de revisión sobre el USO de uno o más insumos dentro de una receta
+ * (Diego 19/11/2026: «el marcado es sobre cómo se usa el insumo en el artículo,
+ * no sobre la elaboración»). La propuesta queda sobre la receta de origen
+ * (article_id, o insumo_id si es la receta de un elaborado) con
+ * payload_after = { revisar: [insumoId…] } — sin `items` a propósito: sigue siendo
+ * una marca sin contenido (no se puede aprobar) y al guardar esa receta se cierra sola.
+ * Acá se le suma a cada propuesta el detalle para la bandeja: nombre del insumo,
+ * cantidad en esa receta, en cuántas recetas se usa y si tiene receta propia.
+ * Dos consultas para todas las propuestas juntas (nada por fila).
+ */
+function idsRevisar(payload) {
+  const arr = Array.isArray(payload?.revisar) ? payload.revisar : [];
+  return [...new Set(arr.map(Number).filter((n) => Number.isFinite(n) && n !== 0))];
+}
+
+async function detalleRevisar(rows) {
+  const out = new Map();
+  const conMarca = rows.filter((r) => idsRevisar(r.payload_after).length);
+  if (!conMarca.length) return out;
+  const bizIds = [...new Set(conMarca.map((r) => Number(r.business_id)))];
+  const insumoIds = [...new Set(conMarca.flatMap((r) => idsRevisar(r.payload_after)))];
+  const [{ rows: ins }, { rows: usos }] = await Promise.all([
+    pool.query(
+      `SELECT i.business_id, i.id, i.nombre,
+              (SELECT count(DISTINCT r.id) FROM recetas r JOIN receta_items ri ON ri.receta_id = r.id
+                WHERE r.business_id = i.business_id AND r.active = TRUE AND ri.insumo_id = i.id) AS usos,
+              EXISTS (SELECT 1 FROM recetas r WHERE r.business_id = i.business_id AND r.insumo_id = i.id AND r.active = TRUE) AS tiene_receta
+         FROM insumos i
+        WHERE i.business_id = ANY($1::bigint[]) AND i.id = ANY($2::int[])`,
+      [bizIds, insumoIds]
+    ),
+    pool.query(
+      `SELECT r.business_id, r.article_id, r.insumo_id AS receta_insumo_id, ri.insumo_id, ri.cantidad, ri.unidad
+         FROM recetas r JOIN receta_items ri ON ri.receta_id = r.id
+        WHERE r.business_id = ANY($1::bigint[]) AND r.active = TRUE AND ri.insumo_id = ANY($2::int[])`,
+      [bizIds, insumoIds]
+    ),
+  ]);
+  const insMap = new Map(ins.map((i) => [`${i.business_id}:${i.id}`, i]));
+  for (const p of conMarca) {
+    const biz = Number(p.business_id);
+    out.set(p.id, idsRevisar(p.payload_after).map((iid) => {
+      const i = insMap.get(`${biz}:${iid}`);
+      const uso = usos.find((u) => Number(u.business_id) === biz && Number(u.insumo_id) === iid
+        && (p.article_id ? Number(u.article_id) === Number(p.article_id) : Number(u.receta_insumo_id) === Number(p.insumo_id)));
+      return {
+        insumo_id: iid,
+        nombre: i?.nombre || `Insumo #${iid}`,
+        cantidad: uso ? Number(uso.cantidad) : null,
+        unidad: uso?.unidad || null,
+        usos: i ? Number(i.usos) : null,
+        tiene_receta: !!i?.tiene_receta,
+      };
+    }));
+  }
+  return out;
+}
+
+async function nombreDeDestino(bizId, { articleId = null, insumoId = null }) {
+  if (articleId) {
+    const { rows } = await pool.query(
+      `SELECT COALESCE((SELECT nombre FROM maxi_articles WHERE business_id = $1 AND articulo_id = $2 LIMIT 1),
+                       (SELECT nombre FROM recetas WHERE business_id = $1 AND article_id = $2 AND active = TRUE ORDER BY id DESC LIMIT 1)) AS n`,
+      [bizId, articleId]
+    );
+    return rows[0]?.n || `Artículo #${articleId}`;
+  }
+  if (insumoId) {
+    const { rows } = await pool.query(`SELECT nombre FROM insumos WHERE business_id = $1 AND id = $2`, [bizId, insumoId]);
+    return rows[0]?.nombre || `Insumo #${insumoId}`;
+  }
+  return 'una receta';
+}
+
+const esMarcaSinContenido = (p) => {
+  const pa = p?.payload_after;
+  if (pa?.tipo === 'insumo_nuevo' || pa?.tipo === 'discontinuar') return false;
+  return !pa || typeof pa !== 'object' || !Object.prototype.hasOwnProperty.call(pa, 'items');
+};
 
 /**
  * GET /businesses/:businessId/receta-proposals?status=pending,in_revision
@@ -73,10 +154,12 @@ async function consultarPropuestas(where, params) {
             s.nombre AS sector_nombre,
             i.nombre AS insumo_nombre,
             ma.nombre AS articulo_nombre,
-            COALESCE(jo.name, jo.email) AS jefe_ok_por
+            COALESCE(jo.name, jo.email) AS jefe_ok_por,
+            COALESCE(NULLIF(ua.display_name, ''), NULLIF(ua.name, ''), ua.email) AS asignado_a_nombre
        FROM receta_proposals p
        LEFT JOIN app_users u ON u.id = p.created_by_user_id
        LEFT JOIN app_users jo ON jo.id = p.jefe_ok_by
+       LEFT JOIN app_users ua ON ua.id = p.asignado_a_user_id
        LEFT JOIN recetas r ON r.id = p.receta_id
        LEFT JOIN sectores s ON s.id = p.sector_id
        LEFT JOIN insumos i ON i.id = p.insumo_id AND i.business_id = p.business_id
@@ -92,10 +175,12 @@ async function consultarPropuestas(where, params) {
     const key = r.receta_id ? `r:${r.receta_id}` : (r.article_id ? `a:${r.article_id}` : `i:${r.insumo_id}`);
     countByTarget.set(key, (countByTarget.get(key) || 0) + 1);
   }
+  const revisarDe = await detalleRevisar(rows);
   return rows.map(r => {
     const key = r.receta_id ? `r:${r.receta_id}` : (r.article_id ? `a:${r.article_id}` : `i:${r.insumo_id}`);
     return {
       ...r,
+      revisar: revisarDe.get(r.id) || null,
       concurrentes: countByTarget.get(key),
       costo_antes: computeCostoAprox(r.payload_before),
       costo_despues: computeCostoAprox(r.payload_after),
@@ -415,14 +500,26 @@ exports.rejectProposal = async (req, res, next) => {
       }
     }
 
-    createSyncNotification({
-      businessId: bizId,
-      userId: proposal.created_by_user_id,
-      type: 'ui_action',
-      title: 'Tu propuesta fue rechazada',
-      message: req.body?.comment ? `Motivo: ${req.body.comment}` : 'Se rechazó el cambio que propusiste en la receta.',
-      metadata: { kind: 'receta_proposal_rejected', proposal_id: id },
-    }).catch(() => {});
+    // Una marca de revisión (sin cambio cargado) no se «rechaza»: se finaliza.
+    const esMarca = esMarcaSinContenido(proposal);
+    const nombreRec = await nombreDeDestino(bizId, { articleId: proposal.article_id, insumoId: proposal.insumo_id }).catch(() => 'una receta');
+    const motivo = (req.body?.comment || '').trim();
+    if (Number(proposal.created_by_user_id) !== Number(uid)) {
+      createSyncNotification({
+        businessId: bizId,
+        userId: proposal.created_by_user_id,
+        type: 'ui_action',
+        title: esMarca ? `Revisión finalizada: ${nombreRec}` : 'Tu propuesta fue rechazada',
+        message: motivo ? (esMarca ? motivo : `Motivo: ${motivo}`) : (esMarca ? 'Se revisó y no hizo falta cambiar la receta.' : 'Se rechazó el cambio que propusiste en la receta.'),
+        metadata: { kind: esMarca ? 'receta_revision_finalizada' : 'receta_proposal_rejected', proposal_id: id },
+      }).catch(() => {});
+    }
+    avisarAlEquipoSinEsperar({
+      businessId: bizId, actorUserId: uid, type: 'recetas', incluirActor: true,
+      title: esMarca ? `Revisión finalizada: ${nombreRec}` : `Propuesta rechazada: ${nombreRec}`,
+      message: motivo || null,
+      metadata: { kind: esMarca ? 'receta_revision_finalizada' : 'receta_proposal_rejected', proposal_id: id },
+    });
 
     logAudit(null, {
       userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
@@ -565,6 +662,17 @@ exports.marcarRevision = async (req, res, next) => {
       .slice(0, 500);
     if (!items.length) return res.status(400).json({ ok: false, error: 'items_required' });
 
+    // Ingredientes marcados DENTRO de una receta: la marca va sobre esa receta
+    // (la de origen), no sobre la receta propia del insumo. Ver detalleRevisar.
+    const oTipo = req.body?.origen?.tipo === 'insumo' ? 'insumo' : (req.body?.origen?.tipo === 'articulo' ? 'articulo' : null);
+    const oId = Number(req.body?.origen?.id);
+    const insumosMarcados = [...new Set(items.filter((it) => it.tipo === 'insumo').map((it) => it.id))];
+    if (oTipo && Number.isFinite(oId) && oId !== 0 && insumosMarcados.length) {
+      const r = await marcarUsoEnReceta({ bizId, uid, oTipo, oId, insumoIds: insumosMarcados, comment, asignadoA });
+      if (r.error) return res.status(409).json({ ok: false, error: r.error, message: r.message, detail: r.message });
+      return res.json({ ok: true, marcados: insumosMarcados.length, propuestaId: r.id, sumadaAExistente: r.sumada });
+    }
+
     let marcados = 0;
     for (const it of items) {
       const col = it.tipo === 'insumo' ? 'insumo_id' : 'article_id';
@@ -595,6 +703,122 @@ exports.marcarRevision = async (req, res, next) => {
       }).catch((e) => console.error('[marcarRevision] audit log:', e?.message));
       marcados++;
     }
+    if (marcados) {
+      avisarAlEquipoSinEsperar({
+        businessId: bizId, actorUserId: uid, type: 'recetas', incluirActor: true,
+        title: marcados === 1
+          ? `A revisión: ${await nombreDeDestino(bizId, { articleId: items[0].tipo === 'articulo' ? items[0].id : null, insumoId: items[0].tipo === 'insumo' ? items[0].id : null }).catch(() => '1 receta')}`
+          : `A revisión: ${marcados} recetas`,
+        message: comment,
+        metadata: { kind: 'receta_marcada_revision', cantidad: marcados },
+      });
+      avisarAsignado({ bizId, uid, asignadoA, titulo: marcados === 1 ? 'Te asignaron una revisión de receta' : `Te asignaron ${marcados} revisiones de recetas`, comment });
+    }
     return res.json({ ok: true, marcados });
+  } catch (e) { next(e); }
+};
+
+function avisarAsignado({ bizId, uid, asignadoA, titulo, comment }) {
+  if (!asignadoA || Number(asignadoA) === Number(uid)) return;
+  createSyncNotification({
+    businessId: bizId, userId: asignadoA, type: 'ui_action',
+    title: titulo, message: comment || null,
+    metadata: { kind: 'receta_revision_asignada' },
+  }).catch(() => {});
+}
+
+async function marcarUsoEnReceta({ bizId, uid, oTipo, oId, insumoIds, comment, asignadoA }) {
+  const col = oTipo === 'insumo' ? 'insumo_id' : 'article_id';
+  const nombreRec = await nombreDeDestino(bizId, oTipo === 'insumo' ? { insumoId: oId } : { articleId: oId });
+  const { rows: abiertas } = await pool.query(
+    `SELECT * FROM receta_proposals WHERE business_id = $1 AND ${col} = $2 AND status = ANY($3::text[])
+      ORDER BY created_at DESC LIMIT 1`,
+    [bizId, oId, ['pending', 'in_revision']]
+  );
+  const ab = abiertas[0];
+  let id; let sumada = false;
+  if (ab && !esMarcaSinContenido(ab)) {
+    return { error: 'ya_tiene_propuesta', message: `${nombreRec} ya tiene un cambio esperando aprobación. Revisalo en Configuración › Aprobaciones.` };
+  }
+  if (ab) {
+    // Ya estaba marcada: se suman los insumos y la nota a la misma marca.
+    const revisar = [...new Set([...idsRevisar(ab.payload_after), ...insumoIds])];
+    const nota = ab.admin_comment && ab.admin_comment !== comment ? `${ab.admin_comment} · ${comment}` : comment;
+    await pool.query(
+      `UPDATE receta_proposals SET payload_after = $1::jsonb, admin_comment = $2,
+              asignado_a_user_id = COALESCE($3, asignado_a_user_id), updated_at = NOW()
+        WHERE id = $4`,
+      [JSON.stringify({ revisar }), nota, asignadoA, ab.id]
+    );
+    id = ab.id; sumada = true;
+  } else {
+    const { rows: rr } = await pool.query(
+      `SELECT id FROM recetas WHERE business_id = $1 AND ${col} = $2 AND active = TRUE ORDER BY id DESC LIMIT 1`,
+      [bizId, oId]
+    );
+    const recetaId = rr[0]?.id || null;
+    const { rows: ins } = await pool.query(
+      `INSERT INTO receta_proposals (business_id, receta_id, article_id, insumo_id, created_by_user_id, status, payload_before, payload_after, admin_comment, asignado_a_user_id)
+       VALUES ($1, $2, $3, $4, $5, 'in_revision', NULL, $6::jsonb, $7, $8)
+       RETURNING id`,
+      [bizId, recetaId, oTipo === 'articulo' ? oId : null, oTipo === 'insumo' ? oId : null, uid, JSON.stringify({ revisar: insumoIds }), comment, asignadoA]
+    );
+    id = ins[0].id;
+    if (recetaId) await pool.query(`UPDATE recetas SET has_pending_proposal = TRUE WHERE id = $1`, [recetaId]);
+  }
+  const { rows: nombres } = await pool.query(`SELECT nombre FROM insumos WHERE business_id = $1 AND id = ANY($2::int[])`, [bizId, insumoIds]);
+  const queInsumos = nombres.map((n) => n.nombre).join(', ') || `${insumoIds.length} insumo(s)`;
+  logAudit(null, {
+    userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: sumada ? 'update' : 'create',
+    diff: { after: { estado: 'en_revision', revisar: insumoIds } },
+    metadata: { decision: 'marcada_revision_uso', comment, asignadoAUserId: asignadoA, target: oTipo, targetId: oId },
+  }).catch((e) => console.error('[marcarUsoEnReceta] audit log:', e?.message));
+  avisarAlEquipoSinEsperar({
+    businessId: bizId, actorUserId: uid, type: 'recetas', incluirActor: true,
+    title: `A revisión: ${queInsumos} en ${nombreRec}`,
+    message: comment,
+    metadata: { kind: 'receta_marcada_revision', proposal_id: id },
+  });
+  avisarAsignado({ bizId, uid, asignadoA, titulo: `Te asignaron revisar ${queInsumos} en ${nombreRec}`, comment });
+  return { id, sumada };
+}
+
+/**
+ * POST /businesses/:businessId/receta-proposals/:id/asignar   body: { asignadoA }
+ * Cambia a quién le toca revisar una propuesta/marca abierta. Solo admin/owner.
+ */
+exports.reasignar = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const id = Number(req.params.id);
+    const uid = req.user?.id;
+    if (!bizId || !id || !uid) return res.status(400).json({ ok: false, error: 'invalid_params' });
+    if (!(await requireAdminOrOwner(uid, bizId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const asignadoA = Number(req.body?.asignadoA) || null;
+    const p = await loadPendingProposal(id, bizId);
+    if (!p || !['pending', 'in_revision'].includes(p.status)) return res.status(404).json({ ok: false, error: 'proposal_not_found' });
+    const { rows } = await pool.query(
+      `UPDATE receta_proposals SET asignado_a_user_id = $1, updated_at = NOW() WHERE id = $2
+        RETURNING id, asignado_a_user_id,
+                  (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), email) FROM app_users WHERE id = $1) AS asignado_a_nombre`,
+      [asignadoA, id]
+    );
+    const antes = p.asignado_a_user_id
+      ? (await pool.query(`SELECT COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), email) AS n FROM app_users WHERE id = $1`, [p.asignado_a_user_id])).rows[0]?.n
+      : null;
+    const nombreRec = await nombreDeDestino(bizId, { articleId: p.article_id, insumoId: p.insumo_id }).catch(() => 'una receta');
+    const despues = rows[0]?.asignado_a_nombre || 'nadie';
+    logAudit(null, {
+      userId: uid, businessId: bizId, entityType: 'receta_proposal', entityId: id, action: 'update',
+      diff: { before: { asignado: antes }, after: { asignado: despues } },
+      metadata: { decision: 'reasignada' },
+    }).catch((e) => console.error('[reasignar] audit log:', e?.message));
+    avisarAlEquipoSinEsperar({
+      businessId: bizId, actorUserId: uid, type: 'recetas', incluirActor: true,
+      title: `Revisión de ${nombreRec}: ${antes || 'sin asignar'} → ${despues}`,
+      metadata: { kind: 'receta_revision_reasignada', proposal_id: id },
+    });
+    avisarAsignado({ bizId, uid, asignadoA, titulo: `Te asignaron revisar ${nombreRec}`, comment: p.admin_comment });
+    return res.json({ ok: true, proposal: rows[0] });
   } catch (e) { next(e); }
 };

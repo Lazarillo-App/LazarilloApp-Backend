@@ -15,5 +15,6 @@ router.post('/:id/approve', ctrl.approveProposal);
 router.post('/:id/reject', ctrl.rejectProposal);
 router.post('/:id/revision', ctrl.requestRevision);
 router.post('/:id/jefe-ok', ctrl.jefeOk);
+router.post('/:id/asignar', ctrl.reasignar);
 
 module.exports = router;
