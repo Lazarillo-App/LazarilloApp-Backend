@@ -2498,6 +2498,7 @@ exports.searchPadrinoInsumo = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
 // POST /insumos/batch-detalle — equivalencias y mermas de varios insumos en una sola llamada
 // (antes el modal de recetas pedía 2 requests por ingrediente).
 exports.batchDetalle = async (req, res) => {
