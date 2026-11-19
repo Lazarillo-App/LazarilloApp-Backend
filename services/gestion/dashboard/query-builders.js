@@ -129,7 +129,9 @@ function buildPivotConditions({
   }
   if (rubroCodigo) {
     conditions.push(sql`COALESCE(rc.codigo, '__sin_rubro') = ${rubroCodigo}`);
-  } else if (filterRubrosOcultos) {
+  } else if (filterRubrosOcultos && !conceptoCodigo && !proveedorId) {
+    // Buscar un concepto o proveedor (buscador del Panel, 19/11/2026) muestra sus compras aunque su
+    // rubro esté apagado en "Rubros visibles" (p. ej. retiros de socios): igual que al buscar un rubro.
     // Whitelist estricta: visibilidadCol nunca debe construirse a partir de un string arbitrario del request.
     const col = VISIBILIDAD_FIELDS.includes(visibilidadCol)
       ? (visibilidadCol)
