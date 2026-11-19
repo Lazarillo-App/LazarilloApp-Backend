@@ -21,17 +21,55 @@ const ZONA = 'America/Argentina/Buenos_Aires';
 const PREFIJO = '9998';
 const USUARIO = 'Lazarillo · Mercado Pago';
 
-// Tipos de cargo, en el orden en que se muestran.
-const GRUPOS = [
-  { grupo: 'comision_mp', nombre: 'Comisión de Mercado Pago', facturable: true, de: 'cuenta' },
-  { grupo: 'cargos_ml', nombre: 'Cargos de Mercado Libre', facturable: true, de: 'ml' },
-  { grupo: 'envios_ml', nombre: 'Envíos de Mercado Libre', facturable: true, de: 'ml' },
-  { grupo: 'terceros', nombre: 'Pago a la app que trae la venta', facturable: true, de: null },
-  { grupo: 'imp_debcred', nombre: 'Impuesto a los débitos y créditos', facturable: false, de: 'cuenta' },
-  { grupo: 'imp_iibb', nombre: 'Retenciones de Ingresos Brutos', facturable: false, de: 'cuenta' },
-  { grupo: 'imp_iget', nombre: 'Retención IGET', facturable: false, de: 'cuenta' },
-];
-const GRUPO = Object.fromEntries(GRUPOS.map((g) => [g.grupo, g]));
+// Tipos de cargo (Diego 19/11/2026: «cada uno de esos descuentos debería ser un concepto de caja diferente,
+// según la leyenda que trae el débito»). La clave sale del cargo mismo:
+//   imp:<nombre>          impuesto o retención (sin factura)            p. ej. imp:tax_withholding-caba
+//   mp:<nombre>:<medio>   lo que cobra Mercado Pago, por medio de cobro p. ej. mp:mercadopago_fee:credit_card
+//   ml:<nombre>           lo que cobra Mercado Libre (y ml:envios)
+//   otro:<nombre>         lo que cobra un tercero (third_payment…)
+// Lo elegido antes para los tipos generales (comision_mp, cargos_ml, imp_iibb…) sigue valiendo como base de
+// cada tipo nuevo hasta que se elija otra cosa para ese tipo.
+const MEDIOS = {
+  credit_card: 'tarjeta de crédito', debit_card: 'tarjeta de débito', account_money: 'dinero en cuenta', prepaid_card: 'tarjeta prepaga',
+  otro: 'otros medios', bank_transfer: 'transferencia', ticket: 'efectivo', digital_currency: 'Mercado Crédito', digital_wallet: 'billetera virtual', atm: 'cajero',
+};
+const PROVINCIAS = {
+  caba: 'CABA', buenos_aires: 'Buenos Aires', tucuman: 'Tucumán', cordoba: 'Córdoba', santa_fe: 'Santa Fe', mendoza: 'Mendoza', neuquen: 'Neuquén',
+  rio_negro: 'Río Negro', entre_rios: 'Entre Ríos', salta: 'Salta', jujuy: 'Jujuy', misiones: 'Misiones', chaco: 'Chaco', corrientes: 'Corrientes',
+};
+const NOMBRES_ML = {
+  meli_fee: 'Cargo por venta de Mercado Libre', meli_percentage_fee: 'Porcentaje por venta de Mercado Libre', flat_fee: 'Cargo fijo por venta de Mercado Libre',
+  financing_add_on_fee: 'Costo de cuotas de Mercado Libre', cards_spread: 'Recargo por pagar con tarjeta (Mercado Libre)', envios: 'Envíos de Mercado Libre',
+};
+const NOMBRES_MP = { mercadopago_fee: 'Comisión por cobro con', financing_fee: 'Costo de cuotas sin interés con', processing_fee: 'Cargo por procesamiento con' };
+const CLAVE_OK = /^(imp|mp|ml|otro):[a-z0-9_:\-.]{1,90}$/;
+const prov = (t) => PROVINCIAS[t] || t.replace(/_/g, ' ').replace(/\b\w/g, (x) => x.toUpperCase());
+
+/** Qué es un tipo de cargo: leyenda, si llega con factura, el tipo general (base) y de quién sugerir el proveedor. */
+function infoGrupo(grupo) {
+  const [cat, nombre = '', medio = ''] = String(grupo).split(':');
+  if (cat === 'imp') {
+    const n = nombre.toLowerCase();
+    const juris = n.includes('-') ? prov(n.slice(n.lastIndexOf('-') + 1)) : '';
+    let leyenda;
+    if (n.includes('debitos_creditos')) leyenda = n.includes('payer') ? 'Impuesto a los débitos y créditos (pagos que hiciste)' : 'Impuesto a los débitos y créditos';
+    else if (n.includes('iget')) leyenda = 'Retención IGET';
+    else if (n.includes('sirtac')) leyenda = `Retención IIBB SIRTAC ${juris}${n.includes('noinsc') ? ' (no inscripto)' : ''}${n.includes('sobretasa') ? ' (sobretasa)' : ''}`.trim();
+    else if (n.includes('sircupa')) leyenda = 'Retención SIRCUPA';
+    else if (juris) leyenda = `Retención IIBB ${juris}`;
+    else leyenda = `Retención ${nombre}`;
+    const base = n.includes('debitos_creditos') ? 'imp_debcred' : n.includes('iget') ? 'imp_iget' : 'imp_iibb';
+    return { grupo, nombre: leyenda, facturable: false, base, de: 'cuenta', orden: 3 };
+  }
+  if (cat === 'mp') {
+    const m = MEDIOS[medio] || (medio ? medio.replace(/_/g, ' ') : 'otros medios');
+    const leyenda = NOMBRES_MP[nombre] ? `${NOMBRES_MP[nombre]} ${m}` : `Cargo de Mercado Pago (${nombre}) con ${m}`;
+    return { grupo, nombre: leyenda.charAt(0).toUpperCase() + leyenda.slice(1), facturable: true, base: 'comision_mp', de: 'cuenta', orden: 1 };
+  }
+  if (cat === 'ml') return { grupo, nombre: NOMBRES_ML[nombre] || `Cargo de Mercado Libre (${nombre})`, facturable: true, base: nombre === 'envios' ? 'envios_ml' : 'cargos_ml', de: 'ml', orden: 2 };
+  if (cat === 'otro') return { grupo, nombre: nombre === 'third_payment' ? 'Pago a la app que trae la venta' : `Cargo de un tercero (${nombre})`, facturable: true, base: 'terceros', de: null, orden: 2 };
+  return null;
+}
 
 // Clasificación de un cargo (alias ch, cobro p). NULL = no es costo del negocio. En un cobro son nuestros los que
 // paga el que cobra (collector); en un PAGO que hicimos, los que paga el pagador (p. ej. el 0,6% de una
@@ -40,13 +78,11 @@ const GRUPO = Object.fromEntries(GRUPOS.map((g) => [g.grupo, g]));
 const CASE_GRUPO = `CASE
   WHEN NOT ((p.rol = 'cobro' AND COALESCE(ch->'accounts'->>'from', '') IN ('collector', 'application_owner'))
           OR (p.rol = 'pago' AND ch->'accounts'->>'from' = 'payer')) THEN NULL
-  WHEN ch->>'name' LIKE 'tax%' AND ch->>'name' LIKE '%debitos_creditos%' THEN 'imp_debcred'
-  WHEN ch->>'name' LIKE 'tax%' AND ch->>'name' LIKE '%iget%' THEN 'imp_iget'
-  WHEN ch->>'name' LIKE 'tax%' THEN 'imp_iibb'
-  WHEN ch->'accounts'->>'to' = 'mp' THEN 'comision_mp'
-  WHEN ch->'accounts'->>'to' = 'ml' THEN 'cargos_ml'
-  WHEN ch->>'name' LIKE 'shp%' THEN 'envios_ml'
-  ELSE 'terceros' END`;
+  WHEN ch->>'name' LIKE 'tax%' THEN 'imp:' || LOWER(ch->>'name')
+  WHEN ch->'accounts'->>'to' = 'mp' THEN 'mp:' || LOWER(ch->>'name') || ':' || COALESCE(NULLIF(p.raw->>'payment_type_id', ''), 'otro')
+  WHEN ch->'accounts'->>'to' = 'ml' THEN 'ml:' || LOWER(ch->>'name')
+  WHEN ch->>'name' LIKE 'shp%' THEN 'ml:envios'
+  ELSE 'otro:' || LOWER(COALESCE(ch->>'name', 'cargo')) END`;
 
 // Movimientos de cargos por día (local), cuenta y tipo, de un negocio, en [desde, hasta].
 // Los cargos de un cobro viejo pueden devolverse mucho después: se miran cobros de hasta 180 días antes.
@@ -94,23 +130,38 @@ async function orgDe(businessId) {
   return r ? Number(r.organization_id) : null;
 }
 
-/** Proveedor y concepto de cada tipo: lo elegido, o el sugerido (la cuenta / «Mercado Libre»). */
-async function configDe(organizationId, businessId) {
+/**
+ * Proveedor y concepto de cada tipo (claves del mes): lo elegido para ese tipo, si no lo elegido para su tipo
+ * general (base), si no el sugerido (el de la cuenta / «Mercado Libre»). «-» = quitado a mano: queda sin elegir.
+ */
+async function configDe(organizationId, businessId, claves = []) {
   const [org, filas, ml, cuentas, conceptos] = await Promise.all([
     db.one(sql`SELECT activo, to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`),
     db.many(sql`SELECT grupo, proveedor_cod, concepto_codigo FROM mp_cargos_config WHERE organization_id = ${organizationId}`),
-    db.one(sql`SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId} AND LOWER(TRIM(nombre)) = 'mercado libre' ORDER BY id LIMIT 1`),
+    db.one(sql`SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId} AND LOWER(TRIM(nombre)) IN ('mercado libre', '.mercado libre', 'mercadolibre') ORDER BY id LIMIT 1`),
     db.many(sql`SELECT sucursal, mp_user_id::text AS cuenta, proveedor_cod, COALESCE(mp_nickname, mp_email, mp_user_id::text) AS nombre FROM integraciones_mercadopago WHERE business_id = ${businessId}`),
-    db.many(sql`SELECT codigo, nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId}`),
+    db.many(sql`SELECT codigo, nombre, "codRga" FROM gestion_conceptos_caja WHERE organization_id = ${organizationId}`),
   ]);
   const elegido = Object.fromEntries(filas.map((f) => [f.grupo, f]));
-  const nombreConcepto = new Map(conceptos.map((c) => [String(c.codigo).trim(), String(c.nombre).trim()]));
+  const conc = new Map(conceptos.map((c) => [String(c.codigo).trim(), { nombre: String(c.nombre).trim(), rubro: c.codRga != null ? String(c.codRga).trim() : null }]));
   const deCuenta = cuentas.find((c) => c.proveedor_cod)?.proveedor_cod || null;
-  const grupos = GRUPOS.map((g) => {
-    const e = elegido[g.grupo] || {};
+  const valor = (campo, g) => {
+    const propio = elegido[g.grupo]?.[campo];
+    if (propio === '-') return { v: null, propio: true };
+    if (propio) return { v: propio, propio: true };
+    const base = elegido[g.base]?.[campo];
+    return { v: base && base !== '-' ? base : null, propio: false };
+  };
+  const grupos = [...new Set(claves)].map(infoGrupo).filter(Boolean).map((g) => {
+    const p = valor('proveedor_cod', g);
+    const c = valor('concepto_codigo', g);
     const sugerido = g.de === 'cuenta' ? deCuenta : g.de === 'ml' ? ml?.codigo || null : null;
-    const concepto = e.concepto_codigo && nombreConcepto.has(e.concepto_codigo) ? e.concepto_codigo : null;
-    return { ...g, proveedorElegido: e.proveedor_cod || null, proveedorSugerido: sugerido, proveedor: e.proveedor_cod || sugerido, concepto, conceptoNombre: concepto ? nombreConcepto.get(concepto) : null };
+    const proveedor = p.v || (p.propio ? null : sugerido);
+    const concepto = c.v && conc.has(c.v) ? c.v : null;
+    return {
+      ...g, proveedor, proveedorSugerido: !p.v && !!proveedor, proveedorHeredado: !!p.v && !p.propio,
+      concepto, conceptoNombre: concepto ? conc.get(concepto).nombre : null, conceptoRubro: concepto ? conc.get(concepto).rubro : null, conceptoHeredado: !!concepto && !c.propio,
+    };
   });
   return { activo: !!org?.activo, desde: org?.desde || null, grupos, cuentas };
 }
@@ -122,8 +173,7 @@ async function resumen(businessId, mes) {
   const m = /^\d{4}-(0[1-9]|1[0-2])$/.test(mes || '') ? mes : hoyAR().slice(0, 7);
   const desde = `${m}-01`;
   const hasta = masDias(new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 1)).toISOString().slice(0, 10), -1);
-  const [cfg, dias, cargados, proveedores, noCosto, avisos] = await Promise.all([
-    configDe(organizationId, businessId),
+  const [dias, cargados, proveedores, noCosto, avisos] = await Promise.all([
     diario(businessId, desde, hasta),
     db.many(sql`SELECT grupo, COUNT(*) FILTER (WHERE comprobante IS NOT NULL)::int AS n, COALESCE(SUM(importe) FILTER (WHERE comprobante IS NOT NULL), 0)::float8 AS cargado,
                        COALESCE(SUM(importe) FILTER (WHERE absorbido_en IS NOT NULL), 0)::float8 AS facturado
@@ -136,24 +186,29 @@ async function resumen(businessId, mes) {
          AND COALESCE(ch->'accounts'->>'from', '') NOT IN ('collector', 'application_owner')`),
     db.one(sql`SELECT COUNT(*)::int AS dias_negativos FROM mp_cargos_cargados WHERE business_id = ${businessId} AND comprobante IS NULL AND fecha BETWEEN ${desde}::date AND ${hasta}::date`),
   ]);
+  const cfg = await configDe(organizationId, businessId, [...dias.map((d) => d.grupo), ...cargados.map((c) => c.grupo)]);
   const nombreProv = new Map(proveedores.map((p) => [p.codigo, p]));
   const total = {};
   for (const d of dias) total[d.grupo] = r2((total[d.grupo] || 0) + d.importe);
   const hechos = Object.fromEntries(cargados.map((c) => [c.grupo, c]));
   const grupos = cfg.grupos.map((g) => ({
-    grupo: g.grupo, nombre: g.nombre, facturable: g.facturable,
+    grupo: g.grupo, nombre: g.nombre, facturable: g.facturable, orden: g.orden,
     total: total[g.grupo] || 0,
     proveedor: g.proveedor ? { codigo: g.proveedor, nombre: nombreProv.get(g.proveedor)?.nombre?.trim() || g.proveedor, medioPago: nombreProv.get(g.proveedor)?.medioPago || null } : null,
-    proveedorSugerido: !g.proveedorElegido && !!g.proveedor,
-    concepto: g.concepto ? { codigo: g.concepto, nombre: g.conceptoNombre } : null,
+    proveedorSugerido: g.proveedorSugerido, proveedorHeredado: g.proveedorHeredado,
+    concepto: g.concepto ? { codigo: g.concepto, nombre: g.conceptoNombre, rubro: g.conceptoRubro } : null, conceptoHeredado: g.conceptoHeredado,
     cargado: hechos[g.grupo]?.cargado || 0, tickets: hechos[g.grupo]?.n || 0, facturado: hechos[g.grupo]?.facturado || 0,
-  }));
+  })).sort((a, b) => a.orden - b.orden || b.total - a.total);
   return { mes: m, activo: cfg.activo, desde: cfg.desde, grupos, noEsCosto: r2(noCosto?.t || 0), cuentas: cfg.cuentas.length, diasNegativos: avisos?.dias_negativos || 0 };
 }
 
-/** Elegir proveedor y/o concepto de un tipo de cargo (vale para toda la organización). */
+/**
+ * Elegir proveedor y/o concepto de un tipo de cargo (vale para toda la organización).
+ * undefined = no se toca; '' o null = quitar (queda sin elegir, no vuelve al general).
+ */
 async function configurar(businessId, { grupo, proveedor, concepto } = {}) {
-  if (!GRUPO[grupo]) return { error: 'grupo_invalido' };
+  const info = infoGrupo(grupo);
+  if (!CLAVE_OK.test(String(grupo || '')) || !info) return { error: 'grupo_invalido' };
   const organizationId = await orgDe(businessId);
   if (proveedor) {
     const p = await db.one(sql`SELECT codigo, nombre FROM gestion_proveedores WHERE organization_id = ${organizationId} AND codigo = ${String(proveedor)}`);
@@ -164,12 +219,83 @@ async function configurar(businessId, { grupo, proveedor, concepto } = {}) {
     if (!c) return { error: 'concepto_inexistente' };
   }
   const antes = await db.one(sql`SELECT proveedor_cod, concepto_codigo FROM mp_cargos_config WHERE organization_id = ${organizationId} AND grupo = ${grupo}`);
-  const prov = proveedor === undefined ? antes?.proveedor_cod ?? null : proveedor || null;
-  const conc = concepto === undefined ? antes?.concepto_codigo ?? null : concepto || null;
+  const nuevo = (v, previo) => (v === undefined ? previo ?? null : v ? String(v) : '-');
+  const pv = nuevo(proveedor, antes?.proveedor_cod);
+  const cc = nuevo(concepto, antes?.concepto_codigo);
   await db.execute(sql`
-    INSERT INTO mp_cargos_config (organization_id, grupo, proveedor_cod, concepto_codigo) VALUES (${organizationId}, ${grupo}, ${prov}, ${conc})
+    INSERT INTO mp_cargos_config (organization_id, grupo, proveedor_cod, concepto_codigo) VALUES (${organizationId}, ${grupo}, ${pv}, ${cc})
     ON CONFLICT (organization_id, grupo) DO UPDATE SET proveedor_cod = EXCLUDED.proveedor_cod, concepto_codigo = EXCLUDED.concepto_codigo, actualizado_at = now()`);
-  return { ok: true, grupo, nombre: GRUPO[grupo].nombre, antes: antes || null, proveedor: prov, concepto: conc };
+  const limpio = (v) => (v === '-' ? null : v);
+  return { ok: true, grupo, nombre: info.nombre, antes: antes ? { proveedor_cod: limpio(antes.proveedor_cod), concepto_codigo: limpio(antes.concepto_codigo) } : null, proveedor: limpio(pv), concepto: limpio(cc) };
+}
+
+/**
+ * Crear el concepto de caja con la leyenda del cargo y dejarlo elegido. Varios a la vez (grupos[]), con el mismo
+ * rubro. Si ya existe un concepto con ese nombre en la organización, se usa ese (no se duplica).
+ */
+async function crearConceptos(businessId, { grupos = [], codRubro, nombres = {} } = {}) {
+  const organizationId = await orgDe(businessId);
+  const lista = [...new Set(grupos)].filter((g) => CLAVE_OK.test(String(g)) && infoGrupo(g)).slice(0, 40);
+  if (!lista.length) return { error: 'sin_grupos' };
+  const carga = require('./gestion/carga-api');
+  const hechos = [];
+  for (const g of lista) {
+    const nombre = String(nombres[g] || infoGrupo(g).nombre).trim().slice(0, 60);
+    let ex = await db.one(sql`SELECT codigo FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND LOWER(TRIM(nombre)) = LOWER(${nombre}) LIMIT 1`);
+    let creado = false;
+    if (!ex) {
+      try {
+        const r = await carga.crearConcepto({ organizationId, body: { nombre, tipo: '-', codRubro: String(codRubro || '') } });
+        ex = { codigo: String(r.codigo) }; creado = true;
+      } catch (e) {
+        return { error: 'concepto_no_creado', detalle: e.message, hechos };
+      }
+    }
+    await configurar(businessId, { grupo: g, concepto: ex.codigo });
+    hechos.push({ grupo: g, codigo: String(ex.codigo), nombre, creado });
+  }
+  return { ok: true, hechos, creados: hechos.filter((h) => h.creado).length };
+}
+
+/** Crear un proveedor de la organización y dejarlo elegido para un tipo de cargo. */
+async function crearProveedor(businessId, { grupo, nombre } = {}) {
+  const organizationId = await orgDe(businessId);
+  if (!infoGrupo(grupo)) return { error: 'grupo_invalido' };
+  const carga = require('./gestion/carga-api');
+  let p;
+  try { p = await carga.crearProveedor({ organizationId, body: { nombre } }); } catch (e) { return { error: 'proveedor_no_creado', detalle: e.message }; }
+  await configurar(businessId, { grupo, proveedor: p.codigo });
+  return { ok: true, proveedor: { codigo: p.codigo, nombre: p.nombre } };
+}
+
+/** Qué hay adentro de un tipo de cargo en el mes: cobro por cobro, con la fecha del cargo (o de la devolución). */
+async function detalle(businessId, mes, grupo) {
+  if (!CLAVE_OK.test(String(grupo || ''))) return { error: 'grupo_invalido' };
+  const m = /^\d{4}-(0[1-9]|1[0-2])$/.test(mes || '') ? mes : hoyAR().slice(0, 7);
+  const desde = `${m}-01`;
+  const hasta = masDias(new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 1)).toISOString().slice(0, 10), -1);
+  const filas = await db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL jit = off`);
+    return tx.many(sql`
+      WITH c AS (
+        SELECT p.mp_id, p.sucursal, p.cuenta, p.importe AS cobro, p.rol, p.raw->>'payment_type_id' AS medio, ch, ${sql.raw(CASE_GRUPO)} AS grupo
+          FROM mp_pagos p, jsonb_array_elements(COALESCE(p.raw->'charges_details', '[]'::jsonb)) ch
+         WHERE p.business_id = ${businessId} AND p.rol IN ('cobro', 'pago') AND p.cuenta IS NOT NULL
+           AND p.fecha >= ${desde}::date - 180 AND p.fecha <= ${hasta}::date + 1
+      ), mov AS (
+        SELECT mp_id, sucursal, cuenta, cobro, rol, medio, ch->>'name' AS cargo, (ch->>'date_created')::timestamptz AS ts, COALESCE((ch->'amounts'->>'original')::numeric, 0) AS importe, false AS devol
+          FROM c WHERE grupo = ${grupo}
+        UNION ALL
+        SELECT mp_id, sucursal, cuenta, cobro, rol, medio, ch->>'name', (r->>'date_created')::timestamptz, -COALESCE((r->>'amount')::numeric, 0), true
+          FROM c, jsonb_array_elements(COALESCE(ch->'refund_charges', '[]'::jsonb)) r WHERE grupo = ${grupo}
+      )
+      SELECT mp_id::text AS op, sucursal, cuenta::text AS cuenta, cobro::float8 AS cobro, rol, medio, cargo, devol,
+             to_char(ts AT TIME ZONE ${ZONA}, 'YYYY-MM-DD') AS fecha, to_char(ts AT TIME ZONE ${ZONA}, 'HH24:MI') AS hora, ROUND(importe, 2)::float8 AS importe
+        FROM mov WHERE (ts AT TIME ZONE ${ZONA})::date BETWEEN ${desde}::date AND ${hasta}::date AND importe <> 0
+       ORDER BY ts DESC LIMIT 2000`);
+  });
+  const total = r2(filas.reduce((a, f) => a + f.importe, 0));
+  return { mes: m, grupo, nombre: infoGrupo(grupo)?.nombre || grupo, filas, total, recortado: filas.length >= 2000 };
 }
 
 /** Encender / apagar la carga para la organización. Al encender, «desde» es el primer día que se carga. */
@@ -205,8 +331,10 @@ async function medioDe(tx, businessId, proveedorCod, organizationId) {
 async function cargarNegocio(businessId) {
   const organizationId = await orgDe(businessId);
   if (!organizationId) return { cargados: 0 };
-  const cfg = await configDe(organizationId, businessId);
-  if (!cfg.activo || !cfg.desde) return { cargados: 0, apagado: true };
+  const org = await db.one(sql`SELECT activo, to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`);
+  if (!org?.activo || !org.desde) return { cargados: 0, apagado: true };
+  const diasTodos = await diario(businessId, org.desde, masDias(hoyAR(), -1));
+  const cfg = await configDe(organizationId, businessId, diasTodos.map((d) => d.grupo));
   const carga = require('./gestion/carga-api');
   const ayer = masDias(hoyAR(), -1);
   if (ayer < cfg.desde) return { cargados: 0 };
@@ -218,7 +346,7 @@ async function cargarNegocio(businessId) {
   const hechos = new Set((await db.many(sql`
     SELECT sucursal, cuenta::text AS cuenta, grupo, to_char(fecha, 'YYYY-MM-DD') AS fecha FROM mp_cargos_cargados
      WHERE business_id = ${businessId} AND fecha >= ${cfg.desde}::date`)).map((x) => `${x.sucursal}|${x.cuenta}|${x.grupo}|${x.fecha}`));
-  const dias = await diario(businessId, cfg.desde, ayer);
+  const dias = diasTodos;
   let cargados = 0, total = 0;
   const errores = [];
   for (const d of dias) {
@@ -293,12 +421,11 @@ async function cargarDia(carga, { organizationId, businessId, dia, grupo, cuenta
  * Solo facturas desde «desde» y sin pagos de MaxiRest (esas ya están pagas).
  */
 async function absorberNegocio(businessId, organizationId) {
-  const facturables = GRUPOS.filter((g) => g.facturable).map((g) => g.grupo);
   const pendientes = await db.many(sql`
     SELECT k.sucursal, k.cuenta::text AS cuenta, k.grupo, to_char(k.fecha, 'YYYY-MM-DD') AS fecha, k.importe::float8 AS importe, k.proveedor_cod, k.comprobante, k.pago_id
       FROM mp_cargos_cargados k
      WHERE k.business_id = ${businessId} AND k.absorbido_en IS NULL AND k.comprobante IS NOT NULL AND k.pago_id IS NOT NULL
-       AND k.grupo = ANY(${facturables}::text[])
+       AND k.grupo NOT LIKE 'imp:%'
      ORDER BY k.fecha, k.sucursal, k.cuenta, k.grupo`);
   if (!pendientes.length) return { pasados: 0, facturas: 0 };
   const org = await db.one(sql`SELECT to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`);
@@ -356,4 +483,4 @@ async function pasarAFactura(businessId, t, f) {
   });
 }
 
-module.exports = { GRUPOS, CASE_GRUPO, sqlDiario, resumen, configurar, activar, cargarNegocio, absorberNegocio };
+module.exports = { infoGrupo, CASE_GRUPO, sqlDiario, resumen, configurar, crearConceptos, crearProveedor, detalle, activar, cargarNegocio, absorberNegocio };
