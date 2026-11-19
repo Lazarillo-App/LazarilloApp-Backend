@@ -603,5 +603,26 @@
     "tipo": "cambio",
     "titulo": "Modal del artículo con pestañas FICHA / RECETA (como insumos)",
     "nota": "Diego 19/11: la ficha usa la misma foto del encabezado (mismo lugar que en Receta) y el mismo pie que Receta (BotonesReceta: Guardar arriba, Borrar y Cancelar abajo). Regla nueva en la Guía: un modal, un solo juego de piezas."
+  },
+  {
+    "clave": "2026-11-19-art-pest-guia-02",
+    "tipo": "guia_parche",
+    "buscar": "con el mismo tamaño y el mismo componente en todas las pestañas: al cambiar de pestaña solo cambia el cuerpo.",
+    "reemplazar": "con el mismo tamaño y el mismo componente en todas las pestañas: al cambiar de pestaña solo cambia el cuerpo. El pie es UNO solo (mismo contenedor, fondo, alto y posición), no uno por pestaña, y el modal tiene alto fijo: al cambiar de pestaña no se corre nada (ni las pestañas, ni los botones, ni el pie). Lo que no aplica en una pestaña se oculta dejando su lugar. Se verifica capturando las dos pestañas al mismo ancho y comparándolas."
+  },
+  {
+    "clave": "2026-11-19-pase-c",
+    "tipo": "tarea",
+    "titulo": "Panel super: tarjeta «Último pase a producción» (✓ completo / ✗ faltan N cambios)",
+    "detalle": "Diego (19/11): ★ importante. Ver en el panel, para Diego y Mairene, si el último pase de testing a main quedó completo. Hoy existe el control automático en GitHub (workflow «Control del pase a producción» en los dos repos: en cada push a main compara lo que traía testing con lo que quedó en main y, si falta algo, abre un issue «Pase a producción incompleto»). La tarjeta mostraría ese resultado + el estado del deploy de producción en Render (live / falló) + si las entradas de claude/sync.json se aplicaron.",
+    "modulo": "general",
+    "prioridad": "alta",
+    "estado": "pendiente"
+  },
+  {
+    "clave": "2026-11-19-art-pest-05",
+    "tipo": "cambio",
+    "titulo": "Modal del artículo con pestañas FICHA / RECETA (como insumos)",
+    "nota": "Diego 19/11: pie unificado de verdad — FICHA y RECETA usan el MISMO pie (costos + Guardar/Borrar/Cancelar); en FICHA los botones guardan la ficha. Alto fijo del modal y «Marcar» oculto sin perder su lugar: nada se corre al cambiar de pestaña. FALLA vieja que ahora afecta a las dos pestañas: en celular (390) el pie corta Precio sugerido y no se ven los botones."
   }
 ]
