@@ -463,5 +463,15 @@
     "modulo": "compras",
     "prioridad": "normal",
     "estado": "pendiente"
+  },
+  {
+    "clave": "2026-11-19-claude-02",
+    "tipo": "tarea",
+    "titulo": "Aprobaciones: la marca de un insumo hecha desde una receta tiene que llevar a esa receta",
+    "detalle": "Diego (19/11): marcó CHEDDAR PASTA ELABORADO a revisión desde la receta de Brioche Ribswich y en Aprobaciones aparece la receta del cheddar (receta nueva), no la de Ribswich. La marca es sobre cómo se usa el insumo en el artículo, no sobre su elaboración. Causa: enviarRevision (RecetaModal) manda {tipo:'insumo', id} y se pierde la receta de origen (propuesta #80 sin article_id). Propuesta: la tarjeta es de la receta de origen, con el insumo marcado adentro (cantidad, en cuántas recetas se usa, link a su elaboración); acciones Abrir receta y corregir / Reasignar / Finalizar revisión; corregir títulos «receta nueva» y «Tu comentario». Además Diego preguntó por qué la única acción es Finalizar revisión. HECHO 19/11 (Diego dio OK): la marca de ingredientes desde una receta queda sobre esa receta (payload_after.revisar), la bandeja muestra la receta de origen con el insumo adentro (cantidad, en cuántas recetas se usa, Ver su receta) y acciones Abrir receta y corregir / Reasignar (POST /:id/asignar) / Finalizar revisión con nota; avisos a la campana al marcar, reasignar y finalizar; el modal de receta resalta el ingrediente. FALLA arreglada: abrir una receta marcada tachaba todos los ingredientes. La marca #80 pasó a Brioche Ribswich (migración 150).",
+    "modulo": "recetas",
+    "prioridad": "alta",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]

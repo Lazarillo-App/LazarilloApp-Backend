@@ -265,6 +265,11 @@ async function propuestaAbiertaDe(bizId, { articleId = null, insumoId = null } =
     tieneContenido,
     adminComment: rows[0].admin_comment || null,
     asignadoA: rows[0].asignado_a_nombre || null,
+    // Marca sobre el USO de insumos en esta receta (ver marcarUsoEnReceta): el
+    // modal resalta esas filas.
+    revisar: Array.isArray(rows[0].payload_after?.revisar)
+      ? rows[0].payload_after.revisar.map(Number).filter((n) => Number.isFinite(n) && n !== 0)
+      : [],
   };
 }
 
