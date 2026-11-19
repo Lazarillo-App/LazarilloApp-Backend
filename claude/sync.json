@@ -543,5 +543,31 @@
     "prioridad": "normal",
     "estado": "pendiente",
     "business_id": null
+  },
+  {
+    "clave": "2026-11-19-art-pest-01",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "codigo-y-nombre",
+    "buscar": "Tocando el **código** editás los datos del artículo (nombre, precio, rubro).",
+    "reemplazar": "Cada artículo se abre en un modal con dos pestañas, como los insumos: **Ficha** (nombre, precio, rubro, código del POS) y **Receta**. Tocando el **código** se abre en la Ficha; con ‹ › pasás al artículo siguiente sin salir de la pestaña."
+  },
+  {
+    "clave": "2026-11-19-art-pest-02",
+    "tipo": "manual_seccion",
+    "capitulo": "acciones-de-un-articulo",
+    "seccion": "el-menu",
+    "buscar": "- **Editar artículo**: nombre, precio, rubro o código.",
+    "reemplazar": "- **Editar artículo**: abre la pestaña **Ficha** del artículo (nombre, precio, rubro o código)."
+  },
+  {
+    "clave": "2026-11-19-art-pest-03",
+    "tipo": "tarea",
+    "titulo": "Modal del artículo con pestañas FICHA / RECETA (como insumos)",
+    "detalle": "Diego (19/11): «similar a insumos, agregá las pestañas para navegar artículos». HECHO: el modal del artículo tiene FICHA y RECETA arriba a la derecha. Código de la tabla y ⋮ › Editar artículo abren en FICHA; el nombre, en RECETA; ‹ › mantiene la pestaña. La ficha guarda con su botón; si hay cambios sin guardar, pregunta antes de cambiar de pestaña, de artículo o cerrar. En celular las pestañas bajan a su renglón. Pendiente aparte: la Receta en celular corta la columna Observaciones (ya pasaba).",
+    "modulo": "recetas",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]
