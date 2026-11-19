@@ -264,6 +264,15 @@ function mediana(valores) {
   return ordenados.length % 2 ? ordenados[mid] : (ordenados[mid - 1] + ordenados[mid]) / 2;
 }
 
+// Costo manual vigente (Diego 19/11/2026): un precio cargado a mano manda hasta que entra una compra
+// de ese insumo con fecha igual o posterior al día en que se cargó. Las re-sincronizaciones de compras
+// viejas no lo pisan. Condición SQL para «este insumo NO tiene un manual vigente».
+const SIN_MANUAL_VIGENTE = (col) => `NOT EXISTS (
+          SELECT 1 FROM insumos im
+           WHERE im.id = ${col} AND im.precio_manual_at IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM purchase_items pm
+                              WHERE pm.insumo_id = im.id AND pm.fecha >= im.precio_manual_at::date))`;
+
 // Aplica el Map de precios (insumo_id → precio) a insumos.precio_ref de una,
 // respetando bonif_aceptada (precio blindado a mano). Devuelve los ids
 // efectivamente actualizados, para que el caller propague el costo en cascada.
@@ -273,11 +282,12 @@ async function aplicarPreciosCosteo(client, businessId, precios) {
   const valores = ids.map((id) => precios.get(id));
   const { rows } = await client.query(
     `UPDATE insumos i
-        SET precio_ref = v.precio, updated_at = NOW()
+        SET precio_ref = v.precio, precio_manual_at = NULL, updated_at = NOW()   -- la compra reemplaza al costo manual
        FROM UNNEST($1::int[], $2::numeric[]) AS v(insumo_id, precio)
       WHERE i.id = v.insumo_id
         AND i.business_id = $3
         AND i.bonif_aceptada IS NOT TRUE
+        AND ${SIN_MANUAL_VIGENTE('i.id')}
       RETURNING i.id`,
     [ids, valores, businessId]
   );
@@ -297,6 +307,7 @@ async function guardarCostosLocales(client, localBizId, precios) {
      SELECT v.insumo_id, $3, v.precio, NOW()
        FROM UNNEST($1::int[], $2::numeric[]) AS v(insumo_id, precio)
       WHERE v.precio > 0
+        AND ${SIN_MANUAL_VIGENTE('v.insumo_id')}
      ON CONFLICT (insumo_id, business_id)
        DO UPDATE SET precio = EXCLUDED.precio, updated_at = NOW()`,
     [ids, valores, Number(localBizId)]

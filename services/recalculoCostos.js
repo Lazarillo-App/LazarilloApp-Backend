@@ -60,6 +60,19 @@ async function recalcularCostosDeNegocio(insBiz) {
           if (!prev || f > prev.fecha) elegido.set(id, { precio, fecha: f });
         }
       }
+      // Costo manual (precio_manual_at) cargado DESPUÉS de la última compra: es una excepción vigente
+      // y el recálculo no la pisa (Diego 19/11/2026); vale hasta que entre una compra nueva.
+      const { rows: manuales } = await client.query(
+        `SELECT id, precio_manual_at FROM insumos WHERE business_id = $1 AND precio_manual_at IS NOT NULL`, [insBiz]);
+      for (const m of manuales) {
+        const id = Number(m.id), d = new Date(m.precio_manual_at);
+        const diaManual = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+        const ult = elegido.get(id)?.fecha || 0;
+        if (ult < diaManual) {   // ninguna compra del día del manual en adelante: el manual sigue
+          elegido.delete(id);
+          for (const p of preciosPorLocal.values()) p.delete(id);
+        }
+      }
       for (const [id, v] of elegido) precios.set(id, v.precio);
       insumosConPrecio = precios.size;
     }

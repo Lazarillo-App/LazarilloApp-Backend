@@ -834,7 +834,12 @@ exports.actualizar = async (req, res) => {
       if (!before.nombre_original) push('nombre_original', before.nombre);
     }
     if (b.unidadMed !== undefined) push('unidad_med', b.unidadMed);
+    // Costo manual como excepción (Diego 19/11/2026): vale para todos los locales hasta que entra
+    // una compra nueva de este insumo (aplicarPreciosCosteo lo pisa y vuelve precio_manual_at a NULL).
+    const precioManual = b.precioRef !== undefined && num(b.precioRef) > 0
+      && Math.abs(num(b.precioRef) - Number(before.precio_ref || 0)) > 0.0001;
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
+    if (precioManual) push('precio_manual_at', new Date());
     if (b.contenidoEnvase !== undefined) push('contenido_envase', b.contenidoEnvase === null || b.contenidoEnvase === '' ? null : num(b.contenidoEnvase));
     if (b.unidadEnvase !== undefined) push('unidad_envase', b.unidadEnvase || null);
     if (b.rubro !== undefined) {
@@ -895,6 +900,20 @@ exports.actualizar = async (req, res) => {
     }
     const { invalidateCacheForBiz } = require('../middleware/cacheJson');
     invalidateCacheForBiz(businessId);
+
+    if (precioManual && !rows[0].es_elaborado) {
+      // El costo por local (de las compras de cada local) dejaría las recetas con el precio viejo:
+      // mientras rija el manual, todos los locales usan este. La próxima compra los vuelve a armar.
+      await pool.query(`DELETE FROM insumo_costos_local WHERE insumo_id = $1`, [id]);
+      await propagarCostoInsumo(Number(id), Number(rows[0].business_id));
+      const fmt = (v) => `$${Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 2 })}`;
+      avisarAlEquipoSinEsperar({
+        businessId, actorUserId: req.user?.id, type: 'insumo_update',
+        title: `Costo manual: ${rows[0].nombre} ${fmt(before.precio_ref)} → ${fmt(rows[0].precio_ref)}`,
+        message: 'Vale hasta la próxima compra de este insumo.',
+        metadata: { kind: 'insumo_update', scope: 'insumo', ids: [Number(id)] },
+      });
+    }
 
     await logAudit(null, {
       userId: req.user?.id || null, businessId,
