@@ -13,7 +13,7 @@
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const { sql, db } = require('./db');
-const { armarFactura, comprobanteDe, facturaSchema, CONCEPTO_PERCEPCION, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE } = require('./facturas/armar');
+const { armarFactura, comprobanteDe, facturaSchema, monedaSchema, CONCEPTO_PERCEPCION, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE } = require('./facturas/armar');
 const { facturaDesdeFilas } = require('./facturas/leer');
 const { unirInsumos } = require('./facturas/insumos');
 const { normalizarComprobante, esTicket } = require('./facturas/saltear-lazarillo');
@@ -871,8 +871,16 @@ async function historialConcepto({ businessId, sp }) {
            MAX(TRIM(COALESCE(c."cajaPago", ''))) AS medio,
            SUM(COALESCE(c."importeManual", c.importe))::float8 AS importe,
            COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo,
-           MIN(c."rowId") AS "rowId" -- para eliminarla desde «Últimas cargas» (Diego 12/11/2026)
+           MIN(c."rowId") AS "rowId", -- para eliminarla desde «Últimas cargas» (Diego 12/11/2026)
+           -- En US$ (Diego 19/11/2026): la próxima carga del concepto arranca igual.
+           (array_agg(fm.moneda) FILTER (WHERE fm.moneda IS NOT NULL))[1] AS moneda
     FROM gestion_compras c
+    -- LATERAL con LIMIT 1: nunca multiplica las filas de la suma.
+    LEFT JOIN LATERAL (
+      SELECT x.payload->'moneda' AS moneda FROM gestion_facturas_movil x
+      WHERE c.origen = 'lazarillo' AND x.business_id = c.business_id AND x.comprobante = c.comprobante
+        AND x.codigo = c.codigo AND x.fecha::date = c.fecha::date AND jsonb_typeof(x.payload->'moneda') = 'object'
+      LIMIT 1) fm ON true
     WHERE c.business_id = ${businessId} AND c.branch_id IS NOT DISTINCT FROM ${lugar.branchId}::bigint
       AND TRIM(COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")) = ${cod}
       AND COALESCE(c.periodo, COALESCE(c."fechaManual", c.fecha)) >= date_trunc('month', CURRENT_DATE) - interval '12 months'
@@ -896,13 +904,20 @@ const gastoSchema = z.object({
   forzar: z.boolean().optional(), // ya se avisó que hay uno parecido
   // Apertura por PDV (Diego 06/11/2026), igual que un registro de factura. Sin reparto = la regla del concepto.
   reparto: z.array(z.object({ puntoDeVentaId: z.number().int(), pct: z.number().min(0).max(100) })).max(20).nullish(),
+  // En dólares (Diego 19/11/2026): el importe en pesos sale de monto × cotización.
+  moneda: monedaSchema.nullish(),
 });
+
+// «US$ 2.500 a $ 1.480 (blue)»: se suma al detalle para que se vea en Detalle de compras.
+const NOMBRE_DOLAR = { blue: 'blue', oficial: 'oficial', mep: 'MEP', manual: 'a mano' };
+const textoMoneda = (m) => `US$ ${m.monto.toLocaleString('es-AR', { maximumFractionDigits: 2 })} a $ ${m.cotizacion.toLocaleString('es-AR', { maximumFractionDigits: 2 })} (${NOMBRE_DOLAR[m.tipo]})`;
 
 async function crearGastoVario({ organizationId, businessId, usuario, body }) {
   const parsed = gastoSchema.safeParse(body);
   if (!parsed.success) throw rechazo('Datos inválidos', 400, { detalle: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) });
   const g = parsed.data;
-  const importe = r2(g.importe);
+  const importe = g.moneda ? r2(g.moneda.monto * g.moneda.cotizacion) : r2(g.importe);
+  const observacion = [g.detalle?.trim(), g.moneda ? textoMoneda(g.moneda) : null].filter(Boolean).join(' · ').slice(0, 200) || null;
   const ctx = { organizationId, businessId };
   const lugares = await obtenerLugares(db, businessId);
   const lugar = lugares.find((l) => l.id === g.lugarId);
@@ -938,7 +953,7 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
     const concepto = await tx.one(sql`SELECT nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${g.conceptoCodigo}`);
     if (!concepto) throw rechazo('Ese concepto no existe.');
     const p = await prepararFactura(tx, ctx, {
-      proveedorId: gv.id, tipo: 'Ticket', prefijo: GV_PREFIJO, numero, fecha: g.fecha, observacion: g.detalle?.trim() || null,
+      proveedorId: gv.id, tipo: 'Ticket', prefijo: GV_PREFIJO, numero, fecha: g.fecha, observacion, moneda: g.moneda ?? null,
       registros: [{ tipo: 'concepto', conceptoCodigo: g.conceptoCodigo, nombre: concepto.nombre.trim(), neto: importe, alicuota: 0, impInt: 0, puntoDeVentaId: g.lugarId, reparto: g.reparto ?? null }],
       percepciones: [], impIntGeneral: 0,
     });

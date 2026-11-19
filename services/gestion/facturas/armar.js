@@ -63,6 +63,15 @@ const registroSchema = z.object({
 // para poder resolver cada una por su lado en Sin rubro.
 const TEXTO_SIN_CONCEPTO = "Sin concepto de caja asociado";
 
+// Gasto pactado en dólares que se paga en pesos (Diego 19/11/2026, el alquiler): los importes de la
+// factura van en pesos; esto guarda cuánto era en US$ y a qué dólar se pasó.
+const monedaSchema = z.object({
+  codigo: z.literal("USD"),
+  monto: z.number().positive().max(1e10),
+  cotizacion: z.number().positive().max(1e7),
+  tipo: z.enum(["blue", "oficial", "mep", "manual"]),
+});
+
 const facturaSchema = z.object({
   proveedorId: z.number().int(),
   tipo: z.enum(Object.keys(TIPOS_COMPROBANTE)),
@@ -79,6 +88,7 @@ const facturaSchema = z.object({
   // Período económico de toda la factura (Diego 06/11/2026): si es otro mes que la fecha, la vista
   // Económica la cuenta en ese mes (gestion_compras.periodo, como los sueldos).
   periodo: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).nullish(),
+  moneda: monedaSchema.nullish(),
 });
 
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -205,4 +215,4 @@ function armarFactura(
   return { filas: lista, lineas: lineasOk, total };
 }
 
-module.exports = { TEXTO_SIN_CONCEPTO, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE, CONCEPTO_PERCEPCION, registroSchema, facturaSchema, comprobanteDe, armarFactura };
+module.exports = { TEXTO_SIN_CONCEPTO, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE, CONCEPTO_PERCEPCION, registroSchema, facturaSchema, monedaSchema, comprobanteDe, armarFactura };
