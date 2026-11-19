@@ -148,6 +148,11 @@ router.get('/search-padrino', ctrl.searchPadrinoInsumo);
 router.delete('/:id/manual', blockStaffWrite, ctrl.eliminarManual);
 router.put('/:id', blockStaffWrite, A.actualizar, ctrl.actualizar);
 router.post('/:id/costo-manual/deshacer', blockStaffWrite, ctrl.deshacerCostoManual);
+// Recargo % del costo (un insumo o todos los de su proveedor) y deshacer en lote (Diego 19/11/2026).
+const CM = require('../controllers/costoManualController');
+router.get('/:id/recargo-alcance', CM.alcance);
+router.post('/recargo', blockStaffWrite, CM.recargo);
+router.post('/costo-manual/deshacer-lote', blockStaffWrite, CM.deshacerLote);
 router.delete('/:id', blockStaffWrite, A.darDeBaja, ctrl.eliminar);
 
 /* ================== BULK (JSON / CSV) ================== */
