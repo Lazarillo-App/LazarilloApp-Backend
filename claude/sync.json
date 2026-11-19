@@ -473,5 +473,39 @@
     "prioridad": "alta",
     "estado": "hecha",
     "business_id": 147
+  },
+  {
+    "clave": "2026-11-19-claude-03",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "codigo-y-nombre",
+    "buscar": "editás los datos del artículo (nombre, precio, rubro).",
+    "reemplazar": "editás los datos del artículo (nombre, precio, rubro). En un artículo creado a mano cargás su **Cód. del POS**: si ese artículo ya está en tu punto de venta se une enseguida y sus ventas cuentan; si no, se une cuando llegue. La ficha muestra los **precios por lista** con el nuevo precio, si escribiste uno."
+  },
+  {
+    "clave": "2026-11-19-claude-04",
+    "tipo": "manual_seccion",
+    "capitulo": "crear-un-articulo",
+    "seccion": "los-datos",
+    "buscar": "Sin código, el artículo no se une con las ventas que lleguen de tu punto de venta.",
+    "reemplazar": "Sin código, el artículo no se une con las ventas que lleguen de tu punto de venta; lo podés cargar después en **Cód. del POS**, editando el artículo."
+  },
+  {
+    "clave": "2026-11-19-claude-05",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "nuevo-precio",
+    "buscar": "En el título elegís a qué **lista de precios** va.",
+    "reemplazar": "En el título elegís a qué **lista de precios** va. La receta y la ficha del artículo ya calculan con el nuevo precio, en todas las listas."
+  },
+  {
+    "clave": "2026-11-19-claude-06",
+    "tipo": "tarea",
+    "titulo": "Ficha y receta del artículo: tomar el nuevo precio en todas las listas + código del POS en artículos a mano",
+    "detalle": "Diego (19/11): al abrir un artículo con nuevo precio seguía el viejo en todas las listas (Brioche Ribswich: 25.600/23.040/20.480 con nuevo 27.500), y a los artículos creados a mano les faltaba el código del POS para vincular sus ventas. HECHO: la receta (front #404) y la ficha calculan con el nuevo precio (27.500/24.750/22.000). La ficha de un artículo a mano tiene «Cód. del POS»: al guardar se vincula enseguida si ese código ya llegó del POS (pasa la receta, sus ventas cuentan) o cuando llegue; deja aviso en la campana. Manual: Artículos › Código y nombre, Nuevo precio; Crear un artículo › Los datos.",
+    "modulo": "recetas",
+    "prioridad": "alta",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]

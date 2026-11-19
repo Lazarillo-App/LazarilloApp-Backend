@@ -375,7 +375,7 @@ exports.obtenerArticulo = async (req, res, next) => {
     if (articleId < 0) {
       const { rows } = await pool.query(
         `SELECT id, name AS nombre, rubro, subrubro, price AS precio, codigo,
-                nombre_original,
+                nombre_original, NULLIF(TRIM(props->>'codigo_externo'), '') AS codigo_pos,
                 NULLIF(TRIM(props->>'descripc'), '') AS descripcion_original,
                 NULLIF(TRIM(props->>'descripcion'), '') AS descripcion_propia
            FROM app_articles WHERE id = $1 AND business_id = $2`,
@@ -613,7 +613,33 @@ exports.actualizarArticulo = async (req, res, next) => {
     invalidateCacheForBiz(bizId);
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
-    return res.json({ ok: true, articulo: updated[0] });
+    // Código del POS en un artículo creado en Lazarillo (Diego 19/11/2026: «no tiene el código del
+    // POS para vincular sus ventas»). Si ese artículo ya existe en el POS, se vincula en el acto
+    // (receta, vínculos y precios pasan al del POS, que es el que trae las ventas); si todavía no
+    // existe, queda guardado y se vincula solo cuando llegue con la próxima sincronización.
+    let vinculo = null;
+    if (isManual && codigoExterno?.trim()) {
+      try {
+        const { reconcileManualsAfterSync } = require('../services/manualReconciliation');
+        const r = await reconcileManualsAfterSync(storageBizId);
+        const it = (r.items || []).find((x) => Number(x.manualId) === articleId);
+        vinculo = it ? { vinculado: true, posId: it.maxiId } : { vinculado: false, codigo: codigoExterno.trim() };
+        invalidateCacheForBiz(bizId);
+        if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
+      } catch (e) {
+        console.error('[actualizarArticulo] vincular con el POS:', e.message);
+        vinculo = { vinculado: false, codigo: codigoExterno.trim(), error: true };
+      }
+      const nombreArt = updated[0]?.name || nombre || `L${Math.abs(articleId)}`;
+      avisarAlEquipoSinEsperar({
+        businessId: bizId, actorUserId: req.user?.id, type: 'articulo_move',
+        title: vinculo.vinculado ? `Vinculado con el POS: ${nombreArt}` : `Código del POS: ${nombreArt}`,
+        message: vinculo.vinculado ? `L${Math.abs(articleId)} → ${vinculo.posId} (sus ventas ya cuentan)` : `${codigoExterno.trim()} · se vincula cuando ese artículo llegue del POS`,
+        metadata: { kind: 'articulo_move', scope: 'articulo', ids: [articleId] },
+      });
+    }
+
+    return res.json({ ok: true, articulo: updated[0], ...(vinculo ? { vinculo } : {}) });
 
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
