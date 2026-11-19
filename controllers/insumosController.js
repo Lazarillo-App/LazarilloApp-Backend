@@ -909,7 +909,7 @@ exports.actualizar = async (req, res) => {
       // El costo por local (de las compras de cada local) dejaría las recetas con el precio viejo:
       // mientras rija el manual, todos los locales usan este. La próxima compra los vuelve a armar.
       await pool.query(`DELETE FROM insumo_costos_local WHERE insumo_id = $1`, [id]);
-      await propagarCostoInsumo(Number(id), Number(rows[0].business_id));
+      await propagarCostoInsumo(Number(id), Number(rows[0].business_id), pool);
       const fmt = (v) => `$${Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 2 })}`;
       avisarAlEquipoSinEsperar({
         businessId, actorUserId: req.user?.id, type: 'insumo_update',
@@ -2498,7 +2498,6 @@ exports.searchPadrinoInsumo = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
-
 // POST /insumos/batch-detalle — equivalencias y mermas de varios insumos en una sola llamada
 // (antes el modal de recetas pedía 2 requests por ingrediente).
 exports.batchDetalle = async (req, res) => {
