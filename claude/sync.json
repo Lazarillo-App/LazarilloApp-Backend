@@ -523,5 +523,25 @@
     "prioridad": "alta",
     "estado": "hecha",
     "business_id": 147
+  },
+  {
+    "clave": "2026-11-19-claude-ccper-1",
+    "tipo": "tarea",
+    "titulo": "Conciliación: período en el modal de cuenta corriente",
+    "detalle": "Pedido de Diego (19/11): el modal de Cuenta corriente tiene que filtrar por período (este mes, mes anterior, este año o personalizado por fechas). HECHO front #416: barra Período (Todo · Este mes · Mes anterior · Este año · Personalizado); Facturado y Cobrado del período, Saldo acumulado al cierre del período; Compras y Cobranzas solo del período (el estado de cada compra se sigue calculando con toda la historia). Abre en Todo.",
+    "modulo": "administracion",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "business_id": 147
+  },
+  {
+    "clave": "2026-11-19-claude-ccper-2",
+    "tipo": "tarea",
+    "titulo": "FALLA: modal de cuenta corriente en celular",
+    "detalle": "Visto 19/11 al probar #416: a 390 px el modal de Cuenta corriente (Conciliación) se sale de la pantalla: la columna Cobranzas queda cortada, los 3 KPIs no entran y los chips de período miden 30 px (mínimo 44 en celu). Ya pasaba antes del cambio. Esperado: pantalla completa, KPIs apilados, Compras y Cobranzas como pestañas o una debajo de la otra, acciones de 44 px.",
+    "modulo": "celular",
+    "prioridad": "normal",
+    "estado": "pendiente",
+    "business_id": null
   }
 ]
