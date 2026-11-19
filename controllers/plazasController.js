@@ -197,15 +197,37 @@ exports.articulos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-async function guardarProductos(plazaId, articleIds) {
+// Lugares de la plaza (Diego 19/11/2026: «al mover un producto no necesariamente otro tiene que ocupar su
+// lugar»): plaza_productos.orden es la CASILLA (1, 2, 3…) y puede haber casillas vacías en el medio.
+async function escribirCasillas(plazaId, ids, casillas) {
   await pool.query('DELETE FROM plaza_productos WHERE plaza_id = $1', [plazaId]);
-  const ids = [...new Set((articleIds || []).map(Number).filter(Number.isFinite))];
   if (ids.length) {
     await pool.query(
-      `INSERT INTO plaza_productos (plaza_id, article_id, orden) SELECT $1, x.id, x.ord FROM unnest($2::int[]) WITH ORDINALITY AS x(id, ord)`,
-      [plazaId, ids]);
+      `INSERT INTO plaza_productos (plaza_id, article_id, orden) SELECT $1, x.id, x.ord FROM unnest($2::int[], $3::int[]) AS x(id, ord)`,
+      [plazaId, ids, casillas]);
     await congelarOrden(plazaId);
   }
+}
+
+// Desde el editor (lista de productos, sin lugares): los que siguen quedan en su casilla, los que salen
+// dejan su lugar vacío y los nuevos van al final.
+async function guardarProductos(plazaId, articleIds) {
+  const ids = [...new Set((articleIds || []).map(Number).filter(Number.isFinite))];
+  const { rows } = await pool.query('SELECT article_id, orden FROM plaza_productos WHERE plaza_id = $1', [plazaId]);
+  const pos = new Map(rows.map((r) => [Number(r.article_id), Number(r.orden)]));
+  let max = ids.reduce((m, id) => (pos.has(id) ? Math.max(m, pos.get(id)) : m), 0);
+  await escribirCasillas(plazaId, ids, ids.map((id) => (pos.has(id) ? pos.get(id) : ++max)));
+}
+
+// Desde «Armar» (arrastrar, ✕, deshacer): [articleId | null, …] — la posición en la lista es la casilla.
+async function guardarCasillas(plazaId, casillas) {
+  const ids = []; const ords = []; const vistos = new Set();
+  (casillas || []).forEach((v, i) => {
+    const id = v == null ? null : Number(v);
+    if (id == null || !Number.isFinite(id) || vistos.has(id)) return;
+    vistos.add(id); ids.push(id); ords.push(i + 1);
+  });
+  await escribirCasillas(plazaId, ids, ords);
 }
 
 // El orden de armado es propio de la plaza (Diego 11/11/2026): al sumar un producto se copia el
@@ -269,7 +291,7 @@ exports.create = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/** PUT /businesses/:businessId/plazas/:id  { nombre?, articleIds?, mostrar? } — mostrar: 'peso' | 'obs' | 'ambos', para toda la plaza. */
+/** PUT /businesses/:businessId/plazas/:id  { nombre?, articleIds? | casillas?, mostrar? } — casillas: [articleId|null] con lugares vacíos. — mostrar: 'peso' | 'obs' | 'ambos', para toda la plaza. */
 exports.update = async (req, res, next) => {
   try {
     const bizId = num(req.businessId);
@@ -281,7 +303,8 @@ exports.update = async (req, res, next) => {
     if (mostrar != null && !MOSTRAR.includes(mostrar)) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
     await pool.query('UPDATE plazas SET nombre = $1, mostrar = COALESCE($3, mostrar), updated_at = NOW() WHERE id = $2 AND business_id = $4',
       [nombre, plaza.id, mostrar, bizId]);
-    if (Array.isArray(req.body?.articleIds)) await guardarProductos(plaza.id, req.body.articleIds);
+    if (Array.isArray(req.body?.casillas)) await guardarCasillas(plaza.id, req.body.casillas);
+    else if (Array.isArray(req.body?.articleIds)) await guardarProductos(plaza.id, req.body.articleIds);
     res.json({ ok: true });
   } catch (e) { next(e); }
 };
@@ -320,7 +343,7 @@ exports.vista = async (req, res, next) => {
  *  (controllers/pantallasController.js), así las dos muestran exactamente lo mismo. */
 async function armarVista(plaza, bizId, articleId = null) {
     const { rows: prods } = await pool.query(
-      `SELECT pp.article_id, COALESCE(ma.nombre, '#' || pp.article_id) AS nombre, f.layout
+      `SELECT pp.article_id, pp.orden, COALESCE(ma.nombre, '#' || pp.article_id) AS nombre, f.layout
          FROM plaza_productos pp
          LEFT JOIN maxi_articles ma ON ma.articulo_id = pp.article_id AND ma.business_id = $2
          LEFT JOIN plaza_fichas f ON f.plaza_id = pp.plaza_id AND f.article_id = pp.article_id
@@ -396,7 +419,7 @@ async function armarVista(plaza, bizId, articleId = null) {
       // Lo que no está en el orden guardado (ingrediente nuevo en la receta) va al final, en el orden de la receta.
       const lugar = new Map(todos.map((r, i) => [r.key, pos.has(r.key) ? pos.get(r.key) : 1e6 + i]));
       todos.sort((a, b) => lugar.get(a.key) - lugar.get(b.key));
-      return { articleId: p.article_id, nombre: p.nombre, obs: obsDe.get(p.article_id) || '', renglones: todos };
+      return { articleId: p.article_id, casilla: Number(p.orden) || null, nombre: p.nombre, obs: obsDe.get(p.article_id) || '', renglones: todos };
     });
     return { plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza }, productos };
 }
