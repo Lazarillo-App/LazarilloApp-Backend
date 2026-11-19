@@ -822,3 +822,37 @@ exports.reasignar = async (req, res, next) => {
     return res.json({ ok: true, proposal: rows[0] });
   } catch (e) { next(e); }
 };
+
+/**
+ * GET /businesses/:businessId/receta-proposals/revisores
+ * A quién se le puede asignar una revisión: TODO el staff del PDV (asignado al
+ * negocio o a su organización), lo haya invitado quien sea. Diego 19/11/2026: el
+ * selector usaba /team/members, que a un admin le muestra solo la gente que invitó
+ * él (regla de Mi equipo, que sigue igual), y desde un admin no aparecían Cocina ni
+ * Barra. Solo lectura; solo admin/dueño (son los que marcan y reasignan).
+ */
+exports.listRevisores = async (req, res, next) => {
+  try {
+    const bizId = Number(req.params.businessId);
+    const uid = req.user?.id;
+    if (!bizId) return res.status(400).json({ ok: false, error: 'invalid_params' });
+    if (!(await requireAdminOrOwner(uid, bizId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (ua.user_id)
+              ua.user_id,
+              COALESCE(NULLIF(ua.self_alias, ''), NULLIF(ua.alias, ''), NULLIF(u.display_name, ''), NULLIF(u.name, ''), u.email) AS nombre,
+              (SELECT string_agg(s.nombre, ' · ' ORDER BY s.nombre) FROM sectores s
+                WHERE s.id = ANY(COALESCE(ua.sector_ids, '{}'::int[]))) AS sectores
+         FROM user_assignments ua
+         JOIN app_users u ON u.id = ua.user_id
+         JOIN app_businesses b ON b.id = $1
+        WHERE ua.revoked_at IS NULL AND ua.role = 'staff'
+          AND ((ua.scope_type = 'business' AND ua.scope_id = b.id)
+            OR (ua.scope_type = 'organization' AND b.organization_id IS NOT NULL AND ua.scope_id = b.organization_id))
+        ORDER BY ua.user_id, (ua.scope_type = 'business') DESC`,
+      [bizId]
+    );
+    rows.sort((a, b) => String(a.nombre).localeCompare(String(b.nombre), 'es'));
+    return res.json({ ok: true, revisores: rows.map((r) => ({ user_id: Number(r.user_id), nombre: r.nombre, sectores: r.sectores || null })) });
+  } catch (e) { next(e); }
+};
