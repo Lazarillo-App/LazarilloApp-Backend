@@ -513,5 +513,15 @@
     "tipo": "cambio",
     "id": 33,
     "nota": "19/11 medido en Comercio (Núñez) con un año traído: GET /conciliacion devuelve 22 MB sin comprimir (8 s desde el servidor; en una conexión hogareña bastante más) y la pantalla tarda ~18 s en aparecer. Front #412 sacó ~100 s de CPU del motor. Falta: comprimir las respuestas (gzip en el back) y pedir solo el período en vez de todas las filas."
+  },
+  {
+    "clave": "2026-11-19-claude-07",
+    "tipo": "tarea",
+    "titulo": "Aprobaciones: «Para quién» tiene que mostrar todo el staff del PDV",
+    "detalle": "Diego (19/11) desde la cuenta admin Front Desk Bar en Container Bar: al marcar/reasignar una revisión solo aparecía «Admin y dueño», no Cocina ni Barra. Causa: el selector usaba /team/members, que a un admin le muestra solo la gente que invitó él (regla de Mi equipo). [stated] Diego: «tiene que mostrar todo el staff del PDV». HECHO: GET /receta-proposals/revisores (todo el staff del negocio y de su organización, con sector; 0,3 ms) y SelectorRevisor lo usa (marcar desde la receta, Marcar varias y Reasignar). Mi equipo no cambia.",
+    "modulo": "recetas",
+    "prioridad": "alta",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]
