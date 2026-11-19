@@ -809,7 +809,7 @@ exports.actualizar = async (req, res) => {
 
     const { rows: beforeRows } = await pool.query(
       `SELECT nombre, nombre_original, unidad_med, precio_ref, rubro, estado, nota,
-              costo_preferido, es_elaborado, codigo_maxi, origen
+              costo_preferido, es_elaborado, codigo_maxi, origen, precio_manual_at
          FROM insumos WHERE id = $1 AND business_id = ANY($2::int[])`,
       [id, orgBizIds]
     );
@@ -839,7 +839,11 @@ exports.actualizar = async (req, res) => {
     const precioManual = b.precioRef !== undefined && num(b.precioRef) > 0
       && Math.abs(num(b.precioRef) - Number(before.precio_ref || 0)) > 0.0001;
     if (b.precioRef !== undefined) push('precio_ref', num(b.precioRef));
-    if (precioManual) push('precio_manual_at', new Date());
+    if (precioManual) {
+      push('precio_manual_at', new Date());
+      // Para poder deshacerlo: el precio de antes del PRIMER cambio manual (si ya era manual, se conserva).
+      if (!before.precio_manual_at) push('precio_previo_manual', before.precio_ref);
+    }
     if (b.contenidoEnvase !== undefined) push('contenido_envase', b.contenidoEnvase === null || b.contenidoEnvase === '' ? null : num(b.contenidoEnvase));
     if (b.unidadEnvase !== undefined) push('unidad_envase', b.unidadEnvase || null);
     if (b.rubro !== undefined) {
@@ -911,7 +915,7 @@ exports.actualizar = async (req, res) => {
         businessId, actorUserId: req.user?.id, type: 'insumo_update',
         title: `Costo manual: ${rows[0].nombre} ${fmt(before.precio_ref)} → ${fmt(rows[0].precio_ref)}`,
         message: 'Vale hasta la próxima compra de este insumo.',
-        metadata: { kind: 'insumo_update', scope: 'insumo', ids: [Number(id)] },
+        metadata: { kind: 'insumo_update', scope: 'insumo', ids: [Number(id)], costo_manual: true },
       });
     }
 
@@ -935,6 +939,57 @@ exports.actualizar = async (req, res) => {
 
 // GET /insumos/:id/compras — historial de compras de un insumo
 // GET /insumos/:id/compras — historial de compras de un insumo
+// POST /insumos/:id/costo-manual/deshacer — saca el costo cargado a mano (Diego 19/11/2026: desde el
+// cuadrito de la receta y desde la campanita). Si el insumo tiene compras, vuelve al costo que dan las
+// compras (mismo cálculo que cuando entra una); si no, al precio que tenía antes del cambio manual.
+exports.deshacerCostoManual = async (req, res) => {
+  const id = Number(req.params.id);
+  const businessId = getBusinessId(req);
+  if (!businessId || !Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'Parámetros inválidos' });
+  const orgBizIds = await getOrgBizIds(businessId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, business_id, nombre, precio_ref, precio_manual_at, precio_previo_manual
+         FROM insumos WHERE id = $1 AND business_id = ANY($2::int[]) FOR UPDATE`, [id, orgBizIds]);
+    const ins = rows[0];
+    if (!ins) { await client.query('ROLLBACK'); return res.status(404).json({ ok: false, error: 'Insumo no encontrado' }); }
+    if (!ins.precio_manual_at) { await client.query('ROLLBACK'); return res.status(409).json({ ok: false, error: 'Este insumo no tiene un costo manual para deshacer' }); }
+    await client.query(
+      `UPDATE insumos SET precio_manual_at = NULL, precio_ref = COALESCE(precio_previo_manual, precio_ref),
+              precio_previo_manual = NULL, updated_at = NOW() WHERE id = $1`, [id]);
+    const { rows: locales } = await client.query(
+      `SELECT DISTINCT business_id FROM purchase_items WHERE insumo_id = $1 AND precio > 0`, [id]);
+    const { actualizarPreciosDeInsumos } = require('../services/purchasesStore');
+    for (const l of locales) {
+      await actualizarPreciosDeInsumos(client, { businessId: Number(l.business_id), insumosBizId: Number(ins.business_id), insumoIds: [id] });
+    }
+    if (!locales.length) await propagarCostoInsumo(id, Number(ins.business_id), client);
+    const { rows: fin } = await client.query(`SELECT precio_ref FROM insumos WHERE id = $1`, [id]);
+    await client.query('COMMIT');
+    const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+    invalidateCacheForBiz(businessId);
+    if (Number(ins.business_id) !== Number(businessId)) invalidateCacheForBiz(Number(ins.business_id));
+    const fmt = (v) => `$${Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 2 })}`;
+    avisarAlEquipoSinEsperar({
+      businessId, actorUserId: req.user?.id, type: 'insumo_update',
+      title: `Costo manual deshecho: ${ins.nombre} ${fmt(ins.precio_ref)} → ${fmt(fin[0]?.precio_ref)}`,
+      message: locales.length ? 'Vuelve al costo de sus compras.'
+        : (ins.precio_previo_manual == null ? 'Ya no es manual. No había un precio anterior guardado: queda el mismo.' : 'Vuelve al precio que tenía antes.'),
+      metadata: { kind: 'insumo_update', scope: 'insumo', ids: [id] },
+    });
+    return res.json({ ok: true, precio_ref: Number(fin[0]?.precio_ref) || 0, deCompras: locales.length > 0,
+      sinPrevio: !locales.length && ins.precio_previo_manual == null });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { /* nada */ }
+    console.error('deshacerCostoManual error:', e);
+    return res.status(500).json({ ok: false, error: 'No se pudo deshacer el costo manual' });
+  } finally {
+    client.release();
+  }
+};
+
 exports.getCompras = async (req, res) => {
   try {
     const { id } = req.params;
@@ -4117,7 +4172,11 @@ exports.getOne = async (req, res) => {
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'ID inválido' });
     const orgBizIds = await getOrgBizIds(businessId);
     const { rows } = await pool.query(
-      `SELECT i.* FROM insumos i WHERE i.id = $1 AND i.business_id = ANY($2::int[]) LIMIT 1`,
+      `SELECT i.*,
+              -- Costo por local, igual que el listado: el modal de receta lo usa al refrescar un insumo.
+              (SELECT json_object_agg(icl.business_id, icl.precio) FROM insumo_costos_local icl
+                WHERE icl.insumo_id = i.id) AS costos_locales
+         FROM insumos i WHERE i.id = $1 AND i.business_id = ANY($2::int[]) LIMIT 1`,
       [id, orgBizIds]
     );
     if (!rows.length) return res.status(404).json({ ok: false, error: 'Insumo no encontrado' });
