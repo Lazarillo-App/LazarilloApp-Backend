@@ -51,13 +51,13 @@ async function main() {
               (SELECT COUNT(*) FROM receta_items ri WHERE ri.receta_id = r.id)::int AS items
          FROM recetas r
          LEFT JOIN app_businesses b ON b.id = r.business_id
-         LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
-         LEFT JOIN insumos i ON i.id = r.insumo_id
-        WHERE ($2::int IS NULL OR r.business_id = $2)
-          AND ( ($3 AND (r.article_id = $1::int
-                         OR regexp_replace(TRIM(i.codigo_maxi::text), '\\.0+$', '') = $1))
-                OR (NOT $3 AND (r.nombre ILIKE '%' || $1 || '%'
-                                OR ma.nombre ILIKE '%' || $1 || '%' OR i.nombre ILIKE '%' || $1 || '%')) )
+         LEFT JOIN maxi_articles ma ON ma.articulo_id::text = r.article_id::text AND ma.business_id = r.business_id
+         LEFT JOIN insumos i ON i.id::text = r.insumo_id::text
+        WHERE ($2::int IS NULL OR r.business_id = $2::int)
+          AND ( ($3::boolean AND (r.article_id::text = $1::text
+                         OR regexp_replace(TRIM(i.codigo_maxi::text), '\\.0+$', '') = $1::text))
+                OR (NOT $3::boolean AND (r.nombre ILIKE '%' || $1::text || '%'
+                                OR ma.nombre ILIKE '%' || $1::text || '%' OR i.nombre ILIKE '%' || $1::text || '%')) )
         ORDER BY r.business_id, r.updated_at DESC
         LIMIT 30`,
       [BUSCA, NEGOCIO, esCodigo]);
@@ -77,16 +77,19 @@ async function main() {
       console.log(`  ${r.items} ingredientes · ${r.pasos} pasos · ${r.tiene_foto ? 'con foto' : 'sin foto'} · costo guardado $${Number(r.costo_total || 0).toFixed(2)} · porciones ${r.porciones}`);
       const { rows: items } = await c.query(
         `SELECT ri.cantidad, ri.unidad, ri.merma, COALESCE(i.nombre, ri.nombre_insumo_maxi, '(?)') AS insumo
-           FROM receta_items ri LEFT JOIN insumos i ON i.id = ri.insumo_id
+           FROM receta_items ri LEFT JOIN insumos i ON i.id::text = ri.insumo_id::text
           WHERE ri.receta_id = $1 ORDER BY ri.orden NULLS LAST, ri.id`, [r.id]);
       for (const it of items) {
         console.log(`    - ${it.insumo}: ${Number(it.cantidad)} ${it.unidad || ''}${Number(it.merma) ? ` (merma ${Number(it.merma)}%)` : ''}`);
       }
+      // savepoint: si el historial falla, que no aborte la transacción
+      await c.query('SAVEPOINT hist');
       const { rows: hist } = await c.query(
         `SELECT action, created_at, user_alias_snapshot FROM audit_log
-          WHERE entity_type = 'receta' AND business_id = $1 AND entity_id = $2
+          WHERE entity_type = 'receta' AND business_id = $1::int AND entity_id::text = $2::text
           ORDER BY created_at DESC LIMIT 5`,
-        [r.business_id, String(r.article_id ?? r.insumo_id)]).catch(() => ({ rows: [] }));
+        [r.business_id, String(r.article_id ?? r.insumo_id)])
+        .catch(async () => { await c.query('ROLLBACK TO SAVEPOINT hist'); return { rows: [] }; });
       if (hist.length) console.log('  historial: ' + hist.map((h) => `${h.action} ${fmt(h.created_at)} ${h.user_alias_snapshot || ''}`.trim()).join(' | '));
     }
 
