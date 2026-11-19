@@ -17,6 +17,7 @@
 //     La lógica vive en services/recetasDesdeKit.js (la usa también el reloj de cada hora).
 //   - Mercado Pago (14/11): las cuentas conectadas traen cobros, pagos y devoluciones recientes.
 //   Responde enseguida; todo sigue en segundo plano.
+//   - mp (19/11): las cuentas de Mercado Pago, cuándo se trajeron y si siguen trayendo el historial.
 // El front pinta un solo punto con la peor de las dos y el detalle en el tooltip.
 //   - kit (Diego, 08/11: "no sé si está atrasado o que no hay compras cargadas"): cuándo subió
 //     el kit por última vez y hasta qué fecha llega lo que subió (services/kit/frescuraKit.js).
@@ -112,8 +113,19 @@ router.get('/', requireBusinessAccess, async (req, res, next) => {
         }),
       };
     }
+    // Mercado Pago en el pulso (Diego 19/11/2026: «el MP se puede sumar al pulso»): cada cuenta conectada,
+    // cuándo se trajo por última vez y si todavía está trayendo su historial. Se trae sola todos los días.
+    let mp = [];
+    try {
+      const r = await pool.query(
+        `SELECT i.sucursal, COALESCE(i.mp_nickname, i.mp_email, i.mp_user_id::text) AS nombre, i.ultimo_sync_at AS sync,
+                to_char(i.ultimo_sync_hasta, 'YYYY-MM-DD') AS hasta, COALESCE(i.historial_completo, false) AS historial_completo,
+                i.ultimo_sync_error AS error
+           FROM integraciones_mercadopago i WHERE i.business_id = $1 ORDER BY i.sucursal, i.conectado_at`, [businessId]);
+      mp = r.rows.map((x) => ({ ...x, sync: x.sync ? new Date(x.sync).toISOString() : null }));
+    } catch { mp = []; }
     res.set('Cache-Control', 'no-store');
-    res.json({ recetas, balance, kit, actualizando });
+    res.json({ recetas, balance, kit, mp, actualizando });
   } catch (e) {
     next(e);
   }
