@@ -282,7 +282,7 @@ async function aplicarPreciosCosteo(client, businessId, precios) {
   const valores = ids.map((id) => precios.get(id));
   const { rows } = await client.query(
     `UPDATE insumos i
-        SET precio_ref = v.precio, precio_manual_at = NULL, updated_at = NOW()   -- la compra reemplaza al costo manual
+        SET precio_ref = v.precio, precio_manual_at = NULL, precio_previo_manual = NULL, updated_at = NOW()   -- la compra reemplaza al costo manual
        FROM UNNEST($1::int[], $2::numeric[]) AS v(insumo_id, precio)
       WHERE i.id = v.insumo_id
         AND i.business_id = $3

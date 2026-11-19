@@ -147,6 +147,7 @@ router.get('/:id/compras', ctrl.getCompras);
 router.get('/search-padrino', ctrl.searchPadrinoInsumo);
 router.delete('/:id/manual', blockStaffWrite, ctrl.eliminarManual);
 router.put('/:id', blockStaffWrite, A.actualizar, ctrl.actualizar);
+router.post('/:id/costo-manual/deshacer', blockStaffWrite, ctrl.deshacerCostoManual);
 router.delete('/:id', blockStaffWrite, A.darDeBaja, ctrl.eliminar);
 
 /* ================== BULK (JSON / CSV) ================== */
