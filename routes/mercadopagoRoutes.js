@@ -115,6 +115,23 @@ router.post('/cargos/activar', manejar(async (req) => {
 }));
 router.post('/cargos/cargar', manejar((req) => cargos.cargarNegocio(bid(req))));
 
+// Marcas a mano sobre los movimientos (Diego 19/11/2026): «Gasto personal» en lo que salió, con su KPI.
+const marcas = require('../services/movMarcas');
+router.get('/marcas', manejar((req) => marcas.listar(bid(req), req.sucursal)));
+router.post('/marcas', manejar(async (req) => {
+  const r = await marcas.marcar(bid(req), req.sucursal, req.body || {}, req.user?.id || null);
+  if (r.ok && !r.sinCambios) {
+    const imp = r.importe != null ? `$ ${Number(r.importe).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'un movimiento';
+    const dia = r.fecha ? ` (${r.fecha.slice(8, 10)}/${r.fecha.slice(5, 7)})` : '';
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'mov_marca',
+      title: r.activo ? `Gasto personal: ${imp}${dia}` : `Ya no es gasto personal: ${imp}${dia}`,
+      metadata: { link: '/movimientos-bancarios' },
+    });
+  }
+  return r;
+}));
+
 router.post('/sincronizar', manejar((req) => mp.sincronizarBanco(bid(req), req.sucursal, req.body?.desde, req.body?.hasta)));
 
 // Reporte de liberaciones (nombres de pagadores y egresos): MP lo arma en unos minutos, el front
