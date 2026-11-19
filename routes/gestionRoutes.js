@@ -202,6 +202,8 @@ const idDe = (req) => Number(req.params.id);
 const organizar = require('../services/gestion/organizar-api');
 router.get('/organizar', responder((req) => organizar.obtenerOrganizar(req.gestion)));
 router.put('/organizar/proveedor/:id', responder((req) => organizar.editarProveedorConcepto({ ...req.gestion, id: req.params.id, body: req.body })));
+// «Desde el banco» (Diego 19/11/2026): lo que descontó Mercado Pago y todavía no entró al tablero (informativo).
+router.get('/desde-el-banco', responder((req) => require('../services/mpCargos').sinCargar({ businessId: req.gestion.businessId, sucursal: ambito(req).sucursal, anio: entero(paramsDe(req), 'anio') })));
 router.get('/sin-rubro', responder((req) => sinRubro.obtenerSinRubro({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
 router.put('/sin-rubro/rubro-insumo/:codigo', responder((req) => sinRubro.editarRubroInsumo({ ...req.gestion, actorUserId: req.user?.id, codigo: req.params.codigo, body: req.body })));
 router.put('/sin-rubro/insumo/:id', responder((req) => sinRubro.editarInsumo({ ...req.gestion, id: idDe(req), body: req.body })));
