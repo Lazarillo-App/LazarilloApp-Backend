@@ -507,5 +507,11 @@
     "prioridad": "alta",
     "estado": "hecha",
     "business_id": 147
+  },
+  {
+    "clave": "2026-11-19-conc-01",
+    "tipo": "cambio",
+    "id": 33,
+    "nota": "19/11 medido en Comercio (Núñez) con un año traído: GET /conciliacion devuelve 22 MB sin comprimir (8 s desde el servidor; en una conexión hogareña bastante más) y la pantalla tarda ~18 s en aparecer. Front #412 sacó ~100 s de CPU del motor. Falta: comprimir las respuestas (gzip en el back) y pedir solo el período en vez de todas las filas."
   }
 ]
