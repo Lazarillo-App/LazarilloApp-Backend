@@ -591,5 +591,17 @@
     "prioridad": "normal",
     "titulo": "Pasar todos los campos de importe a CampoImporte",
     "detalle": "Regla «Importes» de la Guía (19/11). Quedan con $ y sin formato al tipear: EditarItemModal, RecetaModal/ItemRow, RecetaModal/TabFichaInsumo, RecetaModal/PieCostos, AgregarArticuloModal. La carga de factura y los pagos ya formatean en vivo con su propio código (fmtImp / ImporteInput): unificarlos con CampoImporte cuando se toquen. Revisar también tablas: importes a la derecha con tabular-nums."
+  },
+  {
+    "clave": "2026-11-19-art-pest-guia-01",
+    "tipo": "guia_parche",
+    "buscar": "Márgenes del modal: cada vez que se toca un modal,",
+    "reemplazar": "Un modal, un solo juego de piezas (Diego 19/11/2026): cuando un modal tiene pestañas, o se juntan dos modales en uno, todo lo que comparten se unifica. El encabezado (foto, nombre, flechas ‹ ›, descripción, pestañas e íconos) y el pie (Guardar, Borrar, Cancelar) quedan en el mismo lugar, con el mismo tamaño y el mismo componente en todas las pestañas: al cambiar de pestaña solo cambia el cuerpo. Se reutiliza el componente que ya existe, nunca una copia ni uno parecido: se ve igual y el proyecto queda más liviano. Referencia: modal del artículo (FICHA / RECETA) con BotonesReceta.\n\nMárgenes del modal: cada vez que se toca un modal,"
+  },
+  {
+    "clave": "2026-11-19-art-pest-04",
+    "tipo": "cambio",
+    "titulo": "Modal del artículo con pestañas FICHA / RECETA (como insumos)",
+    "nota": "Diego 19/11: la ficha usa la misma foto del encabezado (mismo lugar que en Receta) y el mismo pie que Receta (BotonesReceta: Guardar arriba, Borrar y Cancelar abajo). Regla nueva en la Guía: un modal, un solo juego de piezas."
   }
 ]
