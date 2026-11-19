@@ -454,5 +454,14 @@
     "tipo": "cambio",
     "id": 109,
     "nota": "Mairene + Claude 18/11: las unidades «Todo» de Comercio (9–15/11) no daban con MaxiRest. Ventas exactas, pero salidas de stock 356 en Lazarillo contra 529 en Maxi (Comida de Personal 225/296, PROMEDON 76/153, Evento/Cena 26/45). Causa: gen27.py deduplicaba (remito, código) quedándose con el primer renglón, y en Comida de Personal el mismo artículo va en varios renglones del mismo remito (uno por empleado). Cambio: ahora SUMA cantidad e importe de los renglones repetidos en la primera fila (sigue una fila por remito y código, mismo formato). Como cada carga reemplaza el año, se corrige para atrás en la próxima corrida de cada PC. Diego: si algo necesita el 27 idéntico al de MaxiRest, avisá y lo volvemos atrás. Las PC que leen del Drive necesitan el mismo cambio allá. Diagnóstico: node db/scripts/diag-unidades-semana.js <negocio> <desde> <hasta> [palabras]."
+  },
+  {
+    "clave": "2026-11-19-claude-01",
+    "tipo": "tarea",
+    "titulo": "Gastos en dólares que se debitan en pesos (alquiler)",
+    "detalle": "Diego (19/11): algunos gastos se pactan en US$ y se debitan en pesos, con un dólar de referencia (le pasa con el alquiler). Propuesta: en la carga, importe en $ o US$; si es US$, se carga el dólar de referencia (sugerido según la fecha, editable) y al panel va el equivalente en pesos. El proveedor recuerda que factura en US$ y qué dólar usa. Si al pagar se debita otro importe, la diferencia queda como diferencia de cambio. Falta que Diego elija qué dólar sugerir.",
+    "modulo": "compras",
+    "prioridad": "normal",
+    "estado": "pendiente"
   }
 ]
