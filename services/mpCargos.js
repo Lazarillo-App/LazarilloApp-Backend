@@ -483,4 +483,54 @@ async function pasarAFactura(businessId, t, f) {
   });
 }
 
-module.exports = { infoGrupo, CASE_GRUPO, sqlDiario, resumen, configurar, crearConceptos, crearProveedor, detalle, activar, cargarNegocio, absorberNegocio };
+/**
+ * «Desde el banco» del tablero (Diego 19/11/2026: «en Sin concepto de caja asociado deberían estar estos
+ * movimientos cuando aún no estén configurados… agrupados como "desde el banco"»). Lo que descontó Mercado
+ * Pago en el año y TODAVÍA no entró al tablero (no tiene concepto/proveedor elegido, o la carga sola está
+ * apagada o no llegó a ese día), por tipo de cargo y mes. Es informativo: no suma al total de gastos, porque
+ * si llega la factura del proveedor (o se carga a mano) se contaría dos veces. Lo ya cargado (mp_cargos_cargados)
+ * no aparece: ya está en su concepto.
+ * sucursal: undefined = todas · null = la principal (0 en Mercado Pago) · n = esa sucursal.
+ */
+const cacheBanco = new Map(); // `${biz}|${anio}` → { t, dias } (la consulta de un año tarda ~1 s)
+async function sinCargar({ businessId, anio, sucursal } = {}) {
+  const organizationId = await orgDe(businessId);
+  if (!organizationId) return { grupos: [], total: 0 };
+  const hay = await db.one(sql`SELECT 1 AS ok FROM integraciones_mercadopago WHERE business_id = ${businessId} LIMIT 1`);
+  if (!hay) return { grupos: [], total: 0, conectado: false };
+  const y = Number.isInteger(anio) ? anio : Number(hoyAR().slice(0, 4));
+  const desde = `${y}-01-01`;
+  const hasta = `${y}-12-31` < hoyAR() ? `${y}-12-31` : hoyAR();
+  if (hasta < desde) return { grupos: [], total: 0, conectado: true };
+  const clave = `${businessId}|${y}`;
+  let dias = cacheBanco.get(clave);
+  if (!dias || Date.now() - dias.t > 10 * 60_000) {
+    dias = { t: Date.now(), dias: await diario(businessId, desde, hasta) };
+    cacheBanco.set(clave, dias);
+  }
+  const sucMp = sucursal === undefined ? null : sucursal === null ? 0 : Number(sucursal);
+  const hechos = new Set((await db.many(sql`
+    SELECT sucursal, cuenta::text AS cuenta, grupo, to_char(fecha, 'YYYY-MM-DD') AS fecha FROM mp_cargos_cargados
+     WHERE business_id = ${businessId} AND fecha BETWEEN ${desde}::date AND ${hasta}::date`)).map((x) => `${x.sucursal}|${x.cuenta}|${x.grupo}|${x.fecha}`));
+  const porGrupo = new Map();
+  for (const d of dias.dias) {
+    if (sucMp != null && Number(d.sucursal) !== sucMp) continue;
+    if (hechos.has(`${d.sucursal}|${d.cuenta}|${d.grupo}|${d.fecha}`)) continue;
+    const mes = Number(d.fecha.slice(5, 7));
+    const g = porGrupo.get(d.grupo) || { values: {}, total: 0 };
+    g.values[mes] = r2((g.values[mes] || 0) + d.importe);
+    g.total = r2(g.total + d.importe);
+    porGrupo.set(d.grupo, g);
+  }
+  const cfg = await configDe(organizationId, businessId, [...porGrupo.keys()]);
+  const grupos = cfg.grupos.map((g) => ({
+    grupo: g.grupo, nombre: g.nombre, orden: g.orden,
+    concepto: g.concepto ? g.conceptoNombre : null, proveedor: !!g.proveedor,
+    ...porGrupo.get(g.grupo),
+  })).filter((g) => Math.abs(g.total) >= 0.01).sort((a, b) => a.orden - b.orden || b.total - a.total);
+  const values = {};
+  for (const g of grupos) for (const [m, v] of Object.entries(g.values)) values[m] = r2((values[m] || 0) + v);
+  return { conectado: true, activo: cfg.activo, grupos, values, total: r2(grupos.reduce((s, g) => s + g.total, 0)) };
+}
+
+module.exports = { sinCargar, infoGrupo, CASE_GRUPO, sqlDiario, resumen, configurar, crearConceptos, crearProveedor, detalle, activar, cargarNegocio, absorberNegocio };
