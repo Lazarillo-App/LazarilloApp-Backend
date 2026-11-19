@@ -113,6 +113,31 @@ router.post('/cargos/activar', manejar(async (req) => {
   if (r.activo) setImmediate(() => cargos.cargarNegocio(bid(req)).catch((e) => console.error('[mp-cargos]', e.message)));
   return r;
 }));
+// Qué hay adentro de cada tipo (Diego 19/11: «¿cómo puedo ver qué son esos $1.976?»).
+router.get('/cargos/detalle', manejar((req) => cargos.detalle(bid(req), req.query.mes, req.query.grupo)));
+// Crear el concepto con la leyenda del cargo (uno o todos los que faltan) y el proveedor, desde la misma pantalla.
+router.post('/cargos/crear-conceptos', manejar(async (req) => {
+  const r = await cargos.crearConceptos(bid(req), req.body || {});
+  if (r.ok && r.hechos.length) {
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'mp_cargos_conceptos',
+      title: r.creados ? `Conceptos de caja nuevos para Mercado Pago: ${r.creados}` : `Mercado Pago: concepto elegido para ${r.hechos.length} tipo${r.hechos.length === 1 ? '' : 's'}`,
+      message: r.hechos.map((h) => `${h.nombre} (${h.codigo})`).join(' · ').slice(0, 400),
+      metadata: { link: '/movimientos-bancarios?tab=descuentos' },
+    });
+  }
+  return r;
+}));
+router.post('/cargos/crear-proveedor', manejar(async (req) => {
+  const r = await cargos.crearProveedor(bid(req), req.body || {});
+  if (r.ok) {
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'proveedor_alta', title: `Proveedor nuevo: ${r.proveedor.nombre}`,
+      message: 'Creado desde Lo que descuenta Mercado Pago', metadata: { link: '/movimientos-bancarios?tab=descuentos' },
+    });
+  }
+  return r;
+}));
 router.post('/cargos/cargar', manejar((req) => cargos.cargarNegocio(bid(req))));
 
 // Marcas a mano sobre los movimientos (Diego 19/11/2026): «Gasto personal» en lo que salió, con su KPI.
