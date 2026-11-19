@@ -15,7 +15,8 @@ const { ErrorDatos } = require('./resultados-api');
 // Nombre de la sucursal de una fila (alias de app_branches = br). NULL = la principal.
 const nombreSucursal = sql`COALESCE(br.name, 'Principal')`;
 
-const sucursalDe = (branchId, nombre) => ({ sucursal: branchId == null ? null : Number(branchId), nombre });
+// anio: año de la última compra en esa sucursal (el buscador salta ahí si se mira un año posterior sin datos).
+const sucursalDe = (branchId, nombre, anio) => ({ sucursal: branchId == null ? null : Number(branchId), nombre, ...(anio ? { anio } : {}) });
 
 // Rubros, conceptos y proveedores con al menos una compra en la sucursal dada (o en el negocio,
 // con "todas"), de cualquier año. Mismas reglas que el pivot.
@@ -51,7 +52,8 @@ async function origenesPorSucursal({ organizationId, businessId }) {
       c."proveedorId"                                        AS "proveedorId",
       c.branch_id                                            AS "branchId",
       ${nombreSucursal}                                      AS "sucursalNombre",
-      MAX(COALESCE(c."fechaManual", c.fecha))                AS ultima
+      MAX(COALESCE(c."fechaManual", c.fecha))                AS ultima,
+      EXTRACT(YEAR FROM MAX(COALESCE(c."fechaManual", c.fecha)))::int AS anio
     FROM gestion_v_compras_distribuidas c
     LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId}
                                        AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") = cc.codigo
@@ -67,13 +69,13 @@ async function origenesPorSucursal({ organizationId, businessId }) {
       const lista = porClave.get(k) ?? [];
       const ya = lista.find((x) => x.branchId === r.branchId);
       const t = r.ultima ? new Date(r.ultima).getTime() : 0;
-      if (ya) ya.ultima = Math.max(ya.ultima, t);
-      else lista.push({ branchId: r.branchId, nombre: r.sucursalNombre, ultima: t });
+      if (ya) { ya.ultima = Math.max(ya.ultima, t); ya.anio = Math.max(ya.anio, r.anio || 0); }
+      else lista.push({ branchId: r.branchId, nombre: r.sucursalNombre, ultima: t, anio: r.anio || 0 });
       porClave.set(k, lista);
     }
     const out = new Map();
     for (const [k, lista] of porClave) {
-      out.set(k, [...lista].sort((a, b) => b.ultima - a.ultima).map((p) => sucursalDe(p.branchId, p.nombre)));
+      out.set(k, [...lista].sort((a, b) => b.ultima - a.ultima).map((p) => sucursalDe(p.branchId, p.nombre, p.anio)));
     }
     return out;
   };
