@@ -764,5 +764,31 @@
     "tipo": "cambio",
     "titulo": "Proyección del food cost con el calendario: días que faltan pesados por día de semana y feriados",
     "nota": "Diego 20/11: en la víspera de un feriado se compra de más (cambian los cronogramas de entrega de los proveedores) y se compensa la semana siguiente; dos feriados seguidos (9/11 Papa y 23/11) inflan el food cost parcial de noviembre, y con la suba de precios a mes cerrado debería quedar igual o menor que octubre. Medido en Bar Ramos (compras rubros FC, vs 4 semanas previas): semana previa +12 a +23 % (23/3 +21, 2/4 +23, 1/5 +15, 25/5 +20, 12/10 +17, 9/11 +12), semana siguiente −14 a +11 %, las dos juntas 0 a +10 % (sobre todo inflación); 9/11 compensó justo. Parametrizar sin config manual: «efecto víspera» aprendido por local (mediana de previa/siguiente, mín. 3 feriados de historia), usarlo en la proyección de compras del mes, en un food cost del mes en curso «ajustado por víspera» (con el crudo al lado, sin flecha roja por eso) y ventas con el método único + calendario. Arranca cuando el chat de RRHH termine el calendario único."
+  },
+  {
+    "clave": "2026-11-20-conc-man-1",
+    "tipo": "manual_seccion",
+    "capitulo": "conciliacion-bancaria",
+    "seccion": "periodo-y-tolerancia",
+    "buscar": "Con todo cargado, la parte de arriba se achica y muestra el período y la configuración:\n- Elegí el **mes** o las fechas.\n- **Tolerancia**: cuántos días después puede caer el cobro.\n- Por debajo de **Auto-conciliar** se concilia solo; hasta **Margen sugerencias** te lo propone para que lo revises.\n\nCon **Guardar** descargás tu trabajo y con **Cargar** lo volvés a abrir.",
+    "reemplazar": "Arriba, la **barra del día** muestra el día que estás conciliando y la tira del mes (ámbar = con pendientes, verde = cerrado). Con **‹ mes ›** cambiás de mes, con **Elegir fechas** usás un rango y **Ver el mes completo** vuelve al mes.\n\nLa **⚙** del header abre la configuración de Conciliación: **corte del día** (lo que entra de madrugada cuenta como del día anterior), **tolerancia**, **auto-conciliar** y **sugerencias**. Todo se guarda solo."
+  },
+  {
+    "clave": "2026-11-20-conc-man-2",
+    "tipo": "manual_seccion",
+    "capitulo": "conciliacion-bancaria",
+    "seccion": "conciliar",
+    "buscar": "- A la izquierda, tus **facturas y cobranzas**; a la derecha, el **banco**.\n- Filtrás **Todas**, **Conciliadas** o **Pendientes**; en Pendientes vas día por día.\n- Buscás un **comprobante o cliente** a la izquierda y un **pago por importe** o pagador a la derecha.\n- La barra compara lo que **vendiste** con lo que **entró al banco**. Tildás filas de los dos lados y con **Conciliar** las cerrás a mano.",
+    "reemplazar": "- A la izquierda, tus **facturas y cobranzas**; a la derecha, el **banco**. Arriba del banco elegís **Pendientes**, **Conciliadas** o **Todas**; en Todas y Conciliadas, tocar un día de la tira muestra solo ese día.\n- Los **pagos de cuenta corriente** del día (todo lo que no es efectivo) aparecen sueltos, con su chip, para conciliarlos junto con la venta y el pago del banco. **Deudas nuevas** muestra lo que quedó a cuenta corriente ese día.\n- Buscás un **comprobante o cliente** a la izquierda y un **pago por importe** o pagador a la derecha.\n- La barra compara lo que **vendiste** con lo que **entró al banco**, con el día a la izquierda. Tildás filas de los dos lados y con **Conciliar** las cerrás a mano.\n- Si algo es de **otro PDV** (una transferencia que entró a la otra sucursal, una factura hecha desde otro local), tildalo y tocá el PDV en **Mandar lo tildado a otro PDV**: pasa a la conciliación de ese PDV. Para traerlo de vuelta, hacé lo mismo desde allá."
+  },
+  {
+    "clave": "2026-11-20-conc-pdv",
+    "tipo": "tarea",
+    "titulo": "Conciliación: mandar un registro (factura o pago) a otro PDV",
+    "detalle": "Diego 20/11: a veces los clientes transfieren por error a la otra sucursal o se factura desde Ramos para San Justo. Se tilda y se toca el PDV destino. Hecho: tabla conciliacion_traslados (back) + barra «Mandar lo tildado a otro PDV» (front). PR front #457, back #258.",
+    "modulo": "administracion",
+    "business_id": 204,
+    "prioridad": "alta",
+    "estado": "hecha"
   }
 ]
