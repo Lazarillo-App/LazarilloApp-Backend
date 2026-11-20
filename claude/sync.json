@@ -764,5 +764,20 @@
     "tipo": "cambio",
     "titulo": "Proyección del food cost con el calendario: días que faltan pesados por día de semana y feriados",
     "nota": "Diego 20/11: en la víspera de un feriado se compra de más (cambian los cronogramas de entrega de los proveedores) y se compensa la semana siguiente; dos feriados seguidos (9/11 Papa y 23/11) inflan el food cost parcial de noviembre, y con la suba de precios a mes cerrado debería quedar igual o menor que octubre. Medido en Bar Ramos (compras rubros FC, vs 4 semanas previas): semana previa +12 a +23 % (23/3 +21, 2/4 +23, 1/5 +15, 25/5 +20, 12/10 +17, 9/11 +12), semana siguiente −14 a +11 %, las dos juntas 0 a +10 % (sobre todo inflación); 9/11 compensó justo. Parametrizar sin config manual: «efecto víspera» aprendido por local (mediana de previa/siguiente, mín. 3 feriados de historia), usarlo en la proyección de compras del mes, en un food cost del mes en curso «ajustado por víspera» (con el crudo al lado, sin flecha roja por eso) y ventas con el método único + calendario. Arranca cuando el chat de RRHH termine el calendario único."
+  },
+  {
+    "clave": "2026-11-20-80",
+    "tipo": "manual_seccion",
+    "capitulo": "cronogramas",
+    "seccion": "feriados-y-eventos",
+    "buscar": "Los feriados nacionales ya vienen cargados.",
+    "reemplazar": "Los **feriados** (🔒) vienen del calendario de Lazarillo: los nacionales y los de tu provincia (se elige en el 📅 › ★ Fechas especiales), y se actualizan solos cuando sale un decreto. Si un feriado tu negocio abre igual, tocá el día › **Este día abrimos**: deja de contar como feriado, también para la proyección de ventas."
+  },
+  {
+    "clave": "2026-11-20-81",
+    "tipo": "cambio",
+    "id": 138,
+    "estado": "en_curso",
+    "nota": "Hecho (20/11, back #257 y siguientes, front): tabla lz_feriados por zona (2025–2027 nacionales + Papa 10/11 CABA y Córdoba, 11/11 PBA), zona por negocio (Container = PBA, Comercio = CABA), feriadosDe() en proyección y Sin carga, Panel super › Feriados, Cronogramas muestra los heredados con 🔒 y «Este día abrimos», selector de provincia en 📅 › Fechas especiales; ya no se siembran feriados en negocios nuevos; los feriados viejos sembrados en rrhh_fechas no cuentan doble. Falta (con OK de Diego): borrar esos feriados viejos de rrhh_fechas, zona de Palermo suites / LLEVALO LISTO / otros, y pedir la provincia en el alta de negocio."
   }
 ]
