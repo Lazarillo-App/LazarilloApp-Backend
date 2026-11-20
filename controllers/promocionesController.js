@@ -325,12 +325,17 @@ exports.actualizarPromocion = async (req, res, next) => {
     // MaxiRest que todavía no tiene receta de promo. Por eso, si el artículo existe, su primera
     // edición la deja armada: reutiliza la receta que tenga o crea una. Solo un artículo que no
     // existe responde 404.
+    // La receta vive en el negocio donde se edita (bizId), igual que la lee GET .../receta: cada local
+    // tiene la suya. Antes se buscaba en el negocio principal de la organización y una promo guardada
+    // desde una sucursal (FC 204) pisaba la del principal (Bar 147) y en la sucursal «no se guardaba»
+    // (Diego 20/11/2026, Heineken 6x5). Artículos e insumos se siguen resolviendo en storageBizId.
+    const recetaBizId = bizId;
     const { rows: recExist } = await client.query(
       `SELECT id, es_promo, active FROM recetas
         WHERE article_id = $1 AND business_id = $2
         ORDER BY active DESC, es_promo DESC, id DESC
         LIMIT 1`,
-      [promoId, storageBizId]
+      [promoId, recetaBizId]
     );
     let recetaId = recExist[0]?.id ?? null;
     if (recetaId && !(recExist[0].es_promo && recExist[0].active)) {
@@ -347,7 +352,7 @@ exports.actualizarPromocion = async (req, res, next) => {
             costo_total, es_promo, active, origen, created_by, created_at, updated_at)
          VALUES ($1, $2, $3, 1, $4, 0, TRUE, TRUE, 'promo', $5, NOW(), NOW())
          RETURNING id`,
-        [promoId, storageBizId, (nombreManual && nombreManual.trim()) || articulo.nombre, Number(porcentajeVenta) || 0, req.user?.id || null]
+        [promoId, recetaBizId, (nombreManual && nombreManual.trim()) || articulo.nombre, Number(porcentajeVenta) || 0, req.user?.id || null]
       );
       recetaId = nueva[0].id;
     }
