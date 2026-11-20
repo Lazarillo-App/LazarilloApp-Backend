@@ -339,16 +339,21 @@ exports.vista = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+// Producto nuevo en la plaza (Diego 20/11/2026): se destaca durante una semana desde que se agregó, para que
+// quien opera se dé cuenta rápido. Solo por fecha: la TV no tiene un «visto».
+const DIAS_NUEVO = 7;
+
 /** Tarjetas armadas de una plaza ({ plaza, productos }). La usan la vista del tablero y la pantalla de TV
  *  (controllers/pantallasController.js), así las dos muestran exactamente lo mismo. */
 async function armarVista(plaza, bizId, articleId = null) {
     const { rows: prods } = await pool.query(
-      `SELECT pp.article_id, pp.orden, COALESCE(ma.nombre, '#' || pp.article_id) AS nombre, f.layout
+      `SELECT pp.article_id, pp.orden, COALESCE(ma.nombre, '#' || pp.article_id) AS nombre, f.layout,
+              CASE WHEN f.agregado_at > NOW() - ($4::int * INTERVAL '1 day') THEN f.agregado_at END AS nuevo_desde
          FROM plaza_productos pp
          LEFT JOIN maxi_articles ma ON ma.articulo_id = pp.article_id AND ma.business_id = $2
          LEFT JOIN plaza_fichas f ON f.plaza_id = pp.plaza_id AND f.article_id = pp.article_id
         WHERE pp.plaza_id = $1 AND ($3::int IS NULL OR pp.article_id = $3)
-        ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, articleId]);
+        ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, articleId, DIAS_NUEVO]);
     const ids = prods.map((p) => p.article_id);
     const { rows: items } = ids.length ? await pool.query(
       `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones, ri.secreto,
@@ -419,7 +424,7 @@ async function armarVista(plaza, bizId, articleId = null) {
       // Lo que no está en el orden guardado (ingrediente nuevo en la receta) va al final, en el orden de la receta.
       const lugar = new Map(todos.map((r, i) => [r.key, pos.has(r.key) ? pos.get(r.key) : 1e6 + i]));
       todos.sort((a, b) => lugar.get(a.key) - lugar.get(b.key));
-      return { articleId: p.article_id, casilla: Number(p.orden) || null, nombre: p.nombre, obs: obsDe.get(p.article_id) || '', renglones: todos };
+      return { articleId: p.article_id, casilla: Number(p.orden) || null, nombre: p.nombre, obs: obsDe.get(p.article_id) || '', nuevoDesde: p.nuevo_desde || null, renglones: todos };
     });
     return { plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza }, productos };
 }
