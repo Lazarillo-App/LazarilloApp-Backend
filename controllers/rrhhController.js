@@ -121,7 +121,7 @@ const FECHAS_DEF = [
   [7, 9, 'feriado', 'Independencia', true],
   [8, 17, 'feriado', 'Gral. San Martín', false],
   [10, 12, 'feriado', 'Diversidad Cultural', false],
-  [11, 20, 'feriado', 'Soberanía Nacional', false],
+  [11, 23, 'feriado', 'Soberanía Nacional', false], // 2026: trasladado del viernes 20 al lunes 23
   [12, 8, 'feriado', 'Inmaculada Concepción', true],
   [12, 24, 'prefer', 'Nochebuena', true],
   [12, 25, 'feriado', 'Navidad', true],
