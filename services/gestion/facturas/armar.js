@@ -42,7 +42,7 @@ const repartoSchema = z.array(z.object({ puntoDeVentaId: z.number().int(), pct: 
   .refine((r) => r.filter((x) => x.pct > 0).length < 2 || Math.abs(r.reduce((a, x) => a + x.pct, 0) - 100) < 0.01, "El reparto por PDV tiene que sumar 100%");
 const fechaReal = (s) => { const d = new Date(`${s}T00:00:00Z`); return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s; };
 
-const registroSchema = z.object({
+const registroBase = z.object({
   tipo: z.enum(["concepto", "insumo"]),
   // concepto: su código de caja; insumo: el concepto de caja elegido para la línea. Un insumo puede ir
   // sin concepto (Diego 07/11/2026: data entry puede no saber; lo resuelve el administrador en Sin rubro).
@@ -57,7 +57,8 @@ const registroSchema = z.object({
   puntoDeVentaId: z.number().int(),
   // Reparto explícito entre PDV (suma 100). Sin reparto = todo al PDV del registro.
   reparto: repartoSchema.nullish(),
-}).refine((r) => r.tipo === "insumo" || !!r.conceptoCodigo, { message: "Falta el concepto de caja", path: ["conceptoCodigo"] });
+});
+const registroSchema = registroBase.refine((r) => r.tipo === "insumo" || !!r.conceptoCodigo, { message: "Falta el concepto de caja", path: ["conceptoCodigo"] });
 
 // Fila del 14 sin concepto de caja (como las de MaxiRest: codCga 0). Se separa por rubro del insumo
 // para poder resolver cada una por su lado en Sin rubro.
@@ -90,6 +91,9 @@ const facturaSchema = z.object({
   periodo: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).nullish(),
   moneda: monedaSchema.nullish(),
 });
+// Solo para cargas automáticas del servidor (Diego 20/11/2026, lo que descuenta Mercado Pago): un renglón de
+// concepto puede entrar sin concepto y queda como «Sin concepto de caja asociado» hasta que se elige.
+const facturaSchemaInterna = facturaSchema.extend({ registros: z.array(registroBase).min(1) });
 
 const r2 = (n) => Math.round(n * 100) / 100;
 const hash = (s) => createHash("sha256").update(s).digest("hex").slice(0, 24);
@@ -215,4 +219,4 @@ function armarFactura(
   return { filas: lista, lineas: lineasOk, total };
 }
 
-module.exports = { TEXTO_SIN_CONCEPTO, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE, CONCEPTO_PERCEPCION, registroSchema, facturaSchema, monedaSchema, comprobanteDe, armarFactura };
+module.exports = { TEXTO_SIN_CONCEPTO, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE, CONCEPTO_PERCEPCION, registroSchema, facturaSchema, facturaSchemaInterna, monedaSchema, comprobanteDe, armarFactura };

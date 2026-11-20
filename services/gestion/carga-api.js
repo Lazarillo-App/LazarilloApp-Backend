@@ -13,7 +13,7 @@
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const { sql, db } = require('./db');
-const { armarFactura, comprobanteDe, facturaSchema, monedaSchema, CONCEPTO_PERCEPCION, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE } = require('./facturas/armar');
+const { armarFactura, comprobanteDe, facturaSchema, facturaSchemaInterna, monedaSchema, CONCEPTO_PERCEPCION, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE } = require('./facturas/armar');
 const { facturaDesdeFilas } = require('./facturas/leer');
 const { unirInsumos } = require('./facturas/insumos');
 const { normalizarComprobante, esTicket } = require('./facturas/saltear-lazarillo');
@@ -87,8 +87,8 @@ function descripcionFactura(p) {
 }
 
 // ── Preparar y guardar una factura ─────────────────────────────────────────────
-async function prepararFactura(cliente, { organizationId, businessId }, body, { ticketConFecha = true } = {}) {
-  const parsed = facturaSchema.safeParse(body);
+async function prepararFactura(cliente, { organizationId, businessId }, body, { ticketConFecha = true, sinConcepto: permitirSinConcepto = false } = {}) {
+  const parsed = (permitirSinConcepto ? facturaSchemaInterna : facturaSchema).safeParse(body);
   if (!parsed.success) throw rechazo('Datos inválidos', 400, { detalle: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) });
   const f = parsed.data;
   const proveedor = await cliente.one(sql`

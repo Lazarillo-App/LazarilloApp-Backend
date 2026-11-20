@@ -130,21 +130,36 @@ async function orgDe(businessId) {
   return r ? Number(r.organization_id) : null;
 }
 
+// Carga sola ENCENDIDA por defecto (Diego 20/11/2026: «la factura de Mercado Pago va a tener que entrar al cargar
+// todo lo de ARCA, pero si el usuario no lo hace al menos tiene los gastos contabilizados»). Sin fila en
+// mp_cargos_org = encendida desde DESDE_DEFECTO (los meses de antes no se tocan: Comercio ya carga su factura de
+// MP todos los meses). Apagarla a mano deja la fila con activo = false y se respeta.
+const DESDE_DEFECTO = '2026-12-01';
+async function estadoOrg(organizationId) {
+  const r = await db.one(sql`SELECT activo, to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`);
+  return r || { activo: true, desde: DESDE_DEFECTO, porDefecto: true };
+}
+const proveedorMP = async (organizationId) => (await db.one(sql`
+  SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId}
+     AND LOWER(TRIM(BOTH '.' FROM TRIM(nombre))) IN ('mercado pago', 'mercadopago') ORDER BY id LIMIT 1`))?.codigo || null;
+
 /**
  * Proveedor y concepto de cada tipo (claves del mes): lo elegido para ese tipo, si no lo elegido para su tipo
  * general (base), si no el sugerido (el de la cuenta / «Mercado Libre»). «-» = quitado a mano: queda sin elegir.
  */
 async function configDe(organizationId, businessId, claves = []) {
-  const [org, filas, ml, cuentas, conceptos] = await Promise.all([
-    db.one(sql`SELECT activo, to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`),
+  const [org, filas, ml, cuentas, conceptos, mpProv] = await Promise.all([
+    estadoOrg(organizationId),
     db.many(sql`SELECT grupo, proveedor_cod, concepto_codigo FROM mp_cargos_config WHERE organization_id = ${organizationId}`),
     db.one(sql`SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId} AND LOWER(TRIM(nombre)) IN ('mercado libre', '.mercado libre', 'mercadolibre') ORDER BY id LIMIT 1`),
     db.many(sql`SELECT sucursal, mp_user_id::text AS cuenta, proveedor_cod, COALESCE(mp_nickname, mp_email, mp_user_id::text) AS nombre FROM integraciones_mercadopago WHERE business_id = ${businessId}`),
     db.many(sql`SELECT codigo, nombre, "codRga" FROM gestion_conceptos_caja WHERE organization_id = ${organizationId}`),
+    proveedorMP(organizationId),
   ]);
   const elegido = Object.fromEntries(filas.map((f) => [f.grupo, f]));
   const conc = new Map(conceptos.map((c) => [String(c.codigo).trim(), { nombre: String(c.nombre).trim(), rubro: c.codRga != null ? String(c.codRga).trim() : null }]));
-  const deCuenta = cuentas.find((c) => c.proveedor_cod)?.proveedor_cod || null;
+  // Sin proveedor en la cuenta: el «Mercado Pago» de la organización (Diego 20/11: todo descuento cuenta como gasto).
+  const deCuenta = cuentas.find((c) => c.proveedor_cod)?.proveedor_cod || mpProv || null;
   const valor = (campo, g) => {
     const propio = elegido[g.grupo]?.[campo];
     if (propio === '-') return { v: null, propio: true };
@@ -155,7 +170,7 @@ async function configDe(organizationId, businessId, claves = []) {
   const grupos = [...new Set(claves)].map(infoGrupo).filter(Boolean).map((g) => {
     const p = valor('proveedor_cod', g);
     const c = valor('concepto_codigo', g);
-    const sugerido = g.de === 'cuenta' ? deCuenta : g.de === 'ml' ? ml?.codigo || null : null;
+    const sugerido = g.de === 'ml' ? ml?.codigo || deCuenta : deCuenta;
     const proveedor = p.v || (p.propio ? null : sugerido);
     const concepto = c.v && conc.has(c.v) ? c.v : null;
     return {
@@ -163,7 +178,7 @@ async function configDe(organizationId, businessId, claves = []) {
       concepto, conceptoNombre: concepto ? conc.get(concepto).nombre : null, conceptoRubro: concepto ? conc.get(concepto).rubro : null, conceptoHeredado: !!concepto && !c.propio,
     };
   });
-  return { activo: !!org?.activo, desde: org?.desde || null, grupos, cuentas };
+  return { activo: !!org?.activo, desde: org?.desde || null, porDefecto: !!org?.porDefecto, grupos, cuentas };
 }
 
 /** Pantalla: los tipos de cargo del mes con su total, proveedor, concepto y lo cargado. */
@@ -225,6 +240,7 @@ async function configurar(businessId, { grupo, proveedor, concepto } = {}) {
   await db.execute(sql`
     INSERT INTO mp_cargos_config (organization_id, grupo, proveedor_cod, concepto_codigo) VALUES (${organizationId}, ${grupo}, ${pv}, ${cc})
     ON CONFLICT (organization_id, grupo) DO UPDATE SET proveedor_cod = EXCLUDED.proveedor_cod, concepto_codigo = EXCLUDED.concepto_codigo, actualizado_at = now()`);
+  await aplicarConceptos(organizationId).catch((e) => console.error('[mp-cargos] aplicar conceptos', e.message));
   const limpio = (v) => (v === '-' ? null : v);
   return { ok: true, grupo, nombre: info.nombre, antes: antes ? { proveedor_cod: limpio(antes.proveedor_cod), concepto_codigo: limpio(antes.concepto_codigo) } : null, proveedor: limpio(pv), concepto: limpio(cc) };
 }
@@ -233,6 +249,33 @@ async function configurar(businessId, { grupo, proveedor, concepto } = {}) {
  * Crear el concepto de caja con la leyenda del cargo y dejarlo elegido. Varios a la vez (grupos[]), con el mismo
  * rubro. Si ya existe un concepto con ese nombre en la organización, se usa ese (no se duplica).
  */
+/**
+ * Lo ya cargado sin concepto (entró como «Sin concepto de caja asociado») toma el concepto que se eligió después
+ * para su tipo. Solo los tickets de la carga sola que siguen sin concepto y no pasaron a una factura.
+ */
+async function aplicarConceptos(organizationId) {
+  const pend = await db.many(sql`
+    SELECT DISTINCT k.business_id, k.grupo FROM mp_cargos_cargados k
+      JOIN gestion_compras c ON c.business_id = k.business_id AND c.codigo = k.proveedor_cod AND c.comprobante = k.comprobante
+     WHERE k.business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
+       AND k.comprobante IS NOT NULL AND k.absorbido_en IS NULL
+       AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NULL`);
+  let n = 0;
+  for (const biz of [...new Set(pend.map((x) => Number(x.business_id)))]) {
+    const cfg = await configDe(organizationId, biz, pend.filter((x) => Number(x.business_id) === biz).map((x) => x.grupo));
+    for (const g of cfg.grupos.filter((x) => x.concepto)) {
+      const r = await db.execute(sql`
+        UPDATE gestion_compras c SET "conceptoCodigoManual" = ${g.concepto}
+          FROM mp_cargos_cargados k
+         WHERE k.business_id = ${biz} AND k.grupo = ${g.grupo} AND k.comprobante IS NOT NULL AND k.absorbido_en IS NULL
+           AND c.business_id = k.business_id AND c.codigo = k.proveedor_cod AND c.comprobante = k.comprobante
+           AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NULL`);
+      n += Number(r) || 0;
+    }
+  }
+  return n;
+}
+
 async function crearConceptos(businessId, { grupos = [], codRubro, nombres = {} } = {}) {
   const organizationId = await orgDe(businessId);
   const lista = [...new Set(grupos)].filter((g) => CLAVE_OK.test(String(g)) && infoGrupo(g)).slice(0, 40);
@@ -303,7 +346,7 @@ async function activar(businessId, { activo, desde } = {}, usuario = null) {
   const organizationId = await orgDe(businessId);
   const d = /^\d{4}-\d{2}-\d{2}$/.test(desde || '') ? desde : `${hoyAR().slice(0, 7)}-01`;
   await db.execute(sql`
-    INSERT INTO mp_cargos_org (organization_id, activo, desde, actualizado_por) VALUES (${organizationId}, ${!!activo}, ${d}::date, ${usuario})
+    INSERT INTO mp_cargos_org (organization_id, activo, desde, actualizado_por) VALUES (${organizationId}, ${!!activo}, ${activo ? d : DESDE_DEFECTO}::date, ${usuario})
     ON CONFLICT (organization_id) DO UPDATE SET activo = EXCLUDED.activo,
       desde = CASE WHEN EXCLUDED.activo THEN COALESCE(mp_cargos_org.desde, EXCLUDED.desde) ELSE mp_cargos_org.desde END,
       actualizado_at = now(), actualizado_por = EXCLUDED.actualizado_por`);
@@ -331,9 +374,15 @@ async function medioDe(tx, businessId, proveedorCod, organizationId) {
 async function cargarNegocio(businessId) {
   const organizationId = await orgDe(businessId);
   if (!organizationId) return { cargados: 0 };
-  const org = await db.one(sql`SELECT activo, to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`);
+  const org = await estadoOrg(organizationId);
   if (!org?.activo || !org.desde) return { cargados: 0, apagado: true };
+  if (masDias(hoyAR(), -1) < org.desde) return { cargados: 0 };
   const diasTodos = await diario(businessId, org.desde, masDias(hoyAR(), -1));
+  if (!diasTodos.length) return { cargados: 0 };
+  // Sin proveedor «Mercado Pago» en la organización: se crea (los cargos y sus pagos van a su cuenta corriente).
+  if (!(await proveedorMP(organizationId))) {
+    await require('./gestion/carga-api').crearProveedor({ organizationId, body: { nombre: 'Mercado Pago' } }).catch(() => null);
+  }
   const cfg = await configDe(organizationId, businessId, diasTodos.map((d) => d.grupo));
   const carga = require('./gestion/carga-api');
   const ayer = masDias(hoyAR(), -1);
@@ -355,7 +404,8 @@ async function cargarNegocio(businessId) {
     const hasta = hastaCuenta.get(`${d.sucursal}|${d.cuenta}`);
     if (!hasta || d.fecha > hasta) continue; // ese día todavía no se trajo entero
     const g = porGrupo[d.grupo];
-    if (!g?.proveedor || !g.concepto) continue; // falta elegir proveedor o concepto: se carga cuando estén
+    // Sin concepto elegido entra igual, como «Sin concepto de caja asociado» (cuando se elige, se le pone: aplicarConceptos).
+    if (!g?.proveedor) continue;
     if (d.importe < 0) {
       // un día con más devoluciones que cargos: queda anotado (se ve en la pantalla), sin ticket
       await db.execute(sql`
@@ -394,16 +444,20 @@ async function cargarDia(carga, { organizationId, businessId, dia, grupo, cuenta
     if (!prov) throw new Error('proveedor inexistente');
     const lugares = await carga.obtenerLugares(tx, businessId);
     const lugar = lugares.find((l) => l.branchId === Number(dia.sucursal)) || lugares[0];
+    // El número sale de lo cargado y de lo guardado en el Panel (un ticket pasado a factura se borra de compras).
     const mayor = await tx.one(sql`
-      SELECT MAX(comprobante) AS m FROM gestion_compras WHERE business_id = ${businessId} AND codigo = ${prov.codigo} AND comprobante ~ ${`^Z${PREFIJO}[0-9]{8}$`}`);
+      SELECT MAX(m) AS m FROM (
+        SELECT MAX(comprobante) AS m FROM gestion_compras WHERE business_id = ${businessId} AND codigo = ${prov.codigo} AND comprobante ~ ${`^Z${PREFIJO}[0-9]{8}$`}
+        UNION ALL
+        SELECT MAX(comprobante) FROM gestion_facturas_movil WHERE business_id = ${businessId} AND codigo = ${prov.codigo} AND comprobante ~ ${`^Z${PREFIJO}[0-9]{8}$`}) x`);
     const numero = String((mayor?.m ? Number(mayor.m.slice(-8)) : 0) + 1);
     const medio = await medioDe(tx, businessId, prov.codigo, organizationId);
     const p = await carga.prepararFactura(tx, ctx, {
       proveedorId: prov.id, tipo: 'Ticket', prefijo: PREFIJO, numero, fecha: dia.fecha,
       observacion: `Mercado Pago · ${cuentaNombre} · ${grupo.nombre}`.slice(0, 200),
-      registros: [{ tipo: 'concepto', conceptoCodigo: grupo.concepto, nombre: grupo.conceptoNombre, neto: dia.importe, alicuota: 0, impInt: 0, puntoDeVentaId: lugar.id, reparto: null }],
+      registros: [{ tipo: 'concepto', conceptoCodigo: grupo.concepto || null, nombre: grupo.conceptoNombre || grupo.nombre, neto: dia.importe, alicuota: 0, impInt: 0, puntoDeVentaId: lugar.id, reparto: null }],
       percepciones: [], impIntGeneral: 0,
-    });
+    }, { sinConcepto: true });
     const pago = await carga.altaEnTx(tx, ctx, p, { fecha: dia.fecha, medio, referencia: null }, USUARIO,
       (nombre) => `${p.nombreProv}\n${[grupo.nombre, cuentaNombre, nombre, `$ ${dia.importe.toLocaleString('es-AR')}`].filter(Boolean).join(' · ')}`);
     ids.push(...p.armado.filas.map((x) => x.rowId));
@@ -428,7 +482,7 @@ async function absorberNegocio(businessId, organizationId) {
        AND k.grupo NOT LIKE 'imp:%'
      ORDER BY k.fecha, k.sucursal, k.cuenta, k.grupo`);
   if (!pendientes.length) return { pasados: 0, facturas: 0 };
-  const org = await db.one(sql`SELECT to_char(desde, 'YYYY-MM-DD') AS desde FROM mp_cargos_org WHERE organization_id = ${organizationId}`);
+  const org = await estadoOrg(organizationId);
   let pasados = 0;
   const usadas = new Set();
   for (const prov of [...new Set(pendientes.map((x) => x.proveedor_cod))]) {
@@ -486,10 +540,9 @@ async function pasarAFactura(businessId, t, f) {
 /**
  * «Desde el banco» del tablero (Diego 19/11/2026: «en Sin concepto de caja asociado deberían estar estos
  * movimientos cuando aún no estén configurados… agrupados como "desde el banco"»). Lo que descontó Mercado
- * Pago en el año y TODAVÍA no entró al tablero (no tiene concepto/proveedor elegido, o la carga sola está
- * apagada o no llegó a ese día), por tipo de cargo y mes. Es informativo: no suma al total de gastos, porque
- * si llega la factura del proveedor (o se carga a mano) se contaría dos veces. Lo ya cargado (mp_cargos_cargados)
- * no aparece: ya está en su concepto.
+ * Pago en el año y TODAVÍA no entró al tablero (antes del día en que arranca la carga sola, o con la carga
+ * apagada), por tipo de cargo y mes. Es informativo: no suma al total de gastos. Lo ya cargado (mp_cargos_cargados)
+ * no aparece: ya está en el tablero. Las comisiones de un mes con factura del proveedor tampoco: entraron por la factura.
  * sucursal: undefined = todas · null = la principal (0 en Mercado Pago) · n = esa sucursal.
  */
 const cacheBanco = new Map(); // `${biz}|${anio}` → { t, dias } (la consulta de un año tarda ~1 s)
@@ -523,6 +576,20 @@ async function sinCargar({ businessId, anio, sucursal } = {}) {
     porGrupo.set(d.grupo, g);
   }
   const cfg = await configDe(organizationId, businessId, [...porGrupo.keys()]);
+  // Meses con factura del proveedor (ARCA o a mano, no tickets): las comisiones de ese mes ya están en el tablero
+  // por la factura (Comercio carga la de Mercado Pago todos los meses). Las retenciones no tienen factura: siguen.
+  const provs = [...new Set(cfg.grupos.filter((g) => g.facturable && g.proveedor).map((g) => g.proveedor))];
+  const facturado = new Set(provs.length ? (await db.many(sql`
+    SELECT DISTINCT codigo, EXTRACT(MONTH FROM fecha)::int AS mes FROM gestion_compras
+     WHERE business_id = ${businessId} AND codigo = ANY(${provs}::text[]) AND fecha >= ${desde}::date AND fecha < ${desde}::date + interval '1 year'
+       AND comprobante IS NOT NULL AND UPPER(LEFT(comprobante, 1)) NOT IN ('Z', 'N', 'E', 'G')`)).map((x) => `${x.codigo}|${x.mes}`) : []);
+  for (const g of cfg.grupos) {
+    const v = porGrupo.get(g.grupo);
+    if (!v || !g.facturable || !g.proveedor) continue;
+    for (const m of Object.keys(v.values)) {
+      if (facturado.has(`${g.proveedor}|${m}`)) { v.total = r2(v.total - v.values[m]); delete v.values[m]; }
+    }
+  }
   const grupos = cfg.grupos.map((g) => ({
     grupo: g.grupo, nombre: g.nombre, orden: g.orden,
     concepto: g.concepto ? g.conceptoNombre : null, proveedor: !!g.proveedor,
@@ -533,4 +600,4 @@ async function sinCargar({ businessId, anio, sucursal } = {}) {
   return { conectado: true, activo: cfg.activo, grupos, values, total: r2(grupos.reduce((s, g) => s + g.total, 0)) };
 }
 
-module.exports = { sinCargar, infoGrupo, CASE_GRUPO, sqlDiario, resumen, configurar, crearConceptos, crearProveedor, detalle, activar, cargarNegocio, absorberNegocio };
+module.exports = { sinCargar, aplicarConceptos, estadoOrg, DESDE_DEFECTO, infoGrupo, CASE_GRUPO, sqlDiario, resumen, configurar, crearConceptos, crearProveedor, detalle, activar, cargarNegocio, absorberNegocio };
