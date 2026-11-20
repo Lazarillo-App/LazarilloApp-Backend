@@ -290,6 +290,13 @@ async function writeArticleReceta({ bizId, articleId, uid, body }) {
       [esPromo, receta.id]
     );
 
+    // Para cuántos comensales es el plato (Diego 20/11/2026): solo si el modal lo manda. 1 a 10.
+    if (body && Object.prototype.hasOwnProperty.call(body, 'comensales')) {
+      const n = Math.round(Number(body.comensales));
+      await client.query(`UPDATE recetas SET comensales = $2 WHERE id = $1`,
+        [receta.id, Number.isFinite(n) ? Math.min(10, Math.max(1, n)) : 1]);
+    }
+
     // Regla de precio de la promo (Diego 11/11/2026): solo si el modal la manda (otros caminos que
     // guardan recetas no la tocan). 'margen' o vacío = lo de siempre.
     if (body && Object.prototype.hasOwnProperty.call(body, 'promoRegla')) {
