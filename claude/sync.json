@@ -739,5 +739,24 @@
     "prioridad": "normal",
     "estado": "hecha",
     "business_id": 147
+  },
+  {
+    "clave": "2026-11-20-feriados-01",
+    "tipo": "tarea",
+    "titulo": "Calendario de feriados único de Lazarillo, por zonas (nacional · provincia · negocio)",
+    "detalle": "Diego (20/11): ★ hoy hay tres listas distintas (rrhhController FECHAS_DEF que se copia a cada negocio en rrhh_fechas, services/gestion/feriados.js para «Sin carga», y AR_HOLIDAYS del tablero de ventas) y noviembre 2026 está mal en todos los negocios: falta 9/11 (Papa, nacional), 10/11 (CABA), 11/11 (PBA), 23/11 (solo Bar lo tiene a mano), 7/12 (puente); sobra 20/11. Propuesta aprobada para hacer en el chat de RRHH: tabla central de feriados (nacional + provincial, opcional municipal) mantenida desde Panel super; cada negocio con su zona (Container = PBA, Comercio Núñez = CABA) hereda sin copiar; rrhh_fechas queda solo para lo propio (eventos, cerrados, vísperas, «este feriado abrimos»). La leen proyección de ventas, RRHH/Sin carga, tablero de ventas y la proyección del food cost. Corregir 2026 en los negocios reales con OK de Diego.",
+    "modulo": "rrhh",
+    "prioridad": "alta",
+    "estado": "pendiente"
+  },
+  {
+    "clave": "2026-11-20-feriados-02",
+    "tipo": "tarea",
+    "titulo": "Proyección del food cost con el calendario: días que faltan pesados por día de semana y feriados",
+    "detalle": "Diego (20/11): la proyección del mes en curso del gráfico de food cost es regla de 3 y no ve el feriado del 23/11 ni los findes largos (se compra de más antes). Cuando esté el calendario único: ventas con el método único de Resultados (día de semana × estacionalidad × ritmo + feriados/vísperas) y compras siguiendo el ritmo de compras del local (más antes de feriados). Depende de «Calendario de feriados único».",
+    "modulo": "recetas",
+    "prioridad": "normal",
+    "estado": "pendiente",
+    "business_id": 147
   }
 ]
