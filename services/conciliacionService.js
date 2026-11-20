@@ -110,12 +110,20 @@ async function guardarPagadores(businessId, sucursal, mapa) {
 const TIPOS_TRASLADO = ['ventas', 'banco', 'pagos'];
 
 async function trasladosDe(businessId, sucursal) {
+  // 20/11: el destino puede ser otro negocio de la organización (hacia_bid).
   const { rows } = await pool.query(
-    `SELECT tipo, clave, desde_suc, hacia_suc, fila FROM conciliacion_traslados
-      WHERE business_id = $1 AND (desde_suc = $2 OR hacia_suc = $2)`, [businessId, sucursal]);
+    `SELECT t.tipo, t.clave, t.business_id, t.desde_suc, COALESCE(t.hacia_bid, t.business_id) AS hacia_bid, t.hacia_suc, t.fila,
+            ob.name AS desde_negocio
+       FROM conciliacion_traslados t
+       JOIN app_businesses ob ON ob.id = t.business_id
+      WHERE (t.business_id = $1 AND t.desde_suc = $2) OR (COALESCE(t.hacia_bid, t.business_id) = $1 AND t.hacia_suc = $2)`,
+    [businessId, sucursal]);
+  const aca = (bid, suc) => bid === businessId && suc === sucursal;
   return {
-    salen: rows.filter((r) => r.desde_suc === sucursal && r.hacia_suc !== sucursal).map((r) => ({ tipo: r.tipo, clave: r.clave, hacia: r.hacia_suc })),
-    entran: rows.filter((r) => r.hacia_suc === sucursal && r.desde_suc !== sucursal).map((r) => ({ tipo: r.tipo, clave: r.clave, desde: r.desde_suc, fila: r.fila })),
+    salen: rows.filter((r) => aca(r.business_id, r.desde_suc) && !aca(r.hacia_bid, r.hacia_suc))
+      .map((r) => ({ tipo: r.tipo, clave: r.clave, haciaBid: r.hacia_bid, hacia: r.hacia_suc })),
+    entran: rows.filter((r) => aca(r.hacia_bid, r.hacia_suc) && !aca(r.business_id, r.desde_suc))
+      .map((r) => ({ tipo: r.tipo, clave: r.clave, desdeBid: r.business_id, desde: r.desde_suc, desdeNegocio: r.desde_negocio, fila: r.fila })),
   };
 }
 
@@ -129,29 +137,61 @@ function validarTraslado(body = {}) {
   return { items };
 }
 
-/** Manda las filas de la sucursal `desde` a `hacia`. Una fila que ya había llegado de otra sucursal
- *  se re-dirige; si vuelve a su sucursal de origen, el traslado se borra. Una sola transacción. */
-async function trasladar(businessId, desde, hacia, userId, items) {
+/** PDV a los que se puede mandar: todas las sucursales de todos los negocios de la organización
+ *  (la sucursal is_main de cada negocio es la 0). */
+async function destinosOrg(businessId) {
+  const { rows } = await pool.query(
+    `SELECT b.id AS bid, b.name AS negocio, br.id AS branch_id, br.name AS sucursal, COALESCE((br.props->>'is_main')::boolean, false) AS es_main
+       FROM app_businesses b
+       LEFT JOIN app_branches br ON br.business_id = b.id
+      WHERE b.id = $1 OR (b.organization_id IS NOT NULL AND b.organization_id = (SELECT organization_id FROM app_businesses WHERE id = $1))
+      ORDER BY (b.id = $1) DESC, b.name, es_main DESC, br.name`, [businessId]);
+  const out = [];
+  const vistos = new Set();
+  rows.forEach((r) => {
+    const suc = !r.branch_id || r.es_main ? 0 : r.branch_id;
+    const k = r.bid + ':' + suc;
+    if (vistos.has(k)) return;
+    vistos.add(k);
+    out.push({ bid: r.bid, suc, negocio: r.negocio, nombre: r.branch_id ? r.sucursal : r.negocio });
+  });
+  // un negocio con sucursales pero sin is_main: igual tiene su principal (0)
+  [...new Set(rows.map((r) => r.bid))].forEach((bid) => {
+    if (!vistos.has(bid + ':0')) { const r = rows.find((x) => x.bid === bid); out.push({ bid, suc: 0, negocio: r.negocio, nombre: r.negocio }); }
+  });
+  return out;
+}
+
+/** Manda las filas de (businessId, desde) a (haciaBid, hacia). Una fila que había llegado de otro PDV
+ *  se re-dirige; si vuelve a su PDV de origen, el traslado se borra. Una sola transacción. */
+async function trasladar(businessId, desde, haciaBid, hacia, userId, items) {
   const client = await pool.connect();
   let movidos = 0, devueltos = 0, total = 0;
   try {
     await client.query('BEGIN');
     for (const it of items) {
-      const prev = await client.query('SELECT desde_suc FROM conciliacion_traslados WHERE business_id = $1 AND tipo = $2 AND clave = $3 FOR UPDATE',
-        [businessId, it.tipo, it.clave]);
-      const origen = prev.rows[0] ? prev.rows[0].desde_suc : desde;
+      // ¿llegó acá desde otro PDV? (se busca por destino actual) — si no, nace acá
+      const prev = await client.query(
+        `SELECT business_id, desde_suc FROM conciliacion_traslados
+          WHERE tipo = $1 AND clave = $2 AND COALESCE(hacia_bid, business_id) = $3 AND hacia_suc = $4 FOR UPDATE`,
+        [it.tipo, it.clave, businessId, desde]);
+      const oBid = prev.rows[0] ? prev.rows[0].business_id : businessId;
+      const oSuc = prev.rows[0] ? prev.rows[0].desde_suc : desde;
       const imp = Number(it.fila.imp ?? it.fila.importe) || 0;
       total += imp;
-      if (origen === hacia) {
-        await client.query('DELETE FROM conciliacion_traslados WHERE business_id = $1 AND tipo = $2 AND clave = $3', [businessId, it.tipo, it.clave]);
+      if (oBid === haciaBid && oSuc === hacia) {
+        await client.query('DELETE FROM conciliacion_traslados WHERE business_id = $1 AND tipo = $2 AND clave = $3', [oBid, it.tipo, it.clave]);
         devueltos++;
       } else {
         const fecha = RE_FECHA.test(String(it.fila.fecha || '')) ? it.fila.fecha : null;
+        const fila = { ...it.fila };
+        delete fila.trasladoDesde; delete fila.trasladoNegocio;
         await client.query(
-          `INSERT INTO conciliacion_traslados (business_id, tipo, clave, desde_suc, hacia_suc, fila, fecha, importe, creado_por, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, now())
-           ON CONFLICT (business_id, tipo, clave) DO UPDATE SET hacia_suc = EXCLUDED.hacia_suc, fila = EXCLUDED.fila, creado_por = EXCLUDED.creado_por, updated_at = now()`,
-          [businessId, it.tipo, it.clave, origen, hacia, JSON.stringify(it.fila), fecha, imp, userId || null]);
+          `INSERT INTO conciliacion_traslados (business_id, tipo, clave, desde_suc, hacia_bid, hacia_suc, fila, fecha, importe, creado_por, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, now())
+           ON CONFLICT (business_id, tipo, clave) DO UPDATE SET hacia_bid = EXCLUDED.hacia_bid, hacia_suc = EXCLUDED.hacia_suc,
+             fila = EXCLUDED.fila, creado_por = EXCLUDED.creado_por, updated_at = now()`,
+          [oBid, it.tipo, it.clave, oSuc, haciaBid, hacia, JSON.stringify(fila), fecha, imp, userId || null]);
         movidos++;
       }
     }
@@ -176,7 +216,7 @@ async function nombreSucursal(businessId, sucursal) {
 }
 
 module.exports = {
-  TIPOS_TRASLADO, trasladosDe, validarTraslado, trasladar, nombreSucursal,
+  TIPOS_TRASLADO, trasladosDe, validarTraslado, trasladar, nombreSucursal, destinosOrg,
   TIPOS, validarFuente, validarPeriodo, validarSucursal,
   cargar, guardarFuente, borrarFuente, leerEstado, guardarEstado, guardarPagadores,
 };
