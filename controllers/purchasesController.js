@@ -487,6 +487,26 @@ exports.foodCostMonthly = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/purchases/food-cost-proyeccion?rubros=A|B&branch_id=
+// Mes en curso proyectado a fin de mes: ventas con el método único + calendario de feriados, compras
+// con el ritmo de cada día y el efecto víspera aprendido del local (services/foodCostProyeccion.js).
+// Devuelve factores para que el gráfico de KpiFoodCost multiplique lo que ya filtra cada KPI.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.foodCostProyeccion = async (req, res, next) => {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) return res.status(400).json({ ok: false, error: 'business_id requerido' });
+    const rubros = String(req.query.rubros || '').split('|').map((r) => r.trim()).filter(Boolean);
+    const proyeccion = await require('../services/foodCostProyeccion')
+      .proyeccionFoodCost({ businessId, rubros, branchId: req.query.branch_id ?? null });
+    return res.json({ ok: true, proyeccion });
+  } catch (e) {
+    console.error('[purchases.foodCostProyeccion] error:', e);
+    next(e);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/purchases/summary?from=&to=&branch_id=
 // ─────────────────────────────────────────────────────────────────────────────
 exports.summary = async (req, res, next) => {
