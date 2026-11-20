@@ -12,6 +12,7 @@ router.get('/export/csv',      ctrl.exportCsv);
 router.get('/summary',         ctrl.summary);
 router.get('/food-cost',       ctrl.foodCost);
 router.get('/food-cost-monthly', ctrl.foodCostMonthly);
+router.get('/food-cost-proyeccion', ctrl.foodCostProyeccion);
 router.get('/ranking',         ctrl.ranking);
 router.get('/first-date',      ctrl.firstDate);
 
