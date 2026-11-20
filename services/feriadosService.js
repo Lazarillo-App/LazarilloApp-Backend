@@ -57,10 +57,14 @@ async function feriadosDe(businessId, { desde = null, hasta = null, sucursal } =
     ),
   ]);
   const porFecha = new Map(her.map((h) => [h.fecha, h]));
+  const heredadas = new Set(porFecha.keys());
+  // Un feriado propio en un día que ya trae el calendario (los que se sembraban antes del
+  // 20/11/2026) no cuenta dos veces: manda el heredado. Eventos, cerrados y vísperas sí pisan.
   for (const p of prop) {
-    if (p.tipo === 'no_aplica') { porFecha.delete(p.fecha); continue; }
+    if (p.tipo === 'no_aplica' || (p.tipo === 'feriado' && heredadas.has(p.fecha))) continue;
     porFecha.set(p.fecha, { fecha: p.fecha, tipo: p.tipo, nombre: p.nombre, fijo: !!p.fijo, heredado: false });
   }
+  for (const p of prop) if (p.tipo === 'no_aplica') porFecha.delete(p.fecha);
   return [...porFecha.values()].sort((a, b) => a.fecha.localeCompare(b.fecha));
 }
 

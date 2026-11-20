@@ -790,5 +790,20 @@
     "business_id": 204,
     "prioridad": "alta",
     "estado": "hecha"
+  },
+  {
+    "clave": "2026-11-20-80",
+    "tipo": "manual_seccion",
+    "capitulo": "cronogramas",
+    "seccion": "feriados-y-eventos",
+    "buscar": "Los feriados nacionales ya vienen cargados.",
+    "reemplazar": "Los **feriados** (🔒) vienen del calendario de Lazarillo: los nacionales y los de tu provincia (se elige en el 📅 › ★ Fechas especiales), y se actualizan solos cuando sale un decreto. Si un feriado tu negocio abre igual, tocá el día › **Este día abrimos**: deja de contar como feriado, también para la proyección de ventas."
+  },
+  {
+    "clave": "2026-11-20-81",
+    "tipo": "cambio",
+    "id": 138,
+    "estado": "en_curso",
+    "nota": "Hecho (20/11, back #257 y siguientes, front): tabla lz_feriados por zona (2025–2027 nacionales + Papa 10/11 CABA y Córdoba, 11/11 PBA), zona por negocio (Container = PBA, Comercio = CABA), feriadosDe() en proyección y Sin carga, Panel super › Feriados, Cronogramas muestra los heredados con 🔒 y «Este día abrimos», selector de provincia en 📅 › Fechas especiales; ya no se siembran feriados en negocios nuevos; los feriados viejos sembrados en rrhh_fechas no cuentan doble. Falta (con OK de Diego): borrar esos feriados viejos de rrhh_fechas, zona de Palermo suites / LLEVALO LISTO / otros, y pedir la provincia en el alta de negocio."
   }
 ]
