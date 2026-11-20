@@ -214,7 +214,21 @@ async function resumen(businessId, mes) {
     concepto: g.concepto ? { codigo: g.concepto, nombre: g.conceptoNombre, rubro: g.conceptoRubro } : null, conceptoHeredado: g.conceptoHeredado,
     cargado: hechos[g.grupo]?.cargado || 0, tickets: hechos[g.grupo]?.n || 0, facturado: hechos[g.grupo]?.facturado || 0,
   })).sort((a, b) => a.orden - b.orden || b.total - a.total);
-  return { mes: m, activo: cfg.activo, desde: cfg.desde, grupos, noEsCosto: r2(noCosto?.t || 0), cuentas: cfg.cuentas.length, diasNegativos: avisos?.dias_negativos || 0 };
+  // Conceptos que ya se usaron con cada proveedor (Diego 20/11/2026: «¿por qué no me sugiere otros conceptos
+  // relacionados a este proveedor?»): los más usados en sus compras de los últimos 18 meses (~4 ms).
+  const provsUsados = [...new Set(grupos.map((g) => g.proveedor?.codigo).filter(Boolean))];
+  const usados = provsUsados.length ? await db.many(sql`
+    SELECT codigo, cc FROM (
+      SELECT c.codigo, TRIM(COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")) AS cc,
+             row_number() OVER (PARTITION BY c.codigo ORDER BY COUNT(*) DESC) AS r
+        FROM gestion_compras c
+       WHERE c.business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
+         AND c.codigo = ANY(${provsUsados}::text[]) AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") IS NOT NULL
+         AND c.fecha >= now() - interval '18 months'
+       GROUP BY 1, 2) x WHERE r <= 8 ORDER BY codigo, r`) : [];
+  const sugeridos = {};
+  for (const u of usados) (sugeridos[u.codigo] ||= []).push(u.cc);
+  return { mes: m, activo: cfg.activo, desde: cfg.desde, grupos, sugeridos, noEsCosto: r2(noCosto?.t || 0), cuentas: cfg.cuentas.length, diasNegativos: avisos?.dias_negativos || 0 };
 }
 
 /**
