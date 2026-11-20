@@ -877,6 +877,8 @@ async function historialConcepto({ businessId, sp }) {
            SUM(COALESCE(c."importeManual", c.importe))::float8 AS importe,
            COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo,
            MIN(c."rowId") AS "rowId", -- para eliminarla desde «Últimas cargas» (Diego 12/11/2026)
+           -- Cuántos registros junta la fila: con 1 se corrige fecha/importe desde ahí (Diego 20/11/2026).
+           COUNT(*)::int AS n,
            -- En US$ (Diego 19/11/2026): la próxima carga del concepto arranca igual.
            (array_agg(fm.moneda) FILTER (WHERE fm.moneda IS NOT NULL))[1] AS moneda
     FROM gestion_compras c
