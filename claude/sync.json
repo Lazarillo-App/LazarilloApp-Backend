@@ -684,5 +684,23 @@
     "prioridad": "alta",
     "estado": "hecha",
     "business_id": 147
+  },
+  {
+    "clave": "2026-11-20-cel-04",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "que-mirar",
+    "buscar": "**Top 20** (lo que más facturó)",
+    "reemplazar": "**Top 20** (lo que más facturó, ordenado de mayor a menor facturación; tocando un título lo ordenás por otra cosa)"
+  },
+  {
+    "clave": "2026-11-20-cel-05",
+    "tipo": "tarea",
+    "titulo": "Celular: food cost solo consulta, números y gráfico juntos; Top 20 por facturación",
+    "detalle": "Diego (20/11): en el celular el food cost se consulta y nada más: sin «⚙ Configurar» ni «+ Nuevo» (se configura en la compu), con «✓ cuadra / ⚠ no cuadra» a la vista, y los números (ventas, compras, %, contra el mes anterior y el promedio) junto con el gráfico en una sola vista, a todo el ancho. Puede que después quiera lo mismo en la web. Top 20: arranca ordenado por facturación ($, su puesto) en vez de unidades; tocando un título se ordena por otra cosa. Además, en el celular la app ya no se achica al 90 % (el zoom de #root): botones de 44px reales y es la causa más probable de que el iPhone abriera la app agrandada y cortada.",
+    "modulo": "recetas",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]
