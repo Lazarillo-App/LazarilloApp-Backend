@@ -67,7 +67,7 @@ router.use(async (req, res, next) => {
 const { puedeSeccion, estaOculto } = require('../services/auth/permisos');
 const SECCION_POR_RUTA = [
   [/^\/(facturas|gastos-varios|empleados|conceptos-empleado|pagos-proveedor|ventas-manuales)(\/|$)/, 'carga'],
-  [/^\/conceptos(\/|$)/, 'conceptos'],
+  [/^\/(conceptos|rubros-caja)(\/|$)/, 'conceptos'],
   [/^\/medios-pago(\/|$)/, 'medios'],
 ];
 const OCULTO_POR_RUTA = [
@@ -300,6 +300,8 @@ router.post('/ventas-manuales', responder((req) => carga.crearVentasManuales({ .
 router.delete('/ventas-manuales', responder((req) => carga.borrarVentasManuales({ ...req.gestion, ids: paramsDe(req).get('ids') })));
 router.get('/conceptos', responder((req) => carga.obtenerConceptos(req.gestion)));
 router.post('/conceptos', responder((req) => carga.crearConcepto({ ...req.gestion, body: req.body })));
+// Rubro de conceptos de caja nuevo (Diego 20/11/2026, desde Lo que descuenta MP).
+router.post('/rubros-caja', responder((req) => require('../services/gestion/conceptos/rubros').crearRubroCaja({ ...req.gestion, body: req.body })));
 router.patch('/conceptos/:codigo', responder((req) => carga.editarConcepto({ ...req.gestion, codigo: req.params.codigo, body: req.body })));
 router.delete('/conceptos/:codigo', responder((req) => carga.borrarConcepto({ ...req.gestion, codigo: req.params.codigo })));
 router.get('/medios-pago', responder((req) => carga.obtenerMedios(req.gestion)));

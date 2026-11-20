@@ -83,6 +83,7 @@ const REGLAS = [
   r('POST', `${G}/facturas/proveedores`, 'Gestión', 'proveedor creado', 'proveedores creados'),
   r('PATCH', `${G}/facturas/proveedores/\\d+`, 'Gestión', 'proveedor editado', 'proveedores editados'),
   r('POST', `${G}/conceptos`, 'Gestión', 'concepto de caja creado', 'conceptos de caja creados'),
+  r('POST', `${G}/rubros-caja`, 'Gestión', 'rubro de caja creado', 'rubros de caja creados'),
   r('PATCH', `${G}/conceptos/[^/]+`, 'Gestión', 'concepto de caja editado', 'conceptos de caja editados'),
   r('DELETE', `${G}/conceptos/[^/]+`, 'Gestión', 'concepto de caja borrado', 'conceptos de caja borrados'),
   r('PUT', `${G}/(sin-rubro/(rubro-insumo|insumo|compra)|organizar/proveedor)/[^/]+`, 'Gestión', 'gasto organizado en su concepto', 'gastos organizados en su concepto'),
