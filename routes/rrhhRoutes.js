@@ -19,6 +19,10 @@ router.use((req, res, next) => {
 router.get('/config', ctrl.getConfig);
 router.put('/config', ctrl.putConfig);
 
+// Calendario de feriados único (Diego 20/11/2026): heredados por zona + propios, y la zona del negocio
+router.get('/feriados', ctrl.getFeriados);
+router.put('/zona-feriados', ctrl.putZonaFeriados);
+
 // Empleados (tabla propia de RRHH; MaxiRest solo como semilla, con selección)
 router.get('/empleados/nomina-maxirest', ctrl.listarNominaMaxirest);
 router.post('/empleados/importar', ctrl.importarNomina);

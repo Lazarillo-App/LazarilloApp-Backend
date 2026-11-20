@@ -358,6 +358,8 @@ const PORT = process.env.PORT || 4000;
     require('./services/tareasUnicas/promosDuplicadas').programar();
     // Pendientes de desarrollo que deja Claude en claude/sync.json (sin login, Diego 15/11/2026).
     require('./services/claudeSync').programar();
+    // Calendario de feriados único (lz_feriados): caché de los nacionales para «Sin carga». 20/11/2026.
+    { const fer = require('./services/feriadosService'); fer.refrescarNacionales(); setInterval(fer.refrescarNacionales, 6 * 3600 * 1000).unref(); }
     // Primera carga de salidas de stock sin venta (informe 27) — pendiente #109, 17/11/2026.
     require('./services/tareasUnicas/salidasStockInicial').programar();
   } catch (err) {

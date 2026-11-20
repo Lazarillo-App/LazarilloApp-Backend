@@ -101,14 +101,8 @@ async function obtenerProyeccion({ businessId, params }) {
 
   // Calendario del negocio (RRHH › Cronogramas, Diego 14/11/2026): feriados y vísperas son de todo
   // el negocio; eventos y días cerrados, de la sucursal que se mira (con «Todas», solo lo compartido).
-  const suc = typeof sucursal === "number" ? sucursal : null;
-  const fechas = await db.many(sql`
-    SELECT to_char(f.fecha, 'YYYY-MM-DD') AS fecha, f.tipo, f.nombre, f.fijo
-    FROM rrhh_fechas f
-    WHERE f.business_id = ${businessId}
-      AND (f.compartida
-        OR (${sucursal === undefined}::boolean = false AND f.branch_id IS NOT DISTINCT FROM ${suc}::bigint))
-  `).catch((err) => {
+  // Desde el 20/11/2026: calendario único (feriados heredados por zona) + lo propio del negocio.
+  const fechas = await require('../../feriadosService').feriadosDe(businessId, { sucursal }).catch((err) => {
     console.error("No se pudo leer el calendario para la proyección", err);
     return [];
   });
