@@ -7,6 +7,7 @@
 //   ancla    { tipo: 'ancla', sucursal: null | branchId, reparto: 'ventas' | 'manual',
 //              pct: { alquiler, sueldos, servicios, mercaderias }  (0-100; solo con reparto 'manual'),
 //              propios: [codigoConcepto] }  conceptos que son 100 % del servicio (Beelup, césped…)
+//            base: { fecha, costoMes, costoHora, precio }  la foto del día del último aumento (opcional)
 //   derivado { tipo: 'derivado', ancla: articleId, factor: number }  (0,93 = 93 % de la hora de la ancla;
 //              3,7 = un cumple que vale 3,7 horas)
 //
@@ -44,6 +45,14 @@ function mesesCerrados(n, hoy = new Date()) {
 }
 const finDe = (m) => { const [a, mm] = m.split('-').map(Number); return new Date(Date.UTC(a, mm, 1)).toISOString().slice(0, 10); };
 
+/** Foto del día del último aumento: contra ella se mide cuánto subieron los costos (Diego 20/11/2026). */
+function normalizarBase(b) {
+  if (!b || typeof b !== 'object' || !/^\d{4}-\d{2}-\d{2}$/.test(String(b.fecha || ''))) return null;
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  if (!n(b.costoMes)) return null;
+  return { fecha: String(b.fecha), costoMes: n(b.costoMes), costoHora: n(b.costoHora), precio: n(b.precio) };
+}
+
 /** Normaliza lo que manda el front. Devuelve null si no es un servicio válido. */
 function normalizarConfig(c) {
   if (!c || typeof c !== 'object') return null;
@@ -61,6 +70,7 @@ function normalizarConfig(c) {
       reparto: c.reparto === 'manual' ? 'manual' : 'ventas',
       pct, incluir,
       propios: [...new Set((Array.isArray(c.propios) ? c.propios : []).map(String).filter(Boolean))],
+      base: normalizarBase(c.base),
     };
   }
   if (c.tipo === 'derivado') {
@@ -175,8 +185,25 @@ async function calcularAncla(businessId, anclaArticleId, { db = pool, configOver
     .map((c) => ({ codigo: c.codigo, nombre: c.nombre, rubro: RUBROS.find((r) => r.codRga === c.r)?.clave, mensual: c.total / MESES_COSTO }))
     .sort((a, b) => b.mensual - a.mensual);
 
+  // Precio de hoy de la ancla: el del último mes con ventas. Margen = 1 − costo de la hora ÷ precio.
+  const precioActual = [...meses].reverse().find((x) => x.precioAncla)?.precioAncla ?? null;
+  const margen = precioActual ? 1 - costoHora / precioActual : null;
+  // Contra la foto del último aumento: la hora sube lo mismo que suben los costos del servicio.
+  let vsBase = null;
+  if (cfg.base) {
+    const suba = cfg.base.costoMes > 0 ? costoMes / cfg.base.costoMes - 1 : null;
+    const margenBase = cfg.base.precio && cfg.base.costoHora ? 1 - cfg.base.costoHora / cfg.base.precio : null;
+    vsBase = {
+      desde: cfg.base.fecha, suba,
+      precioSugerido: cfg.base.precio && suba != null ? cfg.base.precio * (1 + suba) : null,
+      margenBase,
+      margenBajo: margenBase != null && margen != null && margen < margenBase - 0.05,
+    };
+  }
+
   return {
     articleId: Number(anclaArticleId), recetaId: rec?.id ?? null, config: cfg,
+    precioActual, margen, vsBase,
     meses, mesesConDatos: conHoras.length, horas, horasUltimos3: horas3, parteVentas,
     mesesCosto: mesesC, rubros, conceptos, costoMes, costoHora,
     familia: familia.map((f) => ({ ...f, costo: costoHora * f.factor })),
@@ -221,4 +248,4 @@ async function listarAnclas(businessId, db = pool) {
     sucursal: r.sucursal == null ? null : Number(r.sucursal) }));
 }
 
-module.exports = { normalizarConfig, calcularAncla, aplicarCostosFamilia, recalcularServicio, listarAnclas, mesesCerrados, RUBROS };
+module.exports = { normalizarBase, normalizarConfig, calcularAncla, aplicarCostosFamilia, recalcularServicio, listarAnclas, mesesCerrados, RUBROS };

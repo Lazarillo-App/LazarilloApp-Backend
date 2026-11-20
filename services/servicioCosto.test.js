@@ -5,12 +5,12 @@ const { describe, expect, it } = require('./gestion/test-utils/vitest');
 const srv = require('./servicioCosto');
 
 // Base falsa: ancla 10 (precio 100) + derivado 11 (factor 0,5). Local factura 2.000/mes, el servicio 1.000.
-function dbFalsa() {
+function dbFalsa(base = null) {
   return {
     query: async (sql) => {
       if (sql.includes("'derivado'")) return { rows: [{ article_id: 11, nombre: 'Media', factor: 0.5 }] };
       if (sql.includes('FROM recetas')) return { rows: [{ id: 1, article_id: 10, nombre: 'Hora', porciones: 1,
-        servicio: { tipo: 'ancla', sucursal: null, reparto: 'ventas', propios: ['P'] } }] };
+        servicio: { tipo: 'ancla', sucursal: null, reparto: 'ventas', propios: ['P'], base } }] };
       if (sql.includes('app_businesses')) return { rows: [{ organization_id: 1 }] };
       if (sql.includes('sales_daily_items')) {
         return { rows: srv.mesesCerrados(12, new Date('2026-11-20')).map((m) => (
@@ -51,5 +51,21 @@ describe('calcularAncla', () => {
     expect(c.costoMes).toBe(1000 * 0.5 + 100);      // alquiler a la mitad + propio entero
     expect(c.costoHora).toBe(60);
     expect(c.familia.find((f) => f.articleId === 11).costo).toBe(30);
+  });
+});
+
+describe('vsBase', () => {
+  it('la hora sube lo mismo que los costos desde el último aumento', async () => {
+    // Base: costo del mes 500 con la hora a 100. Hoy el costo del mes es 600 → +20 % → hora a 120.
+    const base = { fecha: '2026-12-01', costoMes: 500, costoHora: 50, precio: 100 };
+    const c = await srv.calcularAncla(1, 10, { db: dbFalsa(base), hoy: new Date('2026-11-20') });
+    expect(Math.round(c.vsBase.suba * 1000) / 1000).toBe(0.2);
+    expect(Math.round(c.vsBase.precioSugerido)).toBe(120);
+    expect(c.precioActual).toBe(100);
+    expect(Math.round(c.margen * 100)).toBe(40);       // 1 − 60/100
+    expect(c.vsBase.margenBajo).toBe(true);            // 40 % < 50 % − 5
+  });
+  it('una base mal formada no cuenta', () => {
+    expect(srv.normalizarBase({ fecha: 'ayer', costoMes: 5 })).toBe(null);
   });
 });
