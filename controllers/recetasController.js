@@ -200,6 +200,12 @@ exports.saveReceta = async (req, res, next) => {
     const { receta, recetaCostos, savedItems } = await writeArticleReceta({
       bizId, articleId, uid, body: req.body,
     });
+    // Receta de tipo Servicio: el costo no sale de los items (services/servicioCosto.js). Si alguien la
+    // guarda desde el modal común, se vuelve a poner el costo del servicio.
+    if (receta?.id) {
+      const { rows: sv } = await pool.query(`SELECT servicio FROM recetas WHERE id = $1`, [receta.id]).catch(() => ({ rows: [] }));
+      if (sv[0]?.servicio) await require('../services/servicioCosto').recalcularServicio(bizId, articleId).catch((e) => console.warn('[saveReceta] servicio', e.message));
+    }
 
     // Guardado directo (owner/admin): si había una marca de "revisión" (con o sin
     // contenido real) todavía abierta sobre esta receta, queda resuelta — ya se
