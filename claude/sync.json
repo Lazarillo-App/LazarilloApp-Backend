@@ -1,5 +1,13 @@
 [
   {
+    "clave": "2026-11-20-organizar-01",
+    "tipo": "tarea",
+    "titulo": "Organizar gastos: ¿hace falta para negocios nuevos?",
+    "modulo": "resultados",
+    "prioridad": "baja",
+    "detalle": "Diego 20/11: se sacó el aviso «Organizá tus gastos» del Panel (front #455); lo sin concepto queda en la fila «Sin concepto de caja asociado». Revisar SOLO si hace falta: en un negocio nuevo casi todo cae sin concepto y la pantalla Organizar (OrganizarGastos.jsx, sin uso) lo resolvía de una vez. Opciones: botón «Organizar con sugerencias» dentro de la fila Sin concepto; aviso solo si sin concepto supera ~20% de los gastos; o paso del Asistente de alta."
+  },
+  {
     "clave": "2026-11-15-01",
     "tipo": "cambio",
     "id": 7,
