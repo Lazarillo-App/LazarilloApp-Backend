@@ -764,5 +764,13 @@
     "tipo": "cambio",
     "titulo": "Proyección del food cost con el calendario: días que faltan pesados por día de semana y feriados",
     "nota": "Diego 20/11: en la víspera de un feriado se compra de más (cambian los cronogramas de entrega de los proveedores) y se compensa la semana siguiente; dos feriados seguidos (9/11 Papa y 23/11) inflan el food cost parcial de noviembre, y con la suba de precios a mes cerrado debería quedar igual o menor que octubre. Medido en Bar Ramos (compras rubros FC, vs 4 semanas previas): semana previa +12 a +23 % (23/3 +21, 2/4 +23, 1/5 +15, 25/5 +20, 12/10 +17, 9/11 +12), semana siguiente −14 a +11 %, las dos juntas 0 a +10 % (sobre todo inflación); 9/11 compensó justo. Parametrizar sin config manual: «efecto víspera» aprendido por local (mediana de previa/siguiente, mín. 3 feriados de historia), usarlo en la proyección de compras del mes, en un food cost del mes en curso «ajustado por víspera» (con el crudo al lado, sin flecha roja por eso) y ventas con el método único + calendario. Arranca cuando el chat de RRHH termine el calendario único."
+  },
+  {
+    "clave": "2026-11-20-organizar-01",
+    "tipo": "tarea",
+    "titulo": "Organizar gastos: ¿hace falta para negocios nuevos?",
+    "modulo": "resultados",
+    "prioridad": "baja",
+    "detalle": "Diego 20/11: se sacó el aviso «Organizá tus gastos» del Panel (front #455); lo sin concepto queda en la fila «Sin concepto de caja asociado». Revisar SOLO si hace falta: en un negocio nuevo casi todo cae sin concepto y la pantalla Organizar (OrganizarGastos.jsx, sin uso) lo resolvía de una vez. Opciones: botón «Organizar con sugerencias» dentro de la fila Sin concepto; aviso solo si sin concepto supera ~20% de los gastos; o paso del Asistente de alta."
   }
 ]
