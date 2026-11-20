@@ -721,5 +721,23 @@
     "prioridad": "alta",
     "business_id": 147,
     "detalle": "Diego (20/11, captura del celular en Container Bar): en el gráfico de Compras, noviembre muestra $ 17,6 M (−34,1%) cuando el mes va por el día 19, así que parece una baja que no es. Tiene que mostrar el proyectado del mes (barra completa atenuada encima de lo real, con el valor estimado). Además los números cuestan entender: monto y % arriba de cada barra se pisan con la línea de 36,6 M, los colores (beige, verde, rosa) no dicen qué significan y el % no aclara contra qué se compara. Otro chat tocó KpiFoodCost.jsx el 20/11 (#443): coordinar."
+  },
+  {
+    "clave": "2026-11-20-fc-proy-01",
+    "tipo": "manual_seccion",
+    "capitulo": "food-cost",
+    "seccion": "el-panel",
+    "buscar": "**▦** muestra los números y **∿** el gráfico mes a mes.",
+    "reemplazar": "**▦** muestra los números y **∿** el gráfico mes a mes. En el gráfico, las **ventas** y las **compras** del mes en curso van **proyectadas a fin de mes** (≈, borde punteado) con los días ya cerrados; adentro, pleno, lo que ya pasó. Así el mes en curso se compara con los cerrados. En el celular, números y gráfico van juntos."
+  },
+  {
+    "clave": "2026-11-20-fc-proy-02",
+    "tipo": "tarea",
+    "titulo": "Food cost: ventas y compras del mes en curso proyectadas en el gráfico",
+    "detalle": "Diego (20/11): en el gráfico del food cost las compras y las ventas del mes en curso tienen que estar proyectadas. HECHO: proyección a fin de mes con los días cerrados (regla de 3: hasta ayer); la barra llega a lo proyectado (≈, punteada) y adentro va lo real; la variación contra el mes anterior usa lo proyectado. El % de food cost no cambia (ventas y compras se proyectan igual). Mejora posible: usar el método único de proyección de ventas (día de semana × estacionalidad × ritmo) y, para compras, el calendario de compras de cada proveedor.",
+    "modulo": "recetas",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]
