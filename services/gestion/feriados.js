@@ -23,9 +23,13 @@ const FERIADOS = {
   ],
 };
 
-/** Feriados del mes ("YYYY-MM"). null = año sin calendario cargado (no se sabe). */
+/** Feriados del mes ("YYYY-MM"). null = año sin calendario cargado (no se sabe).
+ *  Desde el 20/11/2026 manda el calendario único (lz_feriados, nacionales); esta lista fija
+ *  queda de respaldo si la base todavía no cargó. */
 function feriadosDelMes(mes) {
-  const lista = FERIADOS[Number(mes.slice(0, 4))];
+  let central = null;
+  try { central = require('../feriadosService').nacionalesDelAnio(Number(mes.slice(0, 4))); } catch { central = null; }
+  const lista = central || FERIADOS[Number(mes.slice(0, 4))];
   return lista ? lista.filter((f) => f.startsWith(mes)) : null;
 }
 
