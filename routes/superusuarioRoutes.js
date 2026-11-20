@@ -168,6 +168,35 @@ router.patch('/soporte-cuentas/:orgId', async (req, res, next) => {
   try { responder(res, await soporteCuentas.cambiar(req.params.orgId, req.body?.activo, req.user.id)); } catch (e) { next(e); }
 });
 
+// Calendario de feriados único de Lazarillo (Diego 20/11/2026): lo mantienen los super usuarios.
+const feriadosSvc = require('../services/feriadosService');
+const ZONA_NOMBRE = (z) => (feriadosSvc.ZONAS.find(([k]) => k === z) || [z, z])[1];
+const dm = (f) => `${f.slice(8, 10)}/${f.slice(5, 7)}/${f.slice(0, 4)}`;
+router.get('/feriados', async (req, res, next) => {
+  try { responder(res, await feriadosSvc.listar({ anio: req.query.anio, zona: req.query.zona })); } catch (e) { next(e); }
+});
+router.post('/feriados', async (req, res, next) => {
+  try {
+    const out = await feriadosSvc.guardar(null, req.body, req.user.id);
+    if (!out.error) actividad.registrar(req.user.id, 'feriado', 'agregó un feriado', { titulo: `Feriado nuevo: ${out.feriado.nombre} (${dm(out.feriado.fecha)}, ${ZONA_NOMBRE(out.feriado.zona)})` }).catch(() => {});
+    responder(res, out);
+  } catch (e) { next(e); }
+});
+router.put('/feriados/:id', async (req, res, next) => {
+  try {
+    const out = await feriadosSvc.guardar(Number(req.params.id), req.body, req.user.id);
+    if (!out.error) actividad.registrar(req.user.id, 'feriado', 'editó un feriado', { titulo: `Feriado: ${out.feriado.nombre} (${dm(out.feriado.fecha)}, ${ZONA_NOMBRE(out.feriado.zona)})` }).catch(() => {});
+    responder(res, out);
+  } catch (e) { next(e); }
+});
+router.delete('/feriados/:id', async (req, res, next) => {
+  try {
+    const out = await feriadosSvc.borrar(Number(req.params.id));
+    if (!out.error) actividad.registrar(req.user.id, 'feriado', 'borró un feriado', { titulo: `Feriado quitado: ${out.feriado.nombre} (${dm(out.feriado.fecha)}, ${ZONA_NOMBRE(out.feriado.zona)})` }).catch(() => {});
+    responder(res, out);
+  } catch (e) { next(e); }
+});
+
 router.get('/actividad', async (req, res, next) => {
   try { responder(res, await actividad.listar(req.user.id, req.query.limite)); } catch (e) { next(e); }
 });
