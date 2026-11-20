@@ -59,7 +59,8 @@ async function cargar(businessId, sucursal = 0) {
   const pag = await pool.query('SELECT mapa FROM conciliacion_pagadores WHERE business_id = $1 AND sucursal = $2', [businessId, sucursal]);
   const per = await pool.query(
     'SELECT periodo, updated_at FROM conciliacion_estado WHERE business_id = $1 AND sucursal = $2 ORDER BY updated_at DESC LIMIT 24', [businessId, sucursal]);
-  return { fuentes, pagadores: pag.rows[0]?.mapa || {}, periodos: per.rows };
+  const traslados = await trasladosDe(businessId, sucursal);
+  return { fuentes, pagadores: pag.rows[0]?.mapa || {}, periodos: per.rows, traslados };
 }
 
 async function guardarFuente(businessId, sucursal, userId, fila) {
@@ -103,7 +104,79 @@ async function guardarPagadores(businessId, sucursal, mapa) {
   return { ok: true };
 }
 
+// ── Traslados entre PDV (Diego 20/11/2026) ──────────────────────────────────────────────────────
+// Una fila (venta, movimiento del banco o cobro de cta. cte.) que se manda de la conciliación de una
+// sucursal a otra: el origen deja de verla (salen) y el destino la recibe entera (entran).
+const TIPOS_TRASLADO = ['ventas', 'banco', 'pagos'];
+
+async function trasladosDe(businessId, sucursal) {
+  const { rows } = await pool.query(
+    `SELECT tipo, clave, desde_suc, hacia_suc, fila FROM conciliacion_traslados
+      WHERE business_id = $1 AND (desde_suc = $2 OR hacia_suc = $2)`, [businessId, sucursal]);
+  return {
+    salen: rows.filter((r) => r.desde_suc === sucursal && r.hacia_suc !== sucursal).map((r) => ({ tipo: r.tipo, clave: r.clave, hacia: r.hacia_suc })),
+    entran: rows.filter((r) => r.hacia_suc === sucursal && r.desde_suc !== sucursal).map((r) => ({ tipo: r.tipo, clave: r.clave, desde: r.desde_suc, fila: r.fila })),
+  };
+}
+
+function validarTraslado(body = {}) {
+  const items = Array.isArray(body.items) ? body.items : null;
+  if (!items || !items.length || items.length > 500) return { error: 'items_invalidos' };
+  for (const it of items) {
+    if (!it || !TIPOS_TRASLADO.includes(it.tipo) || typeof it.clave !== 'string' || !it.clave || it.clave.length > 300) return { error: 'item_invalido' };
+    if (!it.fila || typeof it.fila !== 'object' || Array.isArray(it.fila)) return { error: 'fila_invalida' };
+  }
+  return { items };
+}
+
+/** Manda las filas de la sucursal `desde` a `hacia`. Una fila que ya había llegado de otra sucursal
+ *  se re-dirige; si vuelve a su sucursal de origen, el traslado se borra. Una sola transacción. */
+async function trasladar(businessId, desde, hacia, userId, items) {
+  const client = await pool.connect();
+  let movidos = 0, devueltos = 0, total = 0;
+  try {
+    await client.query('BEGIN');
+    for (const it of items) {
+      const prev = await client.query('SELECT desde_suc FROM conciliacion_traslados WHERE business_id = $1 AND tipo = $2 AND clave = $3 FOR UPDATE',
+        [businessId, it.tipo, it.clave]);
+      const origen = prev.rows[0] ? prev.rows[0].desde_suc : desde;
+      const imp = Number(it.fila.imp ?? it.fila.importe) || 0;
+      total += imp;
+      if (origen === hacia) {
+        await client.query('DELETE FROM conciliacion_traslados WHERE business_id = $1 AND tipo = $2 AND clave = $3', [businessId, it.tipo, it.clave]);
+        devueltos++;
+      } else {
+        const fecha = RE_FECHA.test(String(it.fila.fecha || '')) ? it.fila.fecha : null;
+        await client.query(
+          `INSERT INTO conciliacion_traslados (business_id, tipo, clave, desde_suc, hacia_suc, fila, fecha, importe, creado_por, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, now())
+           ON CONFLICT (business_id, tipo, clave) DO UPDATE SET hacia_suc = EXCLUDED.hacia_suc, fila = EXCLUDED.fila, creado_por = EXCLUDED.creado_por, updated_at = now()`,
+          [businessId, it.tipo, it.clave, origen, hacia, JSON.stringify(it.fila), fecha, imp, userId || null]);
+        movidos++;
+      }
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+  return { ok: true, movidos, devueltos, total };
+}
+
+/** Nombre de una sucursal para los avisos (0 = la principal). */
+async function nombreSucursal(businessId, sucursal) {
+  if (!sucursal) {
+    const { rows } = await pool.query('SELECT name FROM app_businesses WHERE id = $1', [businessId]);
+    return rows[0]?.name || 'la principal';
+  }
+  const { rows } = await pool.query('SELECT name FROM app_branches WHERE id = $1 AND business_id = $2', [sucursal, businessId]);
+  return rows[0]?.name || `sucursal ${sucursal}`;
+}
+
 module.exports = {
+  TIPOS_TRASLADO, trasladosDe, validarTraslado, trasladar, nombreSucursal,
   TIPOS, validarFuente, validarPeriodo, validarSucursal,
   cargar, guardarFuente, borrarFuente, leerEstado, guardarEstado, guardarPagadores,
 };
