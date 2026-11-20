@@ -148,6 +148,8 @@ async function destinosOrg(businessId) {
       ORDER BY (b.id = $1) DESC, b.name, es_main DESC, br.name`, [businessId]);
   const out = [];
   const vistos = new Set();
+  // los id pueden venir como texto (bigint): todo a número para comparar
+  rows.forEach((r) => { r.bid = Number(r.bid); r.branch_id = r.branch_id == null ? null : Number(r.branch_id); });
   rows.forEach((r) => {
     const suc = !r.branch_id || r.es_main ? 0 : r.branch_id;
     const k = r.bid + ':' + suc;
