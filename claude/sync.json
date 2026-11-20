@@ -702,5 +702,24 @@
     "prioridad": "normal",
     "estado": "hecha",
     "business_id": 147
+  },
+  {
+    "clave": "2026-11-20-rc-01",
+    "tipo": "tarea",
+    "titulo": "Celular: la receta del artículo/promo es solo de consulta",
+    "modulo": "celular",
+    "prioridad": "normal",
+    "estado": "hecha",
+    "business_id": null,
+    "detalle": "Diego (20/11): «no quiero editar nada desde el celular». Aprobó la maqueta. Front #444: por debajo de 600 px el modal del artículo/promo pasa a pantalla completa (RecetaConsultaCelular.jsx) con el precio actual, Costo / % costo / Te queda, el precio para llegar al objetivo, los ingredientes en tarjetas con el % del costo y el pie «Solo consulta» + Cerrar. Falta el insumo elaborado, que sigue igual."
+  },
+  {
+    "clave": "2026-11-20-rc-02",
+    "tipo": "tarea",
+    "titulo": "Food cost › Compras: proyectar el mes en curso y que los números del gráfico se entiendan",
+    "modulo": "recetas",
+    "prioridad": "alta",
+    "business_id": 147,
+    "detalle": "Diego (20/11, captura del celular en Container Bar): en el gráfico de Compras, noviembre muestra $ 17,6 M (−34,1%) cuando el mes va por el día 19, así que parece una baja que no es. Tiene que mostrar el proyectado del mes (barra completa atenuada encima de lo real, con el valor estimado). Además los números cuestan entender: monto y % arriba de cada barra se pisan con la línea de 36,6 M, los colores (beige, verde, rosa) no dicen qué significan y el % no aclara contra qué se compara. Otro chat tocó KpiFoodCost.jsx el 20/11 (#443): coordinar."
   }
 ]
