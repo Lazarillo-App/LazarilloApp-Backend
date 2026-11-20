@@ -658,5 +658,31 @@
     "modulo": "administracion",
     "prioridad": "normal",
     "estado": "pendiente"
+  },
+  {
+    "clave": "2026-11-20-cel-01",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "la-tabla",
+    "buscar": "En **Recetas › Artículos** ves cada artículo con sus",
+    "reemplazar": "En el celular la tabla pasa a una lista de tres columnas: **nombre**, **costo** (o **precio**, o **unidades**, con el selector de arriba) y **costo %** contra tu objetivo. Arriba quedan el **food cost**, el período, la lupa y los desplegables de **Agrupación** y **Rubro**; tocando un artículo se abre su receta.\n\nEn **Recetas › Artículos** ves cada artículo con sus"
+  },
+  {
+    "clave": "2026-11-20-cel-02",
+    "tipo": "manual_seccion",
+    "capitulo": "insumos",
+    "seccion": "la-tabla",
+    "buscar": "En **Recetas › Insumos** ves cada insumo con:",
+    "reemplazar": "En el celular la tabla pasa a una lista de tres columnas: **nombre** (con su unidad y su rubro), **costo** (o **compras**, con el selector de arriba) y qué **% de las compras de su rubro** se lleva, de lo que más se compra a lo que menos. Arriba quedan el **food cost** y los desplegables de **Agrupación** y **Rubro**; tocando un insumo se abre su ficha.\n\nEn **Recetas › Insumos** ves cada insumo con:"
+  },
+  {
+    "clave": "2026-11-20-cel-03",
+    "tipo": "tarea",
+    "titulo": "Vista celular de Artículos e Insumos: lista de 3 columnas",
+    "detalle": "Diego (20/11): en el celular la tabla se salía de la pantalla. HECHO con mockup aprobado: lista de 3 columnas (componente base ListaCelular). Artículos: Nombre · Costo/Precio/Unidades (selector) · Costo % con objetivo (rojo si se pasa). Insumos: Nombre (unidad · rubro) · Costo/Compras · % del rubro, de mayor a menor compra. Arriba: food cost grande (el mismo KpiFoodCost), período, lupa y +; Agrupación y Rubro como desplegables (la misma barra lateral en modo compacto). Probado a 360 y 390 sin scroll lateral; la compu sigue igual. Falta: la receta/ficha que se abre al tocar sigue sin vista celular (pendiente de la receta en celular).",
+    "modulo": "recetas",
+    "prioridad": "alta",
+    "estado": "hecha",
+    "business_id": 147
   }
 ]
