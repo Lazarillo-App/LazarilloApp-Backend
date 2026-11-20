@@ -813,5 +813,20 @@
     "id": 138,
     "estado": "en_curso",
     "nota": "Hecho (20/11, back #257 y siguientes, front): tabla lz_feriados por zona (2025–2027 nacionales + Papa 10/11 CABA y Córdoba, 11/11 PBA), zona por negocio (Container = PBA, Comercio = CABA), feriadosDe() en proyección y Sin carga, Panel super › Feriados, Cronogramas muestra los heredados con 🔒 y «Este día abrimos», selector de provincia en 📅 › Fechas especiales; ya no se siembran feriados en negocios nuevos; los feriados viejos sembrados en rrhh_fechas no cuentan doble. Falta (con OK de Diego): borrar esos feriados viejos de rrhh_fechas, zona de Palermo suites / LLEVALO LISTO / otros, y pedir la provincia en el alta de negocio."
+  },
+  {
+    "clave": "2026-11-20-fc-proy-02",
+    "tipo": "manual_seccion",
+    "capitulo": "food-cost",
+    "seccion": "el-panel",
+    "buscar": "van **proyectadas a fin de mes** (≈, borde punteado) con los días ya cerrados; adentro, pleno, lo que ya pasó.",
+    "reemplazar": "van **proyectadas a fin de mes** (≈, borde punteado); adentro, pleno, lo que ya pasó. Las **ventas** se proyectan como en Resultados: día de la semana, estacionalidad y el **calendario de feriados** de tu zona. Las **compras**, con el ritmo de cada día de la semana y el **efecto víspera** que Lazarillo aprende de tu local: cuánto comprás de más la semana antes de un feriado (cambian los repartos de los proveedores) y cuánto la semana siguiente. Hacen falta al menos 3 feriados con historia; si no, se proyecta solo con el ritmo. El food cost del mes en curso se ve proyectado (≈) y abajo, chico, el de lo cargado hasta hoy; sus variaciones van en gris porque es una estimación."
+  },
+  {
+    "clave": "2026-11-20-feriados-04",
+    "tipo": "cambio",
+    "titulo": "Proyección del food cost con el calendario: días que faltan pesados por día de semana y feriados",
+    "estado": "hecha",
+    "nota": "Hecho 20/11: GET /purchases/food-cost-proyeccion (services/foodCostProyeccion.js). Ventas = método único + calendario único; compras = ritmo por día de semana (8 semanas sin feriados) + efecto víspera aprendido (mín. 3 feriados). Backtest Bar Ramos 12 meses: regla de 3 7,5% de error → 4,4%. Noviembre Bar: 34,2% → ≈ 27,6% (ventas ≈ $ 89,8 M, compras ≈ $ 24,8 M). Aprendido en Bar: +12% la semana antes, +3% la siguiente (la compensación es chica). PRs back y front de este cambio."
   }
 ]
