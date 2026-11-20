@@ -87,7 +87,20 @@ router.put('/:articleId', async (req, res, next) => {
          VALUES ($1, $2, $3, 1, 0, 0, FALSE, TRUE, 'servicio', $4, $5, NOW(), NOW())`,
         [articleId, bizId, nombre, JSON.stringify(config), req.user?.id || null]);
     }
-    const calculo = await srv.recalcularServicio(bizId, articleId, client);
+    let calculo = await srv.recalcularServicio(bizId, articleId, client);
+    // «Aumenté»: la foto de hoy pasa a ser la base contra la que se miden las subas de costos.
+    if (req.body?.tomarBase && config.tipo === 'ancla' && calculo) {
+      // Precio de la base = el de lista de hoy (el aumento recién hecho), no el de las ventas del mes pasado.
+      const { rows: pr } = await client.query(
+        `SELECT precio::float8 AS p FROM maxi_articles WHERE articulo_id = $2 AND precio > 0 AND (business_id = $1 OR business_id IN (
+           SELECT b2.id FROM app_businesses b1 JOIN app_businesses b2 ON b2.organization_id = b1.organization_id WHERE b1.id = $1))
+         ORDER BY (business_id = $1) DESC LIMIT 1`, [bizId, articleId]);
+      config.base = { fecha: new Date().toISOString().slice(0, 10), costoMes: calculo.costoMes,
+        costoHora: calculo.costoHora, precio: Number(req.body?.precio) > 0 ? Number(req.body.precio) : (pr[0]?.p || calculo.precioActual) };
+      await client.query(`UPDATE recetas SET servicio = $3 WHERE business_id = $1 AND article_id = $2 AND active = TRUE AND servicio IS NOT NULL`,
+        [bizId, articleId, JSON.stringify(config)]);
+      calculo = await srv.calcularAncla(bizId, articleId, { db: client });
+    }
     // Si era derivado de otra ancla, esa familia también cambia.
     if (antes?.tipo === 'derivado' && (config.tipo !== 'derivado' || antes.ancla !== config.ancla)) {
       await srv.recalcularServicio(bizId, antes.ancla, client);
