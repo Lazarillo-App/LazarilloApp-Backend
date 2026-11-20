@@ -813,5 +813,23 @@
     "id": 138,
     "estado": "en_curso",
     "nota": "Hecho (20/11, back #257 y siguientes, front): tabla lz_feriados por zona (2025–2027 nacionales + Papa 10/11 CABA y Córdoba, 11/11 PBA), zona por negocio (Container = PBA, Comercio = CABA), feriadosDe() en proyección y Sin carga, Panel super › Feriados, Cronogramas muestra los heredados con 🔒 y «Este día abrimos», selector de provincia en 📅 › Fechas especiales; ya no se siembran feriados en negocios nuevos; los feriados viejos sembrados en rrhh_fechas no cuentan doble. Falta (con OK de Diego): borrar esos feriados viejos de rrhh_fechas, zona de Palermo suites / LLEVALO LISTO / otros, y pedir la provincia en el alta de negocio."
+  },
+  {
+    "clave": "2026-11-20-gvregla-01",
+    "tipo": "tarea",
+    "estado": "hecha",
+    "modulo": "compras",
+    "prioridad": "alta",
+    "business_id": 147,
+    "titulo": "Gastos Varios: la regla de apertura del concepto se ve siempre",
+    "detalle": "Pedido de Diego 20/11 (mockup aprobado). Front #464: cuadro «Este concepto tiene regla de apertura» debajo del importe con cada destino (negocio · PDV, %, $ en vivo), «Ver la regla ›» (Conceptos de caja con ?q=) y «Repartir distinto solo este gasto» si el negocio tiene más de un PDV. Antes, con destinos de otro negocio (Bar → Container FC) no se mostraba. También en el gasto vario del celular."
+  },
+  {
+    "clave": "2026-11-20-gvregla-02",
+    "tipo": "tarea",
+    "modulo": "celular",
+    "prioridad": "normal",
+    "titulo": "FALLA: modal de carga (Gastos Varios) a 390 px",
+    "detalle": "Visto 20/11 al probar #464: a 390 px de ancho el panel «Últimas cargas» se monta encima del formulario (concepto, importe) y no se puede cargar. Ya pasaba antes. En el celular real se usa /m (Ticket / gasto), que anda bien; falta que el modal del Panel también tenga su vista mobile."
   }
 ]
