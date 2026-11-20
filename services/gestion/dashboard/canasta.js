@@ -6,7 +6,7 @@
 //   mercaderías  Laspeyres por insumo del informe 25 (saltos fuera de ×1,5 / ÷1,5 = "a revisar")
 //   sueldos      mediana de la variación del MISMO empleado (sin SAC, feriados, adelantos)
 //   servicios    mediana de la variación de cada proveedor × concepto (abonos)
-//   alquiler     el monto — por ahora EN REVISIÓN: se muestra en gris y no entra al %
+//   alquiler     el monto del mes (entra al % desde el 20/11/2026)
 // Pesos: lo que pesa cada componente en los gastos de los últimos 6 meses (con aperturas).
 
 /** "YYYY-MM" de los n meses que terminan en anio/mes (el último es el de referencia). */

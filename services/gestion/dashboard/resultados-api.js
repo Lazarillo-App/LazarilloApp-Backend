@@ -471,7 +471,8 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
       SELECT a.m, (exp(percentile_cont(0.5) WITHIN GROUP (ORDER BY ln(a.val / b.val))) - 1)::float8 AS v
       FROM s a JOIN s b ON b.k = a.k AND b.m = ${anterior("a.m")}
       WHERE a.val / b.val BETWEEN 0.667 AND 1.5 GROUP BY a.m HAVING COUNT(*) >= 2`),
-    // Alquiler: el monto del mes (en revisión: se muestra, no entra a la canasta).
+    // Alquiler: el monto del mes. Entra a la canasta (Diego 20/11/2026: «el alquiler no lo saquemos
+    // afuera»; antes quedaba «en revisión» y no había cómo volver a ponerlo).
     db.many(sql`
       SELECT ${mesDe(fecha)} AS m, SUM(${imp})::float8 AS total
       FROM gestion_v_compras_distribuidas v JOIN ${cc} ON ${concepto}
@@ -510,7 +511,7 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
     { clave: "mercaderias", nombre: "Mercaderías", peso: peso(RUBRO.mercaderias), variaciones: serie(merc), cuenta: true,
       aRevisar: merc.find((x) => x.m === meses[N - 1])?.revisar ?? 0 },
     { clave: "servicios", nombre: "Servicios", peso: peso(RUBRO.servicios), variaciones: serie(serv), cuenta: true },
-    { clave: "alquiler", nombre: "Alquiler", peso: peso(RUBRO.alquiler), variaciones: alqVar, cuenta: false },
+    { clave: "alquiler", nombre: "Alquiler", peso: peso(RUBRO.alquiler), variaciones: alqVar, cuenta: true },
   ].filter((c) => c.peso > 0);
 
   return { meses: meses.slice(1), componentes, aumentos };
