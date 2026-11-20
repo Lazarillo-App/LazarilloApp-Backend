@@ -71,4 +71,25 @@ router.put('/pagadores', manejar(async (req) => {
   return svc.guardarPagadores(bid(req), req.sucursal, mapa);
 }));
 
+// Mandar registros a otro PDV (Diego 20/11/2026: «lo tildo y aprieto el PDV donde lo quiero mandar»).
+// body: { hacia: sucursal destino, items: [{ tipo: 'ventas'|'banco'|'pagos', clave, fila }] }
+router.post('/traslados', manejar(async (req) => {
+  const hacia = await svc.validarSucursal(bid(req), req.body?.hacia);
+  if (hacia === null) return { error: 'sucursal_destino_invalida' };
+  if (hacia === req.sucursal) return { error: 'misma_sucursal' };
+  const v = svc.validarTraslado(req.body);
+  if (v.error) return v;
+  const r = await svc.trasladar(bid(req), req.sucursal, hacia, req.user?.id, v.items);
+  const [de, a] = await Promise.all([svc.nombreSucursal(bid(req), req.sucursal), svc.nombreSucursal(bid(req), hacia)]);
+  const n = v.items.length;
+  const pesos = (x) => '$ ' + Math.round(x).toLocaleString('es-AR');
+  require('../services/notificationService').avisarAbm(req, {
+    businessId: bid(req), type: 'conciliacion_traslado',
+    title: n === 1 ? `Conciliación: registro de ${pesos(r.total)} de ${de} a ${a}` : `Conciliación: ${n} registros (${pesos(r.total)}) de ${de} a ${a}`,
+    message: r.devueltos ? `${r.devueltos} volvi${r.devueltos === 1 ? 'ó' : 'eron'} a su sucursal de origen.` : null,
+    metadata: { link: '/conciliacion', desde: req.sucursal, hacia },
+  });
+  return { ...r, traslados: await svc.trasladosDe(bid(req), req.sucursal) };
+}));
+
 module.exports = router;
