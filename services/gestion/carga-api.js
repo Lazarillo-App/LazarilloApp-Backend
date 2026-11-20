@@ -66,8 +66,13 @@ async function obtenerLugares(cliente, businessId) {
     SELECT id, name FROM app_branches
     WHERE business_id = ${businessId} AND NOT COALESCE((props->>'is_main')::boolean, false)
     ORDER BY name`);
+  // La principal se llama como su sucursal (la marcada is_main, ej. «FC RAMOS»), igual que en los chips
+  // del header; si no tiene, como el negocio (Diego 20/11/2026).
+  const main = await cliente.one(sql`
+    SELECT name FROM app_branches WHERE business_id = ${businessId} AND COALESCE((props->>'is_main')::boolean, false)
+    ORDER BY id LIMIT 1`);
   return [
-    { id: idLugar(businessId, null), localId: Number(businessId), branchId: null, nombre: negocio?.name ?? 'Principal' },
+    { id: idLugar(businessId, null), localId: Number(businessId), branchId: null, nombre: main?.name || negocio?.name || 'Principal' },
     ...sucursales.map((s) => ({ id: Number(s.id), localId: Number(businessId), branchId: Number(s.id), nombre: s.name })),
   ];
 }
