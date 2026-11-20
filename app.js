@@ -291,6 +291,7 @@ app.use('/api/businesses/:businessId/kit', kitAppRoutes);
 app.use('/api', organizationsRoutes);
 app.use('/api/businesses/:businessId/articles/:articleId/receta', recetasRoutes);
 app.use('/api/businesses/:businessId/promociones', promocionesRoutes);
+app.use('/api/businesses/:businessId/servicios', require('./routes/serviciosRoutes'));
 app.use('/api/businesses/:businessId/recetas', recetasBulkRoutes);
 const { getRecetasElaboradosMapa } = require('./controllers/recetasElaboradosController');
 app.use('/api/businesses/:businessId/recetas-elaborados', authRequired, getRecetasElaboradosMapa);
