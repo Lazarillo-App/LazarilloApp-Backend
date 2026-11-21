@@ -12,7 +12,10 @@
 
 const pool = require('../config/db');
 const { sectoresQueConduce } = require('./jefeCocina');
+const { sqlEsJefe } = require('./auth/permisos');
 const { avisarAlEquipoSinEsperar, createSyncNotification } = require('./notificationService');
+const { createOrUpdateProposal, snapshotRecetaElaborado } = require('./recetaProposals');
+const { factorConversion, normalizarCantidadUnidad } = require('./unidades');
 
 class ErrorProduccion extends Error {
   constructor(status, code, msg) { super(msg || code); this.status = status; this.code = code; }
@@ -130,10 +133,34 @@ async function contexto(req) {
         WHERE NOT EXISTS (SELECT 1 FROM produccion_turnos WHERE business_id = $1)`, [c.bizId]);
     ts = await turnos(c.bizId);
   }
+  const { rows: sectores } = await pool.query(`SELECT id, nombre, es_fijo FROM sectores WHERE business_id = $1 ORDER BY es_fijo DESC, nombre`, [c.bizId]);
   return {
     uid: c.uid, rol: c.rol, jefe: c.jefe, planifica: c.planifica, decide: c.decide,
-    turnos: ts, equipo: await equipo(c.bizId), plazas: await plazas(c.bizId),
+    turnos: ts, equipo: await equipo(c.bizId), plazas: await plazas(c.bizId), sectores,
   };
+}
+
+/** El jefe (o dueño/admin) cambia las áreas que cubre un cocinero: hay negocios donde todos hacen
+ *  de todo según el día, o hay que cubrir un puesto. Solo staff común (no jefes ni admins). */
+async function asignarAreas(req) {
+  const c = await contextoDe(req); exigir(c.planifica);
+  const userId = Number(req.params.userId);
+  const ids = Array.isArray(req.body?.sector_ids) ? [...new Set(req.body.sector_ids.map(Number).filter(Number.isFinite))] : null;
+  if (!userId || !ids) fallar(400, 'datos_invalidos');
+  const { rows: validos } = await pool.query(`SELECT id FROM sectores WHERE business_id = $1 AND id = ANY($2::int[])`, [c.bizId, ids]);
+  if (validos.length !== ids.length) fallar(400, 'sector_invalido');
+  const { rows } = await pool.query(
+    `UPDATE user_assignments ua SET sector_ids = $3::int[], updated_at = NOW()
+      WHERE ua.user_id = $1 AND ua.scope_type = 'business' AND ua.scope_id = $2 AND ua.revoked_at IS NULL
+        AND ua.role = 'staff' AND NOT ${sqlEsJefe('ua')}
+      RETURNING ua.id`, [userId, c.bizId, ids]);
+  if (!rows.length) fallar(409, 'no_editable', 'Solo se cambian las áreas del staff (no de jefes ni administradores)');
+  const nombres = (await pool.query(`SELECT nombre FROM sectores WHERE id = ANY($1::int[]) ORDER BY nombre`, [ids])).rows.map((r) => r.nombre);
+  if (userId !== c.uid) {
+    createSyncNotification({ businessId: c.bizId, userId, type: 'produccion_tarea', title: 'Cambiaron tus áreas de trabajo',
+      message: nombres.length ? nombres.join(', ') : 'Sin áreas asignadas', metadata: { kind: 'produccion_areas' } }).catch(() => {});
+  }
+  return { ok: true, sector_ids: ids };
 }
 
 async function guardarTurno(req) {
@@ -245,6 +272,7 @@ async function cargarTarea(id, bizId, client = pool) {
 
 async function listarTareas(req) {
   const c = await contextoDe(req);
+  await sincronizarPropuestas(c.bizId);
   const desde = fechaISO(req.query.desde) || lunesDe(new Date().toISOString().slice(0, 10));
   const hasta = fechaISO(req.query.hasta) || sumarDias(desde, 6);
   const { rows } = await pool.query(
@@ -442,6 +470,7 @@ async function pasosReceta(bizId, insumoId) {
 
 async function detalle(req) {
   const c = await contextoDe(req);
+  await sincronizarPropuestas(c.bizId);
   const t = await cargarTarea(Number(req.params.id), c.bizId);
   if (!t || !staffVe(c, t)) fallar(404, 'tarea_no_encontrada');
   let insumos;
@@ -468,8 +497,144 @@ function formatoInsumo(r) {
     cantidad: num(r.cantidad), unidad: r.unidad, insumo_real_id: r.insumo_real_id ? Number(r.insumo_real_id) : null,
     nombre_real: r.nombre_real, cantidad_real: num(r.cantidad_real), unidad_real: r.unidad_real,
     falta: r.falta, agregado: r.agregado, usado: r.usado, motivo: r.motivo, cambio: r.cambio,
+    alcance: r.alcance || 'produccion', proposal_id: r.proposal_id ? Number(r.proposal_id) : null,
     decidido_at: r.decidido_at, nota_decision: r.nota_decision, orden: r.orden,
   };
+}
+
+// ── Cambio permanente de receta (alcance 'receta') ───────────────────────────────────────────
+// El cocinero dice que la receta cambió (no se usa más un insumo, se usa otro, otra cantidad, uno
+// nuevo). Se arma una propuesta de receta con el circuito de siempre (receta_proposals): el
+// dueño/admin la ve en Aprobaciones con el antes/después y el costo, y la aprueba o la rechaza.
+// Las cantidades de la producción están escaladas a las tandas: a la receta van por 1 tanda.
+
+/** Puro: cuerpo de la receta (formato de writeElaboradoReceta) con los cambios aplicados. */
+function cuerpoPropuesta(receta, items, cambios, tandas, costos = new Map()) {
+  const k = Number(tandas) > 0 ? Number(tandas) : 1;
+  const porItem = new Map(cambios.filter((x) => !x.agregado && x.receta_item_id).map((x) => [Number(x.receta_item_id), x]));
+  const base = (x) => ({
+    supplyId: x.article_ref_id ? null : (x.insumo_id || x.supply_id || null),
+    articleRefId: x.article_ref_id || null,
+    cantidad: Number(x.cantidad), unidad: x.unidad, costoUnitario: Number(x.costo_unitario) || 0,
+    notas: x.notas, observaciones: x.observaciones, merma: x.merma, pedido: x.pedido, tipoCosto: x.tipo_costo, orden: x.orden,
+    mermaIds: Array.isArray(x.merma_ids) && x.merma_ids.length ? x.merma_ids : (x.merma_id != null ? [x.merma_id] : []),
+    secreto: x.secreto === true, fotosUrls: Array.isArray(x.fotos_urls) ? x.fotos_urls : [],
+  });
+  const costoDe = (insumoId, unidad) => {
+    const c = costos.get(Number(insumoId));
+    if (!c) return 0;
+    const f = factorConversion(unidad || c.unidad_med, c.unidad_med || unidad);
+    return (Number(c.precio_ref) || 0) * (Number.isFinite(f) ? f : 1);
+  };
+  const salida = [];
+  for (const x of items) {
+    const cam = porItem.get(Number(x.id));
+    if (!cam) { salida.push(base(x)); continue; }
+    if (cam.falta) continue; // ya no va en la receta
+    const it = base(x);
+    const unidad = cam.unidad_real || x.unidad;
+    const cant = cam.cantidad_real != null ? Number(cam.cantidad_real) / k : Number(x.cantidad);
+    if (cam.insumo_real_id && Number(cam.insumo_real_id) !== Number(x.insumo_id)) {
+      it.supplyId = Number(cam.insumo_real_id); it.articleRefId = null; it.costoUnitario = costoDe(cam.insumo_real_id, unidad);
+    } else if (unidad !== x.unidad) {
+      const f = factorConversion(unidad, x.unidad);
+      it.costoUnitario = (Number(x.costo_unitario) || 0) * (Number.isFinite(f) ? f : 1);
+    }
+    const n = normalizarCantidadUnidad(cant, unidad, it.costoUnitario);
+    Object.assign(it, { cantidad: redondear(n.cantidad, 4), unidad: n.unidad, costoUnitario: n.costoUnitario });
+    salida.push(it);
+  }
+  let orden = salida.reduce((m, x) => Math.max(m, Number(x.orden) || 0), 0);
+  for (const cam of cambios.filter((x) => x.agregado && x.insumo_real_id)) {
+    const unidad = cam.unidad_real || null;
+    const n = normalizarCantidadUnidad(Number(cam.cantidad_real) / k, unidad, costoDe(cam.insumo_real_id, unidad));
+    salida.push({ supplyId: Number(cam.insumo_real_id), articleRefId: null, cantidad: redondear(n.cantidad, 4), unidad: n.unidad,
+      costoUnitario: n.costoUnitario, notas: null, observaciones: null, merma: null, pedido: null, tipoCosto: null, orden: ++orden,
+      mermaIds: [], secreto: false, fotosUrls: [] });
+  }
+  return {
+    nombre: receta.nombre, descripcion: receta.descripcion, porciones: receta.porciones, porcentajeVenta: receta.porcentaje_venta,
+    rendimientoUnidad: receta.rendimiento_unidad, rendimientoPeso: receta.rendimiento_peso, unidadPeso: receta.unidad_peso,
+    notas: receta.notas, foto: receta.foto, fotos: receta.fotos, notasUpdatedAt: receta.notas_updated_at,
+    metodoCoccion: receta.metodo_coccion, temperatura: receta.temperatura, tiempoMin: receta.tiempo_min, pasos: receta.pasos,
+    almacenamientoFreezer: receta.almacenamiento_freezer, almacenamientoHeladera: receta.almacenamiento_heladera,
+    items: salida,
+  };
+}
+
+/** Arma (o actualiza) la propuesta con todos los cambios permanentes pendientes de la tarea.
+ *  Sin ninguno, retira la propuesta que había armado. */
+async function proponerReceta(c, tv, nombreAviso) {
+  const { rows: cambios } = await pool.query(
+    `SELECT * FROM produccion_tarea_insumos WHERE tarea_id = $1 AND alcance = 'receta' AND cambio = 'pendiente' ORDER BY id`, [tv.id]);
+  const { rows: previas } = await pool.query(
+    `SELECT DISTINCT proposal_id FROM produccion_tarea_insumos WHERE tarea_id = $1 AND proposal_id IS NOT NULL`, [tv.id]);
+  if (!cambios.length) {
+    for (const p of previas) {
+      await pool.query(`DELETE FROM receta_proposals WHERE id = $1 AND status = 'pending' AND created_by_user_id = $2`, [p.proposal_id, c.uid]);
+    }
+    await pool.query(
+      `UPDATE recetas r SET has_pending_proposal = EXISTS (SELECT 1 FROM receta_proposals p WHERE p.receta_id = r.id AND p.status IN ('pending','in_revision'))
+        WHERE r.business_id = $1 AND r.insumo_id = $2 AND r.active = TRUE`, [c.bizId, tv.insumo_id]);
+    return null;
+  }
+  const { rows: recs } = await pool.query(`SELECT * FROM recetas WHERE business_id = $1 AND insumo_id = $2 AND active = TRUE LIMIT 1`, [c.bizId, tv.insumo_id]);
+  if (!recs.length) fallar(409, 'elaborado_sin_receta');
+  const { rows: items } = await pool.query(`SELECT * FROM receta_items WHERE receta_id = $1 ORDER BY orden NULLS LAST, id`, [recs[0].id]);
+  const ids = [...new Set(cambios.map((x) => Number(x.insumo_real_id)).filter(Boolean))];
+  const costos = new Map();
+  if (ids.length) {
+    const { rows } = await pool.query(`SELECT id, precio_ref, unidad_med FROM insumos WHERE id = ANY($1::bigint[])`, [ids]);
+    for (const r of rows) costos.set(Number(r.id), r);
+  }
+  const body = cuerpoPropuesta(recs[0], items, cambios, tv.tandas, costos);
+  const before = await snapshotRecetaElaborado(tv.insumo_id, c.bizId);
+  const prop = await createOrUpdateProposal({ bizId: c.bizId, insumoId: Number(tv.insumo_id), uid: c.uid, body, snapshotBefore: before, nombreParaAviso: nombreAviso });
+  if (prop?.id) {
+    await pool.query(`UPDATE produccion_tarea_insumos SET proposal_id = $1 WHERE id = ANY($2::bigint[])`, [prop.id, cambios.map((x) => x.id)]);
+  }
+  return prop;
+}
+
+/** Los cambios permanentes toman la decisión de su propuesta (aprobada/rechazada en Aprobaciones). */
+async function sincronizarPropuestas(bizId) {
+  const { rows } = await pool.query(
+    `UPDATE produccion_tarea_insumos x
+        SET cambio = CASE p.status WHEN 'approved' THEN 'aprobado' ELSE 'rechazado' END,
+            decidido_por = p.decided_by, decidido_at = COALESCE(p.decided_at, NOW()), nota_decision = p.admin_comment
+       FROM receta_proposals p, produccion_tareas t
+      WHERE x.proposal_id = p.id AND x.tarea_id = t.id AND t.business_id = $1
+        AND x.cambio = 'pendiente' AND p.status IN ('approved', 'rejected')
+      RETURNING x.tarea_id, x.nombre, x.nombre_real, x.agregado, p.status, p.decided_by`, [bizId]);
+  const porTarea = new Map();
+  for (const r of rows) porTarea.set(Number(r.tarea_id), [...(porTarea.get(Number(r.tarea_id)) || []), r]);
+  for (const [tareaId, lista] of porTarea) {
+    for (const r of lista) {
+      await evento(pool, tareaId, r.decided_by, 'decision',
+        `${r.status === 'approved' ? 'Aprobó' : 'Rechazó'} el cambio en la receta: ${r.agregado ? r.nombre_real : r.nombre}`, { origen: 'aprobaciones' });
+    }
+    await refrescarCambios(tareaId);
+  }
+}
+
+/** Insumos para elegir el reemplazo (los del negocio principal si es una sucursal de un grupo). */
+async function bizInsumos(bizId) {
+  const { rows } = await pool.query('SELECT created_from, organization_id FROM app_businesses WHERE id = $1', [bizId]);
+  const b = rows[0];
+  if (!b || b.created_from !== 'from_group' || !b.organization_id) return bizId;
+  const { rows: r } = await pool.query(
+    `SELECT id FROM app_businesses WHERE organization_id = $1 AND (created_from IS NULL OR created_from IN ('manual','onboarding')) ORDER BY id LIMIT 1`, [b.organization_id]);
+  return Number(r[0]?.id ?? bizId);
+}
+async function buscarInsumos(req) {
+  const c = await contextoDe(req);
+  const q = String(req.query.q || '').trim().slice(0, 60);
+  if (q.length < 2) return [];
+  const { rows } = await pool.query(
+    `SELECT id, nombre, unidad_med FROM insumos
+      WHERE business_id = $1 AND COALESCE(activo, TRUE) AND nombre ILIKE '%' || $2 || '%'
+      ORDER BY (nombre ILIKE $2 || '%') DESC, nombre LIMIT 20`, [await bizInsumos(c.bizId), q]);
+  return rows.map((r) => ({ id: Number(r.id), nombre: r.nombre, unidad: r.unidad_med }));
 }
 const puedeEjecutar = (c, t) => c.planifica || Number(t.responsable_user_id) === c.uid || (!t.responsable_user_id && staffVe(c, t));
 
@@ -560,26 +725,35 @@ async function editarInsumo(req) {
   if (b.deshacer) {
     if (it.cambio && it.cambio !== 'pendiente') fallar(409, 'ya_decidido');
     if (it.agregado) await pool.query(`DELETE FROM produccion_tarea_insumos WHERE id = $1`, [itemId]);
-    else await pool.query(`UPDATE produccion_tarea_insumos SET insumo_real_id = NULL, nombre_real = NULL, cantidad_real = NULL, unidad_real = NULL, falta = FALSE, motivo = NULL, cambio = NULL WHERE id = $1`, [itemId]);
+    else await pool.query(`UPDATE produccion_tarea_insumos SET insumo_real_id = NULL, nombre_real = NULL, cantidad_real = NULL, unidad_real = NULL, falta = FALSE, motivo = NULL, cambio = NULL, alcance = 'produccion', proposal_id = NULL WHERE id = $1`, [itemId]);
     await evento(pool, id, c.uid, 'cambio', `Deshizo el cambio en ${it.nombre}`);
+    if (it.alcance === 'receta') await proponerReceta(c, tv, req.user?.name || req.user?.email);
     await refrescarCambios(id);
     return detalle(req);
   }
   const k = b.cambio || {};
   const motivo = String(k.motivo || '').trim().slice(0, 300);
   if (!motivo) fallar(400, 'motivo_requerido', 'Contá por qué cambió');
+  const alcance = k.alcance === 'receta' ? 'receta' : 'produccion';
   const falta = !!k.falta;
   const cant = falta ? null : num(k.cantidad_real);
   if (!falta && cant == null && !k.insumo_real_id && !k.nombre_real) fallar(400, 'cambio_vacio');
+  let nombreReal = k.nombre_real ? String(k.nombre_real).slice(0, 120) : null;
+  const insumoReal = Number(k.insumo_real_id) || null;
+  if (alcance === 'receta' && !falta && k.nombre_real && !insumoReal) fallar(400, 'elegi_insumo', 'Para cambiar la receta elegí el insumo de la lista');
+  if (insumoReal && !nombreReal) {
+    const { rows: n } = await pool.query(`SELECT nombre FROM insumos WHERE id = $1`, [insumoReal]);
+    nombreReal = n[0]?.nombre || null;
+  }
   await pool.query(
     `UPDATE produccion_tarea_insumos SET insumo_real_id = $2, nombre_real = $3, cantidad_real = $4, unidad_real = $5, falta = $6,
-       motivo = $7, cambio = 'pendiente', usado = NOT $6, decidido_por = NULL, decidido_at = NULL, nota_decision = NULL WHERE id = $1`,
-    [itemId, Number(k.insumo_real_id) || null, k.nombre_real ? String(k.nombre_real).slice(0, 120) : null, cant,
-      k.unidad_real ? String(k.unidad_real).slice(0, 20) : null, falta, motivo]);
-  const texto = falta ? `No había ${it.nombre}` : `${it.nombre} → ${k.nombre_real || it.nombre}${cant != null ? ` ${cant}${k.unidad_real ? ` ${k.unidad_real}` : ''}` : ''}`;
-  await evento(pool, id, c.uid, 'cambio', `${texto} · ${motivo}`, { item_id: itemId });
+       motivo = $7, cambio = 'pendiente', usado = NOT $6, alcance = $8, decidido_por = NULL, decidido_at = NULL, nota_decision = NULL WHERE id = $1`,
+    [itemId, insumoReal, nombreReal, cant, k.unidad_real ? String(k.unidad_real).slice(0, 20) : null, falta, motivo, alcance]);
+  const texto = falta ? `${alcance === 'receta' ? 'Sacar de la receta' : 'No había'} ${it.nombre}` : `${it.nombre} → ${nombreReal || it.nombre}${cant != null ? ` ${cant}${k.unidad_real ? ` ${k.unidad_real}` : ''}` : ''}`;
+  await evento(pool, id, c.uid, 'cambio', `${alcance === 'receta' ? 'Cambio de receta: ' : ''}${texto} · ${motivo}`, { item_id: itemId, alcance });
+  if (alcance === 'receta' || it.alcance === 'receta') await proponerReceta(c, tv, req.user?.name || req.user?.email);
   await refrescarCambios(id);
-  avisarCambio(c, tv, texto, motivo);
+  avisarCambio(c, tv, texto, motivo, alcance);
   return detalle(req);
 }
 
@@ -592,18 +766,23 @@ async function agregarInsumo(req) {
   if (!puedeEjecutar(c, tv)) fallar(403, 'forbidden');
   if (!['en_curso', 'pausada'].includes(tv.estado)) fallar(409, 'no_en_curso');
   const b = req.body || {};
-  const nombre = String(b.nombre || '').trim().slice(0, 120);
+  let nombre = String(b.nombre || '').trim().slice(0, 120);
   const motivo = String(b.motivo || '').trim().slice(0, 300);
   const cant = num(b.cantidad);
+  const alcance = b.alcance === 'receta' ? 'receta' : 'produccion';
+  const insumoId = Number(b.insumo_id) || null;
+  if (alcance === 'receta' && !insumoId) fallar(400, 'elegi_insumo', 'Para cambiar la receta elegí el insumo de la lista');
+  if (insumoId && !nombre) { const { rows: n } = await pool.query(`SELECT nombre FROM insumos WHERE id = $1`, [insumoId]); nombre = n[0]?.nombre || ''; }
   if (!nombre || cant == null || !motivo) fallar(400, 'datos_incompletos', 'Nombre, cantidad y motivo');
   await pool.query(
-    `INSERT INTO produccion_tarea_insumos (tarea_id, insumo_id, nombre, cantidad_real, unidad_real, insumo_real_id, nombre_real, agregado, usado, motivo, cambio, orden)
-     VALUES ($1, $2, $3, $4, $5, $2, $3, TRUE, TRUE, $6, 'pendiente', 999)`,
-    [id, Number(b.insumo_id) || null, nombre, cant, b.unidad ? String(b.unidad).slice(0, 20) : null, motivo]);
+    `INSERT INTO produccion_tarea_insumos (tarea_id, insumo_id, nombre, cantidad_real, unidad_real, insumo_real_id, nombre_real, agregado, usado, motivo, cambio, alcance, orden)
+     VALUES ($1, $2, $3, $4, $5, $2, $3, TRUE, TRUE, $6, 'pendiente', $7, 999)`,
+    [id, insumoId, nombre, cant, b.unidad ? String(b.unidad).slice(0, 20) : null, motivo, alcance]);
   const texto = `Agregó ${nombre} ${cant}${b.unidad ? ` ${b.unidad}` : ''}`;
-  await evento(pool, id, c.uid, 'cambio', `${texto} · ${motivo}`);
+  await evento(pool, id, c.uid, 'cambio', `${alcance === 'receta' ? 'Cambio de receta: ' : ''}${texto} · ${motivo}`, { alcance });
+  if (alcance === 'receta') await proponerReceta(c, tv, req.user?.name || req.user?.email);
   await refrescarCambios(id);
-  avisarCambio(c, tv, texto, motivo);
+  avisarCambio(c, tv, texto, motivo, alcance);
   return detalle(req);
 }
 
@@ -615,11 +794,12 @@ async function refrescarCambios(tareaId) {
         ELSE NULL END, updated_at = NOW()
       WHERE t.id = $1`, [tareaId]);
 }
-function avisarCambio(c, t, texto, motivo) {
+function avisarCambio(c, t, texto, motivo, alcance = 'produccion') {
   avisarAlEquipoSinEsperar({
     businessId: c.bizId, actorUserId: c.uid, type: 'produccion_cambio',
-    title: `Cambio en ${t.titulo}: ${texto}`, message: motivo,
-    metadata: { kind: 'produccion_cambio', tarea_id: Number(t.id), fecha: formatoTarea(t).fecha },
+    title: `${alcance === 'receta' ? 'Cambio de receta' : 'Cambio'} en ${t.titulo}: ${texto}`,
+    message: alcance === 'receta' ? `${motivo} · Para aprobar en Aprobaciones` : motivo,
+    metadata: { kind: 'produccion_cambio', tarea_id: Number(t.id), fecha: formatoTarea(t).fecha, alcance },
   });
 }
 
@@ -632,9 +812,11 @@ async function decidir(req) {
   const decision = String(req.body?.decision || '');
   if (!['aprobado', 'rechazado'].includes(decision)) fallar(400, 'decision_invalida');
   const nota = String(req.body?.nota || '').trim().slice(0, 300) || null;
+  const { rows: chk } = await pool.query(`SELECT alcance FROM produccion_tarea_insumos WHERE id = $1 AND tarea_id = $2`, [itemId, id]);
+  if (chk[0]?.alcance === 'receta') fallar(409, 'en_aprobaciones', 'Es un cambio de receta: se aprueba o rechaza en Aprobaciones');
   const { rows } = await pool.query(
     `UPDATE produccion_tarea_insumos SET cambio = $3, decidido_por = $4, decidido_at = NOW(), nota_decision = $5
-      WHERE id = $1 AND tarea_id = $2 AND cambio = 'pendiente' RETURNING nombre, nombre_real, agregado`,
+      WHERE id = $1 AND tarea_id = $2 AND cambio = 'pendiente' AND alcance = 'produccion' RETURNING nombre, nombre_real, agregado`,
     [itemId, id, decision, c.uid, nota]);
   if (!rows.length) fallar(409, 'sin_cambio_pendiente');
   const it = rows[0];
@@ -668,6 +850,7 @@ async function nota(req) {
 /** Cambios que esperan decisión (bandeja del dueño/admin). */
 async function cambiosPendientes(req) {
   const c = await contextoDe(req); exigir(c.decide);
+  await sincronizarPropuestas(c.bizId);
   const { rows } = await pool.query(
     `SELECT x.*, t.titulo, t.fecha, t.tandas, t.id AS tarea_id,
             COALESCE(NULLIF(u.display_name, ''), NULLIF(u.name, ''), split_part(u.email, '@', 1)) AS responsable
@@ -723,9 +906,9 @@ function resumirPanel(tareas) {
 }
 
 module.exports = {
-  ErrorProduccion, contexto, guardarTurno, borrarTurno, elaborados, guardarElaborado,
+  ErrorProduccion, contexto, asignarAreas, guardarTurno, borrarTurno, elaborados, guardarElaborado,
   listarTareas, crearTareas, editarTarea, borrarTarea, copiarSemana, detalle, accion,
-  editarInsumo, agregarInsumo, decidir, nota, cambiosPendientes, panel,
+  editarInsumo, agregarInsumo, decidir, nota, cambiosPendientes, panel, buscarInsumos,
   // puros (tests)
-  _puros: { fechaISO, sumarDias, lunesDe, tandasValidas, segundosHasta, escalarItems, copiarTareas, resumirPanel },
+  _puros: { cuerpoPropuesta, fechaISO, sumarDias, lunesDe, tandasValidas, segundosHasta, escalarItems, copiarTareas, resumirPanel },
 };

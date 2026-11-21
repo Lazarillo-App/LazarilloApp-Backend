@@ -64,3 +64,33 @@ test('resumirPanel: real solo de hechas, estimado sin canceladas', () => {
   const pure = r.elaborados.find((x) => x.insumo_id === 5);
   assert.equal(pure.rinde_real, 5.5);
 });
+
+test('cuerpoPropuesta: los cambios de la producción vuelven a la receta por 1 tanda', () => {
+  const receta = { nombre: 'Puré', porciones: 6, rendimiento_unidad: 'kg', pasos: [] };
+  const items = [
+    { id: 1, insumo_id: 10, cantidad: 7, unidad: 'kg', costo_unitario: 1000, orden: 0 },
+    { id: 2, insumo_id: 11, cantidad: 1.2, unidad: 'lt', costo_unitario: 1500, orden: 1 },
+    { id: 3, insumo_id: 12, cantidad: 2, unidad: 'gr', costo_unitario: 5, orden: 2 },
+    { id: 4, insumo_id: 13, cantidad: 350, unidad: 'gr', costo_unitario: 8, orden: 3 },
+  ];
+  const cambios = [
+    { receta_item_id: 2, insumo_real_id: 20, cantidad_real: 1.2, unidad_real: 'lt' }, // leche → crema (2 tandas: 0,6 lt)
+    { receta_item_id: 3, falta: true },                                                // sale la nuez moscada
+    { receta_item_id: 4, cantidad_real: 800, unidad_real: 'gr' },                      // manteca: 400 g por tanda
+    { agregado: true, insumo_real_id: 21, cantidad_real: 20, unidad_real: 'gr' },     // ajo nuevo: 10 g
+  ];
+  const costos = new Map([[20, { precio_ref: 4000, unidad_med: 'lt' }], [21, { precio_ref: 6000, unidad_med: 'kg' }]]);
+  const b = p.cuerpoPropuesta(receta, items, cambios, 2, costos);
+  assert.equal(b.items.length, 4);
+  assert.equal(b.items[0].cantidad, 7);
+  assert.equal(b.items[1].supplyId, 20);
+  assert.equal(b.items[1].cantidad, 600);           // 0,6 lt → 600 ml
+  assert.equal(b.items[1].unidad, 'ml');
+  assert.equal(b.items[1].costoUnitario, 4);        // $4000/lt → $4/ml
+  assert.equal(b.items[2].cantidad, 400);
+  assert.equal(b.items[3].supplyId, 21);
+  assert.equal(b.items[3].cantidad, 10);
+  assert.equal(b.items[3].unidad, 'gr');
+  assert.equal(b.items[3].costoUnitario, 6);        // $6000/kg → $6/g
+  assert.equal(b.porciones, 6);
+});

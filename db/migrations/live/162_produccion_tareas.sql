@@ -109,3 +109,11 @@ CREATE TABLE IF NOT EXISTS produccion_eventos (
   created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_produccion_eventos_tarea ON produccion_eventos (tarea_id, created_at);
+
+-- Alcance del cambio de un ingrediente (usuaria 21/11/2026):
+--   'produccion' = solo esta producción (no había, vino otro distinto): lo decide dueño/admin acá.
+--   'receta'     = cambio permanente de la receta: arma una propuesta de receta (receta_proposals,
+--                  proposal_id) que el dueño/admin aprueba o rechaza en Aprobaciones; al decidirse,
+--                  el cambio de la producción toma la misma decisión.
+ALTER TABLE produccion_tarea_insumos ADD COLUMN IF NOT EXISTS alcance TEXT NOT NULL DEFAULT 'produccion';
+ALTER TABLE produccion_tarea_insumos ADD COLUMN IF NOT EXISTS proposal_id BIGINT;

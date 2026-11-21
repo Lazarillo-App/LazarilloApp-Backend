@@ -4,19 +4,23 @@
 // en ese caso el llamador no filtra nada.
 const pool = require('../config/db');
 const { getEffectiveRole } = require('./auth/accessControl');
+const { sqlEsJefe } = require('./auth/permisos');
 
 async function articleIdsPermitidos(userId, businessId, storageBizId) {
   if (!userId || !businessId) return null;
   const role = await getEffectiveRole(userId, businessId);
   if (role !== 'staff') return null;
 
+  // El jefe de cocina ve TODOS los artículos (usuaria 21/11/2026): sus sectores dicen qué equipo
+  // conduce, no qué ve. El filtro por sector queda para el staff común (cocinero, bachero…).
   const { rows: asig } = await pool.query(
-    `SELECT COALESCE(sector_ids, '{}'::int[]) AS sector_ids
-       FROM user_assignments
-      WHERE user_id = $1 AND scope_type = 'business' AND scope_id = $2 AND revoked_at IS NULL
+    `SELECT COALESCE(ua.sector_ids, '{}'::int[]) AS sector_ids, ${sqlEsJefe('ua')} AS es_jefe
+       FROM user_assignments ua
+      WHERE ua.user_id = $1 AND ua.scope_type = 'business' AND ua.scope_id = $2 AND ua.revoked_at IS NULL
       LIMIT 1`,
     [userId, businessId]
   );
+  if (asig[0]?.es_jefe) return null;
   const sectorIds = (asig[0]?.sector_ids || []).map(Number).filter(Number.isFinite);
   if (!sectorIds.length) return null;
 

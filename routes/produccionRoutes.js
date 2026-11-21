@@ -16,10 +16,12 @@ const r = (fn) => async (req, res, next) => {
 };
 
 router.get('/contexto', r(svc.contexto));
+router.put('/equipo/:userId/areas', r(svc.asignarAreas));
 router.post('/turnos', r(svc.guardarTurno));
 router.put('/turnos/:turnoId', r(svc.guardarTurno));
 router.delete('/turnos/:turnoId', r(svc.borrarTurno));
 router.get('/elaborados', r(svc.elaborados));
+router.get('/insumos', r(svc.buscarInsumos));
 router.put('/elaborados/:insumoId', r(svc.guardarElaborado));
 router.get('/tareas', r(svc.listarTareas));
 router.post('/tareas', r(svc.crearTareas));
