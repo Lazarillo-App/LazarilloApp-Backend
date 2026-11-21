@@ -94,3 +94,11 @@ test('cuerpoPropuesta: los cambios de la producción vuelven a la receta por 1 t
   assert.equal(b.items[3].costoUnitario, 6);        // $6000/kg → $6/g
   assert.equal(b.porciones, 6);
 });
+
+test('escalarPorIngrediente: hay 51 kg y la receta pide 55 para 3 tandas', () => {
+  const r = p.escalarPorIngrediente(3, 55, 51);
+  assert.equal(r.tandas, 2.782);
+  assert.ok(Math.abs(r.factor - 51 / 55) < 1e-9);
+  assert.equal(p.escalarPorIngrediente(1, 0, 5), null);
+  assert.equal(p.escalarPorIngrediente(1, 5, 0), null);
+});

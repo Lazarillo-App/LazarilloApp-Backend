@@ -731,6 +731,49 @@ async function accion(req) {
   return detalle(req);
 }
 
+/** Puro: factor y tandas nuevas a partir de la cantidad que hay de un ingrediente. */
+function escalarPorIngrediente(tandas, cantidadReceta, cantidadHay) {
+  const base = Number(cantidadReceta), hay = Number(cantidadHay), k = Number(tandas) || 1;
+  if (!(base > 0) || !(hay > 0)) return null;
+  const factor = hay / base;
+  return { factor, tandas: redondear(k * factor, 3) };
+}
+
+/** «Hay 51 kg y la receta pide 55»: recalcula TODA la fórmula en proporción (tandas, cada
+ *  ingrediente, rinde esperado y tiempo estimado). Antes de empezar o en curso. */
+async function escalar(req) {
+  const c = await contextoDe(req);
+  const id = Number(req.params.id);
+  const tv = await cargarTarea(id, c.bizId);
+  if (!tv || !staffVe(c, tv)) fallar(404, 'tarea_no_encontrada');
+  if (!puedeEjecutar(c, tv)) fallar(403, 'forbidden');
+  if (tv.tipo !== 'produccion') fallar(400, 'solo_elaborados');
+  if (['hecha', 'cancelada'].includes(tv.estado)) fallar(409, 'estado_invalido');
+  const b = req.body || {};
+  const hay = num(b.cantidad);
+  let item;
+  if (tv.estado === 'pendiente') {
+    item = escalarItems(await itemsReceta(c.bizId, tv.insumo_id), tv.tandas).find((x) => Number(x.receta_item_id) === Number(b.receta_item_id));
+  } else {
+    const { rows } = await pool.query(`SELECT * FROM produccion_tarea_insumos WHERE id = $1 AND tarea_id = $2 AND NOT agregado`, [Number(b.item_id), id]);
+    item = rows[0] ? { ...rows[0], cantidad: num(rows[0].cantidad) } : null;
+  }
+  if (!item) fallar(404, 'insumo_no_encontrado');
+  const r = escalarPorIngrediente(tv.tandas, item.cantidad, hay);
+  if (!r || r.tandas <= 0) fallar(400, 'cantidad_invalida', 'Poné cuánto hay');
+  await pool.query(
+    `UPDATE produccion_tareas SET tandas = $2, rinde_esperado = CASE WHEN rinde_esperado IS NULL THEN NULL ELSE ROUND(rinde_esperado * $3, 3) END,
+       minutos_estimados = CASE WHEN minutos_estimados IS NULL THEN NULL ELSE ROUND(minutos_estimados * $3, 1) END, updated_at = NOW()
+      WHERE id = $1`, [id, r.tandas, r.factor]);
+  if (tv.estado !== 'pendiente') {
+    // Ya empezada: la receta fijada se recalcula (los cambios del cocinero quedan como están).
+    await pool.query(`UPDATE produccion_tarea_insumos SET cantidad = ROUND(cantidad * $2, 4) WHERE tarea_id = $1 AND NOT agregado AND cantidad IS NOT NULL`, [id, r.factor]);
+  }
+  await evento(pool, id, c.uid, 'edicion',
+    `Recalculó toda la receta para ${hay} ${item.unidad || ''} de ${item.nombre}: ${num(tv.tandas)} → ${r.tandas} tandas`, { factor: r.factor });
+  return detalle(req);
+}
+
 /** Tildar un ingrediente o registrar un cambio (otro insumo, otra cantidad, no había). */
 async function editarInsumo(req) {
   const c = await contextoDe(req);
@@ -931,10 +974,10 @@ function resumirPanel(tareas) {
 }
 
 module.exports = {
-  ErrorProduccion, contexto, asignarAreas, guardarTurno, borrarTurno, elaborados, guardarElaborado,
+  ErrorProduccion, contexto, asignarAreas, escalar, guardarTurno, borrarTurno, elaborados, guardarElaborado,
   listarTareas, crearTareas, editarTarea, borrarTarea, copiarSemana, detalle, accion,
   editarInsumo, agregarInsumo, decidir, nota, cambiosPendientes, panel, buscarInsumos,
   _ctx: { contextoDe, fallar, exigir, fechaISO, sumarDias, lunesDe, bizInsumos },
   // puros (tests)
-  _puros: { cuerpoPropuesta, loteDe, fechaISO, sumarDias, lunesDe, tandasValidas, segundosHasta, escalarItems, copiarTareas, resumirPanel },
+  _puros: { cuerpoPropuesta, loteDe, escalarPorIngrediente, fechaISO, sumarDias, lunesDe, tandasValidas, segundosHasta, escalarItems, copiarTareas, resumirPanel },
 };

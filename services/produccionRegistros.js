@@ -95,6 +95,28 @@ async function listarMermas(req) {
     }),
   };
 }
+/** Al elegir el insumo: la merma que tiene cargada y las últimas que se midieron en la cocina. */
+async function mermaDeInsumo(req) {
+  const c = await contextoDe(req);
+  const ins = await insumoValido(c, Number(req.params.insumoId));
+  if (!ins) fallar(404, 'insumo_no_encontrado');
+  const { rows: conf } = await pool.query(
+    `SELECT id, nombre, peso_inicial, peso_final, es_default FROM insumo_mermas WHERE insumo_id = $1 ORDER BY es_default DESC NULLS LAST, id`, [ins.id]);
+  const { rows: ult } = await pool.query(
+    `SELECT m.bruto, m.neto, m.unidad, m.created_at, ${nombreUsuario} AS usuario
+       FROM produccion_mermas m LEFT JOIN app_users u ON u.id = m.user_id
+      WHERE m.business_id = $1 AND m.insumo_id = $2 AND m.deleted_at IS NULL ORDER BY m.created_at DESC LIMIT 5`, [c.bizId, ins.id]);
+  const pct = (b, n) => (Number(b) > 0 ? Math.round(((Number(b) - Number(n)) / Number(b)) * 1000) / 10 : null);
+  const ultimas = ult.map((r) => ({ bruto: num(r.bruto), neto: num(r.neto), unidad: r.unidad, pct: pct(r.bruto, r.neto), usuario: r.usuario, created_at: r.created_at }));
+  const conPct = ultimas.filter((x) => x.pct != null);
+  return {
+    insumo: { id: Number(ins.id), nombre: ins.nombre, unidad: ins.unidad_med },
+    configuradas: conf.map((r) => ({ nombre: r.nombre, peso_inicial: num(r.peso_inicial), peso_final: num(r.peso_final), pct: pct(r.peso_inicial, r.peso_final), es_default: !!r.es_default })),
+    ultimas,
+    promedio: conPct.length ? Math.round((conPct.reduce((s, x) => s + x.pct, 0) / conPct.length) * 10) / 10 : null,
+  };
+}
+
 async function crearMerma(req) {
   const c = await contextoDe(req);
   const b = req.body || {};
@@ -231,6 +253,6 @@ async function consumos(req) {
 }
 
 module.exports = {
-  listarMise, guardarMise, listarMermas, crearMerma, listarDesperdicios, crearDesperdicio, borrarRegistro, consumos,
+  listarMise, guardarMise, listarMermas, crearMerma, mermaDeInsumo, listarDesperdicios, crearDesperdicio, borrarRegistro, consumos,
   _puros: { aBase, sumarConsumos },
 };
