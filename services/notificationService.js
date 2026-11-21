@@ -38,6 +38,8 @@ const ALLOWED_TYPES = new Set([
   'usuario_email',
   // Funciones visibles del negocio, las prende/apaga Lazarillo (Diego 17/11/2026)
   'cuenta_funciones',
+  // Tareas operativas · producción (usuaria 21/11/2026)
+  'produccion_tarea', 'produccion_cambio', 'produccion_decision', 'produccion_nota',
 ]);
 
 function safeType(type) {
