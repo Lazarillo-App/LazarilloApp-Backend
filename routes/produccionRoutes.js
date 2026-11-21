@@ -1,0 +1,38 @@
+// routes/produccionRoutes.js — Tareas operativas · producción (ver services/produccion.js)
+// Monta en: app.use('/api/businesses/:businessId/produccion', produccionRoutes)
+'use strict';
+const router = require('express').Router({ mergeParams: true });
+const svc = require('../services/produccion');
+
+const r = (fn) => async (req, res, next) => {
+  try {
+    const out = await fn(req);
+    res.json({ ok: true, ...(Array.isArray(out) ? { items: out } : out) });
+  } catch (e) {
+    if (e instanceof svc.ErrorProduccion) return res.status(e.status).json({ ok: false, error: e.code, message: e.message });
+    console.error('[produccion]', req.method, req.originalUrl, e);
+    next(e);
+  }
+};
+
+router.get('/contexto', r(svc.contexto));
+router.post('/turnos', r(svc.guardarTurno));
+router.put('/turnos/:turnoId', r(svc.guardarTurno));
+router.delete('/turnos/:turnoId', r(svc.borrarTurno));
+router.get('/elaborados', r(svc.elaborados));
+router.put('/elaborados/:insumoId', r(svc.guardarElaborado));
+router.get('/tareas', r(svc.listarTareas));
+router.post('/tareas', r(svc.crearTareas));
+router.post('/semana/copiar', r(svc.copiarSemana));
+router.get('/cambios', r(svc.cambiosPendientes));
+router.get('/panel', r(svc.panel));
+router.get('/tareas/:id', r(svc.detalle));
+router.patch('/tareas/:id', r(svc.editarTarea));
+router.delete('/tareas/:id', r(svc.borrarTarea));
+router.post('/tareas/:id/notas', r(svc.nota));
+router.post('/tareas/:id/insumos', r(svc.agregarInsumo));
+router.patch('/tareas/:id/insumos/:itemId', r(svc.editarInsumo));
+router.post('/tareas/:id/insumos/:itemId/decision', r(svc.decidir));
+router.post('/tareas/:id/:accion', r(svc.accion));
+
+module.exports = router;
