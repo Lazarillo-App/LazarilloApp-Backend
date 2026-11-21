@@ -90,7 +90,20 @@ async function contextoDe(req) {
     misSectores = (rows[0]?.s || []).map(Number);
   }
   if (!gestor && rol !== 'staff') fallar(403, 'forbidden');
-  return { bizId, uid, rol, gestor, jefe, planifica: gestor || jefe, decide: gestor, misSectores };
+  const suc = await resolverSucursal(bizId, req.query?.branchId ?? req.body?.branchId);
+  return { bizId, uid, rol, gestor, jefe, planifica: gestor || jefe, decide: gestor, misSectores, suc };
+}
+
+/** ?branchId= → sucursal (null = la principal; la is_main también es la principal). Igual que RRHH:
+ *  cada sucursal tiene sus turnos, su producción, sus mermas y desperdicios (usuaria 21/11/2026). */
+async function resolverSucursal(bizId, raw) {
+  if (raw == null || raw === '' || raw === 'main' || raw === 'null') return null;
+  const id = Number(raw);
+  if (!Number.isFinite(id) || id <= 0) fallar(400, 'sucursal_invalida');
+  const { rows } = await pool.query(
+    `SELECT id, COALESCE((props->>'is_main')::boolean, FALSE) AS principal FROM app_branches WHERE id = $1 AND business_id = $2`, [id, bizId]);
+  if (!rows[0]) fallar(400, 'sucursal_invalida');
+  return rows[0].principal ? null : Number(rows[0].id);
 }
 const exigir = (cond, code = 'forbidden') => { if (!cond) fallar(403, code); };
 
@@ -116,22 +129,22 @@ async function plazas(bizId) {
       WHERE p.business_id = $1 AND p.deleted_at IS NULL ORDER BY s.nombre NULLS LAST, p.orden, p.nombre`, [bizId]);
   return rows.map((r) => ({ id: r.id, nombre: r.nombre, sector_id: r.sector_id, sector: r.sector }));
 }
-async function turnos(bizId) {
+async function turnos(bizId, suc = null) {
   const { rows } = await pool.query(
-    `SELECT id, nombre, desde, hasta, orden FROM produccion_turnos WHERE business_id = $1 AND deleted_at IS NULL ORDER BY orden, id`, [bizId]);
+    `SELECT id, nombre, desde, hasta, orden FROM produccion_turnos WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $2::bigint AND deleted_at IS NULL ORDER BY orden, id`, [bizId, suc]);
   return rows;
 }
 
 async function contexto(req) {
   const c = await contextoDe(req);
-  let ts = await turnos(c.bizId);
+  let ts = await turnos(c.bizId, c.suc);
   // Primer uso: dos turnos de ejemplo para arrancar (se editan o borran).
   if (!ts.length && c.planifica) {
     await pool.query(
-      `INSERT INTO produccion_turnos (business_id, nombre, desde, hasta, orden)
-       SELECT $1, n, d, h, o FROM (VALUES ('Mañana','08:00','15:00',0),('Tarde','15:00','23:00',1)) v(n,d,h,o)
-        WHERE NOT EXISTS (SELECT 1 FROM produccion_turnos WHERE business_id = $1)`, [c.bizId]);
-    ts = await turnos(c.bizId);
+      `INSERT INTO produccion_turnos (business_id, branch_id, nombre, desde, hasta, orden)
+       SELECT $1, $2::bigint, n, d, h, o FROM (VALUES ('Mañana','08:00','15:00',0),('Tarde','15:00','23:00',1)) v(n,d,h,o)
+        WHERE NOT EXISTS (SELECT 1 FROM produccion_turnos WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $2::bigint)`, [c.bizId, c.suc]);
+    ts = await turnos(c.bizId, c.suc);
   }
   const { rows: sectores } = await pool.query(`SELECT id, nombre, es_fijo FROM sectores WHERE business_id = $1 ORDER BY es_fijo DESC, nombre`, [c.bizId]);
   return {
@@ -179,9 +192,9 @@ async function guardarTurno(req) {
     return rows[0];
   }
   const { rows } = await pool.query(
-    `INSERT INTO produccion_turnos (business_id, nombre, desde, hasta, orden)
-     VALUES ($1, $2, $3, $4, COALESCE($5, (SELECT COALESCE(MAX(orden), -1) + 1 FROM produccion_turnos WHERE business_id = $1)))
-     RETURNING *`, [c.bizId, nombre, hora(b.desde), hora(b.hasta), num(b.orden)]);
+    `INSERT INTO produccion_turnos (business_id, branch_id, nombre, desde, hasta, orden)
+     VALUES ($1, $6::bigint, $2, $3, $4, COALESCE($5, (SELECT COALESCE(MAX(orden), -1) + 1 FROM produccion_turnos WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $6::bigint)))
+     RETURNING *`, [c.bizId, nombre, hora(b.desde), hora(b.hasta), num(b.orden), c.suc]);
   return rows[0];
 }
 async function borrarTurno(req) {
@@ -203,18 +216,18 @@ async function elaborados(req) {
             (SELECT COUNT(*) FROM receta_items ri WHERE ri.receta_id = r.id)::int AS ingredientes,
             -- Promedio de tandas por semana de las últimas 4 semanas (ayuda para programar).
             (SELECT ROUND(SUM(t.tandas) / 4.0, 2) FROM produccion_tareas t
-              WHERE t.business_id = r.business_id AND t.insumo_id = r.insumo_id AND t.deleted_at IS NULL
+              WHERE t.business_id = r.business_id AND t.branch_id IS NOT DISTINCT FROM $2::bigint AND t.insumo_id = r.insumo_id AND t.deleted_at IS NULL
                 AND t.estado = 'hecha' AND t.fecha >= CURRENT_DATE - 28) AS tandas_semana,
             -- Minutos reales promedio por tanda (de lo ya producido).
             (SELECT ROUND(AVG(t.segundos_trabajados / 60.0 / NULLIF(t.tandas, 0)), 1) FROM produccion_tareas t
-              WHERE t.business_id = r.business_id AND t.insumo_id = r.insumo_id AND t.deleted_at IS NULL
+              WHERE t.business_id = r.business_id AND t.branch_id IS NOT DISTINCT FROM $2::bigint AND t.insumo_id = r.insumo_id AND t.deleted_at IS NULL
                 AND t.estado = 'hecha' AND t.segundos_trabajados > 0) AS minutos_reales_tanda
        FROM recetas r
        LEFT JOIN insumos i ON i.id = r.insumo_id
        LEFT JOIN insumo_rubros ir ON ir.business_id = i.business_id AND ir.codigo::text = i.rubro
        LEFT JOIN produccion_elaborados pe ON pe.business_id = r.business_id AND pe.insumo_id = r.insumo_id
       WHERE r.business_id = $1 AND r.insumo_id IS NOT NULL AND r.active = TRUE
-      ORDER BY ir.nombre NULLS LAST, 2`, [c.bizId]);
+      ORDER BY ir.nombre NULLS LAST, 2`, [c.bizId, c.suc]);
   return rows.map((r) => ({
     insumo_id: Number(r.insumo_id), nombre: r.nombre, rubro: r.rubro, rinde_tanda: num(r.porciones), unidad: r.unidad,
     minutos_tanda: num(r.minutos_tanda), plaza_id: r.plaza_id, responsable_user_id: r.responsable_user_id ? Number(r.responsable_user_id) : null,
@@ -277,8 +290,8 @@ async function listarTareas(req) {
   const desde = fechaISO(req.query.desde) || lunesDe(new Date().toISOString().slice(0, 10));
   const hasta = fechaISO(req.query.hasta) || sumarDias(desde, 6);
   const { rows } = await pool.query(
-    `${SELECT_TAREA} WHERE t.business_id = $1 AND t.deleted_at IS NULL AND t.fecha BETWEEN $2 AND $3
-      ORDER BY t.fecha, tu.orden NULLS LAST, t.orden, t.id`, [c.bizId, desde, hasta]);
+    `${SELECT_TAREA} WHERE t.business_id = $1 AND t.branch_id IS NOT DISTINCT FROM $4::bigint AND t.deleted_at IS NULL AND t.fecha BETWEEN $2 AND $3
+      ORDER BY t.fecha, tu.orden NULLS LAST, t.orden, t.id`, [c.bizId, desde, hasta, c.suc]);
   const ahora = new Date();
   return { desde, hasta, tareas: rows.filter((t) => staffVe(c, t)).map((t) => formatoTarea(t, ahora)) };
 }
@@ -322,12 +335,12 @@ async function armarTarea(c, b) {
 async function insertarTarea(client, c, v) {
   const { rows } = await client.query(
     `INSERT INTO produccion_tareas (business_id, tipo, insumo_id, titulo, fecha, turno_id, tandas, rinde_esperado, unidad,
-       responsable_user_id, plaza_id, sector_id, minutos_estimados, creada_por, orden)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-       (SELECT COALESCE(MAX(orden), -1) + 1 FROM produccion_tareas WHERE business_id = $1 AND fecha = $5))
+       responsable_user_id, plaza_id, sector_id, minutos_estimados, creada_por, branch_id, orden)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::bigint,
+       (SELECT COALESCE(MAX(orden), -1) + 1 FROM produccion_tareas WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $15::bigint AND fecha = $5))
      RETURNING id`,
     [c.bizId, v.tipo, v.insumo_id, v.titulo, v.fecha, v.turno_id, v.tandas, v.rinde_esperado, v.unidad,
-      v.responsable_user_id, v.plaza_id, v.sector_id, v.minutos_estimados, c.uid]);
+      v.responsable_user_id, v.plaza_id, v.sector_id, v.minutos_estimados, c.uid, c.suc]);
   return Number(rows[0].id);
 }
 
@@ -447,11 +460,11 @@ async function copiarSemana(req) {
   const dL = lunesDe(desde), hL = lunesDe(hacia);
   if (dL === hL) fallar(400, 'misma_semana');
   const { rows: ya } = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM produccion_tareas WHERE business_id = $1 AND deleted_at IS NULL AND fecha BETWEEN $2 AND $3`, [c.bizId, hL, sumarDias(hL, 6)]);
+    `SELECT COUNT(*)::int AS n FROM produccion_tareas WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $4::bigint AND deleted_at IS NULL AND fecha BETWEEN $2 AND $3`, [c.bizId, hL, sumarDias(hL, 6), c.suc]);
   if (ya[0].n && !req.body?.sumar) fallar(409, 'semana_con_tareas', `La semana destino ya tiene ${ya[0].n} tareas`);
   const { rows } = await pool.query(
-    `SELECT * FROM produccion_tareas WHERE business_id = $1 AND deleted_at IS NULL AND estado <> 'cancelada' AND fecha BETWEEN $2 AND $3 ORDER BY fecha, orden, id`,
-    [c.bizId, dL, sumarDias(dL, 6)]);
+    `SELECT * FROM produccion_tareas WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $4::bigint AND deleted_at IS NULL AND estado <> 'cancelada' AND fecha BETWEEN $2 AND $3 ORDER BY fecha, orden, id`,
+    [c.bizId, dL, sumarDias(dL, 6), c.suc]);
   if (!rows.length) fallar(404, 'semana_vacia', 'La semana de origen no tiene tareas');
   const nuevas = copiarTareas(rows, dL, hL);
   const client = await pool.connect();
@@ -941,8 +954,8 @@ async function cambiosPendientes(req) {
             COALESCE(NULLIF(u.display_name, ''), NULLIF(u.name, ''), split_part(u.email, '@', 1)) AS responsable
        FROM produccion_tarea_insumos x JOIN produccion_tareas t ON t.id = x.tarea_id
        LEFT JOIN app_users u ON u.id = t.responsable_user_id
-      WHERE t.business_id = $1 AND t.deleted_at IS NULL AND x.cambio = 'pendiente'
-      ORDER BY t.fecha DESC, x.id`, [c.bizId]);
+      WHERE t.business_id = $1 AND t.branch_id IS NOT DISTINCT FROM $2::bigint AND t.deleted_at IS NULL AND x.cambio = 'pendiente'
+      ORDER BY t.fecha DESC, x.id`, [c.bizId, c.suc]);
   return rows.map((r) => ({ ...formatoInsumo(r), tarea_id: Number(r.tarea_id), titulo: r.titulo,
     fecha: String(r.fecha instanceof Date ? r.fecha.toISOString() : r.fecha).slice(0, 10), tandas: num(r.tandas), responsable: r.responsable }));
 }
@@ -952,7 +965,7 @@ async function panel(req) {
   const c = await contextoDe(req); exigir(c.planifica);
   const desde = fechaISO(req.query.desde) || lunesDe(new Date().toISOString().slice(0, 10));
   const hasta = fechaISO(req.query.hasta) || sumarDias(desde, 6);
-  const { rows } = await pool.query(`${SELECT_TAREA} WHERE t.business_id = $1 AND t.deleted_at IS NULL AND t.fecha BETWEEN $2 AND $3`, [c.bizId, desde, hasta]);
+  const { rows } = await pool.query(`${SELECT_TAREA} WHERE t.business_id = $1 AND t.branch_id IS NOT DISTINCT FROM $4::bigint AND t.deleted_at IS NULL AND t.fecha BETWEEN $2 AND $3`, [c.bizId, desde, hasta, c.suc]);
   const ahora = new Date();
   const tareas = rows.map((t) => formatoTarea(t, ahora));
   return { desde, hasta, ...resumirPanel(tareas) };

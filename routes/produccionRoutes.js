@@ -4,6 +4,7 @@
 const router = require('express').Router({ mergeParams: true });
 const svc = require('../services/produccion');
 const reg = require('../services/produccionRegistros');
+const sug = require('../services/produccionSugerencias');
 
 const r = (fn) => async (req, res, next) => {
   try {
@@ -39,6 +40,7 @@ router.get('/desperdicios', r(reg.listarDesperdicios));
 router.post('/desperdicios', r(reg.crearDesperdicio));
 router.delete('/registros/:tipo/:id', r(reg.borrarRegistro));
 router.get('/consumos', r(reg.consumos));
+router.get('/sugerencias', r(sug.sugerencias));
 router.get('/tareas/:id', r(svc.detalle));
 router.patch('/tareas/:id', r(svc.editarTarea));
 router.delete('/tareas/:id', r(svc.borrarTarea));

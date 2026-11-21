@@ -79,9 +79,9 @@ async function listarMermas(req) {
             (SELECT CASE WHEN im.peso_inicial > 0 THEN (im.peso_inicial - im.peso_final) / im.peso_inicial END
                FROM insumo_mermas im WHERE im.insumo_id = m.insumo_id ORDER BY im.es_default DESC NULLS LAST, im.id LIMIT 1) AS merma_config
        FROM produccion_mermas m LEFT JOIN app_users u ON u.id = m.user_id
-      WHERE m.business_id = $1 AND m.deleted_at IS NULL AND m.created_at::date BETWEEN $2 AND $3
+      WHERE m.business_id = $1 AND m.branch_id IS NOT DISTINCT FROM $6::bigint AND m.deleted_at IS NULL AND m.created_at::date BETWEEN $2 AND $3
         AND ($4::boolean OR m.user_id = $5)
-      ORDER BY m.created_at DESC`, [c.bizId, desde, hasta, c.planifica, c.uid]);
+      ORDER BY m.created_at DESC`, [c.bizId, desde, hasta, c.planifica, c.uid, c.suc]);
   return {
     desde, hasta,
     items: rows.map((r) => {
@@ -131,9 +131,9 @@ async function crearMerma(req) {
   const nombre = ins?.nombre || String(b.nombre || '').trim().slice(0, 120);
   if (!nombre) fallar(400, 'insumo_requerido', 'Elegí el insumo');
   await pool.query(
-    `INSERT INTO produccion_mermas (business_id, insumo_id, nombre, bruto, neto, unidad, nota, tarea_id, user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    `INSERT INTO produccion_mermas (business_id, insumo_id, nombre, bruto, neto, unidad, nota, tarea_id, user_id, branch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::bigint)`,
     [c.bizId, ins ? Number(ins.id) : null, nombre, bruto, neto, String(b.unidad || ins?.unidad_med || 'kg').slice(0, 20),
-      String(b.nota || '').trim().slice(0, 300) || null, Number(b.tarea_id) || null, c.uid]);
+      String(b.nota || '').trim().slice(0, 300) || null, Number(b.tarea_id) || null, c.uid, c.suc]);
   return listarMermas(req);
 }
 
@@ -144,9 +144,9 @@ async function listarDesperdicios(req) {
   const { rows } = await pool.query(
     `SELECT d.*, ${nombreUsuario} AS usuario, p.nombre AS plaza
        FROM produccion_desperdicios d LEFT JOIN app_users u ON u.id = d.user_id LEFT JOIN plazas p ON p.id = d.plaza_id
-      WHERE d.business_id = $1 AND d.deleted_at IS NULL AND d.created_at::date BETWEEN $2 AND $3
+      WHERE d.business_id = $1 AND d.branch_id IS NOT DISTINCT FROM $6::bigint AND d.deleted_at IS NULL AND d.created_at::date BETWEEN $2 AND $3
         AND ($4::boolean OR d.user_id = $5)
-      ORDER BY d.created_at DESC`, [c.bizId, desde, hasta, c.planifica, c.uid]);
+      ORDER BY d.created_at DESC`, [c.bizId, desde, hasta, c.planifica, c.uid, c.suc]);
   return {
     desde, hasta, motivos: MOTIVOS,
     items: rows.map((r) => ({
@@ -167,10 +167,10 @@ async function crearDesperdicio(req) {
   if (!nombre) fallar(400, 'nombre_requerido', '¿Qué se tiró?');
   const tipo = ['insumo', 'elaborado', 'otro'].includes(b.tipo) ? b.tipo : (ins ? 'insumo' : 'otro');
   await pool.query(
-    `INSERT INTO produccion_desperdicios (business_id, tipo, insumo_id, nombre, cantidad, unidad, motivo, comentario, plaza_id, user_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    `INSERT INTO produccion_desperdicios (business_id, tipo, insumo_id, nombre, cantidad, unidad, motivo, comentario, plaza_id, user_id, branch_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::bigint)`,
     [c.bizId, tipo, ins ? Number(ins.id) : null, nombre, cant, String(b.unidad || ins?.unidad_med || '').slice(0, 20) || null, motivo,
-      String(b.comentario || '').trim().slice(0, 300) || null, Number(b.plaza_id) || null, c.uid]);
+      String(b.comentario || '').trim().slice(0, 300) || null, Number(b.plaza_id) || null, c.uid, c.suc]);
   avisarAlEquipoSinEsperar({
     businessId: c.bizId, actorUserId: c.uid, type: 'produccion_nota', title: `Desperdicio: ${nombre} ${cant}${b.unidad ? ` ${b.unidad}` : ''}`,
     message: motivo + (b.comentario ? ` · ${String(b.comentario).slice(0, 120)}` : ''), clave: `desperdicio:${c.bizId}:${c.uid}`, agruparMin: 20,
@@ -222,20 +222,20 @@ async function consumos(req) {
             COALESCE(x.cantidad_real, x.cantidad) AS cantidad, COALESCE(x.unidad_real, x.unidad) AS unidad,
             CASE WHEN t.tipo = 'mise_en_place' THEN 'mise' ELSE 'produccion' END AS origen
        FROM produccion_tarea_insumos x JOIN produccion_tareas t ON t.id = x.tarea_id
-      WHERE t.business_id = $1 AND t.deleted_at IS NULL AND t.estado = 'hecha' AND t.fecha BETWEEN $2 AND $3
-        AND x.usado AND NOT x.falta AND COALESCE(x.cantidad_real, x.cantidad) > 0`, [c.bizId, desde, hasta]);
+      WHERE t.business_id = $1 AND t.branch_id IS NOT DISTINCT FROM $4::bigint AND t.deleted_at IS NULL AND t.estado = 'hecha' AND t.fecha BETWEEN $2 AND $3
+        AND x.usado AND NOT x.falta AND COALESCE(x.cantidad_real, x.cantidad) > 0`, [c.bizId, desde, hasta, c.suc]);
   const { rows: desp } = await pool.query(
     `SELECT insumo_id, nombre, cantidad, unidad, 'desperdicio' AS origen FROM produccion_desperdicios
-      WHERE business_id = $1 AND deleted_at IS NULL AND created_at::date BETWEEN $2 AND $3`, [c.bizId, desde, hasta]);
+      WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $4::bigint AND deleted_at IS NULL AND created_at::date BETWEEN $2 AND $3`, [c.bizId, desde, hasta, c.suc]);
   const { rows: mer } = await pool.query(
     `SELECT insumo_id, nombre, bruto - neto AS cantidad, unidad, 'merma' AS origen FROM produccion_mermas
-      WHERE business_id = $1 AND deleted_at IS NULL AND created_at::date BETWEEN $2 AND $3 AND bruto > neto`, [c.bizId, desde, hasta]);
+      WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $4::bigint AND deleted_at IS NULL AND created_at::date BETWEEN $2 AND $3 AND bruto > neto`, [c.bizId, desde, hasta, c.suc]);
   const items = sumarConsumos([...usados, ...desp, ...mer]);
   // Lo producido (entra al stock de elaborados).
   const { rows: prod } = await pool.query(
     `SELECT t.insumo_id, t.titulo, t.unidad, SUM(t.rinde_real) AS rinde, SUM(t.tandas) AS tandas, COUNT(*)::int AS veces
-       FROM produccion_tareas t WHERE t.business_id = $1 AND t.deleted_at IS NULL AND t.estado = 'hecha' AND t.tipo = 'produccion'
-        AND t.fecha BETWEEN $2 AND $3 GROUP BY 1, 2, 3 ORDER BY 2`, [c.bizId, desde, hasta]);
+       FROM produccion_tareas t WHERE t.business_id = $1 AND t.branch_id IS NOT DISTINCT FROM $4::bigint AND t.deleted_at IS NULL AND t.estado = 'hecha' AND t.tipo = 'produccion'
+        AND t.fecha BETWEEN $2 AND $3 GROUP BY 1, 2, 3 ORDER BY 2`, [c.bizId, desde, hasta, c.suc]);
   // Costo estimado (solo dueño/admin: el staff no ve plata).
   if (c.gestor) {
     const ids = items.map((i) => i.insumo_id).filter(Boolean);

@@ -85,8 +85,8 @@ async function listarEquipos(req) {
             (SELECT MAX(o.hecha_at) FROM mant_ordenes o WHERE o.equipo_id = e.id AND o.estado = 'hecha') AS ultima,
             (SELECT COUNT(*) FROM mant_planes p WHERE p.equipo_id = e.id AND p.deleted_at IS NULL AND p.activo)::int AS planes
        FROM mant_equipos e LEFT JOIN sectores s ON s.id = e.sector_id LEFT JOIN app_users u ON u.id = e.responsable_user_id
-      WHERE e.business_id = $1 AND e.deleted_at IS NULL
-      ORDER BY (e.estado = 'baja'), e.rubro, e.nombre`, [c.bizId]);
+      WHERE e.business_id = $1 AND e.branch_id IS NOT DISTINCT FROM $2::bigint AND e.deleted_at IS NULL
+      ORDER BY (e.estado = 'baja'), e.rubro, e.nombre`, [c.bizId, c.suc]);
   return { equipos: rows.map((r) => formatoEquipo(r, c)) };
 }
 function formatoEquipo(r, c) {
@@ -121,9 +121,9 @@ async function guardarEquipo(req) {
   } else {
     const { rows } = await pool.query(
       `INSERT INTO mant_equipos (nombre, rubro, marca, modelo, proveedor, codigo, ubicacion, sector_id, responsable_user_id, fecha_compra,
-         fecha_instalacion, estado, fecha_baja, notas, precio, business_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
-      [...vals, c.gestor ? num(b.precio) : null, c.bizId, c.uid]);
+         fecha_instalacion, estado, fecha_baja, notas, precio, business_id, created_by, branch_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::bigint) RETURNING id`,
+      [...vals, c.gestor ? num(b.precio) : null, c.bizId, c.uid, c.suc]);
     equipoId = Number(rows[0].id);
   }
   return detalleEquipo({ ...req, params: { ...req.params, equipoId } });
@@ -233,10 +233,10 @@ async function listarOrdenes(req) {
   // Abiertas hasta `hasta` (incluye vencidas) + las hechas de los últimos 14 días.
   const { rows } = await pool.query(
     `${SELECT_ORDEN}
-      WHERE o.business_id = $1 AND e.deleted_at IS NULL
+      WHERE o.business_id = $1 AND e.branch_id IS NOT DISTINCT FROM $5::bigint AND e.deleted_at IS NULL
         AND ((o.estado = 'pendiente' AND o.fecha <= $2) OR (o.estado = 'hecha' AND o.hecha_at > NOW() - INTERVAL '14 days'))
         AND ($3::boolean OR o.responsable_user_id = $4 OR o.responsable_user_id IS NULL OR o.reportada_por = $4)
-      ORDER BY (o.estado = 'pendiente') DESC, o.urgente DESC, o.fecha, o.id`, [c.bizId, hasta, c.planifica, c.uid]);
+      ORDER BY (o.estado = 'pendiente') DESC, o.urgente DESC, o.fecha, o.id`, [c.bizId, hasta, c.planifica, c.uid, c.suc]);
   return { hoy: hoyAR(), ordenes: rows.map((o) => formatoOrden(o, c)) };
 }
 
@@ -362,8 +362,8 @@ async function listarRegistros(req) {
   const { rows } = await pool.query(
     `SELECT r.*, e.nombre AS equipo, ${nombreUsuario('u')} AS usuario
        FROM mant_registros r JOIN mant_equipos e ON e.id = r.equipo_id LEFT JOIN app_users u ON u.id = r.user_id
-      WHERE r.business_id = $1 AND r.deleted_at IS NULL AND r.created_at > NOW() - INTERVAL '30 days'
-      ORDER BY r.created_at DESC LIMIT 200`, [c.bizId]);
+      WHERE r.business_id = $1 AND e.branch_id IS NOT DISTINCT FROM $2::bigint AND r.deleted_at IS NULL AND r.created_at > NOW() - INTERVAL '30 days'
+      ORDER BY r.created_at DESC LIMIT 200`, [c.bizId, c.suc]);
   return { registros: rows.map(formatoRegistro) };
 }
 async function crearRegistro(req) {
