@@ -700,7 +700,7 @@ async function guardarRecordados({ organizationId, body }) {
 
 async function obtenerMaestrosFactura({ organizationId, businessId }) {
   const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales, envasesPropios, descuentos, recordados, porRubro] = await Promise.all([
-    db.many(sql`SELECT id, codigo, nombre, razon, cuit FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
+    db.many(sql`SELECT id, codigo, nombre, razon, cuit, "medioPago" FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
     db.many(sql`
       SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro
       FROM gestion_conceptos_caja cc
