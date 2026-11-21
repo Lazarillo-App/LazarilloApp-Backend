@@ -415,8 +415,25 @@ async function borrarTarea(req) {
   const c = await contextoDe(req); exigir(c.planifica);
   const t = await cargarTarea(Number(req.params.id), c.bizId);
   if (!t) fallar(404, 'tarea_no_encontrada');
-  if (t.estado !== 'pendiente' && !c.gestor) fallar(409, 'ya_iniciada', 'Solo dueño o admin borran una tarea ya empezada');
-  await pool.query(`UPDATE produccion_tareas SET deleted_at = NOW() WHERE id = $1`, [t.id]);
+  // Jefe / dueño / admin borran en cualquier estado (se cargó, se hizo o se cambió mal: usuaria
+  // 21/11/2026). Borrada, deja de contar en Consumos y en el Panel; queda en el historial.
+  const motivo = String(req.body?.motivo || '').trim().slice(0, 200);
+  await pool.query(`UPDATE produccion_tareas SET deleted_at = NOW(), corriendo_desde = NULL WHERE id = $1`, [t.id]);
+  await evento(pool, t.id, c.uid, 'edicion', `Borró la tarea${t.estado !== 'pendiente' ? ` (estaba ${t.estado.replace('_', ' ')})` : ''}${motivo ? `: ${motivo}` : ''}`);
+  // Un cambio de receta que esperaba aprobación por esta tarea se retira de Aprobaciones.
+  const { rows: props } = await pool.query(
+    `SELECT DISTINCT proposal_id FROM produccion_tarea_insumos WHERE tarea_id = $1 AND proposal_id IS NOT NULL AND cambio = 'pendiente'`, [t.id]);
+  for (const p of props) {
+    const { rows: otros } = await pool.query(
+      `SELECT 1 FROM produccion_tarea_insumos x JOIN produccion_tareas o ON o.id = x.tarea_id
+        WHERE x.proposal_id = $1 AND o.id <> $2 AND o.deleted_at IS NULL LIMIT 1`, [p.proposal_id, t.id]);
+    if (!otros.length) await pool.query(`DELETE FROM receta_proposals WHERE id = $1 AND status = 'pending'`, [p.proposal_id]);
+  }
+  if (props.length && t.insumo_id) {
+    await pool.query(
+      `UPDATE recetas r SET has_pending_proposal = EXISTS (SELECT 1 FROM receta_proposals p WHERE p.receta_id = r.id AND p.status IN ('pending','in_revision'))
+        WHERE r.business_id = $1 AND r.insumo_id = $2 AND r.active = TRUE`, [c.bizId, t.insumo_id]);
+  }
   return { ok: true };
 }
 
