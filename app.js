@@ -285,6 +285,7 @@ app.use('/api/businesses/:businessId/mercadolibre', require('./routes/mercadolib
 app.use('/api/businesses/:businessId/fudo', require('./routes/fudoRoutes'));
 app.use('/api/businesses/:businessId/arca', require('./routes/arcaRoutes'));
 app.use('/api/businesses/:businessId/produccion', require('./routes/produccionRoutes'));
+app.use('/api/businesses/:businessId/mantenimiento', require('./routes/mantenimientoRoutes'));
 app.use('/api/businesses/:businessId/pulso', pulsoRoutes);
 app.use('/api/businesses/:businessId/kit', kitAppRoutes);
 

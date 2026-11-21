@@ -40,6 +40,8 @@ const ALLOWED_TYPES = new Set([
   'cuenta_funciones',
   // Tareas operativas · producción (usuaria 21/11/2026)
   'produccion_tarea', 'produccion_cambio', 'produccion_decision', 'produccion_nota',
+  // Mantenimiento de equipos (21/11/2026)
+  'mant_falla', 'mant_orden',
 ]);
 
 function safeType(type) {
