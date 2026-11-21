@@ -109,7 +109,11 @@ async function mermaDeInsumo(req) {
   const pct = (b, n) => (Number(b) > 0 ? Math.round(((Number(b) - Number(n)) / Number(b)) * 1000) / 10 : null);
   const ultimas = ult.map((r) => ({ bruto: num(r.bruto), neto: num(r.neto), unidad: r.unidad, pct: pct(r.bruto, r.neto), usuario: r.usuario, created_at: r.created_at }));
   const conPct = ultimas.filter((x) => x.pct != null);
+  // Sin merma de limpieza cargada: el % de desperdicio propio del insumo (el que usa el costo).
+  const { rows: dsp } = await pool.query(`SELECT desperdicio_pct_override AS d FROM insumos WHERE id = $1`, [ins.id]).catch(() => ({ rows: [] }));
+  const desperdicio = num(dsp[0]?.d) > 0 ? num(dsp[0].d) : null;
   return {
+    desperdicio,
     insumo: { id: Number(ins.id), nombre: ins.nombre, unidad: ins.unidad_med },
     configuradas: conf.map((r) => ({ nombre: r.nombre, peso_inicial: num(r.peso_inicial), peso_final: num(r.peso_final), pct: pct(r.peso_inicial, r.peso_final), es_default: !!r.es_default })),
     ultimas,
