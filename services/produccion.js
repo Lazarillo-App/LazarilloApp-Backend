@@ -199,7 +199,7 @@ async function elaborados(req) {
   const { rows } = await pool.query(
     `SELECT r.insumo_id, COALESCE(i.nombre, r.nombre) AS nombre, ir.nombre AS rubro,
             r.porciones, COALESCE(r.rendimiento_unidad, 'porcion') AS unidad,
-            pe.minutos_tanda, pe.plaza_id, pe.responsable_user_id,
+            pe.minutos_tanda, pe.plaza_id, pe.responsable_user_id, pe.dias_vida,
             (SELECT COUNT(*) FROM receta_items ri WHERE ri.receta_id = r.id)::int AS ingredientes,
             -- Promedio de tandas por semana de las últimas 4 semanas (ayuda para programar).
             (SELECT ROUND(SUM(t.tandas) / 4.0, 2) FROM produccion_tareas t
@@ -218,7 +218,7 @@ async function elaborados(req) {
   return rows.map((r) => ({
     insumo_id: Number(r.insumo_id), nombre: r.nombre, rubro: r.rubro, rinde_tanda: num(r.porciones), unidad: r.unidad,
     minutos_tanda: num(r.minutos_tanda), plaza_id: r.plaza_id, responsable_user_id: r.responsable_user_id ? Number(r.responsable_user_id) : null,
-    ingredientes: r.ingredientes, tandas_semana: num(r.tandas_semana), minutos_reales_tanda: num(r.minutos_reales_tanda),
+    ingredientes: r.ingredientes, tandas_semana: num(r.tandas_semana), minutos_reales_tanda: num(r.minutos_reales_tanda), dias_vida: r.dias_vida ?? null,
   }));
 }
 async function guardarElaborado(req) {
@@ -226,11 +226,12 @@ async function guardarElaborado(req) {
   const b = req.body || {};
   const insumoId = Number(req.params.insumoId);
   await pool.query(
-    `INSERT INTO produccion_elaborados (business_id, insumo_id, minutos_tanda, plaza_id, responsable_user_id, updated_by, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `INSERT INTO produccion_elaborados (business_id, insumo_id, minutos_tanda, plaza_id, responsable_user_id, dias_vida, updated_by, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
      ON CONFLICT (business_id, insumo_id) DO UPDATE SET minutos_tanda = EXCLUDED.minutos_tanda, plaza_id = EXCLUDED.plaza_id,
-       responsable_user_id = EXCLUDED.responsable_user_id, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
-    [c.bizId, insumoId, num(b.minutos_tanda), Number(b.plaza_id) || null, Number(b.responsable_user_id) || null, c.uid]);
+       responsable_user_id = EXCLUDED.responsable_user_id, dias_vida = EXCLUDED.dias_vida, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+    [c.bizId, insumoId, num(b.minutos_tanda), Number(b.plaza_id) || null, Number(b.responsable_user_id) || null,
+      num(b.dias_vida) != null ? Math.max(0, Math.round(num(b.dias_vida))) : null, c.uid]);
   return { ok: true };
 }
 
@@ -286,7 +287,7 @@ async function listarTareas(req) {
 async function armarTarea(c, b) {
   const fecha = fechaISO(b.fecha);
   if (!fecha) fallar(400, 'fecha_invalida');
-  const tipo = b.insumo_id ? 'produccion' : 'otra';
+  const tipo = b.tipo === 'mise_en_place' ? 'mise_en_place' : b.insumo_id ? 'produccion' : 'otra';
   let titulo = String(b.titulo || '').trim().slice(0, 120);
   let rinde = null, unidad = null, minutos = num(b.minutos_estimados), plaza = Number(b.plaza_id) || null, resp = Number(b.responsable_user_id) || null;
   const tandas = tipo === 'produccion' ? tandasValidas(b.tandas ?? 1) : 1;
@@ -307,12 +308,13 @@ async function armarTarea(c, b) {
     if (!('plaza_id' in b)) plaza = e.plaza_id || null;
     if (!('responsable_user_id' in b)) resp = e.responsable_user_id ? Number(e.responsable_user_id) : null;
   }
-  if (!titulo) fallar(400, 'titulo_requerido');
   let sector = null;
   if (plaza) {
-    const { rows } = await pool.query(`SELECT sector_id FROM plazas WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`, [plaza, c.bizId]);
-    if (!rows.length) plaza = null; else sector = rows[0].sector_id;
+    const { rows } = await pool.query(`SELECT sector_id, nombre FROM plazas WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`, [plaza, c.bizId]);
+    if (!rows.length) plaza = null; else { sector = rows[0].sector_id; if (tipo === 'mise_en_place') titulo = `Mise en place · ${rows[0].nombre}`; }
   }
+  if (tipo === 'mise_en_place' && !plaza) fallar(400, 'plaza_requerida', 'Elegí la plaza');
+  if (!titulo) fallar(400, 'titulo_requerido');
   return { tipo, insumo_id: tipo === 'produccion' ? Number(b.insumo_id) : null, titulo, fecha, turno_id: Number(b.turno_id) || null,
     tandas, rinde_esperado: rinde, unidad, responsable_user_id: resp, plaza_id: plaza, sector_id: sector, minutos_estimados: minutos };
 }
@@ -462,9 +464,22 @@ async function itemsReceta(bizId, insumoId) {
       ORDER BY ri.orden NULLS LAST, ri.id`, [bizId, insumoId]);
   return rows;
 }
+/** Plantilla de mise en place de una plaza (como si fuera una receta de 1 tanda). */
+async function itemsMise(bizId, plazaId) {
+  if (!plazaId) return [];
+  const { rows } = await pool.query(
+    `SELECT id, insumo_id, nombre, cantidad, unidad, orden FROM produccion_mise WHERE business_id = $1 AND plaza_id = $2 ORDER BY orden, id`, [bizId, plazaId]);
+  return rows.map((r) => ({ receta_item_id: null, insumo_id: r.insumo_id ? Number(r.insumo_id) : null, nombre: r.nombre, cantidad: num(r.cantidad), unidad: r.unidad, orden: r.orden }));
+}
+/** Lote de una producción: L + fecha (AAMMDD) + número de tarea. */
+function loteDe(t) {
+  const f = String(t.fecha instanceof Date ? t.fecha.toISOString() : t.fecha).slice(0, 10).replace(/-/g, '').slice(2);
+  return `L${f}-${t.id}`;
+}
 async function pasosReceta(bizId, insumoId) {
   const { rows } = await pool.query(
-    `SELECT r.pasos, r.foto, r.fotos, r.notas FROM recetas r WHERE r.business_id = $1 AND r.insumo_id = $2 AND r.active = TRUE LIMIT 1`, [bizId, insumoId]);
+    `SELECT r.pasos, r.foto, r.fotos, r.notas, r.almacenamiento_heladera, r.almacenamiento_freezer
+       FROM recetas r WHERE r.business_id = $1 AND r.insumo_id = $2 AND r.active = TRUE LIMIT 1`, [bizId, insumoId]);
   return rows[0] || null;
 }
 
@@ -477,6 +492,8 @@ async function detalle(req) {
   if (t.estado === 'pendiente' && t.insumo_id) {
     // Todavía no empezó: la receta de hoy escalada (se fija al iniciar).
     insumos = escalarItems(await itemsReceta(c.bizId, t.insumo_id), t.tandas).map((x) => ({ ...x, id: null, usado: false }));
+  } else if (t.estado === 'pendiente' && t.tipo === 'mise_en_place') {
+    insumos = (await itemsMise(c.bizId, t.plaza_id)).map((x) => ({ ...x, id: null, usado: false }));
   } else {
     const { rows } = await pool.query(`SELECT * FROM produccion_tarea_insumos WHERE tarea_id = $1 ORDER BY orden, id`, [t.id]);
     insumos = rows.map(formatoInsumo);
@@ -486,8 +503,16 @@ async function detalle(req) {
             COALESCE(NULLIF(u.display_name, ''), NULLIF(u.name, ''), split_part(u.email, '@', 1)) AS autor
        FROM produccion_eventos e LEFT JOIN app_users u ON u.id = e.user_id WHERE e.tarea_id = $1 ORDER BY e.created_at, e.id`, [t.id]);
   const receta = t.insumo_id ? await pasosReceta(c.bizId, t.insumo_id) : null;
+  let etiqueta = null;
+  if (t.insumo_id) {
+    const { rows: pe } = await pool.query(`SELECT dias_vida FROM produccion_elaborados WHERE business_id = $1 AND insumo_id = $2`, [c.bizId, t.insumo_id]);
+    etiqueta = {
+      lote: loteDe(t), dias_vida: pe[0]?.dias_vida ?? null,
+      heladera: receta?.almacenamiento_heladera || null, freezer: receta?.almacenamiento_freezer || null,
+    };
+  }
   return {
-    tarea: formatoTarea(t), insumos, eventos, receta,
+    tarea: formatoTarea(t), insumos, eventos, receta, etiqueta,
     puede: { ejecutar: puedeEjecutar(c, t), planificar: c.planifica, decidir: c.decide },
   };
 }
@@ -661,8 +686,8 @@ async function accion(req) {
       if (!['pendiente', 'pausada'].includes(t.estado)) fallar(409, 'estado_invalido');
       if (t.estado === 'pendiente') {
         // Se fija la receta escalada: lo que se use desde acá queda en la tarea.
-        if (t.insumo_id) {
-          const items = escalarItems(await itemsReceta(c.bizId, t.insumo_id), t.tandas);
+        if (t.insumo_id || t.tipo === 'mise_en_place') {
+          const items = t.insumo_id ? escalarItems(await itemsReceta(c.bizId, t.insumo_id), t.tandas) : await itemsMise(c.bizId, t.plaza_id);
           for (const it of items) {
             await client.query(
               `INSERT INTO produccion_tarea_insumos (tarea_id, receta_item_id, insumo_id, nombre, cantidad, unidad, orden) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
@@ -683,13 +708,13 @@ async function accion(req) {
     } else if (que === 'terminar') {
       if (!['en_curso', 'pausada'].includes(t.estado)) fallar(409, 'estado_invalido');
       const rinde = num(req.body?.rinde_real);
-      if (rinde == null || rinde < 0) fallar(400, 'rinde_requerido', 'Cargá cuánto rindió');
+      if (t.tipo === 'produccion' && (rinde == null || rinde < 0)) fallar(400, 'rinde_requerido', 'Cargá cuánto rindió');
       // Lo que no se tildó se da por usado tal cual (como en la planilla: «finalizar» confirma todo).
       await client.query(`UPDATE produccion_tarea_insumos SET usado = TRUE WHERE tarea_id = $1 AND NOT falta`, [id]);
       await client.query(
         `UPDATE produccion_tareas SET estado = 'hecha', segundos_trabajados = $2, corriendo_desde = NULL, terminada_at = NOW(),
            rinde_real = $3, updated_at = NOW() WHERE id = $1`, [id, segundosHasta(t, ahora), rinde]);
-      await evento(client, id, c.uid, 'estado', `Terminó · rindió ${rinde}${t.unidad ? ` ${t.unidad}` : ''}`, { rinde_real: rinde });
+      await evento(client, id, c.uid, 'estado', t.tipo === 'produccion' ? `Terminó · rindió ${rinde}${t.unidad ? ` ${t.unidad}` : ''}` : 'Terminó', { rinde_real: rinde });
     } else if (que === 'reabrir') {
       exigir(c.planifica);
       if (t.estado !== 'hecha' && t.estado !== 'cancelada') fallar(409, 'estado_invalido');
@@ -734,7 +759,7 @@ async function editarInsumo(req) {
   const k = b.cambio || {};
   const motivo = String(k.motivo || '').trim().slice(0, 300);
   if (!motivo) fallar(400, 'motivo_requerido', 'Contá por qué cambió');
-  const alcance = k.alcance === 'receta' ? 'receta' : 'produccion';
+  const alcance = k.alcance === 'receta' && tv.insumo_id ? 'receta' : 'produccion';
   const falta = !!k.falta;
   const cant = falta ? null : num(k.cantidad_real);
   if (!falta && cant == null && !k.insumo_real_id && !k.nombre_real) fallar(400, 'cambio_vacio');
@@ -769,7 +794,7 @@ async function agregarInsumo(req) {
   let nombre = String(b.nombre || '').trim().slice(0, 120);
   const motivo = String(b.motivo || '').trim().slice(0, 300);
   const cant = num(b.cantidad);
-  const alcance = b.alcance === 'receta' ? 'receta' : 'produccion';
+  const alcance = b.alcance === 'receta' && tv.insumo_id ? 'receta' : 'produccion';
   const insumoId = Number(b.insumo_id) || null;
   if (alcance === 'receta' && !insumoId) fallar(400, 'elegi_insumo', 'Para cambiar la receta elegí el insumo de la lista');
   if (insumoId && !nombre) { const { rows: n } = await pool.query(`SELECT nombre FROM insumos WHERE id = $1`, [insumoId]); nombre = n[0]?.nombre || ''; }
@@ -909,6 +934,7 @@ module.exports = {
   ErrorProduccion, contexto, asignarAreas, guardarTurno, borrarTurno, elaborados, guardarElaborado,
   listarTareas, crearTareas, editarTarea, borrarTarea, copiarSemana, detalle, accion,
   editarInsumo, agregarInsumo, decidir, nota, cambiosPendientes, panel, buscarInsumos,
+  _ctx: { contextoDe, fallar, exigir, fechaISO, sumarDias, lunesDe, bizInsumos },
   // puros (tests)
-  _puros: { cuerpoPropuesta, fechaISO, sumarDias, lunesDe, tandasValidas, segundosHasta, escalarItems, copiarTareas, resumirPanel },
+  _puros: { cuerpoPropuesta, loteDe, fechaISO, sumarDias, lunesDe, tandasValidas, segundosHasta, escalarItems, copiarTareas, resumirPanel },
 };

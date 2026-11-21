@@ -3,6 +3,7 @@
 'use strict';
 const router = require('express').Router({ mergeParams: true });
 const svc = require('../services/produccion');
+const reg = require('../services/produccionRegistros');
 
 const r = (fn) => async (req, res, next) => {
   try {
@@ -28,6 +29,15 @@ router.post('/tareas', r(svc.crearTareas));
 router.post('/semana/copiar', r(svc.copiarSemana));
 router.get('/cambios', r(svc.cambiosPendientes));
 router.get('/panel', r(svc.panel));
+// Etapa 2: mise en place, mermas, desperdicios y consumos
+router.get('/mise', r(reg.listarMise));
+router.put('/mise/:plazaId', r(reg.guardarMise));
+router.get('/mermas', r(reg.listarMermas));
+router.post('/mermas', r(reg.crearMerma));
+router.get('/desperdicios', r(reg.listarDesperdicios));
+router.post('/desperdicios', r(reg.crearDesperdicio));
+router.delete('/registros/:tipo/:id', r(reg.borrarRegistro));
+router.get('/consumos', r(reg.consumos));
 router.get('/tareas/:id', r(svc.detalle));
 router.patch('/tareas/:id', r(svc.editarTarea));
 router.delete('/tareas/:id', r(svc.borrarTarea));
