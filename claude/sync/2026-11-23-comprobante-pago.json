@@ -1,0 +1,10 @@
+[
+  {
+    "clave": "2026-11-23-comprobante-pago-01",
+    "tipo": "manual_seccion",
+    "capitulo": "corregir-un-registro",
+    "seccion": "pagos-y-cuenta-corriente",
+    "buscar": "Tocá el **proveedor** (o el punto) y se abre su **cuenta corriente**: sus facturas, sus pagos y lo que le debés.",
+    "reemplazar": "Tocá el **proveedor** (o el punto) y se abre su **cuenta corriente**: sus facturas, sus pagos y lo que le debés.\n\nPara pagar, tildá las facturas y tocá **Pagar seleccionadas** (o **+ Cargar pago** si va a cuenta). Con **📎 Adjuntar comprobante** (o soltando el PDF o la foto de la transferencia sobre la barra) Lazarillo lo lee y completa **importe, fecha, medio e ID**; si el importe no es lo tildado, tilda solas las facturas que lo suman. Revisás y confirmás. El comprobante queda guardado con el pago: se abre desde **📎 comprobante** en la tarjeta del pago."
+  }
+]

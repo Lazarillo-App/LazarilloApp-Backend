@@ -23,6 +23,7 @@ const { fmtPesos, fmtFecha, fmtComprobante } = require('./impagas/clasificar');
 const { estadoPago } = require('./cta-cte/estado');
 const { claveFactura, combinarPagos, imputarFacturas, numeroPago, recortarAplicaciones } = require('./pagos-proveedor/imputar');
 const { esConceptoFeriado, feriadosDelMes } = require('./feriados');
+const { comprobanteValido } = require('./pagos-proveedor/comprobante');
 const {
   esperadoEnMesCerrado, estaAtrasado, mesesObjetivo, resumenCompra, venceEl, RECURRENTE_MIN, RECURRENTE_VENTANA,
 } = require('./sin-carga/estado');
@@ -900,13 +901,13 @@ async function saldosFacturas(cliente, businessId, codPro, facturas) {
 // Pagos vigentes del proveedor en este negocio con disponible (lo que no está imputado).
 async function pagosACuenta(cliente, { organizationId, businessId }, codPro) {
   const rows = await cliente.many(sql`
-    SELECT pp.id, TO_CHAR(pp.fecha, 'YYYY-MM-DD') AS fecha, pp.importe::float8 AS importe, pp.medio, pp.referencia, ${lugarSql('pp')} AS pdv,
+    SELECT pp.id, TO_CHAR(pp.fecha, 'YYYY-MM-DD') AS fecha, pp.importe::float8 AS importe, pp.medio, pp.referencia, pp."comprobanteId", ${lugarSql('pp')} AS pdv,
       COALESCE((SELECT SUM(a.importe) FROM gestion_aplicaciones_pago_proveedor a WHERE a."pagoId" = pp.id), 0)::float8 AS aplicado
     FROM gestion_pagos_proveedor pp
     WHERE pp.organization_id = ${organizationId} AND pp.business_id = ${businessId} AND pp."codPro" = ${codPro} AND pp."anuladoEn" IS NULL
     ORDER BY pp.fecha, pp.id`);
   return rows
-    .map((r) => ({ id: r.id, fecha: r.fecha, importe: Number(r.importe), medio: r.medio, referencia: r.referencia, pdvPagaId: r.pdv, disponible: Math.round((Number(r.importe) - Number(r.aplicado)) * 100) / 100 }))
+    .map((r) => ({ id: r.id, fecha: r.fecha, importe: Number(r.importe), medio: r.medio, referencia: r.referencia, comprobanteId: r.comprobanteId ? Number(r.comprobanteId) : null, pdvPagaId: r.pdv, disponible: Math.round((Number(r.importe) - Number(r.aplicado)) * 100) / 100 }))
     .filter((p) => p.disponible > 0.004);
 }
 
@@ -940,6 +941,8 @@ const pagoSchema = z.object({
   facturas: z.array(z.object({ pdvId: z.number().int(), comprobante: z.string().trim().min(1).max(40) })).max(500).optional(),
   // Usar el disponible de un pago a cuenta existente (no crea otro pago).
   usarPago: z.number().int().positive().optional(),
+  // Comprobante adjunto (PDF o foto de la transferencia), ya subido con POST /pagos-proveedor/comprobante.
+  comprobanteId: z.number().int().positive().optional().nullable(),
 })
   .refine((b) => (b.facturas?.length ?? 0) > 0 || b.importe !== undefined, { message: 'importe o facturas' })
   .refine((b) => b.usarPago !== undefined || (b.medio !== undefined && b.fecha !== undefined && b.pdvPagaId !== undefined), { message: 'medio, fecha y lugar' });
@@ -985,9 +988,10 @@ async function registrarPago({ organizationId, businessId, usuario, body }) {
     if (referencia && await referenciaRepetida(tx, organizationId, referencia)) throw rechazo('Ese ID de transferencia ya está cargado.');
     const { aplicaciones, sobrante } = elegidas.length ? imputarFacturas(pendientes, b.importe) : { aplicaciones: [], sobrante: b.importe };
     const importe = Math.round((aplicaciones.reduce((s, a) => s + a.importe, 0) + sobrante) * 100) / 100;
+    const comprobanteId = await comprobanteValido(tx, businessId, b.comprobanteId ?? null);
     const pago = await tx.one(sql`
-      INSERT INTO gestion_pagos_proveedor (organization_id, business_id, branch_id, "codPro", fecha, importe, medio, referencia, "creadoPor")
-      VALUES (${organizationId}, ${businessId}, ${paga.branchId}::bigint, ${b.codPro}, ${b.fecha}::date, ${importe}::numeric, ${b.medio}, ${referencia}, ${usuario})
+      INSERT INTO gestion_pagos_proveedor (organization_id, business_id, branch_id, "codPro", fecha, importe, medio, referencia, "creadoPor", "comprobanteId")
+      VALUES (${organizationId}, ${businessId}, ${paga.branchId}::bigint, ${b.codPro}, ${b.fecha}::date, ${importe}::numeric, ${b.medio}, ${referencia}, ${usuario}, ${comprobanteId}::bigint)
       RETURNING id`);
     await crearAplicaciones(tx, pago.id, businessId, lugares, b.codPro, aplicaciones);
     await eventoPago(tx, pago.id, 'creado',
@@ -1007,6 +1011,7 @@ const pagoPatchSchema = z.object({
   referencia: z.string().max(200).optional().nullable(),
   pdvPagaId: z.number().int(),
   importe: z.number().positive().optional(),
+  comprobanteId: z.number().int().positive().optional().nullable(),
 });
 
 // Corregir fecha, medio, ID, quién paga e importe. Si sube, lo de más queda a cuenta; si baja y no
@@ -1025,6 +1030,8 @@ async function editarPago({ organizationId, businessId, usuario, id, body }) {
   if (!paga) throw rechazo('Elegí qué sucursal paga.');
   const referencia = referenciaDe(b.referencia);
   if (referencia && await referenciaRepetida(db, organizationId, referencia, id)) throw rechazo('Ese ID de transferencia ya está cargado.', 409);
+  const cambiaComprobante = b.comprobanteId !== undefined;
+  const comprobanteId = cambiaComprobante ? await comprobanteValido(db, businessId, b.comprobanteId) : null;
   const importeAntes = Number(pago.importe);
   const importeNuevo = b.importe !== undefined ? Math.round(b.importe * 100) / 100 : importeAntes;
   const cambiaImporte = Math.abs(importeNuevo - importeAntes) > 0.004;
@@ -1034,6 +1041,7 @@ async function editarPago({ organizationId, businessId, usuario, id, body }) {
     pago.medio !== b.medio ? `medio ${pago.medio} → ${b.medio}` : null,
     (pago.referencia ?? null) !== referencia ? `ID ${pago.referencia ?? '—'} → ${referencia ?? '—'}` : null,
     idLugar(pago.business_id, pago.branch_id) !== b.pdvPagaId ? 'quién paga' : null,
+    cambiaComprobante ? (comprobanteId ? 'comprobante adjunto' : 'sin comprobante') : null,
   ].filter(Boolean).join(' · ');
   await db.transaction(async (tx) => {
     if (cambiaImporte) {
@@ -1054,6 +1062,7 @@ async function editarPago({ organizationId, businessId, usuario, id, body }) {
     await tx.execute(sql`
       UPDATE gestion_pagos_proveedor
       SET fecha = ${b.fecha}::date, medio = ${b.medio}, referencia = ${referencia}, branch_id = ${paga.branchId}::bigint, importe = ${importeNuevo}::numeric
+        ${cambiaComprobante ? sql`, "comprobanteId" = ${comprobanteId}::bigint` : sql``}
       WHERE id = ${id}`);
     if (cambios) await eventoPago(tx, id, 'editado', cambios, null, usuario);
   });
@@ -1135,7 +1144,7 @@ function facturasCtaCteSql({ organizationId, businessId, codPro }) {
       SELECT ${lugarSql('a')} AS pdv_id, a.comprobante,
         JSON_AGG(JSON_BUILD_OBJECT(
           'pagoId', pp.id, 'fecha', TO_CHAR(pp.fecha, 'YYYY-MM-DD'), 'importe', a.importe::float8, 'totalPago', pp.importe::float8,
-          'medio', pp.medio, 'referencia', pp.referencia, 'pdvPaga', CONCAT(bp.name, ' · ', COALESCE(sp.name, (SELECT m.name FROM app_branches m WHERE m.business_id = pp.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), bp.name))
+          'medio', pp.medio, 'referencia', pp.referencia, 'comprobanteId', pp."comprobanteId", 'pdvPaga', CONCAT(bp.name, ' · ', COALESCE(sp.name, (SELECT m.name FROM app_branches m WHERE m.business_id = pp.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), bp.name))
         ) ORDER BY pp.fecha, pp.id) AS pagos_lz
       FROM gestion_aplicaciones_pago_proveedor a
       JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
