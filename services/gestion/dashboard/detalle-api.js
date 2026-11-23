@@ -298,6 +298,7 @@ async function obtenerDetalleCompras({ organizationId, businessId, sucursal, sp 
     importeQuery: parseImporteQuery(sp.get("importeQuery")),
     historico: sp.get("historico") === "1",
   });
+
   // Vista Insumos: compras que traen ese insumo en el 25 / compras sin insumos (van por concepto).
   const lineas = (filtro) => sql`EXISTS (SELECT 1 FROM gestion_detalle_compras d
     WHERE d.business_id = cb.business_id AND d.branch_id IS NOT DISTINCT FROM cb.branch_id
