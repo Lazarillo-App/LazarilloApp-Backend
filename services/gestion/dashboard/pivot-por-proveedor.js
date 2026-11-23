@@ -2,7 +2,7 @@
 'use strict';
 
 const { normalizarTexto } = require('../text-normalize');
-const { construirEntidadIdProveedorTexto, codigoIdentidadProveedorTexto } = require('../proveedor-entidad-id');
+const { construirEntidadIdProveedorTexto, codigoIdentidadProveedorTexto, proveedorIdAgrupable } = require('../proveedor-entidad-id');
 const { mergeComposiciones } = require('./apertura-composicion');
 
 // Hermana de buildPivotData (app/api/dashboard/pivot/route.ts): misma fuente
@@ -21,7 +21,7 @@ function buildPivotDataByProveedor(
     const {
       rubro_codigo,
       rubro_nombre,
-      proveedor_id,
+      proveedor_id: proveedor_id_real,
       proveedor_nombre,
       proveedor_texto_crudo,
       proveedor_codigo,
@@ -37,6 +37,9 @@ function buildPivotDataByProveedor(
       business_id_origen,
       branch_id_origen,
     } = row;
+
+    // Gastos Varios cargado en Lazarillo (con id) va al mismo balde que el del POS (por texto).
+    const proveedor_id = proveedorIdAgrupable(proveedor_id_real, proveedor_nombre);
 
     const t = typeof total === "object" && total !== null ? Number(total.toString()) : Number(total);
 

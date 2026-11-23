@@ -134,10 +134,16 @@ function buildDetalleConditions({
   if (proveedorId !== undefined) conditions.push(sql`p.id = ${proveedorId}`);
   else if (proveedorTexto !== undefined) {
     // codigo es un AND adicional: dos personas con el mismo texto solo se separan por su código real.
+    // Balde Gastos Varios: incluye también lo cargado en Lazarillo con el proveedor «Gastos Varios»
+    // (tiene proveedorId propio) — mismo criterio que proveedorIdAgrupable en el pivot.
+    const esGastosVarios = String(proveedorTexto).toLowerCase().replace(/[^a-z0-9]+/g, '') === 'gastosvarios';
     conditions.push(
-      codigo !== undefined
-        ? sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto} AND c.codigo = ${codigo}`
-        : sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto}`
+      esGastosVarios
+        ? sql`(c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto}
+               OR lower(regexp_replace(COALESCE(p.nombre, c.proveedor, ''), '[^a-zA-Z0-9]', '', 'g')) = 'gastosvarios')`
+        : codigo !== undefined
+          ? sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto} AND c.codigo = ${codigo}`
+          : sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto}`
     );
   } else if (sinProveedor) conditions.push(sql`c."proveedorId" IS NULL AND c.proveedor IS NULL`);
 
