@@ -77,7 +77,8 @@ const detalleSelectJoin = (fuente, organizationId) => sql`
     p.nombre            AS "proveedorNombre",
     p.razon             AS "proveedorRazon",
     neg.name            AS "localNombre",
-    COALESCE(br.name, 'Principal') AS "pdvNombre",
+    -- La principal se llama como su sucursal is_main (ej. «FC RAMOS»), igual que los chips (Diego 23/11/2026).
+    COALESCE(br.name, bm.name, neg.name, 'Principal') AS "pdvNombre",
     c.business_id_origen AS "localIdOrigen",
     c.branch_id_origen   AS "puntoDeVentaIdOrigen",
     cc.codigo           AS "conceptoCajaCodigo",
@@ -98,6 +99,8 @@ const detalleSelectJoin = (fuente, organizationId) => sql`
   LEFT JOIN gestion_proveedores p     ON c."proveedorId" = p.id
   LEFT JOIN app_businesses neg        ON c.business_id = neg.id
   LEFT JOIN app_branches br           ON c.branch_id = br.id
+  LEFT JOIN LATERAL (SELECT m.name FROM app_branches m WHERE c.branch_id IS NULL AND m.business_id = c.business_id
+                       AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1) bm ON true
   -- Concepto original y manual POR SEPARADO.
   LEFT JOIN gestion_conceptos_caja cc        ON cc.organization_id = ${organizationId} AND c."conceptoCodigo" = cc.codigo
   LEFT JOIN gestion_rubros_concepto_caja rc  ON rc.organization_id = ${organizationId} AND cc."codRga" = rc.codigo
