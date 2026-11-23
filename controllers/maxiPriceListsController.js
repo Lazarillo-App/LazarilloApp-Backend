@@ -309,3 +309,50 @@ exports.removeDiscountException = async (req, res, next) => {
         return res.json({ ok: true });
     } catch (e) { next(e); }
 };
+// ─────────────────────────────────────────────────────────────────────────────
+// Lista del POS por sucursal (Diego 23/11/2026) — services/listasPosSucursal.js
+// GET  /api/businesses/:businessId/price-list/sucursales
+// PUT  /api/businesses/:businessId/price-list/sucursales  { branchId, listNumber }
+// GET  /api/businesses/:businessId/price-list/por-sucursal?sucursal=all|main|<id>&from=&to=
+// ─────────────────────────────────────────────────────────────────────────────
+const listasPos = require('../services/listasPosSucursal');
+
+exports.getListasSucursales = async (req, res, next) => {
+    try {
+        const bizId = Number(req.params.businessId);
+        return res.json({ ok: true, ...(await listasPos.configuracion(bizId)) });
+    } catch (e) { next(e); }
+};
+
+exports.setListaSucursal = async (req, res, next) => {
+    try {
+        const bizId = Number(req.params.businessId);
+        const branchId = Number(req.body?.branchId);
+        const listNumber = Number(req.body?.listNumber);
+        if (!bizId || !branchId || !(listNumber >= 1 && listNumber <= 4)) {
+            return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+        }
+        const userId = req.user?.id ?? null;
+        const r = await listasPos.guardar(bizId, branchId, listNumber, userId);
+        const cfg = await listasPos.configuracion(bizId);
+        const alias = (n) => cfg.listas.find((l) => l.listNumber === n)?.alias || `Lista ${n}`;
+        require('../services/notificationService').avisarAlEquipoSinEsperar({
+            businessId: bizId, actorUserId: userId, type: 'config', incluirActor: true,
+            title: `Lista del POS: ${r.nombre} → ${alias(listNumber)}`,
+            message: r.antes ? `Antes: ${alias(r.antes)}` : null,
+            metadata: { branchId, listNumber, antes: r.antes },
+        });
+        return res.json({ ok: true, ...cfg });
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ ok: false, error: e.message });
+        next(e);
+    }
+};
+
+exports.getPreciosPorSucursal = async (req, res, next) => {
+    try {
+        const bizId = Number(req.params.businessId);
+        const { sucursal = 'all', from = null, to = null } = req.query;
+        return res.json({ ok: true, resultado: await listasPos.precios(bizId, { sucursal: String(sucursal), from, to }) });
+    } catch (e) { next(e); }
+};
