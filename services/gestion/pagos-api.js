@@ -98,8 +98,13 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
       SELECT date_trunc('month', ${fechaEco})::date AS mes,
              EXTRACT(day FROM COALESCE(c."fechaManual", c.fecha))::int AS dia,
              (c.periodo IS NOT NULL) AS vencido,
+             -- Sueldos (Diego 23/11/2026): por empleado, no por concepto. Si no, con que un sueldo del mes esté
+             -- cargado, «Liquidación sueldo» ya no faltaba y no se veía a quién le faltaba (ej. Santiago).
+             -- Fila de sueldo = proveedor de texto del POS con legajo y período (los proveedores no traen período).
              CASE WHEN c."proveedorId" IS NOT NULL AND pr.codigo <> ${GV_CODIGO} THEN 'p:' || c."proveedorId"
+                  WHEN c."proveedorId" IS NULL AND c.periodo IS NOT NULL AND NULLIF(TRIM(c.codigo), '') IS NOT NULL THEN 'e:' || TRIM(c.codigo)
                   ELSE 'c:' || COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") END AS clave,
+             CASE WHEN c."proveedorId" IS NULL AND c.periodo IS NOT NULL THEN NULLIF(TRIM(c.proveedor), '') END AS empleado,
              CASE WHEN pr.codigo <> ${GV_CODIGO} THEN c."proveedorId" END AS proveedor_id,
              CASE WHEN pr.codigo <> ${GV_CODIGO} THEN COALESCE(pr.nombre, pr.razon) END AS proveedor,
              COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") AS concepto_codigo,
@@ -128,7 +133,7 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
     ),
     pm AS (
       SELECT clave, mes, SUM(imp) AS imp, AVG(dia) AS dia, BOOL_OR(vencido) AS vencido,
-             MIN(proveedor_id) AS proveedor_id, MIN(proveedor) AS proveedor,
+             MIN(proveedor_id) AS proveedor_id, MIN(proveedor) AS proveedor, MAX(empleado) AS empleado,
              (array_agg(concepto ORDER BY imp DESC))[1] AS concepto,
              (array_agg(concepto_codigo ORDER BY imp DESC))[1] AS concepto_codigo,
              (array_agg(rubro ORDER BY imp DESC))[1] AS rubro,
@@ -144,6 +149,7 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
              (array_agg(x.imp ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS ultimo,
              (array_agg(x.proveedor ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS proveedor,
              (array_agg(x.proveedor_id ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS proveedor_id,
+             (array_agg(x.empleado ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS empleado,
              (array_agg(x.concepto ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS concepto,
              (array_agg(x.concepto_codigo ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS concepto_codigo,
              (array_agg(x.rubro ORDER BY x.mes DESC) FILTER (WHERE x.mes < o.m))[1] AS rubro,
@@ -165,7 +171,7 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
       JOIN b ON b.mes < o.m AND b.mes >= o.m - make_interval(months => ${ANUAL})
       GROUP BY o.m
     )
-    SELECT to_char(r.m, 'YYYY-MM') AS mes, r.clave, r.proveedor, r.proveedor_id::int AS proveedor_id,
+    SELECT to_char(r.m, 'YYYY-MM') AS mes, r.clave, r.proveedor, r.proveedor_id::int AS proveedor_id, r.empleado,
            r.concepto, r.concepto_codigo, r.rubro, ROUND(r.ultimo, 2)::float8 AS ultimo,
            ROUND(r.dia)::int AS dia, r.vencido,
            r.pdv_origen::int AS pdv_origen, ROUND(r.ultimo_total, 2)::float8 AS ultimo_total,
@@ -207,16 +213,23 @@ async function obtenerSinCarga({ organizationId, businessId, sucursal }) {
   exigirSucursal(sucursal);
   const hoy = hoyArgentina();
   const objetivo = mesesObjetivo(hoy);
-  const [filas, descartes] = await Promise.all([
+  const [filas, descartes, bajas] = await Promise.all([
     db.many(sinCargaSql({ organizationId, businessId, sucursal, meses: objetivo })),
     db.many(sql`
       SELECT id, clave, nombre, "creadoEn" FROM gestion_sin_carga_descartes d
-      WHERE ${enLugar('d', businessId, sucursal)} AND clave ~ '^[pc]:' ORDER BY "creadoEn" DESC`),
+      WHERE ${enLugar('d', businessId, sucursal)} AND clave ~ '^[pce]:' ORDER BY "creadoEn" DESC`),
+    // Empleados dados de baja: desde el mes siguiente a la baja su sueldo ya no se espera.
+    db.many(sql`SELECT TRIM(codigo) AS codigo, to_char("fechaBaja", 'YYYY-MM') AS baja FROM gestion_empleados e
+      WHERE ${enLugar('e', businessId, sucursal)} AND "fechaBaja" IS NOT NULL`),
   ]);
+  const bajaDe = new Map(bajas.map((b) => [`e:${b.codigo}`, b.baja]));
   const mesActual = objetivo[0].slice(0, 7);
   const vivas = filas.filter((f) => esperadoEnMesCerrado(f.rubro ?? '', f.mes, mesActual, f.meses_con_gasto, f.meses_con_datos)
     // "Feriados" (sueldos) solo en meses con feriados. Año sin calendario: se muestra.
-    && !(esConceptoFeriado(f.concepto) && feriadosDelMes(f.mes)?.length === 0));
+    && !(esConceptoFeriado(f.concepto) && feriadosDelMes(f.mes)?.length === 0)
+    && !(bajaDe.has(f.clave) && f.mes > bajaDe.get(f.clave))
+    // Si lo último que cobró fue la liquidación final, se fue: no se espera más.
+    && !(f.clave.startsWith('e:') && /liquidaci[oó]n final/i.test(f.concepto ?? '')));
   const ids = [...new Set(vivas.map((f) => f.proveedor_id).filter((x) => x != null))];
   const [ya, mo] = objetivo[0].split('-').map(Number);
   const t = ya * 12 + (mo - 1) - 8; // qué se le compra: los últimos 9 meses
@@ -233,8 +246,9 @@ async function obtenerSinCarga({ organizationId, businessId, sucursal }) {
     const vence = venceEl(f.mes, f.dia, f.vencido);
     meses.find((x) => x.mes === f.mes)?.items.push({
       clave: f.clave,
-      nombre: f.proveedor ?? f.concepto ?? f.clave,
-      detalle: f.proveedor ? (f.concepto ?? '') : f.vencido ? 'sueldos del período' : 'gasto vario',
+      nombre: f.proveedor ?? f.empleado ?? f.concepto ?? f.clave,
+      detalle: f.proveedor ? (f.concepto ?? '') : f.clave.startsWith('e:') ? 'sueldo' : f.vencido ? 'sueldos del período' : 'gasto vario',
+      empleadoCodigo: f.clave.startsWith('e:') ? f.clave.slice(2) : null,
       rubro: f.rubro ?? 'Sin Rubro',
       ultimo: Number(f.ultimo), ultimoTotal: Number(f.ultimo_total ?? f.ultimo), pdvOrigenId: f.pdv_origen ?? null,
       dia: f.dia, vencido: f.vencido,
@@ -249,7 +263,7 @@ async function obtenerSinCarga({ organizationId, businessId, sucursal }) {
 }
 
 const descarteSchema = z.object({
-  clave: z.string().regex(/^[pc]:[^\s@]{1,40}(@\d{4}-\d{2})?$/),
+  clave: z.string().regex(/^[pce]:[^\s@]{1,40}(@\d{4}-\d{2})?$/),
   nombre: z.string().max(200).optional().nullable(),
 });
 
