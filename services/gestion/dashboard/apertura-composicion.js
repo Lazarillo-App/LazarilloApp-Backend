@@ -3,7 +3,7 @@
 
 
 const { normalizarTexto } = require('../text-normalize');
-const { construirEntidadIdProveedorTexto } = require('../proveedor-entidad-id');
+const { construirEntidadIdProveedorTexto, proveedorIdAgrupable } = require('../proveedor-entidad-id');
 
 const toNum = (x) =>
   typeof x === "object" && x !== null ? Number(x.toString()) : Number(x);
@@ -64,7 +64,8 @@ function buildComposicionPorProveedor(
   // Mismo formato que provKeyOriginal en pivot-por-proveedor.ts — ver comentario
   // ahí sobre por qué el código hace falta para no mezclar personas distintas
   // que comparten nombre.
-  const key = (concepto, proveedorId, proveedorNombre, proveedorCodigo) => {
+  const key = (concepto, proveedorIdReal, proveedorNombre, proveedorCodigo) => {
+    const proveedorId = proveedorIdAgrupable(proveedorIdReal, proveedorNombre);
     if (proveedorId != null) return `${concepto}|${proveedorId}`;
     return `${concepto}|${construirEntidadIdProveedorTexto(normalizarTexto(proveedorNombre), proveedorCodigo)}`;
   };
