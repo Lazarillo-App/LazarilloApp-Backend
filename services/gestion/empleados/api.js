@@ -172,6 +172,27 @@ async function anularCarga({ organizationId, businessId, usuario, id }) {
   return { ok: true };
 }
 
+// ¿Esta fila del Panel (proveedor de texto del POS + código) es un empleado? (Diego 23/11/2026: «el código
+// puede estar en la nómina e igual ser un proveedor» — los POS numeran proveedores y empleados por
+// separado: en Bar/FC/Comercio hay 1.000+ facturas de proveedores con un código que también es de un
+// legajo). Lo que manda es que ese proveedor tenga liquidaciones: las filas de sueldos traen período
+// (el mes que liquidan) y las de proveedores no. Y además tiene que estar en la nómina.
+async function esEmpleado({ businessId, sp }) {
+  const codigo = (sp.get('codigo') ?? '').trim();
+  const texto = (sp.get('proveedor') ?? '').trim();
+  if (!codigo || codigo.length > 20 || !texto) return { empleado: false };
+  const { lugar } = await lugarDelNegocio(db, businessId, Number(sp.get('pdvId')));
+  const r = await db.one(sql`
+    SELECT EXISTS (
+      SELECT 1 FROM gestion_compras c
+      WHERE ${enLugar('c', businessId, lugar.branchId)} AND c.codigo = ${codigo}
+        AND c."proveedorTextoNormalizado" = ${normalizarProveedorTexto(texto)} AND c.periodo IS NOT NULL
+    ) AND EXISTS (
+      SELECT 1 FROM gestion_empleados e WHERE ${enLugar('e', businessId, lugar.branchId)} AND e.codigo = ${codigo}
+    ) AS empleado`);
+  return { empleado: !!r?.empleado };
+}
+
 // Cuenta del empleado por período (últimos 12 meses).
 async function obtenerCuenta({ organizationId, businessId, sp }) {
   const codigo = (sp.get('codigo') ?? '').trim();
@@ -371,6 +392,6 @@ async function quitarConceptoFijo({ organizationId, businessId, sp }) {
 }
 
 module.exports = {
-  obtenerNomina, crearCarga, anularCarga, obtenerCuenta,
+  obtenerNomina, crearCarga, anularCarga, obtenerCuenta, esEmpleado,
   listarConceptosFijos, guardarConceptoFijo, quitarConceptoFijo, aplicarConceptosEmpleado,
 };
