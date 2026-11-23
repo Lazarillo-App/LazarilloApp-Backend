@@ -828,5 +828,30 @@
     "titulo": "Proyección del food cost con el calendario: días que faltan pesados por día de semana y feriados",
     "estado": "hecha",
     "nota": "Hecho 20/11: GET /purchases/food-cost-proyeccion (services/foodCostProyeccion.js). Ventas = método único + calendario único; compras = ritmo por día de semana (8 semanas sin feriados) + efecto víspera aprendido (mín. 3 feriados). Backtest Bar Ramos 12 meses: regla de 3 7,5% de error → 4,4%. Noviembre Bar: 34,2% → ≈ 27,6% (ventas ≈ $ 89,8 M, compras ≈ $ 24,8 M). Aprendido en Bar: +12% la semana antes, +3% la siguiente (la compensación es chica). PRs back y front de este cambio."
+  },
+  {
+    "clave": "2026-11-23-lista-suc-01",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "ventas-costo-precio",
+    "buscar": "- **Precio** de venta en la lista elegida.",
+    "reemplazar": "- **Precio** de venta. Si tu POS tiene varias listas y cada sucursal cobra una (⚙ Configuración › Artículos › **Lista del POS por sucursal**), es el precio de la lista de la sucursal que elegiste arriba; con «Todas», el promedio pesado por las unidades que vendió cada una. Debajo del título dice de qué lista sale."
+  },
+  {
+    "clave": "2026-11-23-lista-suc-02",
+    "tipo": "manual_seccion",
+    "capitulo": "configuracion",
+    "seccion": "articulos-y-ventas",
+    "buscar": "- **% costo ideal global**",
+    "reemplazar": "- **Lista del POS por sucursal**: qué lista de precios de tu POS cobra cada sucursal (por ejemplo, Lista 1 en una y Lista 2 en otra). Se guarda al elegir y cambia el Precio y el costo % de Artículos según la sucursal que mirás.\n- **% costo ideal global**"
+  },
+  {
+    "clave": "2026-11-23-lista-suc-03",
+    "tipo": "tarea",
+    "titulo": "Lista de precios del POS por sucursal (Container FC: San Justo Lista 1, Ramos Lista 2)",
+    "modulo": "recetas",
+    "business_id": 204,
+    "estado": "hecha",
+    "detalle": "Diego (23/11): en MaxiRest usa la Lista 1 para San Justo y la 2 para Ramos, y Artículos mostraba siempre la Lista 1 (Cancha 3 a $ 70.000 en Ramos, que cobra $ 75.000; confirmado con las ventas de noviembre). Hecho: ⚙ Configuración › Artículos › Lista del POS por sucursal (tabla branch_price_list, migración 166, aviso en Notificaciones); el Precio y el costo % de Artículos salen de la lista de la sucursal del chip y con «Todas» se pondera por unidades vendidas (elegido por Diego). Manual: articulos › ventas-costo-precio y configuracion › articulos-y-ventas."
   }
 ]
