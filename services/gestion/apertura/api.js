@@ -35,11 +35,16 @@ async function obtenerLocalesApertura({ organizationId, userId }) {
   const sucursales = ids.length ? await db.many(sql`
     SELECT id, name, business_id FROM app_branches
     WHERE business_id = ANY(${ids}::bigint[]) AND NOT COALESCE((props->>'is_main')::boolean, false) ORDER BY name`) : [];
+  // La principal se llama como su sucursal marcada is_main (ej. «FC RAMOS»), nunca «Principal» (Diego 23/11/2026).
+  const mains = ids.length ? await db.many(sql`
+    SELECT DISTINCT ON (business_id) business_id, name FROM app_branches
+    WHERE business_id = ANY(${ids}::bigint[]) AND COALESCE((props->>'is_main')::boolean, false) ORDER BY business_id, id`) : [];
+  const nombreMain = (n) => mains.find((m) => String(m.business_id) === String(n.id))?.name || n.name;
   return propios.map((n) => ({
     id: Number(n.id),
     nombre: n.name,
     puntosDeVenta: [
-      { id: idLugar(n.id, null), localId: Number(n.id), nombre: 'Principal' },
+      { id: idLugar(n.id, null), localId: Number(n.id), nombre: nombreMain(n) },
       ...sucursales.filter((s) => String(s.business_id) === String(n.id)).map((s) => ({ id: Number(s.id), localId: Number(n.id), nombre: s.name })),
     ],
   }));

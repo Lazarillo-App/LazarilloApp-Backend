@@ -13,7 +13,8 @@ const { SIN_RUBRO_CODE, SIN_RUBRO_NOMBRE, VISIBILIDAD_FIELDS } = require('./cons
 const { ErrorDatos } = require('./resultados-api');
 
 // Nombre de la sucursal de una fila (alias de app_branches = br). NULL = la principal.
-const nombreSucursal = sql`COALESCE(br.name, 'Principal')`;
+// Sin sucursal = la principal: se muestra con el nombre de su sucursal is_main (o el del negocio), nunca «Principal».
+const nombreSucursal = (businessId) => sql`COALESCE(br.name, (SELECT m.name FROM app_branches m WHERE m.business_id = ${businessId} AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), (SELECT n.name FROM app_businesses n WHERE n.id = ${businessId}))`;
 
 // anio: año de la última compra en esa sucursal (el buscador salta ahí si se mira un año posterior sin datos).
 const sucursalDe = (branchId, nombre, anio) => ({ sucursal: branchId == null ? null : Number(branchId), nombre, ...(anio ? { anio } : {}) });
@@ -51,7 +52,7 @@ async function origenesPorSucursal({ organizationId, businessId }) {
       cc."codRga"                                            AS "rubroCodigo",
       c."proveedorId"                                        AS "proveedorId",
       c.branch_id                                            AS "branchId",
-      ${nombreSucursal}                                      AS "sucursalNombre",
+      ${nombreSucursal(businessId)}                                      AS "sucursalNombre",
       MAX(COALESCE(c."fechaManual", c.fecha))                AS ultima,
       EXTRACT(YEAR FROM MAX(COALESCE(c."fechaManual", c.fecha)))::int AS anio
     FROM gestion_v_compras_distribuidas c
@@ -150,7 +151,7 @@ async function obtenerObservaciones({ organizationId, businessId, q: qCrudo }) {
         cc.nombre                                                 AS "conceptoNombre",
         COALESCE(p.nombre, p.razon)                               AS "proveedorNombre",
         c.branch_id_origen                                        AS "branchId",
-        ${nombreSucursal}                                         AS "sucursalNombre"
+        ${nombreSucursal(businessId)}                                         AS "sucursalNombre"
       FROM gestion_v_compras_distribuidas c
       LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId}
                                          AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") = cc.codigo
@@ -188,7 +189,7 @@ async function obtenerImportes({ organizationId, businessId, q: qCrudo }) {
       cc.nombre                                                 AS "conceptoNombre",
       COALESCE(p.nombre, p.razon)                               AS "proveedorNombre",
       c.branch_id                                               AS "branchId",
-      ${nombreSucursal}                                         AS "sucursalNombre"
+      ${nombreSucursal(businessId)}                                         AS "sucursalNombre"
     FROM gestion_compras c
     LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId}
                                        AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") = cc.codigo

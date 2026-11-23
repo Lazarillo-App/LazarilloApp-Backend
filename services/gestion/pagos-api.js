@@ -1121,7 +1121,7 @@ function facturasCtaCteSql({ organizationId, businessId, codPro }) {
       SELECT ${lugarSql('a')} AS pdv_id, a.comprobante,
         JSON_AGG(JSON_BUILD_OBJECT(
           'pagoId', pp.id, 'fecha', TO_CHAR(pp.fecha, 'YYYY-MM-DD'), 'importe', a.importe::float8, 'totalPago', pp.importe::float8,
-          'medio', pp.medio, 'referencia', pp.referencia, 'pdvPaga', CONCAT(bp.name, ' · ', COALESCE(sp.name, 'Principal'))
+          'medio', pp.medio, 'referencia', pp.referencia, 'pdvPaga', CONCAT(bp.name, ' · ', COALESCE(sp.name, (SELECT m.name FROM app_branches m WHERE m.business_id = pp.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), bp.name))
         ) ORDER BY pp.fecha, pp.id) AS pagos_lz
       FROM gestion_aplicaciones_pago_proveedor a
       JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
