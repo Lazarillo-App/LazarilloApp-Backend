@@ -635,13 +635,15 @@ const CUBIERTOS = sql`COALESCE(NULLIF(regexp_replace(COALESCE(v.cub::text, ''), 
 // Diego 23/11/2026: comparar un mes contra el mismo mes de años anteriores. Si es el mes en curso, se
 // compara del 1 al último día con ventas en todos los años (si no, el año actual siempre pierde).
 // Los importes se llevan a «pesos de hoy» con el IPC; tickets y cubiertos no se ajustan.
-async function obtenerMesAnios({ businessId, anio, mes, sucursal }) {
+async function obtenerMesAnios({ businessId, anio, mes, sucursal, completo = false }) {
   if (!anio || !mes || mes > 12) throw new ErrorDatos("Datos inválidos");
   const lugar = filtroSucursalSql("v", businessId, sucursal);
   const hoy = new Date(Date.now() - 3 * 3_600_000);
   const enCurso = anio === hoy.getUTCFullYear() && mes === hoy.getUTCMonth() + 1;
+  // completo: el front reemplaza el mes en curso por su proyección (Diego 23/11/2026: «siempre el mes
+  // actual con proyección»), así que los otros años van con el mes entero.
   let hastaDia = 31;
-  if (enCurso) {
+  if (enCurso && !completo) {
     const u = await db.one(sql`SELECT EXTRACT(DAY FROM MAX(v.fecha))::int AS d FROM gestion_ventas v
       WHERE ${lugar} AND v.fecha >= make_date(${anio}::int, ${mes}::int, 1) AND v.fecha < make_date(${anio}::int, ${mes}::int, 1) + interval '1 month'`);
     hastaDia = u?.d ?? 0;
@@ -667,7 +669,7 @@ async function obtenerMesAnios({ businessId, anio, mes, sucursal }) {
     return { anio: f.anio, ventas: Number(f.ventas ?? 0), ventasHoy: nivel ? Number(f.ventas ?? 0) * (hoyNivel / nivel) : null,
       tickets: f.tickets ?? 0, cubiertos: f.cubiertos ?? 0 };
   });
-  return { anio, mes, hastaDia: enCurso ? hastaDia : null, ipc: ipc.disponible ? { disponible: true, hasta: ipc.hasta } : { disponible: false }, anios };
+  return { anio, mes, hastaDia: enCurso && !completo ? hastaDia : null, ipc: ipc.disponible ? { disponible: true, hasta: ipc.hasta } : { disponible: false }, anios };
 }
 
 // El mes de un vistazo para el celular: ventas, gastos por rubro y resultado, con los mismos filtros
