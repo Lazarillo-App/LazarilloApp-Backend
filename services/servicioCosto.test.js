@@ -82,3 +82,12 @@ describe('detectarAumento', () => {
     expect(srv.detectarAumento(dias.slice(10))).toBe(null);
   });
 });
+
+// Cantidad de horas (Diego 23/11/2026): el colegio son 40 horas al 33 % de la hora de la ancla.
+describe('normalizarConfig derivado con horas', () => {
+  it('factor = horas × % ÷ 100 y guarda los dos', () => {
+    expect(srv.normalizarConfig({ tipo: 'derivado', ancla: 6102, horas: 40, pctHora: 33 }))
+      .toEqual({ tipo: 'derivado', ancla: 6102, horas: 40, pctHora: 33, factor: 13.2 });
+    expect(srv.normalizarConfig({ tipo: 'derivado', ancla: 6102, factor: 0.93 })).toEqual({ tipo: 'derivado', ancla: 6102, factor: 0.93 });
+  });
+});
