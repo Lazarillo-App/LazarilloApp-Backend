@@ -54,6 +54,12 @@ async function buildInsumoMap(businessId) {
   return map;
 }
 
+// Food cost con la misma fuente que el Panel (services/foodCostAjustes.js). Solo para el food cost del
+// negocio entero (con desde): con filtro de proveedor o de insumo se muestran los renglones tal cual.
+const { ajustesFoodCost, itemsDeAjustes } = require('../services/foodCostAjustes');
+const hoyAR = () => new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+const conAjustes = (q) => !!q.from && !q.proveedor_id && !q.insumo_id && !q.insumo_ids;
+
 // ── Helper: construye cláusulas WHERE reutilizables para compras ──
 // Devuelve { where: string[], params: any[] } listo para interpolación segura.
 // El caller ya pone business_id como $1 antes de llamar a este helper.
@@ -412,6 +418,13 @@ exports.foodCost = async (req, res, next) => {
       importe: Number(r.importe) || 0,
     }));
 
+    // Misma fuente que el Panel (Diego 23/11/2026): lo que falta de cada concepto (gastos varios,
+    // renglones sin insumo, cargas en Lazarillo, repartos) entra como ítem «sin insumo» de su rubro.
+    if (conAjustes(req.query)) {
+      const aj = await ajustesFoodCost({ businessId, desde: req.query.from, hasta: req.query.to || hoyAR(), branchId: req.query.branch_id, agrupar: 'total' });
+      items.push(...itemsDeAjustes(aj));
+    }
+
     return res.json({ ok: true, items });
   } catch (e) {
     console.error('[purchases.foodCost] error:', e);
@@ -477,7 +490,16 @@ exports.foodCostMonthly = async (req, res, next) => {
         importe: Number(r.importe) || 0,
       });
     }
-    const months = [...porMes.entries()].map(([mes, items]) => ({ mes, items }));
+    if (conAjustes(req.query)) {
+      const aj = await ajustesFoodCost({ businessId, desde: req.query.from, hasta: req.query.to || hoyAR(), branchId: req.query.branch_id, agrupar: 'mes' });
+      const porMesAj = new Map();
+      for (const a of aj) { if (!porMesAj.has(a.periodo)) porMesAj.set(a.periodo, []); porMesAj.get(a.periodo).push(a); }
+      for (const [mes, lista] of porMesAj) {
+        if (!porMes.has(mes)) porMes.set(mes, []);
+        porMes.get(mes).push(...itemsDeAjustes(lista));
+      }
+    }
+    const months = [...porMes.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([mes, items]) => ({ mes, items }));
 
     return res.json({ ok: true, months });
   } catch (e) {
