@@ -1160,8 +1160,9 @@ async function obtenerCtaCte({ organizationId, businessId, sp }) {
     const sucursal = lugares.get(pdvId).branchId;
     const [movs, emp] = await Promise.all([
       db.many(sql`
+        -- Sueldos: el mes que liquidan (período, se pagan a mes vencido), no el día que se cargaron (Diego 23/11/2026).
         SELECT c."rowId" AS row_id,
-               TO_CHAR(COALESCE(c."fechaManual", c.fecha), 'YYYY-MM-DD') AS fecha,
+               TO_CHAR(COALESCE(c."fechaManual", c.periodo, c.fecha), 'YYYY-MM-DD') AS fecha,
                c.comprobante,
                COALESCE(cc.nombre, c.concepto) AS concepto,
                rc.nombre AS rubro,

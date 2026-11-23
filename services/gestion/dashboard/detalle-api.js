@@ -263,7 +263,7 @@ async function obtenerDetalleCompras({ organizationId, businessId, sucursal, sp 
         COALESCE(c."fechaManual", c.fecha) AS "fechaVista",
         COALESCE(c."importeManual", c.importe) AS "importeVista",
         NULL::text AS "pagoRef",
-        COALESCE(c."fechaManual", c.fecha) AS "fechaGasto",
+        COALESCE(c."fechaManual", c.periodo, c.fecha) AS "fechaGasto",
         COALESCE(c."fechaPagoManual", c."fechaPago") AS "fechaPago", c."fechaPagoManual", c."cajaPago", c."conceptoCodigoManual", c.concepto, c.detalle, c.observac, c."observacManual",
         c.proveedor AS "proveedorTexto",
         p.id AS "proveedorId", p.nombre AS "proveedorNombre", p.razon AS "proveedorRazon",
@@ -467,7 +467,7 @@ async function aplicarEdicionCompra(tx, { organizationId, businessId, rowId, dat
   const { importeManual, fechaManual, conceptoCodigoManual, observacManual, fechaPagoManual } = datos;
   const compra = await tx.one(sql`
     SELECT c."rowId", c."conceptoCodigoManual", c."conceptoCodigo", c.concepto, c.proveedor, c.importe, c."importeManual",
-           c.fecha, c."fechaManual", c."fechaPago", c."fechaPagoManual", c.observac, c."observacManual"
+           c.fecha, c.periodo, c."fechaManual", c."fechaPago", c."fechaPagoManual", c.observac, c."observacManual"
     FROM gestion_compras c
     WHERE c.business_id = ${businessId} AND c."rowId" = ${rowId} FOR UPDATE`);
   if (!compra) { const e = new ErrorDatos(`Registro no encontrado: ${rowId}`); e.status = 404; throw e; }
@@ -499,8 +499,9 @@ async function aplicarEdicionCompra(tx, { organizationId, businessId, rowId, dat
 
   // Antes → después, solo de lo que de verdad cambió (lo efectivo: manual si hay, si no el del POS).
   const cambios = [];
-  const fAntes = fechaCorta(compra.fechaManual ?? compra.fecha);
-  const fDesp = fechaCorta(updated.fechaManual ?? compra.fecha);
+  // La F. gasto que cuenta: corregida, si no el período (sueldos), si no la de carga.
+  const fAntes = fechaCorta(compra.fechaManual ?? compra.periodo ?? compra.fecha);
+  const fDesp = fechaCorta(updated.fechaManual ?? compra.periodo ?? compra.fecha);
   if (fechaManual !== undefined && fAntes !== fDesp) cambios.push(`F. gasto ${fAntes} → ${fDesp}`);
   const pAntes = fechaCorta(compra.fechaPagoManual ?? compra.fechaPago);
   const pDesp = fechaCorta(updated.fechaPagoManual ?? compra.fechaPago);
