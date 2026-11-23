@@ -11,6 +11,7 @@ function dbFalsa(base = null) {
       if (sql.includes("'derivado'")) return { rows: [{ article_id: 11, nombre: 'Media', factor: 0.5 }] };
       if (sql.includes('FROM recetas')) return { rows: [{ id: 1, article_id: 10, nombre: 'Hora', porciones: 1,
         servicio: { tipo: 'ancla', sucursal: null, reparto: 'ventas', propios: ['P'], base } }] };
+      if (sql.includes('app_branches')) return { rows: [] };
       if (sql.includes('app_businesses')) return { rows: [{ organization_id: 1 }] };
       if (sql.includes('sales_daily_items')) {
         return { rows: srv.mesesCerrados(12, new Date('2026-11-20')).map((m) => (
@@ -89,5 +90,44 @@ describe('normalizarConfig derivado con horas', () => {
     expect(srv.normalizarConfig({ tipo: 'derivado', ancla: 6102, horas: 40, pctHora: 33 }))
       .toEqual({ tipo: 'derivado', ancla: 6102, horas: 40, pctHora: 33, factor: 13.2 });
     expect(srv.normalizarConfig({ tipo: 'derivado', ancla: 6102, factor: 0.93 })).toEqual({ tipo: 'derivado', ancla: 6102, factor: 0.93 });
+  });
+});
+
+// Por sucursal (Diego 23/11/2026): cada sucursal con sus gastos y ventas; «Todas» suma; el alquiler
+// puede salir de otro PDV.
+describe('calcularAncla por sucursal', () => {
+  const hoy = new Date('2026-11-20');
+  const db = { query: async (sql, params) => {
+    if (sql.includes('app_branches')) return { rows: [{ id: 16, name: 'RAMOS', principal: true }, { id: 15, name: 'SAN JUSTO', principal: false }] };
+    if (sql.includes("'derivado'")) return { rows: [] };
+    if (sql.includes('FROM recetas')) return { rows: [{ id: 1, article_id: 10, nombre: 'Hora', porciones: 1,
+      servicio: { tipo: 'ancla', reparto: 'manual', pct: { alquiler: 100, sueldos: 100, servicios: 100 }, propios: [], alquilerDe: { 15: 'main' } } }] };
+    if (sql.includes('app_businesses')) return { rows: [{ organization_id: 1 }] };
+    if (sql.includes('to_char(day, \'YYYY-MM-DD\')')) return { rows: [] };
+    if (sql.includes('sales_daily_items')) {
+      const sj = sql.includes('branch_id = $4');
+      return { rows: srv.mesesCerrados(12, hoy).map((m) => ({ m, total: 1000, familia: 1000, ancla_monto: sj ? 100 : 200, ancla_qty: sj ? 1 : 2 })) };
+    }
+    if (sql.includes('gestion_v_compras_distribuidas')) {
+      return { rows: [
+        { b: null, r: '21', codigo: 'A', nombre: 'Alquiler', total: 3000 },  // Ramos: 1.000 / mes
+        { b: 15, r: '21', codigo: 'A', nombre: 'Alquiler', total: 300 },     // San Justo: 100 / mes
+        { b: 15, r: '3', codigo: 'S', nombre: 'Sueldos', total: 600 },       // San Justo: 200 / mes
+      ] };
+    }
+    throw new Error('consulta no esperada');
+  } };
+  it('San Justo toma el alquiler de Ramos y sus propios sueldos; Todas suma', async () => {
+    const sj = await srv.calcularAncla(1, 10, { db, hoy, sucursal: 15, detectar: false });
+    expect(sj.sucursal).toBe('15');
+    expect(sj.alquilerDe).toBe('main');
+    expect(Math.round(sj.costoMes)).toBe(1200);
+    const ramos = await srv.calcularAncla(1, 10, { db, hoy, sucursal: 16, detectar: false });
+    expect(ramos.sucursal).toBe('main');
+    expect(Math.round(ramos.costoMes)).toBe(1000);
+    const todas = await srv.calcularAncla(1, 10, { db, hoy, detectar: false });
+    expect(todas.sucursal).toBe('all');
+    expect(Math.round(todas.costoMes)).toBe(2200);
+    expect(Math.round(todas.horas)).toBe(20);
   });
 });

@@ -33,6 +33,22 @@ router.get('/anclas', async (req, res, next) => {
   try { res.json({ ok: true, anclas: await srv.listarAnclas(bizDe(req)) }); } catch (e) { next(e); }
 });
 
+// Sucursal que se mira (Diego 23/11/2026): 'all' | 'main' | id de app_branches. Sin dato = «Todas».
+const sucDe = (req) => (req.query?.sucursal == null || req.query.sucursal === '' ? undefined : String(req.query.sucursal));
+
+// GET /servicios/costos?sucursal= → costo de cada servicio (anclas y atados) en esa sucursal, para la tabla.
+router.get('/costos', async (req, res, next) => {
+  try {
+    const bizId = bizDe(req);
+    const costos = {};
+    for (const a of await srv.listarAnclas(bizId)) {
+      const c = await srv.calcularAncla(bizId, a.articleId, { sucursal: sucDe(req), detectar: false });
+      for (const f of c?.familia || []) costos[String(f.articleId)] = { costoTotal: f.costo, porciones: 1 };
+    }
+    res.json({ ok: true, costos });
+  } catch (e) { next(e); }
+});
+
 // GET /servicios/:articleId → config guardada + cálculo de su ancla
 router.get('/:articleId', async (req, res, next) => {
   try {
@@ -43,7 +59,7 @@ router.get('/:articleId', async (req, res, next) => {
     const config = srv.normalizarConfig(rows[0]?.servicio);
     if (!config) return res.json({ ok: true, config: null, calculo: null });
     const anclaId = config.tipo === 'ancla' ? articleId : config.ancla;
-    const calculo = await srv.calcularAncla(bizId, anclaId);
+    const calculo = await srv.calcularAncla(bizId, anclaId, { sucursal: sucDe(req) });
     res.json({ ok: true, config, calculo });
   } catch (e) { next(e); }
 });
@@ -53,7 +69,7 @@ router.post('/:articleId/calculo', async (req, res, next) => {
   try {
     const config = srv.normalizarConfig(req.body?.config);
     if (!config || config.tipo !== 'ancla') return res.status(400).json({ ok: false, error: 'config_invalida' });
-    res.json({ ok: true, calculo: await srv.calcularAncla(bizDe(req), artDe(req), { configOverride: config }) });
+    res.json({ ok: true, calculo: await srv.calcularAncla(bizDe(req), artDe(req), { configOverride: config, sucursal: sucDe(req) }) });
   } catch (e) { next(e); }
 });
 
@@ -107,6 +123,10 @@ router.put('/:articleId', async (req, res, next) => {
     }
     await client.query('COMMIT');
     invalidateCacheForBiz(bizId);
+    // La receta guarda «Todas»; el modal muestra la sucursal que se está mirando.
+    if (sucDe(req) !== undefined && calculo) {
+      calculo = await srv.calcularAncla(bizId, calculo.articleId, { sucursal: sucDe(req) }).catch(() => calculo);
+    }
     const titulo = config.tipo === 'ancla'
       ? `Servicio ancla: ${nombre}` : (config.horas ? `Servicio: ${nombre} (${String(config.horas).replace('.', ',')} h al ${String(config.pctHora).replace('.', ',')} % de la ancla)` : `Servicio: ${nombre} (${String(Math.round(config.factor * 1000) / 10).replace('.', ',')} % de la ancla)`);
     avisarAbm(req, { businessId: bizId, type: 'servicio_config', title: titulo, metadata: { articleId, tipo: config.tipo }, clave: `servicio:${articleId}` });

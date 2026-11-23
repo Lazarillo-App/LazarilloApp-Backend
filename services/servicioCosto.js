@@ -72,6 +72,10 @@ function normalizarConfig(c) {
       reparto: c.reparto === 'manual' ? 'manual' : 'ventas',
       pct, incluir,
       propios: [...new Set((Array.isArray(c.propios) ? c.propios : []).map(String).filter(Boolean))],
+      // Alquiler de otro PDV (Diego 23/11/2026): { sucursal: sucursalDeLaQueSeToma }, claves 'main' o el id.
+      alquilerDe: Object.fromEntries(Object.entries(c.alquilerDe && typeof c.alquilerDe === 'object' ? c.alquilerDe : {})
+        .map(([k, v]) => [String(k), String(v)])
+        .filter(([k, v]) => /^(main|\d+)$/.test(k) && /^(main|\d+)$/.test(v) && k !== v)),
       base: normalizarBase(c.base),
     };
   }
@@ -125,6 +129,60 @@ function detectarAumento(dias) {
   return null;
 }
 
+/**
+ * Sucursales del negocio para el cálculo por sucursal (Diego 23/11/2026). 'main' = la principal (sus
+ * ventas y gastos llegan sin sucursal); el resto, por su id. La principal de app_branches (is_main)
+ * también es 'main'.
+ */
+async function sucursalesDe(db, businessId) {
+  const { rows } = await db.query(
+    `SELECT id, name, COALESCE((props->>'is_main')::boolean, false) AS principal FROM app_branches
+      WHERE business_id = $1 ORDER BY principal DESC, lower(name)`, [businessId]);
+  const main = rows.find((r) => r.principal);
+  const out = [{ key: 'main', id: main ? Number(main.id) : null, nombre: main?.name || 'Principal' }];
+  for (const r of rows) if (!r.principal) out.push({ key: String(r.id), id: Number(r.id), nombre: r.name });
+  return out;
+}
+const claveSucursal = (v, sucs) => {
+  if (v == null || v === '' || v === 'main' || v === 'none') return 'main';
+  if (v === 'all') return 'all';
+  const n = Number(v);
+  const m = sucs.find((x) => x.id === n);
+  return !m ? 'main' : m.key;
+};
+
+/** «Todas»: la suma de las sucursales (gastos, horas y costo del mes); la hora = costo ÷ horas. */
+function sumarSucursales(partes, sucs) {
+  const base = partes.find((p) => p.sucursal === 'main') || partes[0];
+  const sum = (f) => partes.reduce((a, p) => a + (Number(f(p)) || 0), 0);
+  const costoMes = sum((p) => p.costoMes);
+  const horas = sum((p) => p.horas);
+  const costoHora = horas > 0 ? costoMes / horas : 0;
+  const h3 = partes.every((p) => p.horasUltimos3 == null) ? null : sum((p) => p.horasUltimos3);
+  const vLocal = sum((p) => p.meses.reduce((a, m) => a + m.ventasLocal, 0));
+  const vServ = sum((p) => p.meses.reduce((a, m) => a + m.ventasServicio, 0));
+  const rubros = base.rubros.map((r) => {
+    const deTodas = partes.map((p) => p.rubros.find((x) => x.clave === r.clave)).filter(Boolean);
+    const mensual = deTodas.reduce((a, x) => a + x.mensual, 0);
+    const asignado = deTodas.reduce((a, x) => a + x.asignado, 0);
+    const propios = new Map();
+    for (const x of deTodas) for (const pr of x.propios) propios.set(pr.codigo, { ...pr, mensual: (propios.get(pr.codigo)?.mensual || 0) + pr.mensual });
+    return { ...r, mensual, asignado, pct: r.incluido && mensual > 0 ? asignado / mensual * 100 : 0, propios: [...propios.values()] };
+  });
+  const conceptos = new Map();
+  for (const p of partes) for (const c of p.conceptos) conceptos.set(c.codigo, { ...c, mensual: (conceptos.get(c.codigo)?.mensual || 0) + c.mensual });
+  const margen = base.precioActual ? 1 - costoHora / base.precioActual : null;
+  return {
+    ...base, sucursal: 'all', sucursalNombre: 'Todas', sucursales: sucs, alquilerDe: null,
+    porSucursal: partes.map((p) => ({ sucursal: p.sucursal, nombre: p.sucursalNombre, costoMes: p.costoMes, horas: p.horas, costoHora: p.costoHora })),
+    horas, horasUltimos3: h3, parteVentas: vLocal > 0 ? vServ / vLocal : 0,
+    rubros, conceptos: [...conceptos.values()].sort((a, b) => b.mensual - a.mensual), costoMes, costoHora, margen,
+    mesesConDatos: Math.max(...partes.map((p) => p.mesesConDatos)),
+    familia: base.familia.map((f) => ({ ...f, costo: costoHora * f.factor })),
+    sinDatos: horas === 0 || costoMes === 0,
+  };
+}
+
 async function recetaDe(db, businessId, articleId) {
   const { rows } = await db.query(
     `SELECT id, article_id, nombre, servicio, porciones FROM recetas
@@ -137,10 +195,25 @@ async function recetaDe(db, businessId, articleId) {
  * Calcula una ancla con su familia. No escribe nada.
  * @returns detalle para el modal: costos por rubro, horas por mes, costo por hora y familia.
  */
-async function calcularAncla(businessId, anclaArticleId, { db = pool, configOverride = null, hoy = new Date(), detectar = true } = {}) {
+async function calcularAncla(businessId, anclaArticleId, { db = pool, configOverride = null, hoy = new Date(), detectar = true, sucursal } = {}) {
   const rec = await recetaDe(db, businessId, anclaArticleId);
   const cfg = normalizarConfig(configOverride || rec?.servicio);
   if (!cfg || cfg.tipo !== 'ancla') return null;
+
+  // Por sucursal (Diego 23/11/2026): sin sucursal pedida = «Todas» (lo que se guarda en la receta).
+  const sucs = await sucursalesDe(db, businessId);
+  let clave = sucursal === undefined ? 'all' : claveSucursal(sucursal, sucs);
+  if (clave === 'all' && sucs.length <= 1) clave = 'main';
+  if (clave === 'all') {
+    const partes = [];
+    for (const x of sucs) {
+      partes.push(await calcularAncla(businessId, anclaArticleId, { db, configOverride: cfg, hoy, detectar: detectar && x.key === 'main', sucursal: x.key }));
+    }
+    return sumarSucursales(partes.filter(Boolean), sucs);
+  }
+  const mainId = sucs[0].id;
+  const claveDe = (b) => (b == null || Number(b) === mainId ? 'main' : String(b));
+  const alquilerDe = cfg.alquilerDe?.[clave] && sucs.some((x) => x.key === cfg.alquilerDe[clave]) ? cfg.alquilerDe[clave] : clave;
 
   const { rows: bizRows } = await db.query(`SELECT organization_id FROM app_businesses WHERE id = $1`, [businessId]);
   const orgId = Number(bizRows[0]?.organization_id) || null;
@@ -158,8 +231,8 @@ async function calcularAncla(businessId, anclaArticleId, { db = pool, configOver
       horas: Number(d.horas) > 0 ? Number(d.horas) : null, pctHora: Number(d.pct_hora) > 0 ? Number(d.pct_hora) : null }))];
   const ids = familia.map((f) => f.articleId);
 
-  const suc = cfg.sucursal;
-  const lugarVentas = suc == null ? 'branch_id IS NULL' : 'branch_id = $4';
+  const suc = clave === 'main' ? null : Number(clave);
+  const lugarVentas = suc == null ? (mainId ? `(branch_id IS NULL OR branch_id = ${Number(mainId)})` : 'branch_id IS NULL') : 'branch_id = $4';
 
   // ── Ventas de 12 meses: total del local, de la familia y precio de la ancla por mes ──
   const mesesH = mesesCerrados(MESES_HORAS, hoy);
@@ -195,21 +268,26 @@ async function calcularAncla(businessId, anclaArticleId, { db = pool, configOver
   // ── Costos de los últimos 3 meses cerrados, por rubro y concepto (con aperturas) ──
   const mesesC = mesesCerrados(MESES_COSTO, hoy);
   const desdeC = `${mesesC[0]}-01`, hastaC = finDe(mesesC[mesesC.length - 1]);
+  // Gastos de todas las sucursales: el alquiler puede salir de otro PDV (cfg.alquilerDe).
   const paramsC = [businessId, desdeC, hastaC, orgId];
-  if (suc != null) paramsC.push(suc);
-  const lugarC = suc == null ? 'v.branch_id IS NULL' : 'v.branch_id = $5';
-  const { rows: costos } = orgId ? await db.query(
-    `SELECT cc."codRga" AS r, cc.codigo, cc.nombre,
+  const { rows: costosTodas } = orgId ? await db.query(
+    `SELECT v.branch_id AS b, cc."codRga" AS r, cc.codigo, cc.nombre,
             SUM(COALESCE(v."importeManual", v.importe))::float8 AS total,
             COUNT(DISTINCT to_char(date_trunc('month', COALESCE(v."fechaManual", v.periodo, v.fecha)), 'YYYY-MM'))::int AS meses
        FROM gestion_v_compras_distribuidas v
        JOIN gestion_conceptos_caja cc ON cc.organization_id = $4
                                      AND cc.codigo = COALESCE(v."conceptoCodigoManual", v."conceptoCodigo")
-      WHERE v.business_id = $1 AND ${lugarC}
+      WHERE v.business_id = $1
         AND COALESCE(v."fechaManual", v.periodo, v.fecha) >= $2::timestamp
         AND COALESCE(v."fechaManual", v.periodo, v.fecha) < $3::timestamp
         AND cc."codRga" IN ('1', '2', '3', '21')
-      GROUP BY 1, 2, 3`, paramsC) : { rows: [] };
+      GROUP BY 1, 2, 3, 4`, paramsC) : { rows: [] };
+  const sumaPorConcepto = (filas) => {
+    const m = new Map();
+    for (const c of filas) { const k = `${c.r}|${c.codigo}`; const prev = m.get(k); m.set(k, prev ? { ...prev, total: prev.total + c.total } : { ...c }); }
+    return [...m.values()];
+  };
+  const costos = sumaPorConcepto(costosTodas.filter((c) => (c.r === '21' ? claveDe(c.b) === alquilerDe : claveDe(c.b) === clave)));
 
   const propiosSet = new Set(cfg.propios);
   const rubros = RUBROS.map((r) => {
@@ -248,7 +326,7 @@ async function calcularAncla(businessId, anclaArticleId, { db = pool, configOver
     // Una foto guardada a mano más nueva que el aumento detectado manda; si es más vieja, gana lo detectado.
     if (aumento && !(cfg.base && cfg.base.fecha >= aumento.fecha)) {
       const antes = await calcularAncla(businessId, anclaArticleId, {
-        db, configOverride: { ...cfg, base: null }, hoy: new Date(`${aumento.fecha}T12:00:00Z`), detectar: false });
+        db, configOverride: { ...cfg, base: null }, hoy: new Date(`${aumento.fecha}T12:00:00Z`), detectar: false, sucursal: clave });
       if (antes?.costoMes > 0) {
         cfg.base = { fecha: aumento.fecha, costoMes: antes.costoMes, costoHora: antes.costoHora, precio: aumento.despues, detectado: true, precioAntes: aumento.antes };
       }
@@ -269,6 +347,7 @@ async function calcularAncla(businessId, anclaArticleId, { db = pool, configOver
   }
 
   return {
+    sucursal: clave, sucursalNombre: sucs.find((x) => x.key === clave)?.nombre || null, sucursales: sucs, alquilerDe,
     articleId: Number(anclaArticleId), recetaId: rec?.id ?? null, config: cfg,
     precioActual, margen, vsBase,
     meses, mesesConDatos: conHoras.length, horas, horasUltimos3: horas3, parteVentas,
@@ -315,4 +394,4 @@ async function listarAnclas(businessId, db = pool) {
     sucursal: r.sucursal == null ? null : Number(r.sucursal) }));
 }
 
-module.exports = { detectarAumento, normalizarBase, normalizarConfig, calcularAncla, aplicarCostosFamilia, recalcularServicio, listarAnclas, mesesCerrados, RUBROS };
+module.exports = { sucursalesDe, claveSucursal, sumarSucursales, detectarAumento, normalizarBase, normalizarConfig, calcularAncla, aplicarCostosFamilia, recalcularServicio, listarAnclas, mesesCerrados, RUBROS };
