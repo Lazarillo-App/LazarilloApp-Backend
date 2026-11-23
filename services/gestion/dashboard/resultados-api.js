@@ -725,7 +725,32 @@ async function obtenerResumenMes({ organizationId, businessId, anio, mes, sucurs
   const v = Number(ventas?.total ?? 0);
   const lista = rubros.map((r) => ({ rubro: r.rubro.trim(), total: Number(r.total) })).filter((r) => Math.abs(r.total) > 0.5);
   const gastos = lista.reduce((s, r) => s + r.total, 0);
-  return { ventas: v, gastos, resultado: v - gastos, rubros: lista };
+  const foodCostProy = await factoresFoodCost({ organizationId, businessId, anio, mes, sucursal }).catch((e) => {
+    console.error('[resumen] food cost proyectado', e.message); return null;
+  });
+  return { ventas: v, gastos, resultado: v - gastos, rubros: lista, foodCostProy };
+}
+
+// Food cost del mes en curso con LA MISMA proyección que Artículos (Diego 23/11/2026: «las proyecciones
+// también dan distintas y no deberían»): compras con el ritmo de cada día y el efecto víspera, sobre los
+// rubros de insumo que van a Mercaderías (services/foodCostProyeccion.js). El celular multiplica lo
+// cargado de Mercaderías por factorCompras. Solo el mes en curso; null si no hay con qué proyectar.
+async function factoresFoodCost({ organizationId, businessId, anio, mes, sucursal }) {
+  const hoy = new Date(Date.now() - 3 * 3600e3);
+  if (anio !== hoy.getUTCFullYear() || mes !== hoy.getUTCMonth() + 1) return null;
+  const pool = require('../../../config/db');
+  const { principalDe } = require('../../foodCostAjustes');
+  const principal = await principalDe(businessId);
+  const { rows } = await pool.query(
+    `SELECT DISTINCT ir.nombre FROM insumo_rubros ir
+       JOIN gestion_conceptos_caja cc ON cc.organization_id = $2 AND cc.codigo::text = COALESCE(ir.cpto_caja_lazarillo::text, ir.cpto_caja::text)
+       JOIN gestion_rubros_concepto_caja rc ON rc.organization_id = $2 AND rc.codigo = cc."codRga"
+      WHERE ir.business_id = $1 AND rc.nombre ILIKE '%mercader%'`, [principal, organizationId]);
+  if (!rows.length) return null;
+  const branchId = sucursal === undefined ? 'all' : sucursal === null ? 'none' : sucursal;
+  const p = await require('../../foodCostProyeccion').proyeccionFoodCost({ businessId, rubros: rows.map((r) => r.nombre), branchId });
+  if (!p || p.mes !== `${anio}-${String(mes).padStart(2, '0')}`) return null;
+  return { factorCompras: p.compras.factor, factorVentas: p.ventas.factor, metodo: p.compras.metodo, corte: p.corte };
 }
 
 // Editor de «Facturas que se repiten» (Diego 18/11/2026).
