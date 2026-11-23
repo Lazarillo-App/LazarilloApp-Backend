@@ -864,7 +864,20 @@ async function historialOp({ organizationId, businessId, sucursal, sp }) {
 }
 
 // ── Saldos de un proveedor (14 + informe 80 + pagos de Lazarillo) ─────
-async function saldosFacturas(cliente, businessId, codPro, facturas) {
+// «Gastos Varios» es UNO solo (Diego 23/11/2026): el proveedor GV de Lazarillo más los proveedores del
+// POS que se llaman igual y no están en el maestro (en MaxiRest se crearon varios «GASTOS VARIOS»).
+// Su cuenta corriente, su búsqueda y sus pagos van juntos; los pagos de Lazarillo se guardan con codPro GV.
+const NOMBRE_GV = 'gastos varios';
+async function codigosDe(cliente, businessId, codPro) {
+  if (codPro !== GV_CODIGO) return [codPro];
+  const rows = await cliente.many(sql`
+    SELECT DISTINCT codigo FROM gestion_compras
+    WHERE business_id = ${businessId} AND comprobante IS NOT NULL AND codigo IS NOT NULL AND "proveedorId" IS NULL
+      AND LOWER(TRIM(proveedor)) = ${NOMBRE_GV}`);
+  return [GV_CODIGO, ...rows.map((r) => r.codigo).filter((c) => c !== GV_CODIGO)];
+}
+
+async function saldosFacturas(cliente, businessId, codPro, facturas, codigos = [codPro]) {
   const res = new Map();
   if (!facturas.length) return res;
   const rows = await cliente.many(sql`
@@ -873,18 +886,18 @@ async function saldosFacturas(cliente, businessId, codPro, facturas) {
     )
     SELECT k.pdv, k.cpb,
       (SELECT TO_CHAR(MIN(COALESCE(c."fechaManual", c.fecha)), 'YYYY-MM-DD') FROM gestion_compras c
-        WHERE c.business_id = ${businessId} AND ${lugarSql('c')} = k.pdv AND c.comprobante = k.cpb AND c.codigo = ${codPro}) AS fecha14,
+        WHERE c.business_id = ${businessId} AND ${lugarSql('c')} = k.pdv AND c.comprobante = k.cpb AND c.codigo = ANY(${codigos}::text[])) AS fecha14,
       (SELECT SUM(COALESCE(c."importeManual", c.importe))::float8 FROM gestion_compras c
-        WHERE c.business_id = ${businessId} AND ${lugarSql('c')} = k.pdv AND c.comprobante = k.cpb AND c.codigo = ${codPro}) AS total14,
+        WHERE c.business_id = ${businessId} AND ${lugarSql('c')} = k.pdv AND c.comprobante = k.cpb AND c.codigo = ANY(${codigos}::text[])) AS total14,
       (SELECT TO_CHAR(MIN(p.fecha), 'YYYY-MM-DD') FROM gestion_pagos p
-        WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ${codPro}) AS fecha80,
+        WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ANY(${codigos}::text[])) AS fecha80,
       (SELECT MAX(p.total)::float8 FROM gestion_pagos p
-        WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ${codPro}) AS total80,
+        WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ANY(${codigos}::text[])) AS total80,
       (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(COALESCE(p."fechaPagoManual", p."fechaPago"), 'YYYY-MM-DD'), 'importe', p.importe::float8)) FROM gestion_pagos p
-        WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ${codPro}) AS p80,
+        WHERE p.business_id = ${businessId} AND ${lugarSql('p')} = k.pdv AND p.comprobante = k.cpb AND p."codPro" = ANY(${codigos}::text[])) AS p80,
       (SELECT JSON_AGG(JSON_BUILD_OBJECT('fecha', TO_CHAR(pp.fecha, 'YYYY-MM-DD'), 'importe', a.importe::float8))
         FROM gestion_aplicaciones_pago_proveedor a JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
-        WHERE a.business_id = ${businessId} AND ${lugarSql('a')} = k.pdv AND a.comprobante = k.cpb AND a."codPro" = ${codPro}) AS plz
+        WHERE a.business_id = ${businessId} AND ${lugarSql('a')} = k.pdv AND a.comprobante = k.cpb AND a."codPro" = ANY(${codigos}::text[])) AS plz
     FROM k`);
   for (const r of rows) {
     const total = Number(r.total80 ?? r.total14 ?? 0);
@@ -956,7 +969,7 @@ async function registrarPago({ organizationId, businessId, usuario, body }) {
     const lugares = await mapaLugares(tx, businessId);
     const elegidas = [...new Map((b.facturas ?? []).map((f) => [claveFactura(f.pdvId, f.comprobante), f])).values()];
     if (elegidas.some((f) => !lugares.has(f.pdvId))) throw rechazo('Alguna factura elegida no existe.');
-    const saldos = await saldosFacturas(tx, businessId, b.codPro, elegidas);
+    const saldos = await saldosFacturas(tx, businessId, b.codPro, elegidas, await codigosDe(tx, businessId, b.codPro));
     if ([...saldos.values()].some((s) => !s.existe)) throw rechazo('Alguna factura elegida no existe.');
     const pendientes = [...saldos.values()].map((s) => ({ key: s.key, fecha: s.fecha, saldo: s.saldo }));
     if (elegidas.length && !pendientes.some((p) => p.saldo > 0.004)) throw rechazo('Esas facturas ya están pagas.');
@@ -1108,7 +1121,7 @@ async function quitarAplicacion({ organizationId, businessId, usuario, id, sp })
 
 // ── Cuenta corriente ──────────────────────────────────────────────────
 // Facturas del proveedor en este negocio (pagas incluidas), una por lugar + comprobante.
-function facturasCtaCteSql({ organizationId, businessId, codPro }) {
+function facturasCtaCteSql({ organizationId, businessId, codPro, codigos = [codPro] }) {
   return sql`
     WITH f AS (
       SELECT
@@ -1120,10 +1133,11 @@ function facturasCtaCteSql({ organizationId, businessId, codPro }) {
         MIN(c."rowId")                                                 AS row_id
       FROM gestion_compras c
       LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId} AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") = cc.codigo
-      WHERE c.business_id = ${businessId} AND c.codigo = ${codPro} AND c.comprobante IS NOT NULL
+      WHERE c.business_id = ${businessId} AND c.codigo = ANY(${codigos}::text[]) AND c.comprobante IS NOT NULL
         -- Solo las compras del proveedor del maestro: el mismo código se repite en gastos varios y
-        -- empleados (texto, sin proveedorId).
-        AND c."proveedorId" IN (SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND codigo = ${codPro})
+        -- empleados (texto, sin proveedorId). Gastos Varios suma los del POS que se llaman igual.
+        AND (c."proveedorId" IN (SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND codigo = ${codPro})
+          ${codigos.length > 1 ? sql`OR (c."proveedorId" IS NULL AND LOWER(TRIM(c.proveedor)) = ${NOMBRE_GV})` : sql``})
       GROUP BY 1, c.comprobante
     ),
     pg AS (
@@ -1137,7 +1151,7 @@ function facturasCtaCteSql({ organizationId, businessId, codPro }) {
           'fecha', TO_CHAR(COALESCE("fechaPagoManual", "fechaPago"), 'YYYY-MM-DD'), 'importe', importe::float8, 'medio', medio, 'orden', orden
         ) ORDER BY COALESCE("fechaPagoManual", "fechaPago"), secuencia) AS pagos
       FROM gestion_pagos g
-      WHERE g.business_id = ${businessId} AND "codPro" = ${codPro} AND comprobante IS NOT NULL
+      WHERE g.business_id = ${businessId} AND "codPro" = ANY(${codigos}::text[]) AND comprobante IS NOT NULL
       GROUP BY 1, comprobante
     ),
     lz AS (
@@ -1150,7 +1164,7 @@ function facturasCtaCteSql({ organizationId, businessId, codPro }) {
       JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
       JOIN app_businesses bp ON bp.id = pp.business_id
       LEFT JOIN app_branches sp ON sp.id = pp.branch_id
-      WHERE a.business_id = ${businessId} AND a."codPro" = ${codPro}
+      WHERE a.business_id = ${businessId} AND a."codPro" = ANY(${codigos}::text[])
       GROUP BY 1, a.comprobante
     )
     SELECT
@@ -1214,8 +1228,9 @@ async function obtenerCtaCte({ organizationId, businessId, sp }) {
     };
   }
 
+  const codigos = await codigosDe(db, businessId, codPro);
   const [facturas, prov, aCuenta] = await Promise.all([
-    db.many(facturasCtaCteSql({ organizationId, businessId, codPro })),
+    db.many(facturasCtaCteSql({ organizationId, businessId, codPro, codigos })),
     db.one(sql`
       SELECT COALESCE(p.nombre, (SELECT MAX(c.proveedor) FROM gestion_compras c WHERE c.business_id = ${businessId} AND c.codigo = ${codPro})) AS nombre,
              p.razon, p.cuit, p."pagoAutomatico" AS pago_automatico
@@ -1261,12 +1276,18 @@ async function buscarProveedoresCtaCte({ organizationId, businessId, sp }) {
   const q = (sp.get('q') ?? '').trim().slice(0, 60);
   const patron = `%${q.toLowerCase().replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
   const rows = await db.many(sql`
-    SELECT c.codigo AS cod_pro, COALESCE(MAX(p.nombre), MAX(c.proveedor)) AS nombre, COUNT(DISTINCT c.comprobante)::int AS facturas
-    FROM gestion_compras c
-    LEFT JOIN gestion_proveedores p ON p.organization_id = ${organizationId} AND p.codigo = c.codigo
-    WHERE c.business_id = ${businessId} AND c.codigo IS NOT NULL AND c.comprobante IS NOT NULL
-    GROUP BY c.codigo
-    HAVING ${q ? sql`lower(COALESCE(MAX(p.nombre), MAX(c.proveedor), '')) LIKE ${patron} OR c.codigo = ${q}` : sql`TRUE`}
+    SELECT k.cod_pro, CASE WHEN k.cod_pro = ${GV_CODIGO} THEN 'Gastos Varios' ELSE COALESCE(MAX(p.nombre), MAX(k.proveedor)) END AS nombre,
+           COUNT(DISTINCT k.comprobante)::int AS facturas
+    FROM (
+      -- Gastos Varios va en una sola fila: el de Lazarillo y los del POS que se llaman igual (Diego 23/11/2026).
+      SELECT CASE WHEN c.codigo = ${GV_CODIGO} OR (c."proveedorId" IS NULL AND LOWER(TRIM(c.proveedor)) = ${NOMBRE_GV}) THEN ${GV_CODIGO} ELSE c.codigo END AS cod_pro,
+             c.proveedor, c.comprobante
+      FROM gestion_compras c
+      WHERE c.business_id = ${businessId} AND c.codigo IS NOT NULL AND c.comprobante IS NOT NULL
+    ) k
+    LEFT JOIN gestion_proveedores p ON p.organization_id = ${organizationId} AND p.codigo = k.cod_pro
+    GROUP BY k.cod_pro
+    HAVING ${q ? sql`lower(CASE WHEN k.cod_pro = ${GV_CODIGO} THEN 'Gastos Varios' ELSE COALESCE(MAX(p.nombre), MAX(k.proveedor), '') END) LIKE ${patron} OR k.cod_pro = ${q}` : sql`TRUE`}
     ORDER BY 3 DESC
     LIMIT 12`);
   return { proveedores: rows.map((r) => ({ codPro: r.cod_pro, nombre: r.nombre?.trim() || `Proveedor ${r.cod_pro}`, facturas: Number(r.facturas) })) };
