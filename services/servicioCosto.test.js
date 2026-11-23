@@ -69,3 +69,16 @@ describe('vsBase', () => {
     expect(srv.normalizarBase({ fecha: 'ayer', costoMes: 5 })).toBe(null);
   });
 });
+
+// Último aumento detectado en las ventas (Diego 23/11/2026): Cancha 3 de Ramos pasó de $ 70.000 a
+// $ 75.000 el 07/09/2026; un día suelto con venta grande (42.727) no corta.
+describe('detectarAumento', () => {
+  it('encuentra el último aumento y saltea días sueltos', () => {
+    const d = (f, p) => ({ fecha: `2026-${f}`, precio: p });
+    const dias = [d('08-24', 70000), d('08-25', 70000), d('08-26', 70000), d('08-27', 70000), d('08-28', 42727),
+      d('08-29', 70000), d('08-31', 70000), d('09-01', 70000), d('09-02', 70000), d('09-05', 70000),
+      d('09-07', 75000), d('09-08', 75000), d('09-09', 60000), d('09-10', 75000), d('09-11', 75000), d('09-12', 75000)];
+    expect(srv.detectarAumento(dias)).toEqual({ fecha: '2026-09-07', antes: 70000, despues: 75000 });
+    expect(srv.detectarAumento(dias.slice(10))).toBe(null);
+  });
+});
