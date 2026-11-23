@@ -108,7 +108,7 @@ router.put('/:articleId', async (req, res, next) => {
     await client.query('COMMIT');
     invalidateCacheForBiz(bizId);
     const titulo = config.tipo === 'ancla'
-      ? `Servicio ancla: ${nombre}` : `Servicio: ${nombre} (${String(Math.round(config.factor * 1000) / 10).replace('.', ',')} % de la ancla)`;
+      ? `Servicio ancla: ${nombre}` : (config.horas ? `Servicio: ${nombre} (${String(config.horas).replace('.', ',')} h al ${String(config.pctHora).replace('.', ',')} % de la ancla)` : `Servicio: ${nombre} (${String(Math.round(config.factor * 1000) / 10).replace('.', ',')} % de la ancla)`);
     avisarAbm(req, { businessId: bizId, type: 'servicio_config', title: titulo, metadata: { articleId, tipo: config.tipo }, clave: `servicio:${articleId}` });
     res.json({ ok: true, config, calculo });
   } catch (e) {
