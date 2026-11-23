@@ -143,6 +143,16 @@ const proveedorMP = async (organizationId) => (await db.one(sql`
   SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId}
      AND LOWER(TRIM(BOTH '.' FROM TRIM(nombre))) IN ('mercado pago', 'mercadopago') ORDER BY id LIMIT 1`))?.codigo || null;
 
+// «Mercado Pago» y «Mercado Libre» son la misma empresa (Diego 23/11/2026): la factura mensual de comisiones de MP
+// se carga con cualquiera de los dos. Una factura de uno cubre las comisiones que se cargarían con el otro.
+const NOMBRES_FAMILIA = ['mercado pago', 'mercadopago', 'mercado libre', 'mercadolibre'];
+async function familiaMP(organizationId) {
+  return (await db.many(sql`SELECT codigo FROM gestion_proveedores WHERE organization_id = ${organizationId}
+     AND LOWER(TRIM(BOTH '.' FROM TRIM(nombre))) = ANY(${NOMBRES_FAMILIA}::text[])`)).map((x) => String(x.codigo));
+}
+const conFamilia = (provs, fam) => (provs.some((p) => fam.includes(String(p))) ? [...new Set([...provs.map(String), ...fam])] : provs.map(String));
+const claveProv = (p, fam) => (fam.includes(String(p)) ? 'familia:mp' : String(p));
+
 /**
  * Proveedor y concepto de cada tipo (claves del mes): lo elegido para ese tipo, si no lo elegido para su tipo
  * general (base), si no el sugerido (el de la cuenta / «Mercado Libre»). «-» = quitado a mano: queda sin elegir.
@@ -499,21 +509,23 @@ async function absorberNegocio(businessId, organizationId) {
   const org = await estadoOrg(organizationId);
   let pasados = 0;
   const usadas = new Set();
+  const fam = await familiaMP(organizationId);
   for (const prov of [...new Set(pendientes.map((x) => x.proveedor_cod))]) {
     const cola = pendientes.filter((x) => x.proveedor_cod === prov);
+    const deProv = conFamilia([prov], fam);
     // Facturas del proveedor (no tickets ni NC), con su saldo según lo aplicado en Lazarillo.
     const facturas = await db.many(sql`
-      SELECT c.branch_id::text AS branch_id, c.comprobante, to_char(MIN(c.fecha), 'YYYY-MM-DD') AS fecha,
+      SELECT c.branch_id::text AS branch_id, c.codigo::text AS codigo, c.comprobante, to_char(MIN(c.fecha), 'YYYY-MM-DD') AS fecha,
              SUM(COALESCE(c."importeManual", c.importe))::float8
              - COALESCE((SELECT SUM(a.importe) FROM gestion_aplicaciones_pago_proveedor a JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
-                          WHERE a.business_id = ${businessId} AND a.branch_id IS NOT DISTINCT FROM c.branch_id AND a.comprobante = c.comprobante AND a."codPro" = ${prov}), 0)::float8 AS saldo
+                          WHERE a.business_id = ${businessId} AND a.branch_id IS NOT DISTINCT FROM c.branch_id AND a.comprobante = c.comprobante AND a."codPro" = c.codigo), 0)::float8 AS saldo
         FROM gestion_compras c
-       WHERE c.business_id = ${businessId} AND c.codigo = ${prov} AND c.comprobante IS NOT NULL
+       WHERE c.business_id = ${businessId} AND c.codigo = ANY(${deProv}::text[]) AND c.comprobante IS NOT NULL
          AND UPPER(LEFT(c.comprobante, 1)) NOT IN ('Z', 'N', 'E', 'G')
          AND c.fecha >= ${org?.desde || '2999-01-01'}::date
          AND NOT EXISTS (SELECT 1 FROM gestion_pagos pg WHERE pg.business_id = c.business_id AND pg.branch_id IS NOT DISTINCT FROM c.branch_id
                            AND pg.comprobante = c.comprobante AND pg."codPro" = c.codigo AND pg.importe IS NOT NULL)
-       GROUP BY c.branch_id, c.comprobante
+       GROUP BY c.branch_id, c.codigo, c.comprobante
       HAVING SUM(COALESCE(c."importeManual", c.importe)) > 0
        ORDER BY MIN(c.fecha), c.comprobante`);
     for (const f of facturas) {
@@ -536,8 +548,12 @@ async function pasarAFactura(businessId, t, f) {
     const ya = await tx.one(sql`SELECT absorbido_en FROM mp_cargos_cargados WHERE business_id = ${businessId} AND sucursal = ${t.sucursal} AND cuenta = ${t.cuenta}::bigint AND fecha = ${t.fecha}::date AND grupo = ${t.grupo} FOR UPDATE`);
     if (!ya || ya.absorbido_en) return;
     await tx.execute(sql`
-      UPDATE gestion_aplicaciones_pago_proveedor SET business_id = ${businessId}, branch_id = ${f.branch_id}::bigint, comprobante = ${f.comprobante}
+      UPDATE gestion_aplicaciones_pago_proveedor SET business_id = ${businessId}, branch_id = ${f.branch_id}::bigint, comprobante = ${f.comprobante}, "codPro" = ${f.codigo || t.proveedor_cod}
        WHERE "pagoId" = ${t.pago_id} AND comprobante = ${t.comprobante}`);
+    // Factura cargada con el otro proveedor de la misma empresa (Mercado Libre / Mercado Pago): el pago pasa a ese.
+    if (f.codigo && String(f.codigo) !== String(t.proveedor_cod)) {
+      await tx.execute(sql`UPDATE gestion_pagos_proveedor SET "codPro" = ${f.codigo} WHERE id = ${t.pago_id}`);
+    }
     await tx.execute(sql`
       INSERT INTO gestion_eventos_pago_proveedor ("pagoId", tipo, detalle, importe, usuario)
       VALUES (${t.pago_id}, 'reimputado', ${`De ${t.comprobante} a la factura ${f.comprobante}`}, ${t.importe}::numeric, ${USUARIO})`);
@@ -549,6 +565,97 @@ async function pasarAFactura(businessId, t, f) {
       UPDATE mp_cargos_cargados SET absorbido_en = ${f.comprobante}, absorbido_at = now()
        WHERE business_id = ${businessId} AND sucursal = ${t.sucursal} AND cuenta = ${t.cuenta}::bigint AND fecha = ${t.fecha}::date AND grupo = ${t.grupo}`);
   });
+}
+
+/**
+ * Cargar lo de MESES ANTERIORES de los tipos que ya tienen concepto (Diego 23/11/2026: «Desde el banco, cuando
+ * los conceptos están elegidos, ¿no debería desaparecer?»). Mismo ticket diario que la carga sola, desde el 1/1
+ * del año hasta el día anterior a que arranque la carga sola (o ayer). No toca: lo ya cargado, los días que no se
+ * trajeron enteros, los días con más devoluciones que cargos ni las comisiones de un mes con factura del proveedor
+ * (ya entraron por la factura). Solo tipos con concepto Y proveedor. grupos = lista de claves (sin = todos).
+ */
+async function cargarPasado(businessId, { grupos: soloGrupos, simular = false } = {}) {
+  const organizationId = await orgDe(businessId);
+  if (!organizationId) return { cargados: 0, total: 0 };
+  const hay = await db.one(sql`SELECT 1 AS ok FROM integraciones_mercadopago WHERE business_id = ${businessId} LIMIT 1`);
+  if (!hay) return { cargados: 0, total: 0 };
+  const org = await estadoOrg(organizationId);
+  const ayer = masDias(hoyAR(), -1);
+  // Desde lo más viejo que se trajo de Mercado Pago (Diego 23/11/2026: «lo que no está cargado, al histórico»).
+  const desde = (await db.one(sql`SELECT to_char(MIN(fecha), 'YYYY-MM-DD') AS d FROM mp_pagos WHERE business_id = ${businessId}`))?.d || `${hoyAR().slice(0, 4)}-01-01`;
+  const tope = org?.activo && org.desde && masDias(org.desde, -1) < ayer ? masDias(org.desde, -1) : ayer;
+  if (tope < desde) return { cargados: 0, total: 0 };
+  let dias = await diario(businessId, desde, tope);
+  if (soloGrupos?.length) dias = dias.filter((d) => soloGrupos.includes(d.grupo));
+  if (!dias.length) return { cargados: 0, total: 0 };
+  if (!simular && !(await proveedorMP(organizationId))) {
+    await require('./gestion/carga-api').crearProveedor({ organizationId, body: { nombre: 'Mercado Pago' } }).catch(() => null);
+  }
+  const cfg = await configDe(organizationId, businessId, dias.map((d) => d.grupo));
+  const porGrupo = Object.fromEntries(cfg.grupos.filter((g) => g.concepto && g.proveedor).map((g) => [g.grupo, g]));
+  const hastaCuenta = new Map((await db.many(sql`
+    SELECT sucursal, mp_user_id::text AS cuenta, to_char(ultimo_sync_hasta, 'YYYY-MM-DD') AS hasta FROM integraciones_mercadopago WHERE business_id = ${businessId}`))
+    .map((c) => [`${c.sucursal}|${c.cuenta}`, c.hasta]));
+  const nombreCuenta = new Map(cfg.cuentas.map((c) => [`${c.sucursal}|${c.cuenta}`, c.nombre]));
+  const hechos = new Set((await db.many(sql`
+    SELECT sucursal, cuenta::text AS cuenta, grupo, to_char(fecha, 'YYYY-MM-DD') AS fecha FROM mp_cargos_cargados
+     WHERE business_id = ${businessId} AND fecha BETWEEN ${desde}::date AND ${tope}::date`)).map((x) => `${x.sucursal}|${x.cuenta}|${x.grupo}|${x.fecha}`));
+  const fam = await familiaMP(organizationId);
+  const provs = conFamilia([...new Set(Object.values(porGrupo).filter((g) => g.facturable).map((g) => g.proveedor))], fam);
+  const facturado = new Set(provs.length ? (await db.many(sql`
+    SELECT DISTINCT codigo, to_char(fecha, 'YYYY-MM') AS mes FROM gestion_compras
+     WHERE business_id = ${businessId} AND codigo = ANY(${provs}::text[]) AND fecha BETWEEN ${desde}::date AND ${tope}::date
+       AND comprobante IS NOT NULL AND UPPER(LEFT(comprobante, 1)) NOT IN ('Z', 'N', 'E', 'G')`)).map((x) => `${claveProv(x.codigo, fam)}|${x.mes}`) : []);
+  const carga = require('./gestion/carga-api');
+  let cargados = 0, total = 0;
+  const errores = [];
+  const porMes = {};
+  for (const d of dias) {
+    const g = porGrupo[d.grupo];
+    if (!g || d.importe <= 0) continue;
+    if (hechos.has(`${d.sucursal}|${d.cuenta}|${d.grupo}|${d.fecha}`)) continue;
+    const hasta = hastaCuenta.get(`${d.sucursal}|${d.cuenta}`);
+    if (!hasta || d.fecha > hasta) continue;
+    if (g.facturable && facturado.has(`${claveProv(g.proveedor, fam)}|${d.fecha.slice(0, 7)}`)) continue;
+    if (simular) {
+      const m = d.fecha.slice(0, 7);
+      porMes[m] = porMes[m] || { tickets: 0, total: 0 };
+      porMes[m].tickets += 1; porMes[m].total = r2(porMes[m].total + d.importe);
+      cargados += 1; total = r2(total + d.importe);
+      continue;
+    }
+    try {
+      await cargarDia(carga, { organizationId, businessId, dia: d, grupo: g, cuentaNombre: nombreCuenta.get(`${d.sucursal}|${d.cuenta}`) || d.cuenta });
+      cargados += 1; total = r2(total + d.importe);
+    } catch (e) {
+      errores.push(`${d.fecha} ${d.grupo}: ${e.message}`);
+      if (errores.length > 5) break;
+    }
+  }
+  if (simular) return { simulado: true, desde, hasta: tope, cargados, total, porMes };
+  if (errores.length) console.error('[mp-cargos] pasado', businessId, errores);
+  for (const k of [...cacheBanco.keys()]) if (k.startsWith(`${businessId}|`)) cacheBanco.delete(k);
+  return { cargados, total, errores };
+}
+
+/** cargarPasado en todos los negocios de la organización con Mercado Pago (la configuración es de la organización),
+ *  con un aviso a la campana por negocio si cargó algo. */
+async function cargarPasadoOrg(businessId, { grupos, simular = false } = {}) {
+  const organizationId = await orgDe(businessId);
+  if (!organizationId) return [];
+  const negocios = (await db.many(sql`
+    SELECT DISTINCT i.business_id FROM integraciones_mercadopago i JOIN app_businesses b ON b.id = i.business_id
+     WHERE b.organization_id = ${organizationId}`)).map((x) => Number(x.business_id));
+  const out = [];
+  for (const biz of negocios) {
+    const r = await cargarPasado(biz, { grupos, simular }).catch((e) => ({ cargados: 0, total: 0, errores: [e.message] }));
+    out.push({ businessId: biz, ...r });
+    if (r.cargados && !simular) {
+      const { avisarAlEquipo } = require('./notificationService');
+      await avisarAlEquipo({ businessId: biz, type: 'mp_cargos', title: `Mercado Pago: ${r.cargados} gasto${r.cargados === 1 ? '' : 's'} de meses anteriores cargado${r.cargados === 1 ? '' : 's'} ($ ${r.total.toLocaleString('es-AR')})`, metadata: { link: '/gestion' } }).catch(() => {});
+    }
+  }
+  return out;
 }
 
 /**
@@ -592,16 +699,17 @@ async function sinCargar({ businessId, anio, sucursal } = {}) {
   const cfg = await configDe(organizationId, businessId, [...porGrupo.keys()]);
   // Meses con factura del proveedor (ARCA o a mano, no tickets): las comisiones de ese mes ya están en el tablero
   // por la factura (Comercio carga la de Mercado Pago todos los meses). Las retenciones no tienen factura: siguen.
-  const provs = [...new Set(cfg.grupos.filter((g) => g.facturable && g.proveedor).map((g) => g.proveedor))];
+  const fam = await familiaMP(organizationId);
+  const provs = conFamilia([...new Set(cfg.grupos.filter((g) => g.facturable && g.proveedor).map((g) => g.proveedor))], fam);
   const facturado = new Set(provs.length ? (await db.many(sql`
     SELECT DISTINCT codigo, EXTRACT(MONTH FROM fecha)::int AS mes FROM gestion_compras
      WHERE business_id = ${businessId} AND codigo = ANY(${provs}::text[]) AND fecha >= ${desde}::date AND fecha < ${desde}::date + interval '1 year'
-       AND comprobante IS NOT NULL AND UPPER(LEFT(comprobante, 1)) NOT IN ('Z', 'N', 'E', 'G')`)).map((x) => `${x.codigo}|${x.mes}`) : []);
+       AND comprobante IS NOT NULL AND UPPER(LEFT(comprobante, 1)) NOT IN ('Z', 'N', 'E', 'G')`)).map((x) => `${claveProv(x.codigo, fam)}|${x.mes}`) : []);
   for (const g of cfg.grupos) {
     const v = porGrupo.get(g.grupo);
     if (!v || !g.facturable || !g.proveedor) continue;
     for (const m of Object.keys(v.values)) {
-      if (facturado.has(`${g.proveedor}|${m}`)) { v.total = r2(v.total - v.values[m]); delete v.values[m]; }
+      if (facturado.has(`${claveProv(g.proveedor, fam)}|${m}`)) { v.total = r2(v.total - v.values[m]); delete v.values[m]; }
     }
   }
   const grupos = cfg.grupos.map((g) => ({
@@ -614,4 +722,4 @@ async function sinCargar({ businessId, anio, sucursal } = {}) {
   return { conectado: true, activo: cfg.activo, grupos, values, total: r2(grupos.reduce((s, g) => s + g.total, 0)) };
 }
 
-module.exports = { sinCargar, aplicarConceptos, estadoOrg, DESDE_DEFECTO, infoGrupo, CASE_GRUPO, sqlDiario, resumen, configurar, crearConceptos, crearProveedor, detalle, activar, cargarNegocio, absorberNegocio };
+module.exports = { cargarPasado, cargarPasadoOrg, sinCargar, aplicarConceptos, estadoOrg, DESDE_DEFECTO, infoGrupo, CASE_GRUPO, sqlDiario, resumen, configurar, crearConceptos, crearProveedor, detalle, activar, cargarNegocio, absorberNegocio };
