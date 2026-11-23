@@ -8,7 +8,9 @@
 //              pct: { alquiler, sueldos, servicios, mercaderias }  (0-100; solo con reparto 'manual'),
 //              propios: [codigoConcepto] }  conceptos que son 100 % del servicio (Beelup, césped…)
 //            base: { fecha, costoMes, costoHora, precio }  la foto del día del último aumento (opcional)
-//   derivado { tipo: 'derivado', ancla: articleId, factor: number }  (0,93 = 93 % de la hora de la ancla;
+//   derivado { tipo: 'derivado', ancla: articleId, factor: number, horas?, pctHora? }  (factor = horas ×
+//              pctHora ÷ 100; Diego 23/11/2026: el colegio son 40 horas que se cobran juntas). Sin horas:
+//              (0,93 = 93 % de la hora de la ancla;
 //              3,7 = un cumple que vale 3,7 horas)
 //
 // Ancla:
@@ -75,6 +77,11 @@ function normalizarConfig(c) {
   }
   if (c.tipo === 'derivado') {
     const ancla = Number(c.ancla);
+    const horas = Number(c.horas);
+    const pctHora = Number(c.pctHora);
+    if (Number.isFinite(ancla) && ancla !== 0 && horas > 0 && pctHora > 0) {
+      return { tipo: 'derivado', ancla, horas, pctHora, factor: horas * pctHora / 100 };
+    }
     const factor = Number(c.factor);
     if (!Number.isFinite(ancla) || ancla === 0 || !(factor > 0)) return null;
     return { tipo: 'derivado', ancla, factor };
@@ -140,13 +147,15 @@ async function calcularAncla(businessId, anclaArticleId, { db = pool, configOver
 
   // Familia: la ancla (factor 1) + los derivados del negocio que la eligieron.
   const { rows: der } = await db.query(
-    `SELECT r.article_id, r.nombre, (r.servicio->>'factor')::float8 AS factor
+    `SELECT r.article_id, r.nombre, (r.servicio->>'factor')::float8 AS factor,
+            (r.servicio->>'horas')::float8 AS horas, (r.servicio->>'pctHora')::float8 AS pct_hora
        FROM recetas r
       WHERE r.business_id = $1 AND r.active = TRUE AND r.servicio->>'tipo' = 'derivado'
         AND (r.servicio->>'ancla')::bigint = $2
       ORDER BY r.nombre`, [businessId, anclaArticleId]);
   const familia = [{ articleId: Number(anclaArticleId), nombre: rec?.nombre || null, factor: 1, ancla: true },
-    ...der.map((d) => ({ articleId: Number(d.article_id), nombre: d.nombre, factor: Number(d.factor) || 0, ancla: false }))];
+    ...der.map((d) => ({ articleId: Number(d.article_id), nombre: d.nombre, factor: Number(d.factor) || 0, ancla: false,
+      horas: Number(d.horas) > 0 ? Number(d.horas) : null, pctHora: Number(d.pct_hora) > 0 ? Number(d.pct_hora) : null }))];
   const ids = familia.map((f) => f.articleId);
 
   const suc = cfg.sucursal;
