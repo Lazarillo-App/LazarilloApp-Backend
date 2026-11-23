@@ -397,42 +397,127 @@ const patchCompra = z.object({
 });
 
 // PATCH de una compra del negocio activo: los campos manuales (la reimportación no los pisa).
-async function editarCompra({ organizationId, businessId, rowId, body }) {
+// Regla «todo ABM queda en Notificaciones» (Diego 23/11/2026): cada edición deja su línea en la
+// Actividad de Resultados (campanita), con el antes → después de lo que cambió.
+async function editarCompra({ organizationId, businessId, usuario = null, rowId, body }) {
   const parsed = patchCompra.safeParse(body);
   if (!parsed.success) { const e = new ErrorDatos("Datos inválidos"); e.status = 422; throw e; }
-  const { importeManual, fechaManual, conceptoCodigoManual, observacManual, fechaPagoManual } = parsed.data;
-
   return db.transaction(async (tx) => {
-    const compra = await tx.one(sql`
-      SELECT "rowId", "conceptoCodigoManual" FROM gestion_compras
-      WHERE business_id = ${businessId} AND "rowId" = ${rowId} FOR UPDATE`);
-    if (!compra) { const e = new ErrorDatos("Registro no encontrado"); e.status = 404; throw e; }
-
-    const afectaReparto = importeManual !== undefined || fechaManual !== undefined || conceptoCodigoManual !== undefined;
-    if (conceptoCodigoManual) {
-      const existe = await tx.one(sql`SELECT 1 AS ok FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${conceptoCodigoManual}`);
-      if (!existe) { const e = new ErrorDatos("Concepto no encontrado"); e.status = 404; throw e; }
+    const r = await aplicarEdicionCompra(tx, { organizationId, businessId, rowId, datos: parsed.data });
+    if (r.cambios.length) {
+      await registrarActividadCompra(tx, {
+        organizationId, businessId, usuario, refId: rowId,
+        descripcion: `${r.nombre}\n${r.cambios.join(' · ')}`.slice(0, 500),
+      });
     }
-
-    const sets = [];
-    if (importeManual !== undefined) sets.push(sql`"importeManual" = ${importeManual}::numeric`);
-    if (fechaManual !== undefined) sets.push(sql`"fechaManual" = ${fechaManual}::timestamptz AT TIME ZONE 'UTC'`);
-    if (conceptoCodigoManual !== undefined) sets.push(sql`"conceptoCodigoManual" = ${conceptoCodigoManual}`);
-    if (observacManual !== undefined) sets.push(sql`"observacManual" = ${observacManual}`);
-    if (fechaPagoManual !== undefined) sets.push(sql`"fechaPagoManual" = ${fechaPagoManual}::timestamp(3)`);
-    // Si una persona cambia el concepto, deja de ser el "concepto fijo del empleado".
-    if (conceptoCodigoManual !== undefined && conceptoCodigoManual !== compra.conceptoCodigoManual) sets.push(sql`"conceptoPorRegla" = NULL`);
-    if (!sets.length) return { rowId, reevaluada: false, distribuidaAhora: false };
-
-    const updated = await tx.one(sql`
-      UPDATE gestion_compras SET ${sql.join(sets, ", ")}
-      WHERE business_id = ${businessId} AND "rowId" = ${rowId}
-      RETURNING "rowId", "importeManual", "fechaManual", "conceptoCodigoManual", "observacManual", "fechaPagoManual"`);
-    const reeval = afectaReparto
-      ? await reevaluarCompra(tx, { organizationId, businessId }, rowId)
-      : { reevaluada: false, distribuidaAhora: false };
-    return { ...updated, ...reeval };
+    return r.respuesta;
   });
+}
+
+// PATCH en lote (correcciones masivas de datos que vienen mal del POS, Diego 23/11/2026): aplica
+// la misma edición fila por fila, todo o nada, y deja UNA sola línea en la Actividad con la cantidad
+// y el motivo (no una por registro).
+const patchLote = z.object({
+  motivo: z.string().trim().min(1).max(200),
+  items: z.array(patchCompra.extend({ rowId: z.string().min(1).max(100) })).min(1).max(500),
+});
+async function editarComprasLote({ organizationId, businessId, usuario = null, body }) {
+  const parsed = patchLote.safeParse(body);
+  if (!parsed.success) { const e = new ErrorDatos("Datos inválidos"); e.status = 422; throw e; }
+  const { motivo, items } = parsed.data;
+  if (new Set(items.map((i) => i.rowId)).size !== items.length) { const e = new ErrorDatos("Hay registros repetidos"); e.status = 422; throw e; }
+  return db.transaction(async (tx) => {
+    let editadas = 0;
+    const filas = [];
+    for (const { rowId, ...datos } of items) {
+      const r = await aplicarEdicionCompra(tx, { organizationId, businessId, rowId, datos });
+      if (r.cambios.length) editadas += 1;
+      filas.push(r.respuesta);
+    }
+    if (editadas) {
+      await registrarActividadCompra(tx, {
+        organizationId, businessId, usuario, refId: null,
+        descripcion: `Corrección en lote: ${editadas} ${editadas === 1 ? 'registro' : 'registros'}\n${motivo}`.slice(0, 500),
+      });
+    }
+    return { ok: true, editadas, filas };
+  });
+}
+
+const fechaCorta = (v) => {
+  if (v == null) return '—';
+  const d = v instanceof Date ? v : new Date(String(v).length === 10 ? `${v}T12:00:00Z` : v);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`;
+};
+const pesosCortos = (n) => (n == null ? '—' : `$ ${Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+
+async function registrarActividadCompra(tx, a) {
+  await tx.execute(sql`
+    INSERT INTO gestion_actividad (organization_id, business_id, tipo, accion, descripcion, "refId", usuario, datos)
+    VALUES (${a.organizationId}, ${a.businessId}, 'compra', 'editada', ${a.descripcion}, ${a.refId}, ${a.usuario}, NULL)`);
+}
+
+// Una edición dentro de una transacción: devuelve la respuesta de siempre y la lista de cambios
+// en texto («F. gasto 15/09/2026 → 15/08/2026») para la Actividad.
+async function aplicarEdicionCompra(tx, { organizationId, businessId, rowId, datos }) {
+  const { importeManual, fechaManual, conceptoCodigoManual, observacManual, fechaPagoManual } = datos;
+  const compra = await tx.one(sql`
+    SELECT c."rowId", c."conceptoCodigoManual", c."conceptoCodigo", c.concepto, c.proveedor, c.importe, c."importeManual",
+           c.fecha, c."fechaManual", c."fechaPago", c."fechaPagoManual", c.observac, c."observacManual"
+    FROM gestion_compras c
+    WHERE c.business_id = ${businessId} AND c."rowId" = ${rowId} FOR UPDATE`);
+  if (!compra) { const e = new ErrorDatos(`Registro no encontrado: ${rowId}`); e.status = 404; throw e; }
+
+  const afectaReparto = importeManual !== undefined || fechaManual !== undefined || conceptoCodigoManual !== undefined;
+  let conceptoNuevo = null;
+  if (conceptoCodigoManual) {
+    conceptoNuevo = await tx.one(sql`SELECT nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${conceptoCodigoManual}`);
+    if (!conceptoNuevo) { const e = new ErrorDatos("Concepto no encontrado"); e.status = 404; throw e; }
+  }
+
+  const sets = [];
+  if (importeManual !== undefined) sets.push(sql`"importeManual" = ${importeManual}::numeric`);
+  if (fechaManual !== undefined) sets.push(sql`"fechaManual" = ${fechaManual}::timestamptz AT TIME ZONE 'UTC'`);
+  if (conceptoCodigoManual !== undefined) sets.push(sql`"conceptoCodigoManual" = ${conceptoCodigoManual}`);
+  if (observacManual !== undefined) sets.push(sql`"observacManual" = ${observacManual}`);
+  if (fechaPagoManual !== undefined) sets.push(sql`"fechaPagoManual" = ${fechaPagoManual}::timestamp(3)`);
+  // Si una persona cambia el concepto, deja de ser el "concepto fijo del empleado".
+  if (conceptoCodigoManual !== undefined && conceptoCodigoManual !== compra.conceptoCodigoManual) sets.push(sql`"conceptoPorRegla" = NULL`);
+  if (!sets.length) return { cambios: [], nombre: '', respuesta: { rowId, reevaluada: false, distribuidaAhora: false } };
+
+  const updated = await tx.one(sql`
+    UPDATE gestion_compras SET ${sql.join(sets, ", ")}
+    WHERE business_id = ${businessId} AND "rowId" = ${rowId}
+    RETURNING "rowId", "importeManual", "fechaManual", "conceptoCodigoManual", "observacManual", "fechaPagoManual"`);
+  const reeval = afectaReparto
+    ? await reevaluarCompra(tx, { organizationId, businessId }, rowId)
+    : { reevaluada: false, distribuidaAhora: false };
+
+  // Antes → después, solo de lo que de verdad cambió (lo efectivo: manual si hay, si no el del POS).
+  const cambios = [];
+  const fAntes = fechaCorta(compra.fechaManual ?? compra.fecha);
+  const fDesp = fechaCorta(updated.fechaManual ?? compra.fecha);
+  if (fechaManual !== undefined && fAntes !== fDesp) cambios.push(`F. gasto ${fAntes} → ${fDesp}`);
+  const pAntes = fechaCorta(compra.fechaPagoManual ?? compra.fechaPago);
+  const pDesp = fechaCorta(updated.fechaPagoManual ?? compra.fechaPago);
+  if (fechaPagoManual !== undefined && pAntes !== pDesp) cambios.push(`F. pago ${pAntes} → ${pDesp}`);
+  const iAntes = pesosCortos(compra.importeManual ?? compra.importe);
+  const iDesp = pesosCortos(updated.importeManual ?? compra.importe);
+  if (importeManual !== undefined && iAntes !== iDesp) cambios.push(`Importe ${iAntes} → ${iDesp}`);
+  if (conceptoCodigoManual !== undefined && (conceptoCodigoManual ?? null) !== (compra.conceptoCodigoManual ?? null)) {
+    const codAntes = compra.conceptoCodigoManual ?? compra.conceptoCodigo;
+    const antes = codAntes
+      ? (await tx.one(sql`SELECT nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${codAntes}`))?.nombre ?? compra.concepto
+      : compra.concepto;
+    const despues = conceptoNuevo?.nombre ?? compra.concepto ?? 'el del POS';
+    cambios.push(`Concepto ${antes?.trim() || '—'} → ${String(despues).trim()}`);
+  }
+  if (observacManual !== undefined && (observacManual ?? null) !== (compra.observacManual ?? null)) {
+    cambios.push(observacManual ? 'Observación editada' : 'Observación: vuelve la del POS');
+  }
+  const nombre = [compra.proveedor?.trim(), compra.concepto?.trim()].filter(Boolean).join(' · ') || rowId;
+  return { cambios, nombre, respuesta: { ...updated, ...reeval } };
 }
 
 // PATCH de un pago del informe 80 (Diego 05/11/2026): corrige su fecha de pago aunque venga
@@ -484,4 +569,4 @@ async function obtenerConceptosEdicion({ organizationId }) {
   return { rubros, conceptos };
 }
 
-module.exports = { obtenerConceptosEdicion, buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarPago, editarVenta };
+module.exports = { obtenerConceptosEdicion, buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarComprasLote, editarPago, editarVenta };

@@ -190,8 +190,11 @@ router.get('/dashboard/detalle-ventas', responder((req) =>
   detalle.obtenerDetalleVentas({ ...ambito(req), sp: paramsDe(req) })));
 router.get('/dashboard/compra-lineas/:compraId', responder((req) =>
   detalle.obtenerCompraLineas({ ...req.gestion, compraId: req.params.compraId })));
+// Corrección masiva (Diego 23/11/2026): muchas compras de una vez, un solo aviso en la Actividad.
+router.patch('/dashboard/compras-lote', responder((req) =>
+  detalle.editarComprasLote({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? ''), body: req.body })));
 router.patch('/dashboard/compras/:rowId', responder((req) =>
-  detalle.editarCompra({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
+  detalle.editarCompra({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? ''), rowId: req.params.rowId, body: req.body })));
 router.patch('/dashboard/pagos/:rowId', responder((req) =>
   detalle.editarPago({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 router.patch('/dashboard/ventas/:rowId', responder((req) =>
