@@ -100,8 +100,19 @@ router.post('/cargos/config', manejar(async (req) => {
       message: r.antes ? `Antes: ${[r.antes.proveedor_cod && `proveedor ${r.antes.proveedor_cod}`, r.antes.concepto_codigo && `concepto ${r.antes.concepto_codigo}`].filter(Boolean).join(' · ') || 'sin elegir'}` : null,
       metadata: { link: '/movimientos-bancarios?tab=descuentos' },
     });
+    // Elegido el concepto (con proveedor): lo de meses anteriores entra al tablero (Diego 23/11/2026).
+    if (r.concepto && r.proveedor !== null) setImmediate(() => cargos.cargarPasadoOrg(bid(req), { grupos: [r.grupo] }).catch((e) => console.error('[mp-cargos] pasado', e.message)));
   }
   return r;
+}));
+// «Desde el banco» › cargar al tablero lo de meses anteriores de los tipos que ya tienen concepto (Diego 23/11/2026).
+router.post('/cargos/cargar-pasado', manejar(async (req) => {
+  const grupos = Array.isArray(req.body?.grupos) ? req.body.grupos.map(String) : undefined;
+  // simular: lo que se cargaría, por negocio y mes, sin escribir nada.
+  if (req.body?.simular) return cargos.cargarPasadoOrg(bid(req), { grupos, simular: true });
+  // Puede ser un ticket por día y tipo de todo el año: corre en segundo plano y avisa a la campana al terminar.
+  setImmediate(() => cargos.cargarPasadoOrg(bid(req), { grupos }).catch((e) => console.error('[mp-cargos] pasado', e.message)));
+  return { ok: true, iniciado: true };
 }));
 router.post('/cargos/activar', manejar(async (req) => {
   const r = await cargos.activar(bid(req), req.body || {}, req.user?.email || String(req.user?.id || ''));
@@ -119,6 +130,7 @@ router.get('/cargos/detalle', manejar((req) => cargos.detalle(bid(req), req.quer
 router.post('/cargos/crear-conceptos', manejar(async (req) => {
   const r = await cargos.crearConceptos(bid(req), req.body || {});
   if (r.ok && r.hechos.length) {
+    setImmediate(() => cargos.cargarPasadoOrg(bid(req), { grupos: r.hechos.map((h) => h.grupo).filter(Boolean) }).catch((e) => console.error('[mp-cargos] pasado', e.message)));
     require('../services/notificationService').avisarAbm(req, {
       businessId: bid(req), type: 'mp_cargos_conceptos',
       title: r.creados ? `Conceptos de caja nuevos para Mercado Pago: ${r.creados}` : `Mercado Pago: concepto elegido para ${r.hechos.length} tipo${r.hechos.length === 1 ? '' : 's'}`,
