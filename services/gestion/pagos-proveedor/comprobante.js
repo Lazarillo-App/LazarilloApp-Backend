@@ -40,7 +40,18 @@ function normalizar(x) {
   const fecha = /^\d{4}-\d{2}-\d{2}$/.test(String(x.fecha || '')) ? x.fecha : null;
   const txt = (v, n = 80) => (v == null || v === '' ? null : String(v).trim().slice(0, n) || null);
   const operacion = txt(x.operacion, 60) ? String(x.operacion).replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 40) || null : null;
-  return { importe: num(x.importe), fecha, operacion, banco: txt(x.banco), tipo: txt(x.tipo, 20), destinatario: txt(x.destinatario), cuitDestino: txt(x.cuitDestino, 13)?.replace(/\D/g, '') || null };
+  // Cuenta de origen (emisor) y de destino (receptor): titular, banco, CBU/CVU (22 dígitos), alias y CUIT.
+  const cuenta = (c) => {
+    if (!c || typeof c !== 'object') return null;
+    const o = { titular: txt(c.titular), banco: txt(c.banco, 40), cbu: String(c.cbu ?? '').replace(/\D/g, '').length === 22 ? String(c.cbu).replace(/\D/g, '') : null,
+      tipoCuenta: /^cvu$/i.test(String(c.tipoCuenta || '')) ? 'CVU' : /^cbu$/i.test(String(c.tipoCuenta || '')) ? 'CBU' : null,
+      alias: txt(c.alias, 40), cuit: String(c.cuit ?? '').replace(/\D/g, '').length === 11 ? String(c.cuit).replace(/\D/g, '') : null };
+    return Object.values(o).some(Boolean) ? o : null;
+  };
+  const emisor = cuenta(x.emisor), receptor = cuenta(x.receptor);
+  return { importe: num(x.importe), fecha, operacion, banco: txt(x.banco), tipo: txt(x.tipo, 20),
+    destinatario: txt(x.destinatario) || receptor?.titular || null,
+    cuitDestino: txt(x.cuitDestino, 13)?.replace(/\D/g, '') || receptor?.cuit || null, emisor, receptor };
 }
 
 // ── Lectura por reglas sobre el texto del comprobante (gratis) ──
@@ -85,7 +96,8 @@ function leerTexto(texto) {
     const conFecha = /fecha/i.test(l);
     for (const m of l.matchAll(/\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\b/g)) fechas.push({ d: +m[1], m: +m[2], a: anio(m[3]), conFecha });
     for (const m of l.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) fechas.push({ d: +m[3], m: +m[2], a: +m[1], conFecha });
-    for (const m of l.toLowerCase().matchAll(/\b(\d{1,2})\s+(?:de\s+)?([a-zé]+)\.?\s+(?:de\s+)?(\d{4})\b/g)) {
+    // «21 de noviembre de 2026», «23/noviembre/2026» (Mercado Pago), «23-nov-2026».
+    for (const m of l.toLowerCase().matchAll(/\b(\d{1,2})(?:\s+de\s+|\s*[/-]\s*|\s+)([a-záé]+)\.?(?:\s+de\s+|\s*[/-]\s*|\s+)(\d{4})\b/g)) {
       const mes = MESES[m[2]] || Object.entries(MESES).find(([k]) => k.startsWith(m[2].slice(0, 3)))?.[1];
       if (mes) fechas.push({ d: +m[1], m: mes, a: +m[3], conFecha });
     }
@@ -107,14 +119,42 @@ function leerTexto(texto) {
       break;
     }
   }
-  const banco = (BANCOS.find(([, re]) => re.test(t)) || [null])[0];
+  // Cuentas: cada CBU/CVU con su titular y banco (las líneas de arriba) y su CUIT (la de abajo). La primera
+  // es la de origen y la segunda la de destino; si hay una sola y arriba dice «destino/para», es la de destino.
+  const nombreBanco = (l) => (BANCOS.find(([, re]) => re.test(l)) || [null])[0] || (/\bbanco\b/i.test(l) ? l.replace(/^[^A-Za-zÁÉÍÓÚÑáéíóúñ]+/, '').trim() : null);
+  const limpiar = (l) => l.replace(/^[^A-Za-z0-9ÁÉÍÓÚÑáéíóúñ]+/, '').trim();
+  const cuentas = [];
+  lineas.forEach((l, i) => {
+    const m = /\b(CBU|CVU)\b[^\d]{0,6}([\d ]{22,30})/i.exec(l);
+    if (!m) return;
+    const cbu = m[2].replace(/\D/g, '');
+    if (cbu.length !== 22) return;
+    const c = { cbu, tipoCuenta: m[1].toUpperCase(), titular: null, banco: null, cuit: null, alias: null, linea: i };
+    for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
+      const lj = lineas[j];
+      if (/\b(CBU|CVU|CUIT|CUIL)\b|origen|destino|motivo|\$/i.test(lj)) break;
+      const b = nombreBanco(lj);
+      if (b && !c.banco) c.banco = b;
+      else if (!c.titular && /[A-Za-zÁÉÍÓÚÑáéíóúñ]{3}/.test(lj)) c.titular = limpiar(lj).slice(0, 80);
+    }
+    for (let j = i + 1; j <= Math.min(lineas.length - 1, i + 2); j++) {
+      const cu = /\b(?:CUIT|CUIL)[^\d]{0,8}(\d{2}-?\d{8}-?\d)/i.exec(lineas[j]);
+      if (cu && !c.cuit) c.cuit = cu[1];
+      const al = /\balias\b\s*:?\s*([A-Za-z0-9.\-]{6,})/i.exec(lineas[j]);
+      if (al && !c.alias) c.alias = al[1];
+    }
+    cuentas.push(c);
+  });
+  let emisor = cuentas[0] || null, receptor = cuentas[1] || null;
+  if (cuentas.length === 1 && lineas.slice(Math.max(0, cuentas[0].linea - 4), cuentas[0].linea).some((l) => /destin|para\b|beneficiario/i.test(l)) && !lineas.slice(Math.max(0, cuentas[0].linea - 4), cuentas[0].linea).some((l) => /origen/i.test(l))) { receptor = emisor; emisor = null; }
+  const banco = emisor?.banco || (BANCOS.find(([, re]) => re.test(t)) || [null])[0];
   const tipo = /transfer/i.test(t) ? 'transferencia' : /dep[oó]sito/i.test(t) ? 'deposito' : /cheque|echeq/i.test(t) ? 'cheque' : /efectivo/i.test(t) ? 'efectivo' : null;
   let destinatario = null;
   for (let i = 0; i < lineas.length && !destinatario; i++) {
     const m = /^(destinatario|beneficiario|para|a nombre de|titular destino)\s*:?\s*(.*)$/i.exec(lineas[i]);
     if (m) destinatario = (m[2] || lineas[i + 1] || '').slice(0, 80) || null;
   }
-  return normalizar({ importe, fecha, operacion, banco, tipo, destinatario });
+  return normalizar({ importe, fecha, operacion, banco, tipo, destinatario, emisor, receptor });
 }
 
 // El medio del negocio que corresponde: el que se llama como el banco; si no, el primero de tipo
