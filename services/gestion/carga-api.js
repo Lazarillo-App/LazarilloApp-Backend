@@ -13,7 +13,7 @@
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const { sql, db } = require('./db');
-const { armarFactura, comprobanteDe, facturaSchema, monedaSchema, CONCEPTO_PERCEPCION, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE } = require('./facturas/armar');
+const { armarFactura, comprobanteDe, facturaSchema, facturaSchemaInterna, monedaSchema, CONCEPTO_PERCEPCION, ORIGEN_LAZARILLO, TIPOS_COMPROBANTE } = require('./facturas/armar');
 const { facturaDesdeFilas } = require('./facturas/leer');
 const { unirInsumos } = require('./facturas/insumos');
 const { normalizarComprobante, esTicket } = require('./facturas/saltear-lazarillo');
@@ -66,8 +66,13 @@ async function obtenerLugares(cliente, businessId) {
     SELECT id, name FROM app_branches
     WHERE business_id = ${businessId} AND NOT COALESCE((props->>'is_main')::boolean, false)
     ORDER BY name`);
+  // La principal se llama como su sucursal (la marcada is_main, ej. «FC RAMOS»), igual que en los chips
+  // del header; si no tiene, como el negocio (Diego 20/11/2026).
+  const main = await cliente.one(sql`
+    SELECT name FROM app_branches WHERE business_id = ${businessId} AND COALESCE((props->>'is_main')::boolean, false)
+    ORDER BY id LIMIT 1`);
   return [
-    { id: idLugar(businessId, null), localId: Number(businessId), branchId: null, nombre: negocio?.name ?? 'Principal' },
+    { id: idLugar(businessId, null), localId: Number(businessId), branchId: null, nombre: main?.name || negocio?.name || 'Principal' },
     ...sucursales.map((s) => ({ id: Number(s.id), localId: Number(businessId), branchId: Number(s.id), nombre: s.name })),
   ];
 }
@@ -87,8 +92,8 @@ function descripcionFactura(p) {
 }
 
 // ── Preparar y guardar una factura ─────────────────────────────────────────────
-async function prepararFactura(cliente, { organizationId, businessId }, body, { ticketConFecha = true } = {}) {
-  const parsed = facturaSchema.safeParse(body);
+async function prepararFactura(cliente, { organizationId, businessId }, body, { ticketConFecha = true, sinConcepto: permitirSinConcepto = false } = {}) {
+  const parsed = (permitirSinConcepto ? facturaSchemaInterna : facturaSchema).safeParse(body);
   if (!parsed.success) throw rechazo('Datos inválidos', 400, { detalle: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) });
   const f = parsed.data;
   const proveedor = await cliente.one(sql`
@@ -872,6 +877,8 @@ async function historialConcepto({ businessId, sp }) {
            SUM(COALESCE(c."importeManual", c.importe))::float8 AS importe,
            COALESCE(BOOL_OR(c.origen = 'lazarillo'), false) AS lazarillo,
            MIN(c."rowId") AS "rowId", -- para eliminarla desde «Últimas cargas» (Diego 12/11/2026)
+           -- Cuántos registros junta la fila: con 1 se corrige fecha/importe desde ahí (Diego 20/11/2026).
+           COUNT(*)::int AS n,
            -- En US$ (Diego 19/11/2026): la próxima carga del concepto arranca igual.
            (array_agg(fm.moneda) FILTER (WHERE fm.moneda IS NOT NULL))[1] AS moneda
     FROM gestion_compras c
@@ -906,6 +913,9 @@ const gastoSchema = z.object({
   reparto: z.array(z.object({ puntoDeVentaId: z.number().int(), pct: z.number().min(0).max(100) })).max(20).nullish(),
   // En dólares (Diego 19/11/2026): el importe en pesos sale de monto × cotización.
   moneda: monedaSchema.nullish(),
+  // Desde la vista Proveedor del Panel (Diego 20/11/2026, el alquiler): el ticket interno va a nombre de
+  // ese proveedor (su fila y su cta cte), no de «Gastos Varios».
+  proveedorId: z.number().int().positive().nullish(),
 });
 
 // «US$ 2.500 a $ 1.480 (blue)»: se suma al detalle para que se vea en Detalle de compras.
@@ -933,7 +943,8 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
         AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo") = ${g.conceptoCodigo}
         AND ABS(COALESCE(c."importeManual", c.importe) - ${importe}::numeric) <= 1
         AND DATE_TRUNC('month', COALESCE(c."fechaManual", c.fecha)) = DATE_TRUNC('month', ${g.fecha}::date)
-        AND (c.comprobante IS NULL OR UPPER(LEFT(c.comprobante, 1)) IN ('E', 'G') OR c.codigo = ${GV_CODIGO})
+        AND (c.comprobante IS NULL OR UPPER(LEFT(c.comprobante, 1)) IN ('E', 'G') OR c.codigo = ${GV_CODIGO}
+             OR c.comprobante ~ ${`^Z${GV_PREFIJO}[0-9]{8}$`})
       LIMIT 1`);
     if (parecido) throw rechazo('Ya hay un gasto parecido', 409, { parecido });
   }
@@ -943,12 +954,15 @@ async function crearGastoVario({ organizationId, businessId, usuario, body }) {
     await tx.execute(sql`
       INSERT INTO gestion_proveedores (organization_id, codigo, nombre, razon) VALUES (${organizationId}, ${GV_CODIGO}, ${GV_NOMBRE}, ${GV_NOMBRE})
       ON CONFLICT (organization_id, codigo) DO NOTHING`);
-    const gv = await tx.one(sql`SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND codigo = ${GV_CODIGO}`);
+    const gv = g.proveedorId
+      ? await tx.one(sql`SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND id = ${g.proveedorId}`)
+      : await tx.one(sql`SELECT id FROM gestion_proveedores WHERE organization_id = ${organizationId} AND codigo = ${GV_CODIGO}`);
+    if (!gv) throw rechazo('Ese proveedor no existe.');
     // Numeración interna correlativa por negocio.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`gastos-varios:${businessId}`}))`);
     const mayor = await tx.one(sql`
       SELECT MAX(comprobante) AS m FROM gestion_compras
-      WHERE business_id = ${businessId} AND codigo = ${GV_CODIGO} AND comprobante ~ ${`^Z${GV_PREFIJO}[0-9]{8}$`}`);
+      WHERE business_id = ${businessId} AND comprobante ~ ${`^Z${GV_PREFIJO}[0-9]{8}$`}`);
     const numero = siguienteNumeroGV(mayor?.m);
     const concepto = await tx.one(sql`SELECT nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${g.conceptoCodigo}`);
     if (!concepto) throw rechazo('Ese concepto no existe.');

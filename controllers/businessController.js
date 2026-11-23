@@ -112,7 +112,8 @@ exports.create = async (req, res) => {
       timezone = '-03:00',
       tax_id = '',
       maxi,
-      perfil
+      perfil,
+      zonaFeriados
     } = req.body || {};
 
     if (!name || !name.trim()) return res.status(400).json({ error: 'name_required' });
@@ -147,6 +148,12 @@ exports.create = async (req, res) => {
       [uid, name.trim(), slug, props]
     );
     const biz = rows[0];
+
+    // Provincia para heredar sus feriados (Diego 20/11/2026: se pide en el alta). Sin zona = solo nacionales.
+    if (zonaFeriados && zonaFeriados !== 'AR' && require('../services/feriadosService').zonaValida(zonaFeriados)) {
+      await pool.query('UPDATE app_businesses SET zona_feriados=$2 WHERE id=$1', [biz.id, zonaFeriados]);
+      biz.zona_feriados = zonaFeriados;
+    }
 
     await pool.query(
       `INSERT INTO user_businesses (user_id, business_id, role)

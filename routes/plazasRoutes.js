@@ -13,6 +13,7 @@ router.post('/', ctrl.create);
 router.get('/:id/vista', ctrl.vista);
 router.put('/:id/fichas/:articleId/item', ctrl.editarItem);
 router.put('/:id/ocultar', ctrl.ocultar);
+router.put('/:id/fichas/:articleId/nuevo', ctrl.marcarNuevo);
 router.put('/:id/fichas/:articleId', ctrl.guardarFicha);
 // TVs de la plaza (Vincular TV / desvincular), ver controllers/pantallasController.js
 router.get('/:id/pantallas', pantallas.listar);

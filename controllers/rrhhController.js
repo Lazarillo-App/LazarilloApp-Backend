@@ -38,6 +38,7 @@ function avisarRrhh(req, type, title, message = null, metadata = {}, extra = {})
   });
 }
 const { PDV_MAP } = require('../services/maxiPdvMap');
+const feriadosSvc = require('../services/feriadosService');
 const { getEffectiveRole, listAccessibleBusinesses } = require('../services/auth/accessControl');
 
 /* ───────────────────────── helpers ───────────────────────── */
@@ -79,7 +80,7 @@ const nombreNegocio = async (id) => {
 
 // Feriados y pre feriados valen para todas las sucursales; eventos y cierres
 // son de la sucursal donde se cargan.
-const esCompartida = (tipo) => ['feriado', 'prefer'].includes(String(tipo || '').toLowerCase());
+const esCompartida = (tipo) => ['feriado', 'prefer', 'no_aplica'].includes(String(tipo || '').toLowerCase());
 
 // "CANCINO" → "Cancino" (la réplica trae mayormente mayúsculas; es semilla editable)
 function titulo(s) {
@@ -107,24 +108,10 @@ const PUESTOS_DEF = [
   ...['Cocinero', 'Camarero', 'Mozo', 'Bartender', 'Barista', 'Encargado', 'Caja', 'Recepción', 'Runner'].map((n) => [n, n]),
 ];
 
-// [mm, dd, tipo, nombre, fijo]  (móviles con la fecha 2026 del catálogo aprobado)
+// [mm, dd, tipo, nombre, fijo] — desde el 20/11/2026 los FERIADOS no se siembran: se heredan del
+// calendario único (lz_feriados, por zona; services/feriadosService.js). Acá solo las vísperas.
 const FECHAS_DEF = [
-  [1, 1, 'feriado', 'Año Nuevo', true],
-  [2, 16, 'feriado', 'Carnaval', false],
-  [2, 17, 'feriado', 'Carnaval', false],
-  [3, 24, 'feriado', 'Día de la Memoria', true],
-  [4, 2, 'feriado', 'Malvinas', true],
-  [4, 3, 'feriado', 'Viernes Santo', false],
-  [5, 1, 'feriado', 'Día del Trabajador', true],
-  [5, 25, 'feriado', 'Revolución de Mayo', true],
-  [6, 20, 'feriado', 'Gral. Belgrano', true],
-  [7, 9, 'feriado', 'Independencia', true],
-  [8, 17, 'feriado', 'Gral. San Martín', false],
-  [10, 12, 'feriado', 'Diversidad Cultural', false],
-  [11, 20, 'feriado', 'Soberanía Nacional', false],
-  [12, 8, 'feriado', 'Inmaculada Concepción', true],
   [12, 24, 'prefer', 'Nochebuena', true],
-  [12, 25, 'feriado', 'Navidad', true],
   [12, 31, 'prefer', 'Fin de Año', true],
 ];
 
@@ -320,6 +307,8 @@ async function leerAprendido(bizId, nominaId) {
 
 async function leerConfig(bizId, branchId = null) {
   const nominaId = await nominaDe(bizId);
+  const zona = await feriadosSvc.zonaDe(bizId);
+  const anioHoy = new Date().getUTCFullYear();
   const [empleados, puestos, fechas, espacios, turnos, aprendido] = await Promise.all([
     pool.query(
       `SELECT id, codigo_maxi AS "codigoMaxi", nombre, apellido, sector, activo, origen,
@@ -381,7 +370,47 @@ async function leerConfig(bizId, branchId = null) {
     puestos: puestos.rows,
     fechas: fechas.rows,
     espacios: espacios.rows.map((e) => ({ ...e, turnos: turnosPorEspacio.get(e.id) || [] })),
+    // Calendario único (20/11/2026): feriados heredados de la zona del negocio (año pasado → próximo).
+    zonaFeriados: zona,
+    zonas: feriadosSvc.ZONAS.map(([k, n]) => ({ zona: k, nombre: n })),
+    feriados: await feriadosSvc.heredados(zona, `${anioHoy - 1}-01-01`, `${anioHoy + 1}-12-31`),
   };
+}
+
+// GET /feriados?desde&hasta — calendario del negocio (heredados + propios de la sucursal elegida)
+async function getFeriados(req, res) {
+  try {
+    const desde = /^\d{4}-\d{2}-\d{2}$/.test(req.query.desde || '') ? req.query.desde : null;
+    const hasta = /^\d{4}-\d{2}-\d{2}$/.test(req.query.hasta || '') ? req.query.hasta : null;
+    const sucursal = req.query.branchId === undefined ? undefined : (asInt(req.query.branchId) || null);
+    const [fechas, zona] = await Promise.all([
+      feriadosSvc.feriadosDe(Number(req.businessId), { desde, hasta, sucursal }),
+      feriadosSvc.zonaDe(Number(req.businessId)),
+    ]);
+    return res.json({ ok: true, zona, fechas });
+  } catch (e) {
+    console.error('[rrhh.getFeriados]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+
+// PUT /zona-feriados { zona } — provincia del negocio para heredar sus feriados (null = solo nacional)
+async function putZonaFeriados(req, res) {
+  const zona = req.body?.zona ? String(req.body.zona) : null;
+  if (zona && !feriadosSvc.zonaValida(zona)) return res.status(400).json({ ok: false, error: 'zona_invalida' });
+  try {
+    const { rows } = await pool.query('SELECT zona_feriados FROM app_businesses WHERE id=$1', [req.businessId]);
+    const antes = rows[0]?.zona_feriados || null;
+    await pool.query('UPDATE app_businesses SET zona_feriados=$2 WHERE id=$1', [req.businessId, zona === 'AR' ? null : zona]);
+    const nombre = (z) => (feriadosSvc.ZONAS.find(([k]) => k === z) || [null, 'Solo nacionales'])[1];
+    if ((antes || null) !== (zona === 'AR' ? null : zona)) {
+      avisarRrhh(req, 'rrhh_config', `Feriados: ${nombre(antes)} → ${nombre(zona === 'AR' ? null : zona)}`);
+    }
+    return res.json({ ok: true, zona: zona === 'AR' ? null : zona });
+  } catch (e) {
+    console.error('[rrhh.putZonaFeriados]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
 }
 
 // GET /api/businesses/:bizId/rrhh/config
@@ -1184,5 +1213,6 @@ module.exports = {
   getConfig, putConfig,
   listarNominaMaxirest, importarNomina, crearEmpleado, editarEmpleado,
   candidatosNomina, vincularNomina, desvincularNomina,
+  getFeriados, putZonaFeriados,
   listarSemanas, getSemana, putSemana, borrarSemana,
 };

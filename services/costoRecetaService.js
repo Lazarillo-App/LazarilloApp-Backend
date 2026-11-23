@@ -22,12 +22,14 @@ const { factorConversion, canonicalUnit } = require('./unidades');
 async function recalcularCostoReceta(recetaId, db = pool) {
   // 1. costo_total = SUM(cantidad × costo_unitario) de los items
   const { rows: recRows } = await db.query(
-    `SELECT id, porciones, rendimiento_unidad, rendimiento_peso, unidad_peso
+    `SELECT id, porciones, rendimiento_unidad, rendimiento_peso, unidad_peso, servicio
        FROM recetas WHERE id = $1`,
     [recetaId]
   );
   if (!recRows.length) return null;
   const rec = recRows[0];
+  // Receta de tipo Servicio: su costo no sale de los items sino de services/servicioCosto.js.
+  if (rec.servicio) return { ...rec, _servicio: true };
 
   const { rows: sumRows } = await db.query(
     `SELECT COALESCE(SUM(ri.cantidad * ri.costo_unitario), 0) AS total

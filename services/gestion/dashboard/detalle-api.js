@@ -77,7 +77,8 @@ const detalleSelectJoin = (fuente, organizationId) => sql`
     p.nombre            AS "proveedorNombre",
     p.razon             AS "proveedorRazon",
     neg.name            AS "localNombre",
-    COALESCE(br.name, 'Principal') AS "pdvNombre",
+    -- La principal se llama como su sucursal is_main (ej. «FC RAMOS»), igual que los chips (Diego 23/11/2026).
+    COALESCE(br.name, bm.name, neg.name) AS "pdvNombre",
     c.business_id_origen AS "localIdOrigen",
     c.branch_id_origen   AS "puntoDeVentaIdOrigen",
     cc.codigo           AS "conceptoCajaCodigo",
@@ -98,6 +99,8 @@ const detalleSelectJoin = (fuente, organizationId) => sql`
   LEFT JOIN gestion_proveedores p     ON c."proveedorId" = p.id
   LEFT JOIN app_businesses neg        ON c.business_id = neg.id
   LEFT JOIN app_branches br           ON c.branch_id = br.id
+  LEFT JOIN LATERAL (SELECT m.name FROM app_branches m WHERE c.branch_id IS NULL AND m.business_id = c.business_id
+                       AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1) bm ON true
   -- Concepto original y manual POR SEPARADO.
   LEFT JOIN gestion_conceptos_caja cc        ON cc.organization_id = ${organizationId} AND c."conceptoCodigo" = cc.codigo
   LEFT JOIN gestion_rubros_concepto_caja rc  ON rc.organization_id = ${organizationId} AND cc."codRga" = rc.codigo
@@ -134,10 +137,16 @@ function buildDetalleConditions({
   if (proveedorId !== undefined) conditions.push(sql`p.id = ${proveedorId}`);
   else if (proveedorTexto !== undefined) {
     // codigo es un AND adicional: dos personas con el mismo texto solo se separan por su código real.
+    // Balde Gastos Varios: incluye también lo cargado en Lazarillo con el proveedor «Gastos Varios»
+    // (tiene proveedorId propio) — mismo criterio que proveedorIdAgrupable en el pivot.
+    const esGastosVarios = String(proveedorTexto).toLowerCase().replace(/[^a-z0-9]+/g, '') === 'gastosvarios';
     conditions.push(
-      codigo !== undefined
-        ? sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto} AND c.codigo = ${codigo}`
-        : sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto}`
+      esGastosVarios
+        ? sql`(c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto}
+               OR lower(regexp_replace(COALESCE(p.nombre, c.proveedor, ''), '[^a-zA-Z0-9]', '', 'g')) = 'gastosvarios')`
+        : codigo !== undefined
+          ? sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto} AND c.codigo = ${codigo}`
+          : sql`c."proveedorId" IS NULL AND c.proveedor = ${proveedorTexto}`
     );
   } else if (sinProveedor) conditions.push(sql`c."proveedorId" IS NULL AND c.proveedor IS NULL`);
 
@@ -254,11 +263,11 @@ async function obtenerDetalleCompras({ organizationId, businessId, sucursal, sp 
         COALESCE(c."fechaManual", c.fecha) AS "fechaVista",
         COALESCE(c."importeManual", c.importe) AS "importeVista",
         NULL::text AS "pagoRef",
-        COALESCE(c."fechaManual", c.fecha) AS "fechaGasto",
+        COALESCE(c."fechaManual", c.periodo, c.fecha) AS "fechaGasto",
         COALESCE(c."fechaPagoManual", c."fechaPago") AS "fechaPago", c."fechaPagoManual", c."cajaPago", c."conceptoCodigoManual", c.concepto, c.detalle, c.observac, c."observacManual",
         c.proveedor AS "proveedorTexto",
         p.id AS "proveedorId", p.nombre AS "proveedorNombre", p.razon AS "proveedorRazon",
-        neg.name AS "localNombre", COALESCE(br.name, 'Principal') AS "pdvNombre",
+        neg.name AS "localNombre", COALESCE(br.name, (SELECT m.name FROM app_branches m WHERE m.business_id = c.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), neg.name) AS "pdvNombre",
         c.business_id AS "localIdOrigen", c.branch_id AS "puntoDeVentaIdOrigen",
         cc.codigo AS "conceptoCajaCodigo", cc.nombre AS "conceptoCajaNombre", rc.nombre AS "conceptoCajaRubroNombre",
         ccm.codigo AS "conceptoCajaManualCodigo", ccm.nombre AS "conceptoCajaManualNombre", rcm.nombre AS "conceptoCajaManualRubroNombre",
@@ -348,7 +357,7 @@ async function obtenerDetalleVentas({ businessId, sucursal, sp }) {
   if (cobro) condiciones.push(cobro === SIN_COBRO_CODE ? sql`v."codCobro" IS NULL` : sql`v."codCobro" = ${cobro}`);
   const rows = await db.many(sql`
     SELECT v."rowId", v.fecha, v.importe, v."importeManual", v.tipo, v.cobro, v.turno, v.comprobant, v.hora, v.mesa, v.mozo,
-           v.total, v.descuento, v.cupon, neg.name AS negocio, COALESCE(br.name, 'Principal') AS sucursal
+           v.total, v.descuento, v.cupon, neg.name AS negocio, COALESCE(br.name, (SELECT m.name FROM app_branches m WHERE m.business_id = v.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), neg.name) AS sucursal
     FROM gestion_ventas v
     LEFT JOIN app_businesses neg ON v.business_id = neg.id
     LEFT JOIN app_branches br    ON v.branch_id = br.id
@@ -391,42 +400,128 @@ const patchCompra = z.object({
 });
 
 // PATCH de una compra del negocio activo: los campos manuales (la reimportación no los pisa).
-async function editarCompra({ organizationId, businessId, rowId, body }) {
+// Regla «todo ABM queda en Notificaciones» (Diego 23/11/2026): cada edición deja su línea en la
+// Actividad de Resultados (campanita), con el antes → después de lo que cambió.
+async function editarCompra({ organizationId, businessId, usuario = null, rowId, body }) {
   const parsed = patchCompra.safeParse(body);
   if (!parsed.success) { const e = new ErrorDatos("Datos inválidos"); e.status = 422; throw e; }
-  const { importeManual, fechaManual, conceptoCodigoManual, observacManual, fechaPagoManual } = parsed.data;
-
   return db.transaction(async (tx) => {
-    const compra = await tx.one(sql`
-      SELECT "rowId", "conceptoCodigoManual" FROM gestion_compras
-      WHERE business_id = ${businessId} AND "rowId" = ${rowId} FOR UPDATE`);
-    if (!compra) { const e = new ErrorDatos("Registro no encontrado"); e.status = 404; throw e; }
-
-    const afectaReparto = importeManual !== undefined || fechaManual !== undefined || conceptoCodigoManual !== undefined;
-    if (conceptoCodigoManual) {
-      const existe = await tx.one(sql`SELECT 1 AS ok FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${conceptoCodigoManual}`);
-      if (!existe) { const e = new ErrorDatos("Concepto no encontrado"); e.status = 404; throw e; }
+    const r = await aplicarEdicionCompra(tx, { organizationId, businessId, rowId, datos: parsed.data });
+    if (r.cambios.length) {
+      await registrarActividadCompra(tx, {
+        organizationId, businessId, usuario, refId: rowId,
+        descripcion: `${r.nombre}\n${r.cambios.join(' · ')}`.slice(0, 500),
+      });
     }
-
-    const sets = [];
-    if (importeManual !== undefined) sets.push(sql`"importeManual" = ${importeManual}::numeric`);
-    if (fechaManual !== undefined) sets.push(sql`"fechaManual" = ${fechaManual}::timestamptz AT TIME ZONE 'UTC'`);
-    if (conceptoCodigoManual !== undefined) sets.push(sql`"conceptoCodigoManual" = ${conceptoCodigoManual}`);
-    if (observacManual !== undefined) sets.push(sql`"observacManual" = ${observacManual}`);
-    if (fechaPagoManual !== undefined) sets.push(sql`"fechaPagoManual" = ${fechaPagoManual}::timestamp(3)`);
-    // Si una persona cambia el concepto, deja de ser el "concepto fijo del empleado".
-    if (conceptoCodigoManual !== undefined && conceptoCodigoManual !== compra.conceptoCodigoManual) sets.push(sql`"conceptoPorRegla" = NULL`);
-    if (!sets.length) return { rowId, reevaluada: false, distribuidaAhora: false };
-
-    const updated = await tx.one(sql`
-      UPDATE gestion_compras SET ${sql.join(sets, ", ")}
-      WHERE business_id = ${businessId} AND "rowId" = ${rowId}
-      RETURNING "rowId", "importeManual", "fechaManual", "conceptoCodigoManual", "observacManual", "fechaPagoManual"`);
-    const reeval = afectaReparto
-      ? await reevaluarCompra(tx, { organizationId, businessId }, rowId)
-      : { reevaluada: false, distribuidaAhora: false };
-    return { ...updated, ...reeval };
+    return r.respuesta;
   });
+}
+
+// PATCH en lote (correcciones masivas de datos que vienen mal del POS, Diego 23/11/2026): aplica
+// la misma edición fila por fila, todo o nada, y deja UNA sola línea en la Actividad con la cantidad
+// y el motivo (no una por registro).
+const patchLote = z.object({
+  motivo: z.string().trim().min(1).max(200),
+  items: z.array(patchCompra.extend({ rowId: z.string().min(1).max(100) })).min(1).max(500),
+});
+async function editarComprasLote({ organizationId, businessId, usuario = null, body }) {
+  const parsed = patchLote.safeParse(body);
+  if (!parsed.success) { const e = new ErrorDatos("Datos inválidos"); e.status = 422; throw e; }
+  const { motivo, items } = parsed.data;
+  if (new Set(items.map((i) => i.rowId)).size !== items.length) { const e = new ErrorDatos("Hay registros repetidos"); e.status = 422; throw e; }
+  return db.transaction(async (tx) => {
+    let editadas = 0;
+    const filas = [];
+    for (const { rowId, ...datos } of items) {
+      const r = await aplicarEdicionCompra(tx, { organizationId, businessId, rowId, datos });
+      if (r.cambios.length) editadas += 1;
+      filas.push(r.respuesta);
+    }
+    if (editadas) {
+      await registrarActividadCompra(tx, {
+        organizationId, businessId, usuario, refId: null,
+        descripcion: `Corrección en lote: ${editadas} ${editadas === 1 ? 'registro' : 'registros'}\n${motivo}`.slice(0, 500),
+      });
+    }
+    return { ok: true, editadas, filas };
+  });
+}
+
+const fechaCorta = (v) => {
+  if (v == null) return '—';
+  const d = v instanceof Date ? v : new Date(String(v).length === 10 ? `${v}T12:00:00Z` : v);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`;
+};
+const pesosCortos = (n) => (n == null ? '—' : `$ ${Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+
+async function registrarActividadCompra(tx, a) {
+  await tx.execute(sql`
+    INSERT INTO gestion_actividad (organization_id, business_id, tipo, accion, descripcion, "refId", usuario, datos)
+    VALUES (${a.organizationId}, ${a.businessId}, 'compra', 'editada', ${a.descripcion}, ${a.refId}, ${a.usuario}, NULL)`);
+}
+
+// Una edición dentro de una transacción: devuelve la respuesta de siempre y la lista de cambios
+// en texto («F. gasto 15/09/2026 → 15/08/2026») para la Actividad.
+async function aplicarEdicionCompra(tx, { organizationId, businessId, rowId, datos }) {
+  const { importeManual, fechaManual, conceptoCodigoManual, observacManual, fechaPagoManual } = datos;
+  const compra = await tx.one(sql`
+    SELECT c."rowId", c."conceptoCodigoManual", c."conceptoCodigo", c.concepto, c.proveedor, c.importe, c."importeManual",
+           c.fecha, c.periodo, c."fechaManual", c."fechaPago", c."fechaPagoManual", c.observac, c."observacManual"
+    FROM gestion_compras c
+    WHERE c.business_id = ${businessId} AND c."rowId" = ${rowId} FOR UPDATE`);
+  if (!compra) { const e = new ErrorDatos(`Registro no encontrado: ${rowId}`); e.status = 404; throw e; }
+
+  const afectaReparto = importeManual !== undefined || fechaManual !== undefined || conceptoCodigoManual !== undefined;
+  let conceptoNuevo = null;
+  if (conceptoCodigoManual) {
+    conceptoNuevo = await tx.one(sql`SELECT nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${conceptoCodigoManual}`);
+    if (!conceptoNuevo) { const e = new ErrorDatos("Concepto no encontrado"); e.status = 404; throw e; }
+  }
+
+  const sets = [];
+  if (importeManual !== undefined) sets.push(sql`"importeManual" = ${importeManual}::numeric`);
+  if (fechaManual !== undefined) sets.push(sql`"fechaManual" = ${fechaManual}::timestamptz AT TIME ZONE 'UTC'`);
+  if (conceptoCodigoManual !== undefined) sets.push(sql`"conceptoCodigoManual" = ${conceptoCodigoManual}`);
+  if (observacManual !== undefined) sets.push(sql`"observacManual" = ${observacManual}`);
+  if (fechaPagoManual !== undefined) sets.push(sql`"fechaPagoManual" = ${fechaPagoManual}::timestamp(3)`);
+  // Si una persona cambia el concepto, deja de ser el "concepto fijo del empleado".
+  if (conceptoCodigoManual !== undefined && conceptoCodigoManual !== compra.conceptoCodigoManual) sets.push(sql`"conceptoPorRegla" = NULL`);
+  if (!sets.length) return { cambios: [], nombre: '', respuesta: { rowId, reevaluada: false, distribuidaAhora: false } };
+
+  const updated = await tx.one(sql`
+    UPDATE gestion_compras SET ${sql.join(sets, ", ")}
+    WHERE business_id = ${businessId} AND "rowId" = ${rowId}
+    RETURNING "rowId", "importeManual", "fechaManual", "conceptoCodigoManual", "observacManual", "fechaPagoManual"`);
+  const reeval = afectaReparto
+    ? await reevaluarCompra(tx, { organizationId, businessId }, rowId)
+    : { reevaluada: false, distribuidaAhora: false };
+
+  // Antes → después, solo de lo que de verdad cambió (lo efectivo: manual si hay, si no el del POS).
+  const cambios = [];
+  // La F. gasto que cuenta: corregida, si no el período (sueldos), si no la de carga.
+  const fAntes = fechaCorta(compra.fechaManual ?? compra.periodo ?? compra.fecha);
+  const fDesp = fechaCorta(updated.fechaManual ?? compra.periodo ?? compra.fecha);
+  if (fechaManual !== undefined && fAntes !== fDesp) cambios.push(`F. gasto ${fAntes} → ${fDesp}`);
+  const pAntes = fechaCorta(compra.fechaPagoManual ?? compra.fechaPago);
+  const pDesp = fechaCorta(updated.fechaPagoManual ?? compra.fechaPago);
+  if (fechaPagoManual !== undefined && pAntes !== pDesp) cambios.push(`F. pago ${pAntes} → ${pDesp}`);
+  const iAntes = pesosCortos(compra.importeManual ?? compra.importe);
+  const iDesp = pesosCortos(updated.importeManual ?? compra.importe);
+  if (importeManual !== undefined && iAntes !== iDesp) cambios.push(`Importe ${iAntes} → ${iDesp}`);
+  if (conceptoCodigoManual !== undefined && (conceptoCodigoManual ?? null) !== (compra.conceptoCodigoManual ?? null)) {
+    const codAntes = compra.conceptoCodigoManual ?? compra.conceptoCodigo;
+    const antes = codAntes
+      ? (await tx.one(sql`SELECT nombre FROM gestion_conceptos_caja WHERE organization_id = ${organizationId} AND codigo = ${codAntes}`))?.nombre ?? compra.concepto
+      : compra.concepto;
+    const despues = conceptoNuevo?.nombre ?? compra.concepto ?? 'el del POS';
+    cambios.push(`Concepto ${antes?.trim() || '—'} → ${String(despues).trim()}`);
+  }
+  if (observacManual !== undefined && (observacManual ?? null) !== (compra.observacManual ?? null)) {
+    cambios.push(observacManual ? 'Observación editada' : 'Observación: vuelve la del POS');
+  }
+  const nombre = [compra.proveedor?.trim(), compra.concepto?.trim()].filter(Boolean).join(' · ') || rowId;
+  return { cambios, nombre, respuesta: { ...updated, ...reeval } };
 }
 
 // PATCH de un pago del informe 80 (Diego 05/11/2026): corrige su fecha de pago aunque venga
@@ -478,4 +573,4 @@ async function obtenerConceptosEdicion({ organizationId }) {
   return { rubros, conceptos };
 }
 
-module.exports = { obtenerConceptosEdicion, buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarPago, editarVenta };
+module.exports = { obtenerConceptosEdicion, buildDetalleConditions, obtenerDetalleCompras, obtenerDetalleVentas, obtenerCompraLineas, editarCompra, editarComprasLote, editarPago, editarVenta };

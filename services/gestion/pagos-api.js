@@ -1121,7 +1121,7 @@ function facturasCtaCteSql({ organizationId, businessId, codPro }) {
       SELECT ${lugarSql('a')} AS pdv_id, a.comprobante,
         JSON_AGG(JSON_BUILD_OBJECT(
           'pagoId', pp.id, 'fecha', TO_CHAR(pp.fecha, 'YYYY-MM-DD'), 'importe', a.importe::float8, 'totalPago', pp.importe::float8,
-          'medio', pp.medio, 'referencia', pp.referencia, 'pdvPaga', CONCAT(bp.name, ' · ', COALESCE(sp.name, 'Principal'))
+          'medio', pp.medio, 'referencia', pp.referencia, 'pdvPaga', CONCAT(bp.name, ' · ', COALESCE(sp.name, (SELECT m.name FROM app_branches m WHERE m.business_id = pp.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), bp.name))
         ) ORDER BY pp.fecha, pp.id) AS pagos_lz
       FROM gestion_aplicaciones_pago_proveedor a
       JOIN gestion_pagos_proveedor pp ON pp.id = a."pagoId" AND pp."anuladoEn" IS NULL
@@ -1160,8 +1160,9 @@ async function obtenerCtaCte({ organizationId, businessId, sp }) {
     const sucursal = lugares.get(pdvId).branchId;
     const [movs, emp] = await Promise.all([
       db.many(sql`
+        -- Sueldos: el mes que liquidan (período, se pagan a mes vencido), no el día que se cargaron (Diego 23/11/2026).
         SELECT c."rowId" AS row_id,
-               TO_CHAR(COALESCE(c."fechaManual", c.fecha), 'YYYY-MM-DD') AS fecha,
+               TO_CHAR(COALESCE(c."fechaManual", c.periodo, c.fecha), 'YYYY-MM-DD') AS fecha,
                c.comprobante,
                COALESCE(cc.nombre, c.concepto) AS concepto,
                rc.nombre AS rubro,

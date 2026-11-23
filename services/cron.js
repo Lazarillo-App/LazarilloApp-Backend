@@ -230,6 +230,36 @@ function startFudoCron() {
   }, { timezone: tz });
 }
 
+/**
+ * Servicios por hora (Diego 20/11/2026): todos los días recalcula cada ancla y su familia y avisa
+ * si los costos subieron 5 % desde el último aumento o si bajó el uso (services/servicioAvisos.js).
+ * - SERVICIOS_CRON=1 / 0 → fuerza encenderlo / apagarlo. Sin la variable, corre donde corre la
+ *   ingesta de gestion (un solo servicio: testing y producción comparten la base).
+ * - CRON_SERVICIOS_SCHEDULE → default "50 6 * * *" (después de la ingesta de la madrugada).
+ */
+let serviciosStarted = false;
+
+function startServiciosCron() {
+  if (serviciosStarted) return;
+  serviciosStarted = true;
+  const forzado = process.env.SERVICIOS_CRON;
+  const habilitado = forzado === '1' || (forzado !== '0' && gestionCronHabilitado());
+  if (!habilitado) {
+    console.log(`[cron] servicios por hora deshabilitado en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
+    return;
+  }
+  const tz = process.env.CRON_TZ || 'America/Argentina/Buenos_Aires';
+  const expr = process.env.CRON_SERVICIOS_SCHEDULE || '50 6 * * *';
+  console.log(`[cron] servicios por hora habilitado. TZ=${tz} schedule=${expr}`);
+  cron.schedule(expr, async () => {
+    try {
+      await require('./servicioAvisos').revisarServicios();
+    } catch (e) {
+      console.error('[cron] ❌ error en servicios por hora:', e.message);
+    }
+  }, { timezone: tz });
+}
+
 function startGestionCron() {
   if (gestionStarted) return;
   gestionStarted = true;
@@ -240,6 +270,8 @@ function startGestionCron() {
   startMercadoPagoCron();
   // Fudo diario: su propia llave (FUDO_CRON).
   startFudoCron();
+  // Servicios por hora: su propia llave (SERVICIOS_CRON).
+  startServiciosCron();
 
   if (!gestionCronHabilitado()) {
     console.log(`[cron] ingesta de gestion deshabilitada en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
@@ -267,4 +299,4 @@ function startGestionCron() {
   }, { timezone: tz });
 }
 
-module.exports = { startCron, startGestionCron, startRecetasKitCron, startMercadoPagoCron, startFudoCron, syncAllBusinessesDaily, ensureBackfillAll };
+module.exports = { startCron, startGestionCron, startRecetasKitCron, startMercadoPagoCron, startFudoCron, startServiciosCron, syncAllBusinessesDaily, ensureBackfillAll };

@@ -100,8 +100,19 @@ router.post('/cargos/config', manejar(async (req) => {
       message: r.antes ? `Antes: ${[r.antes.proveedor_cod && `proveedor ${r.antes.proveedor_cod}`, r.antes.concepto_codigo && `concepto ${r.antes.concepto_codigo}`].filter(Boolean).join(' · ') || 'sin elegir'}` : null,
       metadata: { link: '/movimientos-bancarios?tab=descuentos' },
     });
+    // Elegido el concepto (con proveedor): lo de meses anteriores entra al tablero (Diego 23/11/2026).
+    if (r.concepto && r.proveedor !== null) setImmediate(() => cargos.cargarPasadoOrg(bid(req), { grupos: [r.grupo] }).catch((e) => console.error('[mp-cargos] pasado', e.message)));
   }
   return r;
+}));
+// «Desde el banco» › cargar al tablero lo de meses anteriores de los tipos que ya tienen concepto (Diego 23/11/2026).
+router.post('/cargos/cargar-pasado', manejar(async (req) => {
+  const grupos = Array.isArray(req.body?.grupos) ? req.body.grupos.map(String) : undefined;
+  // simular: lo que se cargaría, por negocio y mes, sin escribir nada.
+  if (req.body?.simular) return cargos.cargarPasadoOrg(bid(req), { grupos, simular: true });
+  // Puede ser un ticket por día y tipo de todo el año: corre en segundo plano y avisa a la campana al terminar.
+  setImmediate(() => cargos.cargarPasadoOrg(bid(req), { grupos }).catch((e) => console.error('[mp-cargos] pasado', e.message)));
+  return { ok: true, iniciado: true };
 }));
 router.post('/cargos/activar', manejar(async (req) => {
   const r = await cargos.activar(bid(req), req.body || {}, req.user?.email || String(req.user?.id || ''));
@@ -113,7 +124,50 @@ router.post('/cargos/activar', manejar(async (req) => {
   if (r.activo) setImmediate(() => cargos.cargarNegocio(bid(req)).catch((e) => console.error('[mp-cargos]', e.message)));
   return r;
 }));
+// Qué hay adentro de cada tipo (Diego 19/11: «¿cómo puedo ver qué son esos $1.976?»).
+router.get('/cargos/detalle', manejar((req) => cargos.detalle(bid(req), req.query.mes, req.query.grupo)));
+// Crear el concepto con la leyenda del cargo (uno o todos los que faltan) y el proveedor, desde la misma pantalla.
+router.post('/cargos/crear-conceptos', manejar(async (req) => {
+  const r = await cargos.crearConceptos(bid(req), req.body || {});
+  if (r.ok && r.hechos.length) {
+    setImmediate(() => cargos.cargarPasadoOrg(bid(req), { grupos: r.hechos.map((h) => h.grupo).filter(Boolean) }).catch((e) => console.error('[mp-cargos] pasado', e.message)));
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'mp_cargos_conceptos',
+      title: r.creados ? `Conceptos de caja nuevos para Mercado Pago: ${r.creados}` : `Mercado Pago: concepto elegido para ${r.hechos.length} tipo${r.hechos.length === 1 ? '' : 's'}`,
+      message: r.hechos.map((h) => `${h.nombre} (${h.codigo})`).join(' · ').slice(0, 400),
+      metadata: { link: '/movimientos-bancarios?tab=descuentos' },
+    });
+  }
+  return r;
+}));
+router.post('/cargos/crear-proveedor', manejar(async (req) => {
+  const r = await cargos.crearProveedor(bid(req), req.body || {});
+  if (r.ok) {
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'proveedor_alta', title: `Proveedor nuevo: ${r.proveedor.nombre}`,
+      message: 'Creado desde Lo que descuenta Mercado Pago', metadata: { link: '/movimientos-bancarios?tab=descuentos' },
+    });
+  }
+  return r;
+}));
 router.post('/cargos/cargar', manejar((req) => cargos.cargarNegocio(bid(req))));
+
+// Marcas a mano sobre los movimientos (Diego 19/11/2026): «Gasto personal» en lo que salió, con su KPI.
+const marcas = require('../services/movMarcas');
+router.get('/marcas', manejar((req) => marcas.listar(bid(req), req.sucursal)));
+router.post('/marcas', manejar(async (req) => {
+  const r = await marcas.marcar(bid(req), req.sucursal, req.body || {}, req.user?.id || null);
+  if (r.ok && !r.sinCambios) {
+    const imp = r.importe != null ? `$ ${Number(r.importe).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'un movimiento';
+    const dia = r.fecha ? ` (${r.fecha.slice(8, 10)}/${r.fecha.slice(5, 7)})` : '';
+    require('../services/notificationService').avisarAbm(req, {
+      businessId: bid(req), type: 'mov_marca',
+      title: r.activo ? `Gasto personal: ${imp}${dia}` : `Ya no es gasto personal: ${imp}${dia}`,
+      metadata: { link: '/movimientos-bancarios' },
+    });
+  }
+  return r;
+}));
 
 router.post('/sincronizar', manejar((req) => mp.sincronizarBanco(bid(req), req.sucursal, req.body?.desde, req.body?.hasta)));
 

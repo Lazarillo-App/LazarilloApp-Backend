@@ -1,0 +1,14 @@
+[
+  {
+    "clave": "2026-11-23-fechas-03",
+    "tipo": "guia_parche",
+    "buscar": "· Formato dd/mm/aaaa. La barra aparece sola al completar el día y el mes\n  («25» → «25/», «2510» → «25/10/»); al borrar no se vuelve a poner y una barra\n  tipeada de más no se duplica.",
+    "reemplazar": "· Formato dd/mm/aaaa. La barra la pone el campo: nunca hace falta tipearla.\n  - Día o mes completos → barra: «25» → «25/», «25/10» → «25/10/».\n  - Un dígito que no admite otro detrás se completa con 0 y pasa al tramo\n    siguiente: día 4–9 («6» → «06/»), mes 2–9 («25/6» → «25/06/»).\n  - Un dígito seguido de barra o punto también se completa: «1/» → «01/».\n  - Números de corrido arman la fecha («25102026» → «25/10/2026»).\n  - Al borrar no se vuelve a poner nada; una barra tipeada de más no se duplica.\n· Al entrar al campo (clic o Tab) se selecciona todo: se escribe encima, sin\n  mezclarse con la fecha que estaba."
+  },
+  {
+    "clave": "2026-11-23-fechas-04",
+    "tipo": "cambio",
+    "titulo": "Pasar los campos de fecha existentes a CampoFecha (uno por uno)",
+    "nota": "Diego 23/11: revisar en TODAS las fechas (se abra o no el calendario) que la barra la ponga el campo, que «6» se complete a «06/» y que al entrar se seleccione todo. Ya lo hace CampoFecha y la carga de factura/gastos/empleados (front #496 y el de esta nota). Probar cada pantalla tipeando: 2510, 6626, 1/5/26, 25102026."
+  }
+]

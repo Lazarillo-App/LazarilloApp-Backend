@@ -67,7 +67,7 @@ router.use(async (req, res, next) => {
 const { puedeSeccion, estaOculto } = require('../services/auth/permisos');
 const SECCION_POR_RUTA = [
   [/^\/(facturas|gastos-varios|empleados|conceptos-empleado|pagos-proveedor|ventas-manuales)(\/|$)/, 'carga'],
-  [/^\/conceptos(\/|$)/, 'conceptos'],
+  [/^\/(conceptos|rubros-caja)(\/|$)/, 'conceptos'],
   [/^\/medios-pago(\/|$)/, 'medios'],
 ];
 const OCULTO_POR_RUTA = [
@@ -159,6 +159,9 @@ router.post('/dashboard/canasta/aumentos', responder((req) =>
   api.anotarAumento({ ...ambito(req), body: req.body })));
 router.delete('/dashboard/canasta/aumentos', responder((req) =>
   api.borrarAumento({ ...ambito(req), body: req.body, actorUserId: req.user?.id, sucursalParam: paramsDe(req).get('sucursal') })));
+router.get('/m/historico', responder((req) => api.obtenerHistorico(ambito(req))));
+router.get('/m/mes-anios', responder((req) =>
+  api.obtenerMesAnios({ ...ambito(req), anio: entero(paramsDe(req), 'anio'), mes: entero(paramsDe(req), 'mes'), completo: paramsDe(req).get('completo') === '1' })));
 router.get('/m/resumen', responder((req) =>
   api.obtenerResumenMes({ ...ambito(req), anio: entero(paramsDe(req), 'anio'), mes: entero(paramsDe(req), 'mes') })));
 router.get('/m/detalle', responder((req) => detalleVentas.obtenerDetalleVentas({ ...ambito(req), sp: paramsDe(req) })));
@@ -187,8 +190,11 @@ router.get('/dashboard/detalle-ventas', responder((req) =>
   detalle.obtenerDetalleVentas({ ...ambito(req), sp: paramsDe(req) })));
 router.get('/dashboard/compra-lineas/:compraId', responder((req) =>
   detalle.obtenerCompraLineas({ ...req.gestion, compraId: req.params.compraId })));
+// Corrección masiva (Diego 23/11/2026): muchas compras de una vez, un solo aviso en la Actividad.
+router.patch('/dashboard/compras-lote', responder((req) =>
+  detalle.editarComprasLote({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? ''), body: req.body })));
 router.patch('/dashboard/compras/:rowId', responder((req) =>
-  detalle.editarCompra({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
+  detalle.editarCompra({ ...req.gestion, usuario: req.user?.email ?? String(req.user?.id ?? ''), rowId: req.params.rowId, body: req.body })));
 router.patch('/dashboard/pagos/:rowId', responder((req) =>
   detalle.editarPago({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 router.patch('/dashboard/ventas/:rowId', responder((req) =>
@@ -202,8 +208,10 @@ const idDe = (req) => Number(req.params.id);
 const organizar = require('../services/gestion/organizar-api');
 router.get('/organizar', responder((req) => organizar.obtenerOrganizar(req.gestion)));
 router.put('/organizar/proveedor/:id', responder((req) => organizar.editarProveedorConcepto({ ...req.gestion, id: req.params.id, body: req.body })));
+// «Desde el banco» (Diego 19/11/2026): lo que descontó Mercado Pago y todavía no entró al tablero (informativo).
+router.get('/desde-el-banco', responder((req) => require('../services/mpCargos').sinCargar({ businessId: req.gestion.businessId, sucursal: ambito(req).sucursal, anio: entero(paramsDe(req), 'anio') })));
 router.get('/sin-rubro', responder((req) => sinRubro.obtenerSinRubro({ ...ambito(req), anio: entero(paramsDe(req), 'anio') })));
-router.put('/sin-rubro/rubro-insumo/:codigo', responder((req) => sinRubro.editarRubroInsumo({ ...req.gestion, codigo: req.params.codigo, body: req.body })));
+router.put('/sin-rubro/rubro-insumo/:codigo', responder((req) => sinRubro.editarRubroInsumo({ ...req.gestion, actorUserId: req.user?.id, codigo: req.params.codigo, body: req.body })));
 router.put('/sin-rubro/insumo/:id', responder((req) => sinRubro.editarInsumo({ ...req.gestion, id: idDe(req), body: req.body })));
 router.put('/sin-rubro/compra/:rowId', responder((req) => sinRubro.editarCompraSinConcepto({ ...req.gestion, rowId: req.params.rowId, body: req.body })));
 router.get('/sin-carga', responder((req) => pagos.obtenerSinCarga(ambito(req))));
@@ -255,6 +263,7 @@ router.delete('/tareas/:id', responder((req) => actividad.borrarTarea({ ...req.g
 // ── Empleados y concepto fijo ──
 router.get('/empleados', responder((req) => empleados.obtenerNomina({ ...req.gestion, sp: paramsDe(req) })));
 router.post('/empleados', responder((req) => empleados.crearCarga({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.get('/empleados/es-empleado', responder((req) => empleados.esEmpleado({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/empleados/cuenta', responder((req) => empleados.obtenerCuenta({ ...req.gestion, sp: paramsDe(req) })));
 router.delete('/empleados/:id', responder((req) => empleados.anularCarga({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
 router.get('/conceptos-empleado', responder((req) => empleados.listarConceptosFijos({ ...req.gestion, sp: paramsDe(req) })));
@@ -298,6 +307,8 @@ router.post('/ventas-manuales', responder((req) => carga.crearVentasManuales({ .
 router.delete('/ventas-manuales', responder((req) => carga.borrarVentasManuales({ ...req.gestion, ids: paramsDe(req).get('ids') })));
 router.get('/conceptos', responder((req) => carga.obtenerConceptos(req.gestion)));
 router.post('/conceptos', responder((req) => carga.crearConcepto({ ...req.gestion, body: req.body })));
+// Rubro de conceptos de caja nuevo (Diego 20/11/2026, desde Lo que descuenta MP).
+router.post('/rubros-caja', responder((req) => require('../services/gestion/conceptos/rubros').crearRubroCaja({ ...req.gestion, body: req.body })));
 router.patch('/conceptos/:codigo', responder((req) => carga.editarConcepto({ ...req.gestion, codigo: req.params.codigo, body: req.body })));
 router.delete('/conceptos/:codigo', responder((req) => carga.borrarConcepto({ ...req.gestion, codigo: req.params.codigo })));
 router.get('/medios-pago', responder((req) => carga.obtenerMedios(req.gestion)));

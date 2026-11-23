@@ -101,14 +101,8 @@ async function obtenerProyeccion({ businessId, params }) {
 
   // Calendario del negocio (RRHH › Cronogramas, Diego 14/11/2026): feriados y vísperas son de todo
   // el negocio; eventos y días cerrados, de la sucursal que se mira (con «Todas», solo lo compartido).
-  const suc = typeof sucursal === "number" ? sucursal : null;
-  const fechas = await db.many(sql`
-    SELECT to_char(f.fecha, 'YYYY-MM-DD') AS fecha, f.tipo, f.nombre, f.fijo
-    FROM rrhh_fechas f
-    WHERE f.business_id = ${businessId}
-      AND (f.compartida
-        OR (${sucursal === undefined}::boolean = false AND f.branch_id IS NOT DISTINCT FROM ${suc}::bigint))
-  `).catch((err) => {
+  // Desde el 20/11/2026: calendario único (feriados heredados por zona) + lo propio del negocio.
+  const fechas = await require('../../feriadosService').feriadosDe(businessId, { sucursal }).catch((err) => {
     console.error("No se pudo leer el calendario para la proyección", err);
     return [];
   });
@@ -477,7 +471,8 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
       SELECT a.m, (exp(percentile_cont(0.5) WITHIN GROUP (ORDER BY ln(a.val / b.val))) - 1)::float8 AS v
       FROM s a JOIN s b ON b.k = a.k AND b.m = ${anterior("a.m")}
       WHERE a.val / b.val BETWEEN 0.667 AND 1.5 GROUP BY a.m HAVING COUNT(*) >= 2`),
-    // Alquiler: el monto del mes (en revisión: se muestra, no entra a la canasta).
+    // Alquiler: el monto del mes. Entra a la canasta (Diego 20/11/2026: «el alquiler no lo saquemos
+    // afuera»; antes quedaba «en revisión» y no había cómo volver a ponerlo).
     db.many(sql`
       SELECT ${mesDe(fecha)} AS m, SUM(${imp})::float8 AS total
       FROM gestion_v_compras_distribuidas v JOIN ${cc} ON ${concepto}
@@ -516,7 +511,7 @@ async function obtenerCanasta({ organizationId, businessId, anio, mes, sucursal 
     { clave: "mercaderias", nombre: "Mercaderías", peso: peso(RUBRO.mercaderias), variaciones: serie(merc), cuenta: true,
       aRevisar: merc.find((x) => x.m === meses[N - 1])?.revisar ?? 0 },
     { clave: "servicios", nombre: "Servicios", peso: peso(RUBRO.servicios), variaciones: serie(serv), cuenta: true },
-    { clave: "alquiler", nombre: "Alquiler", peso: peso(RUBRO.alquiler), variaciones: alqVar, cuenta: false },
+    { clave: "alquiler", nombre: "Alquiler", peso: peso(RUBRO.alquiler), variaciones: alqVar, cuenta: true },
   ].filter((c) => c.peso > 0);
 
   return { meses: meses.slice(1), componentes, aumentos };
@@ -610,8 +605,13 @@ async function obtenerAnual({ organizationId, businessId, anio, sucursal }) {
   const condC = sql.join(buildPivotConditions({ year: anio, tableAlias: "c", businessId, sucursal, filterRubrosOcultos: true }), " AND ");
   const [ventas, rubros] = await Promise.all([
     db.many(sql`
-      SELECT EXTRACT(MONTH FROM v.fecha)::int AS mes, SUM(COALESCE(v."importeManual", v.importe))::float8 AS total
-      FROM gestion_ventas v WHERE ${condV} GROUP BY 1`),
+      -- Primero por ticket (día + comprobante) y después por mes: 4 veces más rápido que COUNT(DISTINCT …)
+      -- (Comercio 2026: 409 → 97 ms, 23/11/2026).
+      SELECT mes, SUM(t)::float8 AS total, COUNT(*)::int AS tickets, SUM(c)::int AS cubiertos FROM (
+        SELECT EXTRACT(MONTH FROM v.fecha)::int AS mes, v.fecha::date, v.comprobant,
+               SUM(COALESCE(v."importeManual", v.importe)) AS t, SUM(${CUBIERTOS}) AS c
+        FROM gestion_ventas v WHERE ${condV} GROUP BY 1, 2, 3) x
+      GROUP BY 1`),
     db.many(sql`
       SELECT EXTRACT(MONTH FROM COALESCE(c."fechaManual", c.fecha))::int AS mes,
              COALESCE(rc.nombre, 'Sin Rubro') AS rubro, SUM(COALESCE(c."importeManual", c.importe))::float8 AS total
@@ -622,9 +622,89 @@ async function obtenerAnual({ organizationId, businessId, anio, sucursal }) {
   ]);
   const meses = Array.from({ length: 12 }, (_, i) => {
     const lista = rubros.filter((r) => r.mes === i + 1).map((r) => ({ rubro: r.rubro.trim(), total: Number(r.total) })).filter((r) => Math.abs(r.total) > 0.5);
-    return { mes: i + 1, ventas: Number(ventas.find((v) => v.mes === i + 1)?.total ?? 0), gastos: lista.reduce((s, r) => s + r.total, 0), rubros: lista };
+    const v = ventas.find((x) => x.mes === i + 1);
+    return { mes: i + 1, ventas: Number(v?.total ?? 0), tickets: v?.tickets ?? 0, cubiertos: v?.cubiertos ?? 0, gastos: lista.reduce((s, r) => s + r.total, 0), rubros: lista };
   });
   return { anio, meses };
+}
+
+// Cubiertos del POS: a veces vienen como texto; lo que no es número cuenta 0 (igual que el detalle de ventas).
+const CUBIERTOS = sql`COALESCE(NULLIF(regexp_replace(COALESCE(v.cub::text, ''), '[^0-9]', '', 'g'), '')::int, 0)`;
+
+// ---------------------------------------------------------------- el mes, año por año (/m/mes-anios)
+// Diego 23/11/2026: comparar un mes contra el mismo mes de años anteriores. Si es el mes en curso, se
+// compara del 1 al último día con ventas en todos los años (si no, el año actual siempre pierde).
+// Los importes se llevan a «pesos de hoy» con el IPC; tickets y cubiertos no se ajustan.
+async function obtenerMesAnios({ businessId, anio, mes, sucursal, completo = false }) {
+  if (!anio || !mes || mes > 12) throw new ErrorDatos("Datos inválidos");
+  const lugar = filtroSucursalSql("v", businessId, sucursal);
+  const hoy = new Date(Date.now() - 3 * 3_600_000);
+  const enCurso = anio === hoy.getUTCFullYear() && mes === hoy.getUTCMonth() + 1;
+  // completo: el front reemplaza el mes en curso por su proyección (Diego 23/11/2026: «siempre el mes
+  // actual con proyección»), así que los otros años van con el mes entero.
+  let hastaDia = 31;
+  if (enCurso && !completo) {
+    const u = await db.one(sql`SELECT EXTRACT(DAY FROM MAX(v.fecha))::int AS d FROM gestion_ventas v
+      WHERE ${lugar} AND v.fecha >= make_date(${anio}::int, ${mes}::int, 1) AND v.fecha < make_date(${anio}::int, ${mes}::int, 1) + interval '1 month'`);
+    hastaDia = u?.d ?? 0;
+  }
+  const [filas, ipc] = await Promise.all([
+    hastaDia ? db.many(sql`
+      SELECT anio, SUM(t)::float8 AS ventas, COUNT(*)::int AS tickets, SUM(c)::int AS cubiertos FROM (
+        SELECT g.y AS anio, v.fecha::date, v.comprobant, SUM(COALESCE(v."importeManual", v.importe)) AS t, SUM(${CUBIERTOS}) AS c
+        FROM generate_series(2000, ${anio}::int) g(y)
+        JOIN gestion_ventas v ON v.fecha >= make_date(g.y, ${mes}::int, 1)
+                             AND v.fecha < LEAST(make_date(g.y, ${mes}::int, 1) + interval '1 month', make_date(g.y, ${mes}::int, 1) + ${hastaDia}::int)
+        WHERE ${lugar} AND v.importe IS NOT NULL AND COALESCE(v."importeManual", v.importe) != 0
+        GROUP BY 1, 2, 3) x
+      GROUP BY 1 ORDER BY 1`) : [],
+    require('../ipc').nivelesIpc().catch(() => ({ disponible: false })),
+  ]);
+  const clave = (a) => `${a}-${String(mes).padStart(2, "0")}`;
+  const hoyNivel = ipc.disponible ? ipc.nivel.get(ipc.hasta) : null;
+  const anios = filas.map((f) => {
+    // El mes en curso todavía no tiene IPC: vale como «hoy» (factor 1).
+    const k = clave(f.anio) > (ipc.hasta ?? "") ? ipc.hasta : clave(f.anio);
+    const nivel = ipc.disponible ? ipc.nivel.get(k) : null;
+    return { anio: f.anio, ventas: Number(f.ventas ?? 0), ventasHoy: nivel ? Number(f.ventas ?? 0) * (hoyNivel / nivel) : null,
+      tickets: f.tickets ?? 0, cubiertos: f.cubiertos ?? 0 };
+  });
+  return { anio, mes, hastaDia: enCurso && !completo ? hastaDia : null, ipc: ipc.disponible ? { disponible: true, hasta: ipc.hasta } : { disponible: false }, anios };
+}
+
+// ---------------------------------------------------------------- histórico de ventas (/m/historico)
+// Diego 23/11/2026: un solo gráfico que cambia entre «mes a mes», «{mes} histórico» y «anual
+// histórico». Se manda todo el historial por año y mes (unas 130 filas) y el celular arma cada vista
+// sin volver a pedir. Pesos de cada mes llevados a pesos de hoy con el IPC; tickets y cubiertos no.
+// Recorre toda la historia del negocio (Bar: 200 mil filas, 1,2 s en testing): se guarda 1 h en memoria.
+const cacheHistorico = new Map();
+async function obtenerHistorico({ businessId, sucursal }) {
+  const clave = `${businessId}|${sucursal === undefined ? "*" : sucursal}`;
+  const c = cacheHistorico.get(clave);
+  if (c && Date.now() - c.t < 3_600_000) return c.r;
+  const lugar = filtroSucursalSql("v", businessId, sucursal);
+  const [filas, ipc] = await Promise.all([
+    db.many(sql`
+      SELECT anio, mes, SUM(t)::float8 AS ventas, COUNT(*)::int AS tickets, SUM(c)::int AS cubiertos FROM (
+        SELECT EXTRACT(YEAR FROM v.fecha)::int AS anio, EXTRACT(MONTH FROM v.fecha)::int AS mes, v.fecha::date, v.comprobant,
+               SUM(COALESCE(v."importeManual", v.importe)) AS t, SUM(${CUBIERTOS}) AS c
+        FROM gestion_ventas v
+        WHERE ${lugar} AND v.fecha < now() + interval '1 day' AND v.importe IS NOT NULL AND COALESCE(v."importeManual", v.importe) != 0
+        GROUP BY 1, 2, 3, 4) x
+      GROUP BY 1, 2 ORDER BY 1, 2`),
+    require('../ipc').nivelesIpc().catch(() => ({ disponible: false })),
+  ]);
+  const hoyNivel = ipc.disponible ? ipc.nivel.get(ipc.hasta) : null;
+  const meses = filas.map((f) => {
+    const k = `${f.anio}-${String(f.mes).padStart(2, "0")}`;
+    // Un mes sin IPC publicado todavía (el en curso) vale como «hoy».
+    const nivel = ipc.disponible ? ipc.nivel.get(k > ipc.hasta ? ipc.hasta : k) : null;
+    const ventas = Number(f.ventas ?? 0);
+    return { anio: f.anio, mes: f.mes, ventas, ventasHoy: nivel ? ventas * (hoyNivel / nivel) : null, tickets: f.tickets ?? 0, cubiertos: f.cubiertos ?? 0 };
+  });
+  const r = { ipc: ipc.disponible ? { disponible: true, hasta: ipc.hasta } : { disponible: false }, meses };
+  cacheHistorico.set(clave, { t: Date.now(), r });
+  return r;
 }
 
 // El mes de un vistazo para el celular: ventas, gastos por rubro y resultado, con los mismos filtros
@@ -659,6 +739,8 @@ const clientesDelPos = conDatos(recurrentesApi.clientesDelPos);
 module.exports = {
   ErrorDatos,
   obtenerAnual,
+  obtenerMesAnios,
+  obtenerHistorico,
   obtenerResumenMes,
   obtenerProyeccion,
   obtenerRecurrentes,

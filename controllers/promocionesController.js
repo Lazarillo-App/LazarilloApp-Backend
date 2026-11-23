@@ -6,6 +6,7 @@
 'use strict';
 const pool = require('../config/db');
 const { invalidateCacheForBiz } = require('../middleware/cacheJson');
+const { avisarAbm } = require('../services/notificationService');
 
 function safeNum(v) {
   const n = Number(v);
@@ -183,14 +184,15 @@ exports.crearPromocion = async (req, res, next) => {
        Math.round(costoTotal * 100) / 100, manualBatchId]
     );
 
-    // 8. Crear la receta de la promo (es_promo = TRUE)
+    // 8. Crear la receta de la promo (es_promo = TRUE) en el local donde se arma (bizId), que es
+    //    donde la lee GET .../receta. El artículo y la agrupación son de la organización (storageBizId).
     const { rows: recRows } = await client.query(
       `INSERT INTO recetas
          (article_id, business_id, nombre, porciones, porcentaje_venta,
           costo_total, es_promo, active, origen, created_by, created_at, updated_at)
        VALUES ($1, $2, $3, 1, $4, $5, TRUE, TRUE, 'promo', $6, NOW(), NOW())
        RETURNING id`,
-      [newId, storageBizId, nombrePromo, Number(porcentajeVenta) || 0,
+      [newId, bizId, nombrePromo, Number(porcentajeVenta) || 0,
        Math.round(costoTotal * 10000) / 10000, uid]
     );
     const recetaId = recRows[0].id;
@@ -268,6 +270,7 @@ exports.crearPromocion = async (req, res, next) => {
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
     console.log(`[crearPromocion] Promo id=${newId} "${nombrePromo}" biz=${bizId} costo=${costoTotal.toFixed(2)}`);
+    avisarAbm(req, { businessId: bizId, type: 'promo_alta', title: `Promo nueva: ${nombrePromo}`, metadata: { articleId: newId } });
 
     return res.status(201).json({
       ok: true,
@@ -325,12 +328,17 @@ exports.actualizarPromocion = async (req, res, next) => {
     // MaxiRest que todavía no tiene receta de promo. Por eso, si el artículo existe, su primera
     // edición la deja armada: reutiliza la receta que tenga o crea una. Solo un artículo que no
     // existe responde 404.
+    // La receta vive en el negocio donde se edita (bizId), igual que la lee GET .../receta: cada local
+    // tiene la suya. Antes se buscaba en el negocio principal de la organización y una promo guardada
+    // desde una sucursal (FC 204) pisaba la del principal (Bar 147) y en la sucursal «no se guardaba»
+    // (Diego 20/11/2026, Heineken 6x5). Artículos e insumos se siguen resolviendo en storageBizId.
+    const recetaBizId = bizId;
     const { rows: recExist } = await client.query(
       `SELECT id, es_promo, active FROM recetas
         WHERE article_id = $1 AND business_id = $2
         ORDER BY active DESC, es_promo DESC, id DESC
         LIMIT 1`,
-      [promoId, storageBizId]
+      [promoId, recetaBizId]
     );
     let recetaId = recExist[0]?.id ?? null;
     if (recetaId && !(recExist[0].es_promo && recExist[0].active)) {
@@ -347,7 +355,7 @@ exports.actualizarPromocion = async (req, res, next) => {
             costo_total, es_promo, active, origen, created_by, created_at, updated_at)
          VALUES ($1, $2, $3, 1, $4, 0, TRUE, TRUE, 'promo', $5, NOW(), NOW())
          RETURNING id`,
-        [promoId, storageBizId, (nombreManual && nombreManual.trim()) || articulo.nombre, Number(porcentajeVenta) || 0, req.user?.id || null]
+        [promoId, recetaBizId, (nombreManual && nombreManual.trim()) || articulo.nombre, Number(porcentajeVenta) || 0, req.user?.id || null]
       );
       recetaId = nueva[0].id;
     }
@@ -461,6 +469,7 @@ exports.actualizarPromocion = async (req, res, next) => {
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
 
     console.log(`[actualizarPromocion] Promo id=${promoId} "${nombrePromo}" biz=${bizId} costo=${costoTotal.toFixed(2)}`);
+    avisarAbm(req, { businessId: bizId, type: 'promo_edicion', title: `Promo modificada: ${nombrePromo}`, metadata: { articleId: promoId } });
 
     return res.json({
       ok: true,
@@ -494,53 +503,70 @@ exports.eliminarPromocion = async (req, res, next) => {
     await client.query('BEGIN');
     const storageBizId = await resolveStorageBizId(bizId);
 
-    // 1. Borrar items + receta de la promo
-    await client.query(
-      `DELETE FROM receta_items WHERE receta_id IN (
-         SELECT id FROM recetas WHERE article_id = $1 AND business_id = $2 AND es_promo = TRUE
-       )`,
-      [promoId, storageBizId]
+    // 1. Borrar la receta de la promo SOLO del local donde se desarma (bizId). Antes se borraba la del
+    //    negocio principal: desde una sucursal (FC) se perdía la promo del Bar (Diego 20/11/2026, #148).
+    const { rows: recs } = await client.query(
+      `SELECT id, nombre FROM recetas WHERE article_id = $1 AND business_id = $2 AND es_promo = TRUE`,
+      [promoId, bizId]
     );
-    await client.query(
-      `DELETE FROM recetas WHERE article_id = $1 AND business_id = $2 AND es_promo = TRUE`,
-      [promoId, storageBizId]
-    );
+    const recIds = recs.map(r => r.id);
+    if (recIds.length) {
+      await client.query(`DELETE FROM receta_items WHERE receta_id = ANY($1::bigint[])`, [recIds]);
+      await client.query(`DELETE FROM recetas WHERE id = ANY($1::bigint[])`, [recIds]);
+    }
 
-    // 2. Borrar el artículo-promo
-    await client.query(`DELETE FROM maxi_articles WHERE articulo_id = $1 AND business_id = $2`, [promoId, storageBizId]);
-    await client.query(`DELETE FROM app_articles WHERE id = $1 AND business_id = $2`, [promoId, storageBizId]);
-
-    // 3. Sacar el objetivo de price_config
-    await client.query(
-      `DELETE FROM article_price_config WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2`,
-      [storageBizId, String(promoId)]
-    );
-
-    // 4. Sacar el ID de la agrupación Promociones (app_articles_ids + articulos JSONB)
-    const { rows: agRows } = await client.query(
-      `SELECT id, articulos, app_articles_ids FROM agrupaciones
-        WHERE business_id = $1 AND nombre ILIKE 'Promociones' LIMIT 1`,
-      [storageBizId]
-    );
-    if (agRows.length) {
-      const ag = agRows[0];
-      const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
-        : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
-      const arts = Array.isArray(ag.articulos) ? ag.articulos
-        : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
-      const newAppIds = appIds.filter(id => Number(id) !== promoId);
-      const newArts = arts.filter(a => Number(a?.id ?? a?.articulo_id ?? a) !== promoId);
-      await client.query(
-        `UPDATE agrupaciones SET app_articles_ids = $1, articulos = $2, updated_at = NOW() WHERE id = $3`,
-        [JSON.stringify(newAppIds), JSON.stringify(newArts), ag.id]
+    // 2. El artículo-promo es de la organización. Un artículo del POS (id positivo) nunca se borra:
+    //    lo trae el POS. Una promo creada en Lazarillo (id negativo) se borra solo si ya ningún local
+    //    de la organización la tiene armada.
+    let articuloBorrado = false;
+    if (promoId < 0) {
+      const { rows: otras } = await client.query(
+        `SELECT 1 FROM recetas r
+          WHERE r.article_id = $1 AND r.es_promo = TRUE
+            AND (r.business_id = $2 OR r.business_id IN (
+                  SELECT b2.id FROM app_businesses b1 JOIN app_businesses b2 ON b2.organization_id = b1.organization_id
+                   WHERE b1.id = $2))
+          LIMIT 1`,
+        [promoId, storageBizId]
       );
+      if (!otras.length) {
+        articuloBorrado = true;
+        await client.query(`DELETE FROM maxi_articles WHERE articulo_id = $1 AND business_id = $2`, [promoId, storageBizId]);
+        await client.query(`DELETE FROM app_articles WHERE id = $1 AND business_id = $2`, [promoId, storageBizId]);
+        await client.query(
+          `DELETE FROM article_price_config WHERE business_id = $1 AND scope = 'articulo' AND scope_id = $2`,
+          [storageBizId, String(promoId)]
+        );
+        // Sacar el ID de la agrupación Promociones (app_articles_ids + articulos JSONB)
+        const { rows: agRows } = await client.query(
+          `SELECT id, articulos, app_articles_ids FROM agrupaciones
+            WHERE business_id = $1 AND nombre ILIKE 'Promociones' LIMIT 1`,
+          [storageBizId]
+        );
+        if (agRows.length) {
+          const ag = agRows[0];
+          const appIds = Array.isArray(ag.app_articles_ids) ? ag.app_articles_ids
+            : (typeof ag.app_articles_ids === 'string' ? JSON.parse(ag.app_articles_ids || '[]') : []);
+          const arts = Array.isArray(ag.articulos) ? ag.articulos
+            : (typeof ag.articulos === 'string' ? JSON.parse(ag.articulos || '[]') : []);
+          const newAppIds = appIds.filter(id => Number(id) !== promoId);
+          const newArts = arts.filter(a => Number(a?.id ?? a?.articulo_id ?? a) !== promoId);
+          await client.query(
+            `UPDATE agrupaciones SET app_articles_ids = $1, articulos = $2, updated_at = NOW() WHERE id = $3`,
+            [JSON.stringify(newAppIds), JSON.stringify(newArts), ag.id]
+          );
+        }
+      }
     }
 
     await client.query('COMMIT');
     invalidateCacheForBiz(bizId);
     if (storageBizId !== bizId) invalidateCacheForBiz(storageBizId);
-    console.log(`[eliminarPromocion] Promo ${promoId} desarmada (biz ${bizId})`);
-    return res.json({ ok: true, deleted: promoId });
+    console.log(`[eliminarPromocion] Promo ${promoId} desarmada (biz ${bizId}, recetas ${recIds.length}, artículo ${articuloBorrado ? 'borrado' : 'queda'})`);
+    if (recIds.length) {
+      avisarAbm(req, { businessId: bizId, type: 'promo_baja', title: `Promo desarmada: ${recs[0].nombre || promoId}`, metadata: { articleId: promoId } });
+    }
+    return res.json({ ok: true, deleted: promoId, recetas: recIds.length, articuloBorrado });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch { }
     console.error('[eliminarPromocion]', e);

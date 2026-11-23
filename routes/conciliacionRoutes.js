@@ -71,4 +71,37 @@ router.put('/pagadores', manejar(async (req) => {
   return svc.guardarPagadores(bid(req), req.sucursal, mapa);
 }));
 
+// Mandar registros a otro PDV (Diego 20/11/2026: «lo tildo y aprieto el PDV donde lo quiero mandar»;
+// «otro PDV puede ser cualquiera de la organización, incluso el Bar»).
+router.get('/destinos', manejar(async (req) => ({ destinos: await svc.destinosOrg(bid(req)) })));
+
+// body: { haciaBid?: negocio destino (de la misma organización; por defecto este), hacia: sucursal destino,
+//         items: [{ tipo: 'ventas'|'banco'|'pagos', clave, fila }] }
+router.post('/traslados', manejar(async (req) => {
+  const destinos = await svc.destinosOrg(bid(req));
+  const haciaBid = req.body?.haciaBid == null ? bid(req) : Number(req.body.haciaBid);
+  const hacia = Number(req.body?.hacia) || 0;
+  const dest = destinos.find((d) => d.bid === haciaBid && d.suc === hacia);
+  if (!dest) return { error: 'destino_invalido' };
+  if (haciaBid === bid(req) && hacia === req.sucursal) return { error: 'misma_sucursal' };
+  const v = svc.validarTraslado(req.body);
+  if (v.error) return v;
+  const r = await svc.trasladar(bid(req), req.sucursal, haciaBid, hacia, req.user?.id, v.items);
+  const orig = destinos.find((d) => d.bid === bid(req) && d.suc === req.sucursal);
+  const de = orig ? (orig.bid === haciaBid ? orig.nombre : `${orig.negocio} · ${orig.nombre}`) : await svc.nombreSucursal(bid(req), req.sucursal);
+  const a = dest.bid === bid(req) ? dest.nombre : `${dest.negocio} · ${dest.nombre}`;
+  const n = v.items.length;
+  const pesos = (x) => '$ ' + Math.round(x).toLocaleString('es-AR');
+  const title = n === 1 ? `Conciliación: registro de ${pesos(r.total)} de ${de} a ${a}` : `Conciliación: ${n} registros (${pesos(r.total)}) de ${de} a ${a}`;
+  const message = r.devueltos ? `${r.devueltos} volvi${r.devueltos === 1 ? 'ó' : 'eron'} a su PDV de origen.` : null;
+  const ns = require('../services/notificationService');
+  ns.avisarAbm(req, { businessId: bid(req), type: 'conciliacion_traslado', title, message, metadata: { link: '/conciliacion', desde: req.sucursal, haciaBid, hacia } });
+  // si va a otro negocio, el equipo de ese negocio también se entera
+  if (haciaBid !== bid(req)) {
+    ns.avisarAlEquipoSinEsperar({ businessId: haciaBid, actorUserId: req.user?.id || null, type: 'conciliacion_traslado', title, message,
+      metadata: { kind: 'conciliacion_traslado', link: '/conciliacion', desdeBid: bid(req), desde: req.sucursal, hacia } });
+  }
+  return { ...r, traslados: await svc.trasladosDe(bid(req), req.sucursal) };
+}));
+
 module.exports = router;

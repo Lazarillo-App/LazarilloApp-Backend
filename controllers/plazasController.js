@@ -15,7 +15,7 @@ const { recalcularCostoRecetas } = require('../services/costoRecetaService');
 const { createOrUpdateProposal, snapshotReceta } = require('../services/recetaProposals');
 const { normalizarCantidadUnidad, canonicalUnit } = require('../services/unidades');
 const { logAudit } = require('../services/audit/auditLog');
-const { avisarAbm } = require('../services/notificationService');
+const { avisarAbm, avisarAlEquipoSinEsperar } = require('../services/notificationService');
 
 // ── Unidades de un ingrediente (panel «En esta receta» de la plaza, Diego 11/11/2026) ──
 // Cada unidad se mide en su familia (peso en gr, volumen en ml, unidades en u) para poder pasar
@@ -136,6 +136,8 @@ exports.list = async (req, res, next) => {
                  JOIN recetas r ON r.business_id = p.business_id AND r.article_id = pp2.article_id AND COALESCE(r.active, TRUE)
                  JOIN receta_items ri ON ri.receta_id = r.id
                 WHERE pp2.plaza_id = p.id) AS ingredientes,
+              (SELECT COALESCE(json_agg(json_build_object('tipo', g.tipo, 'nombre', g.nombre)), '[]')
+                 FROM plaza_grupos g WHERE g.plaza_id = p.id) AS grupos,
               COALESCE(json_agg(json_build_object('articleId', pp.article_id,
                 'nombre', (SELECT ma.nombre FROM maxi_articles ma WHERE ma.articulo_id = pp.article_id AND ma.business_id = p.business_id LIMIT 1))
                 ORDER BY pp.orden, pp.article_id) FILTER (WHERE pp.article_id IS NOT NULL), '[]') AS productos
@@ -151,7 +153,7 @@ exports.list = async (req, res, next) => {
       `SELECT id, nombre FROM sectores WHERE business_id = $1 AND id = ANY($2::int[]) AND COALESCE(es_fijo, FALSE) = FALSE
         ORDER BY nombre`, [bizId, gestionables]) : { rows: [] };
     res.json({ ok: true,
-      plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos, tvs: r.tvs, ingredientes: r.ingredientes,
+      plazas: rows.map((r) => ({ id: r.id, nombre: r.nombre, sectorId: r.sector_id, sectorNombre: r.sector_nombre, productos: r.productos, tvs: r.tvs, ingredientes: r.ingredientes, grupos: r.grupos || [],
         puedeEditar: gestionables.includes(Number(r.sector_id)) })),
       puedeCrear: secs.length > 0, puedeCrearSector: esGestor(req), sectores: secs.map((x) => ({ id: x.id, nombre: x.nombre })) });
   } catch (e) { next(e); }
@@ -197,15 +199,112 @@ exports.articulos = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-async function guardarProductos(plazaId, articleIds) {
+// Lugares de la plaza (Diego 19/11/2026: «al mover un producto no necesariamente otro tiene que ocupar su
+// lugar»): plaza_productos.orden es la CASILLA (1, 2, 3…) y puede haber casillas vacías en el medio.
+async function escribirCasillas(plazaId, ids, casillas) {
   await pool.query('DELETE FROM plaza_productos WHERE plaza_id = $1', [plazaId]);
-  const ids = [...new Set((articleIds || []).map(Number).filter(Number.isFinite))];
   if (ids.length) {
     await pool.query(
-      `INSERT INTO plaza_productos (plaza_id, article_id, orden) SELECT $1, x.id, x.ord FROM unnest($2::int[]) WITH ORDINALITY AS x(id, ord)`,
-      [plazaId, ids]);
+      `INSERT INTO plaza_productos (plaza_id, article_id, orden) SELECT $1, x.id, x.ord FROM unnest($2::int[], $3::int[]) AS x(id, ord)`,
+      [plazaId, ids, casillas]);
     await congelarOrden(plazaId);
   }
+}
+
+// Desde el editor (lista de productos, sin lugares): los que siguen quedan en su casilla, los que salen
+// dejan su lugar vacío y los nuevos van al final.
+async function guardarProductos(plazaId, articleIds) {
+  const ids = [...new Set((articleIds || []).map(Number).filter(Number.isFinite))];
+  const { rows } = await pool.query('SELECT article_id, orden FROM plaza_productos WHERE plaza_id = $1', [plazaId]);
+  const pos = new Map(rows.map((r) => [Number(r.article_id), Number(r.orden)]));
+  let max = ids.reduce((m, id) => (pos.has(id) ? Math.max(m, pos.get(id)) : m), 0);
+  await escribirCasillas(plazaId, ids, ids.map((id) => (pos.has(id) ? pos.get(id) : ++max)));
+}
+
+// Desde «Armar» (arrastrar, ✕, deshacer): [articleId | null, …] — la posición en la lista es la casilla.
+async function guardarCasillas(plazaId, casillas) {
+  const ids = []; const ords = []; const vistos = new Set();
+  (casillas || []).forEach((v, i) => {
+    const id = v == null ? null : Number(v);
+    if (id == null || !Number.isFinite(id) || vistos.has(id)) return;
+    vistos.add(id); ids.push(id); ords.push(i + 1);
+  });
+  await escribirCasillas(plazaId, ids, ords);
+}
+
+// ── Rubros enteros en la plaza (Diego 20/11/2026) ─────────────────────────────────────────────────────
+// Si en el editor se tilda un rubro (o subrubro) entero, la plaza lo «sigue»: cuando aparece un producto
+// nuevo en ese rubro (con receta), se suma solo al final de la plaza (y sale con ★ NUEVO). Los grupos son
+// los mismos del editor: rubro = maxi_articles.subrubro, subrubro = maxi_articles.categoria.
+const TIPOS_GRUPO = ['rubro', 'subrubro'];
+const SQL_ARTICULOS_DE_GRUPO = `
+  SELECT DISTINCT r.article_id AS id
+    FROM recetas r
+    LEFT JOIN maxi_articles ma ON ma.articulo_id = r.article_id AND ma.business_id = r.business_id
+   WHERE r.business_id = $1 AND r.article_id IS NOT NULL AND COALESCE(r.active, TRUE)
+     AND CASE WHEN $2 = 'rubro' THEN COALESCE(NULLIF(TRIM(ma.subrubro), ''), 'Sin rubro')
+              ELSE COALESCE(NULLIF(TRIM(ma.categoria), ''), 'Sin subrubro') END = $3
+     AND NOT EXISTS (
+       SELECT 1 FROM agrupaciones a
+        CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(a.articulos) = 'array' THEN a.articulos ELSE '[]'::jsonb END) e
+        WHERE a.business_id = $1 AND LOWER(TRIM(a.nombre)) IN ('discontinuados', 'descontinuados')
+          AND (e->>'id') = r.article_id::text)`;
+
+// Guarda qué grupos sigue la plaza. Los que ya seguía conservan sus «conocidos»; los nuevos arrancan
+// conociendo todo lo que hoy tiene el grupo (ya se eligió entero en el editor).
+async function guardarGrupos(plazaId, bizId, grupos) {
+  const lista = [];
+  const vistos = new Set();
+  for (const g of grupos || []) {
+    const tipo = String(g?.tipo || ''); const nombre = String(g?.nombre || '').trim().slice(0, 120);
+    if (!TIPOS_GRUPO.includes(tipo) || !nombre || vistos.has(`${tipo}:${nombre}`)) continue;
+    vistos.add(`${tipo}:${nombre}`); lista.push({ tipo, nombre });
+  }
+  await pool.query(
+    `DELETE FROM plaza_grupos WHERE plaza_id = $1
+       AND (tipo, nombre) NOT IN (SELECT * FROM unnest($2::text[], $3::text[]))`,
+    [plazaId, lista.map((g) => g.tipo), lista.map((g) => g.nombre)]);
+  for (const g of lista) {
+    const { rows } = await pool.query(SQL_ARTICULOS_DE_GRUPO, [bizId, g.tipo, g.nombre]);
+    await pool.query(
+      `INSERT INTO plaza_grupos (plaza_id, tipo, nombre, conocidos) VALUES ($1, $2, $3, $4::int[])
+       ON CONFLICT (plaza_id, tipo, nombre) DO NOTHING`, [plazaId, g.tipo, g.nombre, rows.map((r) => Number(r.id))]);
+  }
+}
+
+// Suma a la plaza los productos nuevos de los grupos que sigue. Corre al armar la vista (tablero y TV),
+// así lo nuevo aparece solo. Devuelve los ids sumados.
+async function sumarDeGrupos(plaza, bizId) {
+  const { rows: grupos } = await pool.query('SELECT tipo, nombre, conocidos FROM plaza_grupos WHERE plaza_id = $1', [plaza.id]);
+  if (!grupos.length) return [];
+  const sumados = [];
+  for (const g of grupos) {
+    const { rows } = await pool.query(SQL_ARTICULOS_DE_GRUPO, [bizId, g.tipo, g.nombre]);
+    const conocidos = new Set((g.conocidos || []).map(Number));
+    const faltan = rows.map((r) => Number(r.id)).filter((id) => !conocidos.has(id));
+    if (!faltan.length) continue;
+    const { rows: ins } = await pool.query(
+      `INSERT INTO plaza_productos (plaza_id, article_id, orden)
+       SELECT $1, x.id, COALESCE((SELECT MAX(orden) FROM plaza_productos WHERE plaza_id = $1), 0) + x.n
+         FROM unnest($2::int[]) WITH ORDINALITY AS x(id, n)
+       ON CONFLICT (plaza_id, article_id) DO NOTHING
+       RETURNING article_id`, [plaza.id, faltan]);
+    await pool.query(
+      `UPDATE plaza_grupos SET conocidos = (SELECT array_agg(DISTINCT c) FROM unnest(conocidos || $4::int[]) c)
+        WHERE plaza_id = $1 AND tipo = $2 AND nombre = $3`, [plaza.id, g.tipo, g.nombre, faltan]);
+    sumados.push(...ins.map((r) => Number(r.article_id)));
+  }
+  if (sumados.length) {
+    await congelarOrden(plaza.id);
+    const { rows: nom } = await pool.query(
+      'SELECT nombre FROM maxi_articles WHERE business_id = $1 AND articulo_id = ANY($2::int[]) ORDER BY nombre', [bizId, sumados]);
+    const nombres = nom.map((r) => r.nombre);
+    avisarAlEquipoSinEsperar({ businessId: bizId, type: 'plaza_auto',
+      title: sumados.length === 1 ? `${plaza.nombre}: se sumó ${nombres[0] || 'un producto'}` : `${plaza.nombre}: se sumaron ${sumados.length} productos`,
+      message: `Productos nuevos de un rubro que sigue la plaza${nombres.length ? `: ${nombres.join(', ')}` : ''}`,
+      metadata: { scope: 'plaza', ids: [plaza.id] } });
+  }
+  return sumados;
 }
 
 // El orden de armado es propio de la plaza (Diego 11/11/2026): al sumar un producto se copia el
@@ -263,13 +362,14 @@ exports.create = async (req, res, next) => {
     const { rows } = await pool.query(
       `INSERT INTO plazas (business_id, sector_id, nombre) VALUES ($1, $2, $3) RETURNING id`, [bizId, sectorId, nombre]);
     await guardarProductos(rows[0].id, req.body?.articleIds);
+    if (Array.isArray(req.body?.grupos)) await guardarGrupos(rows[0].id, bizId, req.body.grupos);
     avisarAbm(req, { businessId: bizId, type: 'plaza_create', title: `Plaza nueva: ${nombre}`,
       metadata: { scope: 'plaza', ids: [rows[0].id] } });
     res.status(201).json({ ok: true, id: rows[0].id });
   } catch (e) { next(e); }
 };
 
-/** PUT /businesses/:businessId/plazas/:id  { nombre?, articleIds?, mostrar? } — mostrar: 'peso' | 'obs' | 'ambos', para toda la plaza. */
+/** PUT /businesses/:businessId/plazas/:id  { nombre?, articleIds? | casillas?, mostrar? } — casillas: [articleId|null] con lugares vacíos. — mostrar: 'peso' | 'obs' | 'ambos', para toda la plaza. */
 exports.update = async (req, res, next) => {
   try {
     const bizId = num(req.businessId);
@@ -281,7 +381,9 @@ exports.update = async (req, res, next) => {
     if (mostrar != null && !MOSTRAR.includes(mostrar)) return res.status(400).json({ ok: false, error: 'datos_invalidos' });
     await pool.query('UPDATE plazas SET nombre = $1, mostrar = COALESCE($3, mostrar), updated_at = NOW() WHERE id = $2 AND business_id = $4',
       [nombre, plaza.id, mostrar, bizId]);
-    if (Array.isArray(req.body?.articleIds)) await guardarProductos(plaza.id, req.body.articleIds);
+    if (Array.isArray(req.body?.casillas)) await guardarCasillas(plaza.id, req.body.casillas);
+    else if (Array.isArray(req.body?.articleIds)) await guardarProductos(plaza.id, req.body.articleIds);
+    if (Array.isArray(req.body?.grupos)) await guardarGrupos(plaza.id, bizId, req.body.grupos);
     res.json({ ok: true });
   } catch (e) { next(e); }
 };
@@ -316,16 +418,22 @@ exports.vista = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+// Producto nuevo en la plaza (Diego 20/11/2026): se destaca durante una semana desde que se agregó, para que
+// quien opera se dé cuenta rápido. Solo por fecha: la TV no tiene un «visto».
+const DIAS_NUEVO = 7;
+
 /** Tarjetas armadas de una plaza ({ plaza, productos }). La usan la vista del tablero y la pantalla de TV
  *  (controllers/pantallasController.js), así las dos muestran exactamente lo mismo. */
 async function armarVista(plaza, bizId, articleId = null) {
+    if (!articleId) { try { await sumarDeGrupos(plaza, bizId); } catch (e) { console.error('[plazas] sumarDeGrupos', e.message); } }
     const { rows: prods } = await pool.query(
-      `SELECT pp.article_id, COALESCE(ma.nombre, '#' || pp.article_id) AS nombre, f.layout
+      `SELECT pp.article_id, pp.orden, COALESCE(ma.nombre, '#' || pp.article_id) AS nombre, f.layout,
+              CASE WHEN f.agregado_at > NOW() - ($4::int * INTERVAL '1 day') THEN f.agregado_at END AS nuevo_desde
          FROM plaza_productos pp
          LEFT JOIN maxi_articles ma ON ma.articulo_id = pp.article_id AND ma.business_id = $2
          LEFT JOIN plaza_fichas f ON f.plaza_id = pp.plaza_id AND f.article_id = pp.article_id
         WHERE pp.plaza_id = $1 AND ($3::int IS NULL OR pp.article_id = $3)
-        ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, articleId]);
+        ORDER BY pp.orden, pp.article_id`, [plaza.id, bizId, articleId, DIAS_NUEVO]);
     const ids = prods.map((p) => p.article_id);
     const { rows: items } = ids.length ? await pool.query(
       `SELECT r.article_id, ri.id AS item_id, ri.cantidad, ri.unidad, ri.insumo_id, ri.article_ref_id, ri.observaciones, ri.secreto,
@@ -396,9 +504,10 @@ async function armarVista(plaza, bizId, articleId = null) {
       // Lo que no está en el orden guardado (ingrediente nuevo en la receta) va al final, en el orden de la receta.
       const lugar = new Map(todos.map((r, i) => [r.key, pos.has(r.key) ? pos.get(r.key) : 1e6 + i]));
       todos.sort((a, b) => lugar.get(a.key) - lugar.get(b.key));
-      return { articleId: p.article_id, nombre: p.nombre, obs: obsDe.get(p.article_id) || '', renglones: todos };
+      return { articleId: p.article_id, casilla: Number(p.orden) || null, nombre: p.nombre, obs: obsDe.get(p.article_id) || '', nuevoDesde: p.nuevo_desde || null, renglones: todos };
     });
-    return { plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza }, productos };
+    const { rows: grs } = await pool.query('SELECT tipo, nombre FROM plaza_grupos WHERE plaza_id = $1 ORDER BY tipo, nombre', [plaza.id]);
+    return { plaza: { id: plaza.id, nombre: plaza.nombre, sectorId: plaza.sector_id, sectorNombre: plaza.sector_nombre, mostrar: mostrarPlaza, grupos: grs }, productos };
 }
 exports.armarVista = armarVista;
 exports.cargarPlaza = cargarPlaza;
@@ -543,6 +652,31 @@ exports.ocultar = async (req, res, next) => {
           AND COALESCE(ri.secreto, FALSE) <> $1`,
       [oculto, Number(m[2]), bizId]);
     res.json({ ok: true, renglones: rowCount });
+  } catch (e) { next(e); }
+};
+
+/** PUT /businesses/:businessId/plazas/:id/fichas/:articleId/nuevo  { nuevo: bool } — marcar o desmarcar ★ NUEVO
+ *  a mano (Diego 20/11/2026). Marcar lo destaca DIAS_NUEVO días desde hoy; desmarcar lo saca ya. */
+exports.marcarNuevo = async (req, res, next) => {
+  try {
+    const bizId = num(req.businessId);
+    const plaza = await cargarPlaza(num(req.params.id), bizId);
+    if (!plaza) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!(await puedeArmar(req, plaza))) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const articleId = num(req.params.articleId);
+    const nuevo = !!req.body?.nuevo;
+    const { rows } = await pool.query(
+      `UPDATE plaza_fichas f SET agregado_at = CASE WHEN $3 THEN NOW() ELSE NULL END
+         FROM plaza_productos pp
+        WHERE pp.plaza_id = f.plaza_id AND pp.article_id = f.article_id AND f.plaza_id = $1 AND f.article_id = $2
+        RETURNING f.agregado_at`, [plaza.id, articleId, nuevo]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'not_found' });
+    const { rows: n } = await pool.query('SELECT nombre FROM maxi_articles WHERE business_id = $1 AND articulo_id = $2 LIMIT 1', [bizId, articleId]);
+    const nombre = n[0]?.nombre || `#${articleId}`;
+    avisarAbm(req, { businessId: bizId, type: 'plaza_nuevo',
+      title: nuevo ? `★ Nuevo en ${plaza.nombre}: ${nombre}` : `${plaza.nombre}: ${nombre} ya no se destaca como nuevo`,
+      metadata: { scope: 'plaza', ids: [plaza.id] } });
+    res.json({ ok: true, nuevoDesde: rows[0].agregado_at });
   } catch (e) { next(e); }
 };
 

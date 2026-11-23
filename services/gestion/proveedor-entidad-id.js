@@ -1,5 +1,6 @@
 // Portado de lazarillo_gestion/lib/proveedor-entidad-id.ts (TypeScript → JavaScript, misma lógica).
 'use strict';
+const { normalizarTexto } = require('./text-normalize');
 
 // Clave "texto:<normalizado>" (proveedor sin proveedorId real) con sufijo
 // opcional "|codigo:<codigo>" que desambigua personas reales distintas que
@@ -64,4 +65,13 @@ function candidatosEntidadIdProveedor(entidadId) {
   return [entidadId, construirEntidadIdProveedorTexto(parsed.normalizado, null)];
 }
 
-module.exports = { codigoIdentidadProveedorTexto, construirEntidadIdProveedorTexto, parsearEntidadIdProveedorTexto, candidatosEntidadIdProveedor };
+// «Gastos Varios» es UN balde, venga del POS (texto «GASTOS VARIOS», sin proveedorId) o de
+// Lazarillo (gasto cargado en la app: proveedor «Gastos Varios» con id propio). Con el id
+// aparecía un segundo «Gastos Varios» en la vista por proveedor (Diego, 23/11/2026).
+// Devuelve null si la fila es del balde (se agrupa por texto), o el proveedorId tal cual.
+function proveedorIdAgrupable(proveedorId, proveedorNombre) {
+  if (proveedorId == null) return null;
+  return normalizarTexto(String(proveedorNombre ?? '')) === 'gastosvarios' ? null : proveedorId;
+}
+
+module.exports = { proveedorIdAgrupable, codigoIdentidadProveedorTexto, construirEntidadIdProveedorTexto, parsearEntidadIdProveedorTexto, candidatosEntidadIdProveedor };
