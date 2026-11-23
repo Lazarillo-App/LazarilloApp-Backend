@@ -228,6 +228,19 @@ router.get('/impagas/pagos-internos/:id', responder((req) => pagos.obtenerOp({ .
 router.patch('/impagas/pagos-internos/:id', responder((req) => pagos.editarOp({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
 router.delete('/impagas/pagos-internos/:id', responder((req) => pagos.anularOp({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
 router.post('/impagas/pagos-internos/:id/desimputar', responder((req) => pagos.desimputarOp({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
+// Comprobante de pago adjunto (Diego 23/11/2026): se sube, se guarda y se lee (importe, fecha, ID, banco).
+const comprobantePago = require('../services/gestion/pagos-proveedor/comprobante');
+router.post('/pagos-proveedor/comprobante', responder((req) => comprobantePago.subirComprobante({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.get('/pagos-proveedor/comprobante/:id', async (req, res, next) => {
+  try {
+    const f = await comprobantePago.archivoComprobante({ businessId: req.gestion.businessId, id: idDe(req) });
+    if (!f) return res.status(404).json({ error: 'No existe' });
+    res.setHeader('Content-Type', f.mime);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(f.nombre)}"`);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.send(f.datos);
+  } catch (e) { next(e); }
+});
 router.post('/pagos-proveedor', responder((req) => pagos.registrarPago({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
 router.patch('/pagos-proveedor/:id', responder((req) => pagos.editarPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
 router.delete('/pagos-proveedor/:id', responder((req) => pagos.anularPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
