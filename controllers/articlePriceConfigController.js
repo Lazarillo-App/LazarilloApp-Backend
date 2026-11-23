@@ -80,13 +80,15 @@ exports.getRecetasCostos = async (req, res, next) => {
              AND pi.precio > 0
          ) AS fecha_ultima_compra
        FROM recetas r
-       JOIN receta_items ri ON ri.receta_id = r.id
+       -- LEFT: una receta de tipo «servicio» (alquiler de canchas, Diego 20/11/2026) no tiene
+       -- ingredientes y su costo sale de la canasta; con JOIN quedaba afuera y la tabla mostraba «—».
+       LEFT JOIN receta_items ri ON ri.receta_id = r.id
        -- Sin filtrar por negocio: los insumos viven en el negocio principal de la
        -- organización (ej. receta de Container FC con insumos de Container Bar).
        LEFT JOIN insumos i ON i.id = ri.insumo_id
        WHERE r.business_id = $1
          AND r.active = TRUE
-         AND ri.tipo_costo != 'nulo'
+         AND (ri.id IS NOT NULL AND ri.tipo_costo != 'nulo' OR ri.id IS NULL AND r.servicio IS NOT NULL)
          AND ($2::int IS NULL OR r.id IN (
                SELECT rif.receta_id FROM receta_items rif
                 WHERE rif.insumo_id IN (SELECT insumo_id FROM afectados)

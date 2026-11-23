@@ -828,5 +828,79 @@
     "titulo": "Proyección del food cost con el calendario: días que faltan pesados por día de semana y feriados",
     "estado": "hecha",
     "nota": "Hecho 20/11: GET /purchases/food-cost-proyeccion (services/foodCostProyeccion.js). Ventas = método único + calendario único; compras = ritmo por día de semana (8 semanas sin feriados) + efecto víspera aprendido (mín. 3 feriados). Backtest Bar Ramos 12 meses: regla de 3 7,5% de error → 4,4%. Noviembre Bar: 34,2% → ≈ 27,6% (ventas ≈ $ 89,8 M, compras ≈ $ 24,8 M). Aprendido en Bar: +12% la semana antes, +3% la siguiente (la compensación es chica). PRs back y front de este cambio."
+  },
+  {
+    "clave": "2026-11-23-lista-suc-01",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "ventas-costo-precio",
+    "buscar": "- **Precio** de venta en la lista elegida.",
+    "reemplazar": "- **Precio** de venta. Si tu POS tiene varias listas y cada sucursal cobra una (⚙ Configuración › Artículos › **Lista del POS por sucursal**), es el precio de la lista de la sucursal que elegiste arriba; con «Todas», el promedio pesado por las unidades que vendió cada una. Debajo del título dice de qué lista sale."
+  },
+  {
+    "clave": "2026-11-23-lista-suc-02",
+    "tipo": "manual_seccion",
+    "capitulo": "configuracion",
+    "seccion": "articulos-y-ventas",
+    "buscar": "- **% costo ideal global**",
+    "reemplazar": "- **Lista del POS por sucursal**: qué lista de precios de tu POS cobra cada sucursal (por ejemplo, Lista 1 en una y Lista 2 en otra). Se guarda al elegir y cambia el Precio y el costo % de Artículos según la sucursal que mirás.\n- **% costo ideal global**"
+  },
+  {
+    "clave": "2026-11-23-lista-suc-03",
+    "tipo": "tarea",
+    "titulo": "Lista de precios del POS por sucursal (Container FC: San Justo Lista 1, Ramos Lista 2)",
+    "modulo": "recetas",
+    "business_id": 204,
+    "estado": "hecha",
+    "detalle": "Diego (23/11): en MaxiRest usa la Lista 1 para San Justo y la 2 para Ramos, y Artículos mostraba siempre la Lista 1 (Cancha 3 a $ 70.000 en Ramos, que cobra $ 75.000; confirmado con las ventas de noviembre). Hecho: ⚙ Configuración › Artículos › Lista del POS por sucursal (tabla branch_price_list, migración 166, aviso en Notificaciones); el Precio y el costo % de Artículos salen de la lista de la sucursal del chip y con «Todas» se pondera por unidades vendidas (elegido por Diego). Manual: articulos › ventas-costo-precio y configuracion › articulos-y-ventas."
+  },
+  {
+    "clave": "2026-11-23-servicio-01",
+    "tipo": "manual_seccion",
+    "capitulo": "receta-de-un-articulo",
+    "seccion": "servicios",
+    "buscar": "Los conceptos que son solo del servicio (cámaras, césped) entran enteros.",
+    "reemplazar": "La tabla muestra, gasto por gasto, cuánto gasta el local por mes, qué parte le toca al servicio y cuánto es; abajo, el **costo del servicio por mes**. Los **gastos que son solo de este servicio** (cámaras, césped) se suman con **+ Agregar gasto**, se ven como etiquetas con su × y entran enteros."
+  },
+  {
+    "clave": "2026-11-23-servicio-02",
+    "tipo": "manual_seccion",
+    "capitulo": "receta-de-un-articulo",
+    "seccion": "servicios",
+    "buscar": "**Aumenté hoy**: el día que subís la hora, tocá ese botón en la ancla. Desde ahí la franja te muestra cuánto subieron tus costos y a cuánto llevar la hora para sostener el margen.",
+    "reemplazar": "**Último aumento**: Lazarillo lo ve solo en las ventas de la ancla (el día que la hora empezó a cobrarse al precio nuevo) y desde ahí la franja te muestra cuánto subieron tus costos y a cuánto llevar la hora para sostener el margen. El próximo aumento también se toma solo cuando cambiás el precio en el POS."
+  },
+  {
+    "clave": "2026-11-23-servicio-03",
+    "tipo": "manual_seccion",
+    "capitulo": "receta-de-un-articulo",
+    "seccion": "servicios",
+    "buscar": "- **Servicios atados**: cada uno vale",
+    "reemplazar": "- **Servicios atados**: se suman desde la ancla con **+ Sumar servicio**, que de entrada muestra solo los artículos de su mismo rubro (con «Ver todos los artículos» se abre el resto). Cada uno vale"
+  },
+  {
+    "clave": "2026-11-23-lista-suc-04",
+    "tipo": "manual_seccion",
+    "capitulo": "configuracion",
+    "seccion": "articulos-y-ventas",
+    "buscar": "- **Lista del POS por sucursal**: qué lista de precios de tu POS cobra cada sucursal (por ejemplo, Lista 1 en una y Lista 2 en otra). Se guarda al elegir y cambia el Precio y el costo % de Artículos según la sucursal que mirás.\n",
+    "reemplazar": "- **Listas de precios** › **Configurar listas**: arriba, qué lista de tu POS cobra cada sucursal (por ejemplo, Lista 1 en una y Lista 2 en otra). Se guarda al elegir y cambia el Precio y el costo % de Artículos según la sucursal que mirás.\n"
+  },
+  {
+    "clave": "2026-11-23-lista-suc-05",
+    "tipo": "manual_seccion",
+    "capitulo": "articulos",
+    "seccion": "ventas-costo-precio",
+    "buscar": "(⚙ Configuración › Artículos › **Lista del POS por sucursal**)",
+    "reemplazar": "(**Configurar listas**, en el selector de lista de Nuevo precio o en ⚙ Configuración › Artículos)"
+  },
+  {
+    "clave": "2026-11-23-servicio-04",
+    "tipo": "tarea",
+    "titulo": "Receta de servicio más simple: costos claros, gastos propios a la vista, aumento detectado solo",
+    "modulo": "recetas",
+    "business_id": 204,
+    "estado": "hecha",
+    "detalle": "Diego (23/11), sobre la ancla Cancha 3: no se entendía «Para el servicio 10,4 %» ni el «Total por mes»; quería ver qué gastos propios hay (desplegable); el último aumento tendría que detectarse solo (y el próximo igual); «+ Sumar servicio» mostraba todos los artículos mezclados. Hecho: columnas «Gasta el local / Le toca al servicio / Costo para el servicio» con el total abajo y la frase de dónde sale el %; «Gastos que son solo de este servicio» con etiquetas y «+ Agregar gasto» agrupado por rubro; último aumento detectado en las ventas de la ancla (Cancha 3 Ramos: 07/09/2026, $ 70.000 → $ 75.000), sin botón «Aumenté hoy»; «+ Sumar servicio» muestra primero los del mismo rubro. Además la «Lista del POS por sucursal» pasó al modal Configurar listas."
   }
 ]

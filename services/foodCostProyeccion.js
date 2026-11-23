@@ -148,6 +148,19 @@ async function proyeccionFoodCost({ businessId, rubros = [], branchId = null }) 
     feriadosDe(businessId, {}).catch(() => []),
   ]);
 
+  // Misma fuente que el Panel (Diego 23/11/2026): por día, lo que falta de cada concepto de los rubros
+  // del KPI (gastos varios, renglones sin insumo, cargas en Lazarillo, repartos).
+  try {
+    const aj = await require('./foodCostAjustes').ajustesFoodCost({ businessId, desde: desdeCompras, hasta: finMes, branchId, agrupar: 'dia' });
+    const porDia = new Map(compras.map((r) => [r.fecha, r]));
+    for (const a of aj) {
+      if (rubros.length && !rubros.includes(a.rubro)) continue;
+      const r = porDia.get(a.periodo) || { fecha: a.periodo, total: 0 };
+      r.total += a.importe;
+      if (!porDia.has(a.periodo)) { porDia.set(a.periodo, r); compras.push(r); }
+    }
+  } catch (e) { console.error('[foodCostProyeccion] ajustes', e.message); }
+
   const mes = corte.slice(0, 7);
   const diasMes = Number(finMes.slice(8)), cerrados = Number(corte.slice(8));
   const ventasMes = ventas.filter((r) => r.fecha.startsWith(mes)).reduce((a, r) => a + r.total, 0);

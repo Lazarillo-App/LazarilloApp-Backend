@@ -18,5 +18,8 @@ router.param('businessId', requireBusinessAccessParam);
 router.get('/businesses/:businessId/price-list',        ctrl.getBusinessPriceList);
 router.put('/businesses/:businessId/price-list',        ctrl.setBusinessPriceList);
 router.get('/businesses/:businessId/price-list/prices', ctrl.getBusinessPrices);
+router.get('/businesses/:businessId/price-list/sucursales',   ctrl.getListasSucursales);
+router.put('/businesses/:businessId/price-list/sucursales',   ctrl.setListaSucursal);
+router.get('/businesses/:businessId/price-list/por-sucursal', ctrl.getPreciosPorSucursal);
 
 module.exports = router;

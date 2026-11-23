@@ -82,6 +82,42 @@ function normalizarConfig(c) {
   return null;
 }
 
+/**
+ * Último aumento de precio de la ancla, leído de sus ventas día por día (Diego 23/11/2026: «¿no
+ * debería darse cuenta solo del último aumento?»). Precio del día = facturado ÷ unidades. Nivel de
+ * hoy = el precio más repetido de los últimos 7 días con ventas. Se camina hacia atrás hasta
+ * encontrar 3 días seguidos a un precio más bajo y estable (los días sueltos con descuento o una
+ * venta grande no cortan): el aumento es el primer día al nivel nuevo.
+ * @param dias [{ fecha, precio }] ordenados por fecha
+ * @returns { fecha, antes, despues } | null
+ */
+function detectarAumento(dias) {
+  const ds = (dias || []).filter((d) => d.precio > 0);
+  if (ds.length < 10) return null;
+  const redondo = (v) => Math.round(v / 100) * 100;
+  const moda = (arr) => {
+    const c = new Map();
+    for (const v of arr) c.set(redondo(v), (c.get(redondo(v)) || 0) + 1);
+    return [...c.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0] ?? null;
+  };
+  const nivel = moda(ds.slice(-7).map((d) => d.precio));
+  if (!nivel) return null;
+  const alNivel = (v) => Math.abs(v - nivel) <= nivel * 0.01;
+  let i = ds.length - 1;
+  let primero = null; // primer día (hacia atrás) visto al nivel de hoy
+  while (i >= 0) {
+    if (alNivel(ds[i].precio)) { primero = i; i--; continue; }
+    // ¿Arranca acá un tramo de 3 días seguidos a un mismo precio más bajo?
+    const tramo = ds.slice(Math.max(0, i - 2), i + 1).map((d) => redondo(d.precio));
+    const estable = tramo.length === 3 && tramo.every((v) => v === tramo[0]) && tramo[0] < nivel * 0.99;
+    if (estable && primero != null) {
+      return { fecha: ds[primero].fecha, antes: tramo[0], despues: nivel };
+    }
+    i--; // día suelto (descuento, venta grande): no corta
+  }
+  return null;
+}
+
 async function recetaDe(db, businessId, articleId) {
   const { rows } = await db.query(
     `SELECT id, article_id, nombre, servicio, porciones FROM recetas
@@ -94,7 +130,7 @@ async function recetaDe(db, businessId, articleId) {
  * Calcula una ancla con su familia. No escribe nada.
  * @returns detalle para el modal: costos por rubro, horas por mes, costo por hora y familia.
  */
-async function calcularAncla(businessId, anclaArticleId, { db = pool, configOverride = null, hoy = new Date() } = {}) {
+async function calcularAncla(businessId, anclaArticleId, { db = pool, configOverride = null, hoy = new Date(), detectar = true } = {}) {
   const rec = await recetaDe(db, businessId, anclaArticleId);
   const cfg = normalizarConfig(configOverride || rec?.servicio);
   if (!cfg || cfg.tipo !== 'ancla') return null;
@@ -188,13 +224,35 @@ async function calcularAncla(businessId, anclaArticleId, { db = pool, configOver
   // Precio de hoy de la ancla: el del último mes con ventas. Margen = 1 − costo de la hora ÷ precio.
   const precioActual = [...meses].reverse().find((x) => x.precioAncla)?.precioAncla ?? null;
   const margen = precioActual ? 1 - costoHora / precioActual : null;
+  // Último aumento: se detecta solo en las ventas de la ancla y
+  // la foto es el cálculo con los costos de antes de ese día (Diego 23/11/2026).
+  let aumento = null;
+  if (detectar) {
+    const pDias = [businessId, anclaArticleId, desdeH];
+    if (suc != null) pDias.push(suc);
+    const { rows: dias } = await db.query(
+      `SELECT to_char(day, 'YYYY-MM-DD') AS fecha, (SUM(amount) / NULLIF(SUM(qty), 0))::float8 AS precio
+         FROM sales_daily_items
+        WHERE business_id = $1 AND article_id = $2 AND day >= $3::date AND ${suc == null ? 'branch_id IS NULL' : 'branch_id = $4'}
+        GROUP BY day HAVING SUM(qty) > 0 ORDER BY day`, pDias);
+    aumento = detectarAumento(dias);
+    // Una foto guardada a mano más nueva que el aumento detectado manda; si es más vieja, gana lo detectado.
+    if (aumento && !(cfg.base && cfg.base.fecha >= aumento.fecha)) {
+      const antes = await calcularAncla(businessId, anclaArticleId, {
+        db, configOverride: { ...cfg, base: null }, hoy: new Date(`${aumento.fecha}T12:00:00Z`), detectar: false });
+      if (antes?.costoMes > 0) {
+        cfg.base = { fecha: aumento.fecha, costoMes: antes.costoMes, costoHora: antes.costoHora, precio: aumento.despues, detectado: true, precioAntes: aumento.antes };
+      }
+    }
+  }
   // Contra la foto del último aumento: la hora sube lo mismo que suben los costos del servicio.
   let vsBase = null;
   if (cfg.base) {
     const suba = cfg.base.costoMes > 0 ? costoMes / cfg.base.costoMes - 1 : null;
     const margenBase = cfg.base.precio && cfg.base.costoHora ? 1 - cfg.base.costoHora / cfg.base.precio : null;
     vsBase = {
-      desde: cfg.base.fecha, suba,
+      desde: cfg.base.fecha, suba, detectado: !!cfg.base.detectado,
+      precioAntes: cfg.base.precioAntes ?? null, precioBase: cfg.base.precio ?? null,
       precioSugerido: cfg.base.precio && suba != null ? cfg.base.precio * (1 + suba) : null,
       margenBase,
       margenBajo: margenBase != null && margen != null && margen < margenBase - 0.05,
@@ -248,4 +306,4 @@ async function listarAnclas(businessId, db = pool) {
     sucursal: r.sucursal == null ? null : Number(r.sucursal) }));
 }
 
-module.exports = { normalizarBase, normalizarConfig, calcularAncla, aplicarCostosFamilia, recalcularServicio, listarAnclas, mesesCerrados, RUBROS };
+module.exports = { detectarAumento, normalizarBase, normalizarConfig, calcularAncla, aplicarCostosFamilia, recalcularServicio, listarAnclas, mesesCerrados, RUBROS };
