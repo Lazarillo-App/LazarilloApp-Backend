@@ -1,0 +1,23 @@
+[
+  {
+    "clave": "2026-11-23-fechas-01",
+    "tipo": "guia_parche",
+    "buscar": "Modales con un mismo patrón",
+    "reemplazar": "Fechas (Diego 23/11/2026): toda fecha que se carga de ahora en más se tipea y\nse ve siempre igual, como los importes.\n· Componente único: src/componentes/CampoFecha.jsx. Nunca un <input type=\"date\">\n  suelto ni un campo de fecha armado a mano.\n· Formato dd/mm/aaaa. La barra aparece sola al completar el día y el mes\n  («25» → «25/», «2510» → «25/10/»); al borrar no se vuelve a poner y una barra\n  tipeada de más no se duplica.\n· Solo día y mes («25/10» o «2510») = año actual.\n· Año de 2 dígitos sin fallas: «25» → 2025 (hasta el año actual + 20 es 20xx;\n  más, 19xx: «85» → 1985, fechas de nacimiento).\n· Día fuera de rango se ajusta al último del mes (31/02 → 28/02).\n· Se confirma al salir del campo o con Enter; si no se entiende, vuelve a lo que\n  estaba (nunca a la fecha de hoy).\n· Tipear no le quita el calendario: el ícono abre el calendario visual.\n· Se guarda siempre la fecha limpia (AAAA-MM-DD), nunca el texto.\n· Los campos de fecha que ya existían se pasan uno por uno, revisando cada caso\n  (pendiente en la lista), no en bloque.\n\nModales con un mismo patrón"
+  },
+  {
+    "clave": "2026-11-23-fechas-02",
+    "tipo": "tarea",
+    "titulo": "Pasar los campos de fecha existentes a CampoFecha (uno por uno)",
+    "modulo": "general",
+    "prioridad": "normal",
+    "detalle": "Diego 23/11: la regla de fechas (CampoFecha: barra sola, día+mes = año actual, año de 2 dígitos, calendario con el ícono) vale de ahora en más; lo que ya existe se revisa UNO POR UNO, no en bloque. Ya lo tienen: carga de factura/gastos/empleados (FechaInput de ModalCargaFactura, PR front #491). Con <input type=\"date\"> (unos 45 campos en 24 archivos): ComprasDetalleModal (4), RrhhNomina (3), IngresosManuales (3), RrhhCronogramasModales, MovimientosBancarios, Dashboard, mercadolibre-compras, movil/gasto-movil y factura-movil (celular: definir si queda el calendario nativo), apertura-vigencia-selector, ImportarExportarDatos, ArcaCaja, conciliación (piezas, pantalla, barraDía), businessSyncPanel, base/MenuColumna (filtros desde/hasta), SyncVentasButton, SyncComprasModal, SalesControls, SuperFeriados, HistorialConcepto, CanastaTarjeta. Otros a mano: pagos/deuda-pdv FechaInput, pago-proveedor, FechaTriple de la factura."
+  },
+  {
+    "clave": "2026-11-23-dolares-01",
+    "tipo": "cambio",
+    "titulo": "Gastos en dólares que se debitan en pesos (alquiler)",
+    "estado": "hecha",
+    "nota": "Hecho: carga en US$ con cotización sugerida (blue/oficial/MEP, ArgentinaDatos+DolarApi, tabla gestion_cotizaciones) en Gastos Varios y Factura; la próxima carga del concepto arranca igual. PRs back #218, front #401/#456/#460."
+  }
+]

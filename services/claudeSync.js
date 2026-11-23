@@ -2,7 +2,8 @@
 //
 // Pendientes de desarrollo que carga Claude sin iniciar sesión (Diego 15/11/2026: «no dependas de
 // mí»). Claude no escribe contraseñas, así que en vez de usar la API con su usuario deja cada
-// cambio en claude/sync.json (en el repo, vía PR) y el servidor lo aplica al arrancar.
+// cambio en claude/sync.json o en un archivo nuevo de claude/sync/ (en el repo, vía PR) y el
+// servidor lo aplica al arrancar.
 //
 // Cada entrada tiene una `clave` única y se aplica UNA sola vez (tabla claude_sync): la base es la
 // misma para testing y producción y los dos servicios arrancan, el primero que la reclama la aplica.
@@ -29,6 +30,20 @@ const tablero = require('./tableroService');
 
 const CLAUDE_USER_ID = 51;
 const ARCHIVO = path.join(__dirname, '..', 'claude', 'sync.json');
+// Además de sync.json, cada archivo de claude/sync/*.json (un arreglo de entradas, mismo formato).
+// Sumar un archivo chico nuevo por tanda evita subir el sync.json entero (150 KB) y los choques
+// entre chats que lo editan a la vez (23/11/2026).
+const CARPETA = path.join(__dirname, '..', 'claude', 'sync');
+
+function leerEntradas() {
+  const out = [];
+  const leer = (f) => { try { const a = JSON.parse(fs.readFileSync(f, 'utf8')); if (Array.isArray(a)) out.push(...a); } catch (err) { console.error('[claude-sync]', path.basename(f), err.message); } };
+  if (fs.existsSync(ARCHIVO)) leer(ARCHIVO);
+  try {
+    for (const f of fs.readdirSync(CARPETA).filter((x) => x.endsWith('.json')).sort()) leer(path.join(CARPETA, f));
+  } catch { /* sin carpeta */ }
+  return out;
+}
 
 async function buscarTarea(e) {
   if (e.id) return Number(e.id);
@@ -84,9 +99,8 @@ async function aplicar(e) {
 }
 
 async function correr() {
-  let entradas;
-  try { entradas = JSON.parse(fs.readFileSync(ARCHIVO, 'utf8')); } catch { return; }
-  if (!Array.isArray(entradas) || !entradas.length) return;
+  const entradas = leerEntradas();
+  if (!entradas.length) return;
   await pool.query(`CREATE TABLE IF NOT EXISTS claude_sync (
     clave TEXT PRIMARY KEY, aplicado_at TIMESTAMPTZ NOT NULL DEFAULT now(), resultado JSONB)`);
   for (const e of entradas) {
