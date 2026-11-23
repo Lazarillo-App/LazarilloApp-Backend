@@ -260,6 +260,7 @@ router.delete('/tareas/:id', responder((req) => actividad.borrarTarea({ ...req.g
 // ── Empleados y concepto fijo ──
 router.get('/empleados', responder((req) => empleados.obtenerNomina({ ...req.gestion, sp: paramsDe(req) })));
 router.post('/empleados', responder((req) => empleados.crearCarga({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.get('/empleados/es-empleado', responder((req) => empleados.esEmpleado({ ...req.gestion, sp: paramsDe(req) })));
 router.get('/empleados/cuenta', responder((req) => empleados.obtenerCuenta({ ...req.gestion, sp: paramsDe(req) })));
 router.delete('/empleados/:id', responder((req) => empleados.anularCarga({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
 router.get('/conceptos-empleado', responder((req) => empleados.listarConceptosFijos({ ...req.gestion, sp: paramsDe(req) })));
