@@ -13,7 +13,7 @@
 const pool = require('../config/db');
 const { sectoresQueConduce } = require('./jefeCocina');
 const { sqlEsJefe } = require('./auth/permisos');
-const { avisarAlEquipoSinEsperar, createSyncNotification } = require('./notificationService');
+const { createSyncNotification } = require('./notificationService');
 const { createOrUpdateProposal, snapshotRecetaElaborado } = require('./recetaProposals');
 const { factorConversion, normalizarCantidadUnidad } = require('./unidades');
 
@@ -892,9 +892,52 @@ async function refrescarCambios(tareaId) {
         ELSE NULL END, updated_at = NOW()
       WHERE t.id = $1`, [tareaId]);
 }
+// ── Avisos de cocina: suben por la cadena (usuaria 23/11/2026) ──────────────────────────────────
+// Del cocinero → jefes de cocina + dueño/admin. Del jefe → dueño/admin. Del dueño/admin → los otros
+// dueños/admins. `extra` suma gente puntual (el responsable de la tarea, quien la programó). Quien lo
+// genera nunca lo recibe. En el front estos avisos quedan en pantalla hasta descartarlos.
+async function destinatariosCadena(c, extra = []) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT uid FROM (
+       SELECT owner_id AS uid FROM app_businesses WHERE id = $1
+       UNION SELECT m.user_id FROM app_memberships m WHERE m.business_id = $1 AND m.role IN ('owner','manager')
+       UNION SELECT ua.user_id FROM user_assignments ua
+              WHERE ua.revoked_at IS NULL AND ua.role IN ('admin','owner')
+                AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
+                  OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
+       UNION SELECT ua.user_id FROM user_assignments ua
+              WHERE $2::boolean AND ua.scope_type = 'business' AND ua.scope_id = $1 AND ua.revoked_at IS NULL AND ${sqlEsJefe('ua')}
+     ) x WHERE uid IS NOT NULL`, [c.bizId, !c.gestor && !c.jefe]);
+  const set = new Set(rows.map((r) => Number(r.uid)));
+  for (const u of extra) if (Number(u)) set.add(Number(u));
+  set.delete(Number(c.uid));
+  return [...set];
+}
+
+async function avisarCadena(c, { type, title, message = null, metadata = {}, extra = [], clave = null, agruparMin = 20 }) {
+  const { rows: yo } = await pool.query(
+    `SELECT COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), split_part(email, '@', 1)) AS n FROM app_users WHERE id = $1`, [c.uid]);
+  const meta = { ...metadata, kind: metadata.kind || type, actor_user_id: c.uid, actor_nombre: yo[0]?.n || null,
+    actor_rol: c.gestor ? 'gestor' : c.jefe ? 'jefe' : 'cocina', ...(clave ? { clave: String(clave) } : {}) };
+  if (clave) {
+    // El mismo aviso hace poco (ej. varios desperdicios seguidos) se renueva en vez de apilarse.
+    const up = await pool.query(
+      `UPDATE sync_notifications SET title = $3, message = $4, metadata = $5::jsonb, created_at = NOW(), read = FALSE
+        WHERE business_id = $1 AND metadata->>'clave' = $2 AND created_at > NOW() - ($6::int * INTERVAL '1 minute')`,
+      [c.bizId, String(clave), title, message, JSON.stringify(meta), agruparMin]);
+    if (up.rowCount) return;
+  }
+  for (const uid of await destinatariosCadena(c, extra)) {
+    await createSyncNotification({ businessId: c.bizId, userId: uid, type, title, message, metadata: meta }).catch(() => {});
+  }
+}
+function avisarCadenaSinEsperar(c, args) {
+  avisarCadena(c, args).catch((e) => console.error('[avisarCadena]', args?.type, e?.message));
+}
+
 function avisarCambio(c, t, texto, motivo, alcance = 'produccion') {
-  avisarAlEquipoSinEsperar({
-    businessId: c.bizId, actorUserId: c.uid, type: 'produccion_cambio',
+  avisarCadenaSinEsperar(c, {
+    type: 'produccion_cambio',
     title: `${alcance === 'receta' ? 'Cambio de receta' : 'Cambio'} en ${t.titulo}: ${texto}`,
     message: alcance === 'receta' ? `${motivo} · Para aprobar en Aprobaciones` : motivo,
     metadata: { kind: 'produccion_cambio', tarea_id: Number(t.id), fecha: formatoTarea(t).fecha, alcance },
@@ -937,11 +980,9 @@ async function nota(req) {
   const texto = String(req.body?.texto || '').trim().slice(0, 1000);
   if (!texto) fallar(400, 'texto_requerido');
   await evento(pool, id, c.uid, 'nota', texto);
-  const destinos = new Set([Number(tv.responsable_user_id), Number(tv.creada_por)].filter((x) => x && x !== c.uid));
-  for (const uid of destinos) {
-    createSyncNotification({ businessId: c.bizId, userId: uid, type: 'produccion_nota', title: `Observación en ${tv.titulo}`,
-      message: texto.slice(0, 160), metadata: { kind: 'produccion_nota', tarea_id: id } }).catch(() => {});
-  }
+  // La otra punta (responsable ↔ quien la programó) y, además, sube por la cadena (23/11).
+  avisarCadenaSinEsperar(c, { type: 'produccion_nota', title: `Observación en ${tv.titulo}`, message: texto.slice(0, 160),
+    metadata: { kind: 'produccion_nota', tarea_id: id }, extra: [tv.responsable_user_id, tv.creada_por] });
   return detalle(req);
 }
 
@@ -1007,7 +1048,7 @@ module.exports = {
   ErrorProduccion, contexto, asignarAreas, escalar, guardarTurno, borrarTurno, elaborados, guardarElaborado,
   listarTareas, crearTareas, editarTarea, borrarTarea, copiarSemana, detalle, accion,
   editarInsumo, agregarInsumo, decidir, nota, cambiosPendientes, panel, buscarInsumos,
-  _ctx: { contextoDe, fallar, exigir, fechaISO, sumarDias, lunesDe, bizInsumos },
+  _ctx: { contextoDe, fallar, exigir, fechaISO, sumarDias, lunesDe, bizInsumos, avisarCadenaSinEsperar },
   // puros (tests)
   _puros: { cuerpoPropuesta, loteDe, escalarPorIngrediente, fechaISO, sumarDias, lunesDe, tandasValidas, segundosHasta, escalarItems, copiarTareas, resumirPanel },
 };

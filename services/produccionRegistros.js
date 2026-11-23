@@ -10,9 +10,8 @@
 const pool = require('../config/db');
 const { _ctx } = require('./produccion');
 const { factorConversion, canonicalUnit } = require('./unidades');
-const { avisarAlEquipoSinEsperar } = require('./notificationService');
 
-const { contextoDe, fallar, exigir, fechaISO, sumarDias, lunesDe, bizInsumos } = _ctx;
+const { contextoDe, fallar, exigir, fechaISO, sumarDias, lunesDe, bizInsumos, avisarCadenaSinEsperar } = _ctx;
 const num = (v) => { if (v === '' || v == null) return null; const n = Number(String(v).replace(',', '.')); return Number.isFinite(n) ? n : null; };
 const nombreUsuario = `COALESCE(NULLIF(u.display_name, ''), NULLIF(u.name, ''), split_part(u.email, '@', 1))`;
 const MOTIVOS = ['Vencido', 'Se pasó de cocción', 'Dañado', 'Se cayó', 'Mal conservado', 'Sobró', 'Otro'];
@@ -171,8 +170,9 @@ async function crearDesperdicio(req) {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::bigint)`,
     [c.bizId, tipo, ins ? Number(ins.id) : null, nombre, cant, String(b.unidad || ins?.unidad_med || '').slice(0, 20) || null, motivo,
       String(b.comentario || '').trim().slice(0, 300) || null, Number(b.plaza_id) || null, c.uid, c.suc]);
-  avisarAlEquipoSinEsperar({
-    businessId: c.bizId, actorUserId: c.uid, type: 'produccion_nota', title: `Desperdicio: ${nombre} ${cant}${b.unidad ? ` ${b.unidad}` : ''}`,
+  // Sube por la cadena: del cocinero al jefe y al dueño/admin; del jefe al dueño/admin (23/11).
+  avisarCadenaSinEsperar(c, {
+    type: 'produccion_nota', title: `Desperdicio: ${nombre} ${cant}${b.unidad ? ` ${b.unidad}` : ''}`,
     message: motivo + (b.comentario ? ` · ${String(b.comentario).slice(0, 120)}` : ''), clave: `desperdicio:${c.bizId}:${c.uid}`, agruparMin: 20,
     metadata: { kind: 'produccion_desperdicio' },
   });
