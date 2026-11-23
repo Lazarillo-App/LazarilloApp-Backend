@@ -672,6 +672,41 @@ async function obtenerMesAnios({ businessId, anio, mes, sucursal, completo = fal
   return { anio, mes, hastaDia: enCurso && !completo ? hastaDia : null, ipc: ipc.disponible ? { disponible: true, hasta: ipc.hasta } : { disponible: false }, anios };
 }
 
+// ---------------------------------------------------------------- histórico de ventas (/m/historico)
+// Diego 23/11/2026: un solo gráfico que cambia entre «mes a mes», «{mes} histórico» y «anual
+// histórico». Se manda todo el historial por año y mes (unas 130 filas) y el celular arma cada vista
+// sin volver a pedir. Pesos de cada mes llevados a pesos de hoy con el IPC; tickets y cubiertos no.
+// Recorre toda la historia del negocio (Bar: 200 mil filas, 1,2 s en testing): se guarda 1 h en memoria.
+const cacheHistorico = new Map();
+async function obtenerHistorico({ businessId, sucursal }) {
+  const clave = `${businessId}|${sucursal === undefined ? "*" : sucursal}`;
+  const c = cacheHistorico.get(clave);
+  if (c && Date.now() - c.t < 3_600_000) return c.r;
+  const lugar = filtroSucursalSql("v", businessId, sucursal);
+  const [filas, ipc] = await Promise.all([
+    db.many(sql`
+      SELECT anio, mes, SUM(t)::float8 AS ventas, COUNT(*)::int AS tickets, SUM(c)::int AS cubiertos FROM (
+        SELECT EXTRACT(YEAR FROM v.fecha)::int AS anio, EXTRACT(MONTH FROM v.fecha)::int AS mes, v.fecha::date, v.comprobant,
+               SUM(COALESCE(v."importeManual", v.importe)) AS t, SUM(${CUBIERTOS}) AS c
+        FROM gestion_ventas v
+        WHERE ${lugar} AND v.fecha < now() + interval '1 day' AND v.importe IS NOT NULL AND COALESCE(v."importeManual", v.importe) != 0
+        GROUP BY 1, 2, 3, 4) x
+      GROUP BY 1, 2 ORDER BY 1, 2`),
+    require('../ipc').nivelesIpc().catch(() => ({ disponible: false })),
+  ]);
+  const hoyNivel = ipc.disponible ? ipc.nivel.get(ipc.hasta) : null;
+  const meses = filas.map((f) => {
+    const k = `${f.anio}-${String(f.mes).padStart(2, "0")}`;
+    // Un mes sin IPC publicado todavía (el en curso) vale como «hoy».
+    const nivel = ipc.disponible ? ipc.nivel.get(k > ipc.hasta ? ipc.hasta : k) : null;
+    const ventas = Number(f.ventas ?? 0);
+    return { anio: f.anio, mes: f.mes, ventas, ventasHoy: nivel ? ventas * (hoyNivel / nivel) : null, tickets: f.tickets ?? 0, cubiertos: f.cubiertos ?? 0 };
+  });
+  const r = { ipc: ipc.disponible ? { disponible: true, hasta: ipc.hasta } : { disponible: false }, meses };
+  cacheHistorico.set(clave, { t: Date.now(), r });
+  return r;
+}
+
 // El mes de un vistazo para el celular: ventas, gastos por rubro y resultado, con los mismos filtros
 // que el Panel (Económica, rubros visibles). Liviano: solo sumas.
 async function obtenerResumenMes({ organizationId, businessId, anio, mes, sucursal }) {
@@ -705,6 +740,7 @@ module.exports = {
   ErrorDatos,
   obtenerAnual,
   obtenerMesAnios,
+  obtenerHistorico,
   obtenerResumenMes,
   obtenerProyeccion,
   obtenerRecurrentes,
