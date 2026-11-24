@@ -67,7 +67,7 @@ router.use(async (req, res, next) => {
 const { puedeSeccion, estaOculto } = require('../services/auth/permisos');
 const SECCION_POR_RUTA = [
   [/^\/(facturas|gastos-varios|empleados|conceptos-empleado|pagos-proveedor|ventas-manuales)(\/|$)/, 'carga'],
-  [/^\/(conceptos|rubros-caja)(\/|$)/, 'conceptos'],
+  [/^\/(conceptos|conceptos-discontinuados|rubros-caja)(\/|$)/, 'conceptos'],
   [/^\/medios-pago(\/|$)/, 'medios'],
 ];
 const OCULTO_POR_RUTA = [
@@ -170,7 +170,7 @@ router.get('/m/anual', responder((req) =>
 router.get('/dashboard/actualizado', responder((req) => api.obtenerActualizado(ambito(req))));
 router.get('/dashboard/rango-anios', responder((req) => api.obtenerRangoAnios(ambito(req))));
 
-// ── Buscador (⌘K) y rubros visibles ────────────────────────────────────────────
+// ── Buscador (⌘K) y rubros visibles ─────────────────────────────────────────────
 router.get('/search/suggestions', responder((req) =>
   busqueda.obtenerSugerencias({ ...ambito(req), q: paramsDe(req).get('q') })));
 router.get('/search/observaciones', responder((req) =>
@@ -324,6 +324,9 @@ router.post('/conceptos', responder((req) => carga.crearConcepto({ ...req.gestio
 router.post('/rubros-caja', responder((req) => require('../services/gestion/conceptos/rubros').crearRubroCaja({ ...req.gestion, body: req.body })));
 router.patch('/conceptos/:codigo', responder((req) => carga.editarConcepto({ ...req.gestion, codigo: req.params.codigo, body: req.body })));
 router.delete('/conceptos/:codigo', responder((req) => carga.borrarConcepto({ ...req.gestion, codigo: req.params.codigo })));
+// Discontinuar rubros y conceptos de caja, en toda la organización o por negocio (Diego 20/11 y 24/11/2026).
+router.post('/conceptos-discontinuados', responder((req) => require('../services/gestion/conceptos/discontinuados').discontinuar({ ...req.gestion, usuario: usuarioDe(req), actorUserId: req.user?.id, body: req.body })));
+router.post('/conceptos-discontinuados/reactivar', responder((req) => require('../services/gestion/conceptos/discontinuados').reactivar({ ...req.gestion, actorUserId: req.user?.id, body: req.body })));
 router.get('/medios-pago', responder((req) => carga.obtenerMedios(req.gestion)));
 router.post('/medios-pago', responder((req) => carga.crearMedio({ ...req.gestion, body: req.body })));
 router.put('/medios-pago/:id', responder((req) => carga.editarMedio({ ...req.gestion, id: Number(req.params.id), body: req.body })));
