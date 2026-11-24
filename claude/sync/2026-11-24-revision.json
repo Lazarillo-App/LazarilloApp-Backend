@@ -1,0 +1,16 @@
+[
+  {
+    "clave": "2026-11-24-rev-01",
+    "tipo": "cambio",
+    "id": 153,
+    "estado": "en_curso",
+    "nota": "Revisión 24/11 (Mairene + Gemini, front 2783072 y 8c84e42): ya usan CampoFecha Mantenimiento (Pasarlo a, Próxima/Primera vez, Fecha de compra, Instalación, Para el) y Producción › Etiquetas (Elaboración y Vencimiento, que sigue recalculándose con la vida útil). Faltan las demás pantallas de la lista."
+  },
+  {
+    "clave": "2026-11-24-rev-02",
+    "tipo": "cambio",
+    "id": 125,
+    "estado": "en_curso",
+    "nota": "Revisión 24/11 (Mairene + Gemini, front 44cd7db): Mantenimiento ya usa CampoImporte en «Costo (opcional)» de la orden y «Precio de compra» del equipo (siguen solo para dueño/admin). Faltan los demás módulos."
+  }
+]
