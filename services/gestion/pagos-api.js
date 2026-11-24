@@ -195,7 +195,10 @@ function queCompraSql({ organizationId, businessId, ids, desde }) {
     FROM gestion_detalle_compras d
     JOIN gestion_compras c ON c.business_id = d.business_id AND c."rowId" = d."compraId"
     LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId} AND cc.codigo = d."codCga"
+    LEFT JOIN gestion_rubros_concepto_caja rc ON rc.organization_id = ${organizationId} AND rc.codigo = cc."codRga"
+    LEFT JOIN gestion_rubros_visibilidad rv ON rv.business_id = ${businessId} AND rv.codigo = rc.codigo
     WHERE c.business_id = ${businessId} AND c."proveedorId" = ANY(${ids}::int[]) AND COALESCE(c."fechaManual", c.fecha) >= ${desde}::date
+      AND ${rubroEncendidoSql(businessId)}
       AND COALESCE(TRIM(d.medida), '') <> '' AND COALESCE(TRIM(d.nombre), '') <> ''
     GROUP BY 1, 3, 4
     UNION ALL
@@ -205,7 +208,10 @@ function queCompraSql({ organizationId, businessId, ids, desde }) {
            SUM(ABS(COALESCE(c."importeManual", c.importe)))::float8
     FROM gestion_compras c
     LEFT JOIN gestion_conceptos_caja cc ON cc.organization_id = ${organizationId} AND cc.codigo = COALESCE(c."conceptoCodigoManual", c."conceptoCodigo")
+    LEFT JOIN gestion_rubros_concepto_caja rc ON rc.organization_id = ${organizationId} AND rc.codigo = cc."codRga"
+    LEFT JOIN gestion_rubros_visibilidad rv ON rv.business_id = ${businessId} AND rv.codigo = rc.codigo
     WHERE c.business_id = ${businessId} AND c."proveedorId" = ANY(${ids}::int[]) AND c.fecha >= ${desde}::date
+      AND ${rubroEncendidoSql(businessId)} -- «Iva Compensacion» no es lo que se le compra a Telefónica
       AND COALESCE(c."conceptoCodigoManual", c."conceptoCodigo", '') NOT IN ('133', '899', '137') -- percepciones
     GROUP BY 1, 3`;
 }
