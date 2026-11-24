@@ -707,7 +707,12 @@ async function obtenerMaestrosFactura({ organizationId, businessId }) {
   const [proveedores, conceptos, comprados, lugares, deMaxirest, tipos, historialConceptos, manuales, envasesPropios, descuentos, recordados, porRubro] = await Promise.all([
     db.many(sql`SELECT id, codigo, nombre, razon, cuit, "medioPago" FROM gestion_proveedores WHERE organization_id = ${organizationId} ORDER BY nombre`),
     db.many(sql`
-      SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro
+      SELECT TRIM(cc.codigo) AS codigo, TRIM(cc.nombre) AS nombre, COALESCE(TRIM(rc.nombre), 'Sin Rubro') AS rubro,
+             -- Discontinuado en este negocio (el concepto o su rubro): no se ofrece al cargar, pero el nombre
+             -- sigue disponible para mostrar lo ya cargado (Diego 24/11/2026).
+             EXISTS (SELECT 1 FROM gestion_conceptos_discontinuados d
+                      WHERE d.organization_id = ${organizationId} AND (d.business_id IS NULL OR d.business_id = ${businessId})
+                        AND ((d.tipo = 'concepto' AND TRIM(d.codigo) = TRIM(cc.codigo)) OR (d.tipo = 'rubro' AND TRIM(d.codigo) = TRIM(cc."codRga")))) AS discontinuado
       FROM gestion_conceptos_caja cc
       LEFT JOIN gestion_rubros_concepto_caja rc ON rc.organization_id = ${organizationId} AND rc.codigo = cc."codRga"
       WHERE cc.organization_id = ${organizationId} ORDER BY cc.nombre`),
@@ -1049,7 +1054,7 @@ async function borrarVentasManuales({ businessId, ids: idsCrudos }) {
 
 // ── Conceptos de caja (maestro de la organización) ─────────────────────────────
 async function obtenerConceptos({ organizationId }) {
-  const [filas, rubros, conRegistros] = await Promise.all([
+  const [filas, rubros, uso, discontinuados, negocios] = await Promise.all([
     db.many(sql`
       SELECT c.codigo, TRIM(c.nombre) AS nombre, c.tipo, c."codRga", c."codImp", TRIM(r.nombre) AS rubro, c."editadoEnLazarillo",
              TRIM(c."nombreMaxirest") AS "nombreMx", c."tipoMaxirest" AS "tipoMx", c."codRgaMaxirest" AS "codRgaMx", TRIM(rm.nombre) AS "rubroMx"
@@ -1058,12 +1063,18 @@ async function obtenerConceptos({ organizationId }) {
       LEFT JOIN gestion_rubros_concepto_caja rm ON rm.organization_id = ${organizationId} AND rm.codigo = c."codRgaMaxirest"
       WHERE c.organization_id = ${organizationId}`),
     db.many(sql`SELECT codigo, nombre FROM gestion_rubros_concepto_caja WHERE organization_id = ${organizationId}`),
-    // Conceptos con al menos un registro: los demás se marcan "sin uso".
+    // Uso por concepto y negocio: último registro y cantidad en los últimos 12 meses (Diego 20/11/2026:
+    // «primero me gustaría tener la data de si se usa o no»). ~90 ms en Container (74 mil compras).
     db.many(sql`
-      SELECT DISTINCT c FROM (
-        SELECT "codCga" AS c FROM gestion_compras WHERE "codCga" IS NOT NULL AND business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
-        UNION SELECT "conceptoCodigoManual" FROM gestion_compras WHERE "conceptoCodigoManual" IS NOT NULL AND business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
-      ) t`),
+      SELECT TRIM(COALESCE("conceptoCodigoManual", "codCga")) AS c, business_id AS b,
+             TO_CHAR(MAX(COALESCE("fechaManual", fecha)), 'YYYY-MM-DD') AS ultimo,
+             COUNT(*) FILTER (WHERE COALESCE("fechaManual", fecha) > now() - interval '12 months')::int AS n12
+        FROM gestion_compras
+       WHERE COALESCE("conceptoCodigoManual", "codCga") IS NOT NULL
+         AND business_id IN (SELECT id FROM app_businesses WHERE organization_id = ${organizationId})
+       GROUP BY 1, 2`),
+    require('./conceptos/discontinuados').listar({ organizationId }),
+    db.many(sql`SELECT id, TRIM(name) AS nombre FROM app_businesses WHERE organization_id = ${organizationId} ORDER BY id`),
   ]);
   const conceptos = filas
     .map((c) => ({
@@ -1074,7 +1085,10 @@ async function obtenerConceptos({ organizationId }) {
     .sort((a, b) => a.codigo - b.codigo);
   return {
     fuente: 'panel', conceptos,
-    conRegistros: conRegistros.map((f) => String(f.c).trim()),
+    conRegistros: [...new Set(uso.map((f) => f.c))],
+    uso: uso.map((f) => ({ c: f.c, b: Number(f.b), ultimo: f.ultimo, n12: f.n12 })),
+    discontinuados,
+    negocios: negocios.map((n) => ({ id: Number(n.id), nombre: n.nombre })),
     rubros: rubros.sort((a, b) => Number(a.codigo) - Number(b.codigo)),
   };
 }
