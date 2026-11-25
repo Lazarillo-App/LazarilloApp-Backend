@@ -360,9 +360,14 @@ async function obtenerDetalleVentas({ businessId, sucursal, sp }) {
   ];
   if (tipo) condiciones.push(tipo === SIN_TIPO_CODE ? sql`v.tipo IS NULL` : sql`v.tipo = ${tipo}`);
   if (cobro) condiciones.push(cobro === SIN_COBRO_CODE ? sql`v."codCobro" IS NULL` : sql`v."codCobro" = ${cobro}`);
-  // Días del mes (25/11/2026): solo con el mes de la celda.
+  // Meses elegidos en el calendario (25/11/2026): al abrir desde la columna Total o la fila Total, el
+  // detalle respeta el período del Panel en vez de traer el año entero.
+  const mes = mesValido(sp.get("mes"));
+  const meses = mes ? undefined : monthsParam.safeParse(sp.get("months")).data;
+  if (meses?.length) condiciones.push(sql`EXTRACT(MONTH FROM v.fecha)::int IN (${sql.join(meses.map((m) => sql`${m}`))})`);
+  // Días del mes (25/11/2026): con un solo mes (el de la celda o el único elegido).
   const dias = diasParam.safeParse(sp.get("dias")).data;
-  if (dias && mesValido(sp.get("mes"))) condiciones.push(sql`EXTRACT(DAY FROM v.fecha)::int BETWEEN ${dias.desde} AND ${dias.hasta}`);
+  if (dias && (mes || meses?.length === 1)) condiciones.push(sql`EXTRACT(DAY FROM v.fecha)::int BETWEEN ${dias.desde} AND ${dias.hasta}`);
   const rows = await db.many(sql`
     SELECT v."rowId", v.fecha, v.importe, v."importeManual", v.tipo, v.cobro, v.turno, v.comprobant, v.hora, v.mesa, v.mozo,
            v.total, v.descuento, v.cupon,
