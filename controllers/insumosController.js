@@ -2840,12 +2840,39 @@ exports.mermas_create = async (req, res) => {
     if (es_default === true) {
       await client.query(`UPDATE insumo_mermas SET es_default = FALSE WHERE insumo_id = $1`, [insumoId]);
     }
-    const { rows } = await client.query(
-      `INSERT INTO insumo_mermas (insumo_id, nombre, peso_inicial, peso_final, es_default)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at`,
-      [insumoId, nombre.trim(), Number(peso_inicial), Number(peso_final), es_default === true]
+    const nombreLimpio = nombre.trim();
+    const { rows: prevRows } = await client.query(
+      `SELECT id, peso_inicial, peso_final FROM insumo_mermas WHERE insumo_id = $1 AND LOWER(nombre) = LOWER($2) LIMIT 1`,
+      [insumoId, nombreLimpio]
     );
+    let rows;
+    if (prevRows.length) {
+      const mermaId = prevRows[0].id;
+      const pesoInicialViejo = Number(prevRows[0].peso_inicial);
+      const pesoFinalViejo = Number(prevRows[0].peso_final);
+      const factorViejo = pesoFinalViejo > 0 ? pesoInicialViejo / pesoFinalViejo : 1;
+      const factorNuevo = Number(peso_final) > 0 ? Number(peso_inicial) / Number(peso_final) : 1;
+      const up = await client.query(
+        `UPDATE insumo_mermas
+            SET nombre = $2, peso_inicial = $3, peso_final = $4,
+                es_default = CASE WHEN $5::boolean THEN TRUE ELSE es_default END,
+                updated_at = NOW()
+          WHERE id = $1
+          RETURNING id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at`,
+        [mermaId, nombreLimpio, Number(peso_inicial), Number(peso_final), es_default === true]
+      );
+      rows = up.rows;
+      // Misma cascada que editar/borrar (ver mermas_update).
+      if (factorViejo !== factorNuevo) await propagarCostoInsumo(insumoId, bizId, client);
+    } else {
+      const ins = await client.query(
+        `INSERT INTO insumo_mermas (insumo_id, nombre, peso_inicial, peso_final, es_default)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, insumo_id, nombre, peso_inicial, peso_final, es_default, created_at, updated_at`,
+        [insumoId, nombreLimpio, Number(peso_inicial), Number(peso_final), es_default === true]
+      );
+      rows = ins.rows;
+    }
 
     await logAudit(client, {
       userId: req.user?.id || null, businessId: bizId,
@@ -2932,18 +2959,11 @@ exports.mermas_update = async (req, res) => {
       const pesoInicialNuevo = Number(rows[0].peso_inicial);
       const pesoFinalNuevo = Number(rows[0].peso_final);
       const factorNuevo = pesoFinalNuevo > 0 ? pesoInicialNuevo / pesoFinalNuevo : 1;
-      if (factorViejo !== factorNuevo && factorViejo > 0) {
-        const { rows: itemsAfectados } = await client.query(
-          `UPDATE receta_items
-              SET costo_unitario = costo_unitario / $1::numeric * $2::numeric,
-                  updated_at = NOW()
-            WHERE merma_id = $3
-           RETURNING receta_id`,
-          [factorViejo, factorNuevo, mermaId]
-        );
-        const recetaIds = [...new Set(itemsAfectados.map(it => it.receta_id))];
-        if (recetaIds.length) await recalcularCostoRecetas(recetaIds, client);
-      }
+      // 25/11/2026: la misma cascada que al borrar una merma (propagarCostoInsumo): recalcula cada
+      // renglón con los valores actuales de sus mermas (también los que tienen varias, merma_ids),
+      // sus recetas y, si son de un elaborado, su costo y las recetas que lo usan, hacia arriba.
+      // Antes se multiplicaba por factor solo donde merma_id = esta, y los elaborados no se enteraban.
+      if (factorViejo !== factorNuevo) await propagarCostoInsumo(insumoId, bizId, client);
     }
 
     await logAudit(client, {

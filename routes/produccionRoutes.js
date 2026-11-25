@@ -5,6 +5,28 @@ const router = require('express').Router({ mergeParams: true });
 const svc = require('../services/produccion');
 const reg = require('../services/produccionRegistros');
 const sug = require('../services/produccionSugerencias');
+const nov = require('../services/produccionNovedades');
+const multer = require('multer');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
+
+const uploadNovedadFoto = multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: async (req) => ({
+      folder: `lazarillo/cocina/${Number(req.params.businessId) || 'general'}`,
+      allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+      transformation: [{ width: 1200, height: 1200, crop: 'limit', quality: 'auto' }],
+      public_id: `novedad_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    }),
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = /^image\/(png|jpe?g|webp)$/i.test(file.mimetype);
+    if (!ok) return cb(new svc.ErrorProduccion(400, 'formato_invalido', 'Solo imágenes JPG, PNG o WEBP (máx. 8 MB)'));
+    cb(null, true);
+  },
+});
 
 const r = (fn) => async (req, res, next) => {
   try {
@@ -36,11 +58,32 @@ router.put('/mise/:plazaId', r(reg.guardarMise));
 router.get('/mermas', r(reg.listarMermas));
 router.post('/mermas', r(reg.crearMerma));
 router.get('/mermas/insumo/:insumoId', r(reg.mermaDeInsumo));
+// «Usar esta merma» (25/11/2026): jefe, dueño o admin; deshacer solo dueño o admin.
+router.post('/mermas/usar', r(require('../services/produccionMermaUso').usarMerma));
+router.post('/mermas/usos/:usoId/deshacer', r(require('../services/produccionMermaUso').deshacerUso));
 router.get('/desperdicios', r(reg.listarDesperdicios));
 router.post('/desperdicios', r(reg.crearDesperdicio));
 router.delete('/registros/:tipo/:id', r(reg.borrarRegistro));
 router.get('/consumos', r(reg.consumos));
 router.get('/sugerencias', r(sug.sugerencias));
+// Novedades de cocina (etapa 1, 24/11/2026)
+router.get('/novedades', r(nov.listarNovedades));
+router.post('/novedades', r(nov.crearNovedad));
+router.post('/novedades/foto', r(async (req) => {
+  await svc._ctx.contextoDe(req);
+  await new Promise((resolve, reject) => {
+    uploadNovedadFoto.single('file')(req, null, (err) => {
+      if (!err) return resolve();
+      if (err instanceof svc.ErrorProduccion) return reject(err);
+      if (err.code === 'LIMIT_FILE_SIZE') return reject(new svc.ErrorProduccion(400, 'archivo_grande', 'La foto supera el máximo de 8 MB'));
+      return reject(err);
+    });
+  });
+  if (!req.file) throw new svc.ErrorProduccion(400, 'falta_archivo', 'Elegí o sacá una foto');
+  return { url: req.file.path, public_id: req.file.filename };
+}));
+router.post('/novedades/:id/vista', r(nov.marcarVista));
+router.delete('/novedades/:id', r(nov.borrarNovedad));
 router.get('/tareas/:id', r(svc.detalle));
 router.patch('/tareas/:id', r(svc.editarTarea));
 router.delete('/tareas/:id', r(svc.borrarTarea));

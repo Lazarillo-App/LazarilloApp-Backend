@@ -4,7 +4,7 @@
 // tiene). Solo el dueño los crea, edita o borra. Se apoyan en el rol admin: Dueño y
 // Staff son fijos y no pasan por acá.
 const pool = require('../config/db');
-const { normalizarRol, SECCIONES, limpiarStaff, JEFE_DEFAULT, administracionDefault } = require('../services/auth/permisos');
+const { normalizarRol, SECCIONES, limpiarStaff, JEFE_DEFAULT, COCINERO_DEFAULT, administracionDefault } = require('../services/auth/permisos');
 
 const scopeDe = (req) => {
   const orgId = Number(req.business?.organization_id);
@@ -68,8 +68,9 @@ async function administracionDe(scope) {
 }
 
 // ── Staff y sus subroles (Diego 11/11/2026) ──────────────────────────────────────────────
-// La primera vez se crea «Jefe de cocina» (OK al equipo + precio + % de costo). Si después lo
-// borran no vuelve (cuenta cualquier subrol que haya existido, borrado o no).
+// La primera vez se crean «Jefe de cocina» (OK al equipo + precio + % de costo + cocina) y
+// «Cocinero» (es de cocina). Si después los borran no vuelven (cuenta cualquier subrol con ese
+// nombre que haya existido, borrado o no).
 async function staffDe(scope) {
   const { rows: alguna } = await pool.query(
     `SELECT 1 FROM app_custom_roles WHERE ${scope.col} = $1 AND base_role = 'staff' AND NOT es_staff_base LIMIT 1`, [scope.id]);
@@ -77,6 +78,14 @@ async function staffDe(scope) {
     await pool.query(
       `INSERT INTO app_custom_roles (${scope.col}, nombre, base_role, permisos_staff) VALUES ($1, 'Jefe de cocina', 'staff', $2::jsonb)`,
       [scope.id, JSON.stringify(JEFE_DEFAULT)]);
+  }
+  const { rows: hayCocinero } = await pool.query(
+    `SELECT 1 FROM app_custom_roles WHERE ${scope.col} = $1 AND base_role = 'staff' AND NOT es_staff_base AND LOWER(TRIM(nombre)) = 'cocinero' LIMIT 1`,
+    [scope.id]);
+  if (!hayCocinero.length) {
+    await pool.query(
+      `INSERT INTO app_custom_roles (${scope.col}, nombre, base_role, permisos_staff) VALUES ($1, 'Cocinero', 'staff', $2::jsonb)`,
+      [scope.id, JSON.stringify(COCINERO_DEFAULT)]);
   }
   const { rows: base } = await pool.query(
     `SELECT permisos_staff FROM app_custom_roles WHERE ${scope.col} = $1 AND es_staff_base AND deleted_at IS NULL LIMIT 1`, [scope.id]);
@@ -89,7 +98,14 @@ async function staffDe(scope) {
       ORDER BY cr.created_at, cr.id`, [scope.id]);
   return {
     base: limpiarStaff(base[0]?.permisos_staff, { base: true }),
-    subroles: rows.map((r) => ({ id: Number(r.id), nombre: r.nombre, permisos: limpiarStaff(r.permisos_staff), personas: r.personas })),
+    subroles: rows.map((r) => {
+      const raw = r.permisos_staff && typeof r.permisos_staff === 'object' ? r.permisos_staff : {};
+      const permisos = limpiarStaff(raw);
+      if (raw.es_cocina !== false && (permisos.aprobar_equipo || /^(jefe de cocina|cocinero)$/i.test(String(r.nombre || '').trim()))) {
+        permisos.es_cocina = true;
+      }
+      return { id: Number(r.id), nombre: r.nombre, permisos, personas: r.personas };
+    }),
   };
 }
 
@@ -153,6 +169,7 @@ exports.updateStaff = async (req, res, next) => {
       [scope.id, nombre, id]);
     if (dup.length) return res.status(409).json({ ok: false, error: 'nombre_repetido' });
     const permisos = limpiarStaff(req.body?.permisos);
+    if (req.body?.permisos && req.body.permisos.es_cocina === false) permisos.es_cocina = false;
     const { rowCount } = await pool.query(
       `UPDATE app_custom_roles SET nombre = $1, permisos_staff = $2::jsonb, updated_at = NOW()
         WHERE id = $3 AND ${scope.col} = $4 AND deleted_at IS NULL AND base_role = 'staff' AND NOT es_staff_base`,

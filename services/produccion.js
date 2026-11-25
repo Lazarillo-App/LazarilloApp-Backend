@@ -12,8 +12,8 @@
 
 const pool = require('../config/db');
 const { sectoresQueConduce } = require('./jefeCocina');
-const { sqlEsJefe } = require('./auth/permisos');
-const { createSyncNotification } = require('./notificationService');
+const { sqlEsJefe, sqlEsCocina, getStaffPermisos } = require('./auth/permisos');
+const { avisarAbm, createSyncNotification } = require('./notificationService');
 const { createOrUpdateProposal, snapshotRecetaElaborado } = require('./recetaProposals');
 const { factorConversion, normalizarCantidadUnidad } = require('./unidades');
 
@@ -25,6 +25,10 @@ const fallar = (status, code, msg) => { throw new ErrorProduccion(status, code, 
 // ── Helpers puros (tests en produccion.test.js) ──────────────────────────────────────────────
 const num = (v) => { if (v === '' || v == null) return null; const n = Number(String(v).replace(',', '.')); return Number.isFinite(n) ? n : null; };
 const redondear = (n, d = 3) => (n == null ? null : Math.round(n * 10 ** d) / 10 ** d);
+const diaMes = (iso) => {
+  const [, m, d] = String(iso || '').slice(0, 10).split('-');
+  return d && m ? `${Number(d)}/${Number(m)}` : String(iso || '');
+};
 
 /** Fecha YYYY-MM-DD válida o null. */
 function fechaISO(v) {
@@ -84,6 +88,8 @@ async function contextoDe(req) {
   const jefe = conduce.length > 0;
   let misSectores = [];
   if (rol === 'staff') {
+    const sp = await getStaffPermisos(uid, bizId);
+    if (!jefe && !sp?.permisos?.es_cocina) fallar(403, 'no_es_cocina', 'Solo para el equipo de cocina');
     const { rows } = await pool.query(
       `SELECT COALESCE(sector_ids, '{}'::int[]) AS s FROM user_assignments
         WHERE user_id = $1 AND scope_type = 'business' AND scope_id = $2 AND revoked_at IS NULL LIMIT 1`, [uid, bizId]);
@@ -111,16 +117,18 @@ const exigir = (cond, code = 'forbidden') => { if (!cond) fallar(403, code); };
 async function equipo(bizId) {
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (u.id) u.id, COALESCE(NULLIF(u.display_name, ''), NULLIF(u.name, ''), split_part(u.email, '@', 1)) AS nombre,
-            x.role, x.subrol, COALESCE(x.sector_ids, '{}'::int[]) AS sector_ids
+            x.role, x.es_jefe, COALESCE(x.sector_ids, '{}'::int[]) AS sector_ids
        FROM (
-         SELECT ua.user_id, ua.role, ua.subrol, ua.sector_ids FROM user_assignments ua
-          WHERE ua.revoked_at IS NULL AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
+         SELECT ua.user_id, ua.role, ${sqlEsJefe('ua')} AS es_jefe, ua.sector_ids FROM user_assignments ua
+          WHERE ua.revoked_at IS NULL
+            AND (ua.role IN ('owner', 'admin') OR ${sqlEsCocina('ua')})
+            AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
              OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
          UNION ALL
-         SELECT owner_id, 'owner', NULL, NULL FROM app_businesses WHERE id = $1 AND owner_id IS NOT NULL
+         SELECT owner_id, 'owner', FALSE, NULL FROM app_businesses WHERE id = $1 AND owner_id IS NOT NULL
        ) x JOIN app_users u ON u.id = x.user_id
       ORDER BY u.id, CASE x.role WHEN 'staff' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END`, [bizId]);
-  return rows.map((r) => ({ id: Number(r.id), nombre: r.nombre, rol: r.role, jefe: r.subrol === 'jefe', sector_ids: (r.sector_ids || []).map(Number) }))
+  return rows.map((r) => ({ id: Number(r.id), nombre: r.nombre, rol: r.role, jefe: !!r.es_jefe, sector_ids: (r.sector_ids || []).map(Number) }))
     .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
 }
 async function plazas(bizId) {
@@ -189,12 +197,14 @@ async function guardarTurno(req) {
         WHERE id = $5 AND business_id = $6 AND deleted_at IS NULL RETURNING *`,
       [nombre, hora(b.desde), hora(b.hasta), num(b.orden), id, c.bizId]);
     if (!rows.length) fallar(404, 'turno_no_encontrado');
+    avisarAbm(req, { businessId: c.bizId, type: 'produccion_turno', title: `Turno editado: ${nombre}`, metadata: { turno_id: id } });
     return rows[0];
   }
   const { rows } = await pool.query(
     `INSERT INTO produccion_turnos (business_id, branch_id, nombre, desde, hasta, orden)
      VALUES ($1, $6::bigint, $2, $3, $4, COALESCE($5, (SELECT COALESCE(MAX(orden), -1) + 1 FROM produccion_turnos WHERE business_id = $1 AND branch_id IS NOT DISTINCT FROM $6::bigint)))
      RETURNING *`, [c.bizId, nombre, hora(b.desde), hora(b.hasta), num(b.orden), c.suc]);
+  avisarAbm(req, { businessId: c.bizId, type: 'produccion_turno', title: `Turno nuevo: ${nombre}`, metadata: { turno_id: Number(rows[0]?.id) || null } });
   return rows[0];
 }
 async function borrarTurno(req) {
@@ -202,7 +212,12 @@ async function borrarTurno(req) {
   const id = Number(req.params.turnoId);
   // Las tareas de ese turno quedan "sin turno" (no se pierden).
   await pool.query(`UPDATE produccion_tareas SET turno_id = NULL WHERE business_id = $1 AND turno_id = $2`, [c.bizId, id]);
-  await pool.query(`UPDATE produccion_turnos SET deleted_at = NOW() WHERE id = $1 AND business_id = $2`, [id, c.bizId]);
+  const { rows } = await pool.query(
+    `UPDATE produccion_turnos SET deleted_at = NOW() WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL RETURNING nombre`,
+    [id, c.bizId]);
+  if (rows[0]?.nombre) {
+    avisarAbm(req, { businessId: c.bizId, type: 'produccion_turno', title: `Turno eliminado: ${rows[0].nombre}`, metadata: { turno_id: id } });
+  }
   return { ok: true };
 }
 
@@ -245,6 +260,12 @@ async function guardarElaborado(req) {
        responsable_user_id = EXCLUDED.responsable_user_id, dias_vida = EXCLUDED.dias_vida, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
     [c.bizId, insumoId, num(b.minutos_tanda), Number(b.plaza_id) || null, Number(b.responsable_user_id) || null,
       num(b.dias_vida) != null ? Math.max(0, Math.round(num(b.dias_vida))) : null, c.uid]);
+  const { rows: ins } = await pool.query(
+    `SELECT COALESCE(i.nombre, r.nombre) AS nombre FROM recetas r LEFT JOIN insumos i ON i.id = r.insumo_id
+      WHERE r.business_id = $1 AND r.insumo_id = $2 AND r.active = TRUE LIMIT 1`, [c.bizId, insumoId]).catch(() => ({ rows: [] }));
+  const nombre = ins[0]?.nombre || `Insumo #${insumoId}`;
+  avisarAbm(req, { businessId: c.bizId, type: 'produccion_elaborado', title: `Estimado de producción: ${nombre}`,
+    metadata: { insumo_id: insumoId }, clave: `prod_elab:${insumoId}` });
   return { ok: true };
 }
 
@@ -377,6 +398,12 @@ async function crearTareas(req) {
   const porPersona = new Map();
   valores.forEach((v, i) => { if (v.responsable_user_id) porPersona.set(v.responsable_user_id, [...(porPersona.get(v.responsable_user_id) || []), { ...v, id: ids[i] }]); });
   avisarAsignadas(c.bizId, c.uid, porPersona);
+  const fechas = [...new Set(valores.map((v) => v.fecha))].sort();
+  const semLunes = lunesDe(fechas[0]);
+  const titleAbm = valores.length === 1
+    ? `Producción programada: ${valores[0].titulo} (${diaMes(valores[0].fecha)})`
+    : `Producción programada: ${valores.length} tareas, semana del ${diaMes(semLunes)}`;
+  avisarAbm(req, { businessId: c.bizId, type: 'produccion_tarea', title: titleAbm, metadata: { ids, fecha: fechas[0], cantidad: valores.length } });
   return { ids };
 }
 
@@ -447,6 +474,9 @@ async function borrarTarea(req) {
       `UPDATE recetas r SET has_pending_proposal = EXISTS (SELECT 1 FROM receta_proposals p WHERE p.receta_id = r.id AND p.status IN ('pending','in_revision'))
         WHERE r.business_id = $1 AND r.insumo_id = $2 AND r.active = TRUE`, [c.bizId, t.insumo_id]);
   }
+  const fTarea = String(t.fecha instanceof Date ? t.fecha.toISOString() : t.fecha).slice(0, 10);
+  avisarAbm(req, { businessId: c.bizId, type: 'produccion_tarea', title: `Tarea eliminada: ${t.titulo} (${diaMes(fTarea)})`,
+    message: motivo || null, metadata: { tarea_id: Number(t.id), fecha: fTarea } });
   return { ok: true };
 }
 
@@ -482,6 +512,9 @@ async function copiarSemana(req) {
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }
   avisarAsignadas(c.bizId, c.uid, porPersona);
+  avisarAbm(req, { businessId: c.bizId, type: 'produccion_tarea',
+    title: `Producción programada: ${nuevas.length} ${nuevas.length === 1 ? 'tarea' : 'tareas'}, semana del ${diaMes(hL)}`,
+    metadata: { copiadas: nuevas.length, desde: hL, hasta: sumarDias(hL, 6) } });
   return { copiadas: nuevas.length, desde: hL, hasta: sumarDias(hL, 6) };
 }
 
