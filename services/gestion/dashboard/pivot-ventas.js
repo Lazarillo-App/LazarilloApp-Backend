@@ -33,9 +33,20 @@ async function obtenerPivotVentas({ businessId, params }) {
   return buildPivotData(rows);
 }
 
+// Nombre de cada forma de cobro (usuaria 25/11/2026): un mismo código puede venir del POS con varios
+// textos, y a veces el texto es un número de factura («FCB 0006-00029976») en vez del medio de pago. Se usa
+// el texto que más plata mueve, salteando los que parecen comprobantes (salvo que no haya otro).
+const PARECE_COMPROBANTE = /^\s*(F|FC|NC|ND|TK|TQ|RE|RC)\s*[A-EMX]?\s*\d{1,5}\s*-\s*\d+/i;
+function elegirNombre(textos) {
+  const lista = [...textos].sort((a, b) => b[1] - a[1]);
+  const bueno = lista.find(([n]) => !PARECE_COMPROBANTE.test(n));
+  return (bueno || lista[0] || [''])[0];
+}
+
 function buildPivotData(sqlRows) {
   const tipoMap = new Map();
   const cobroMap = new Map();
+  const textosCobro = new Map(); // cobroKey → Map(texto → importe)
 
   for (const row of sqlRows) {
     const { tipo_codigo, tipo_nombre, cobro_codigo, cobro_nombre, mes } = row;
@@ -70,10 +81,15 @@ function buildPivotData(sqlRows) {
       tipo.children.push(cobroRow);
     }
     const cobro = cobroMap.get(cobroKey);
+    if (!textosCobro.has(cobroKey)) textosCobro.set(cobroKey, new Map());
+    const textos = textosCobro.get(cobroKey);
+    textos.set(cobro_nombre, (textos.get(cobro_nombre) ?? 0) + Math.abs(t));
 
     cobro.values[mes] = (cobro.values[mes] ?? 0) + t;
     cobro.rowTotal += t;
   }
+
+  for (const [key, cobro] of cobroMap) cobro.nombre = elegirNombre(textosCobro.get(key) || new Map()) || cobro.nombre;
 
   for (const [, tipo] of tipoMap) {
     for (const cobro of tipo.children) {
@@ -98,4 +114,4 @@ function buildPivotData(sqlRows) {
   return { rows: Array.from(tipoMap.values()), columnTotals, grandTotal };
 }
 
-module.exports = { obtenerPivotVentas, buildPivotData };
+module.exports = { obtenerPivotVentas, buildPivotData, _elegirNombre: elegirNombre };
