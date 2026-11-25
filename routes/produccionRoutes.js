@@ -58,6 +58,9 @@ router.put('/mise/:plazaId', r(reg.guardarMise));
 router.get('/mermas', r(reg.listarMermas));
 router.post('/mermas', r(reg.crearMerma));
 router.get('/mermas/insumo/:insumoId', r(reg.mermaDeInsumo));
+// «Usar esta merma» (25/11/2026): jefe, dueño o admin; deshacer solo dueño o admin.
+router.post('/mermas/usar', r(require('../services/produccionMermaUso').usarMerma));
+router.post('/mermas/usos/:usoId/deshacer', r(require('../services/produccionMermaUso').deshacerUso));
 router.get('/desperdicios', r(reg.listarDesperdicios));
 router.post('/desperdicios', r(reg.crearDesperdicio));
 router.delete('/registros/:tipo/:id', r(reg.borrarRegistro));

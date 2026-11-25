@@ -81,8 +81,10 @@ async function listarMermas(req) {
       WHERE m.business_id = $1 AND m.branch_id IS NOT DISTINCT FROM $6::bigint AND m.deleted_at IS NULL AND m.created_at::date BETWEEN $2 AND $3
         AND ($4::boolean OR m.user_id = $5)
       ORDER BY m.created_at DESC`, [c.bizId, desde, hasta, c.planifica, c.uid, c.suc]);
+  // Mermas guardadas en el insumo desde acá (con Deshacer para dueño/admin).
+  const usos = c.planifica ? await require('./produccionMermaUso').usosRecientes(c) : [];
   return {
-    desde, hasta,
+    desde, hasta, usos,
     items: rows.map((r) => {
       const bruto = num(r.bruto), neto = num(r.neto);
       return {

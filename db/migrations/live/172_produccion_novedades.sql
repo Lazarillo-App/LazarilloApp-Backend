@@ -1,4 +1,4 @@
--- 169: Producción · Novedades de cocina — etapa 1 (pedido de Mairene 24/11/2026).
+-- 172: Producción · Novedades de cocina — etapa 1 (pedido de Mairene 24/11/2026).
 -- Avisos operativos entre el equipo de cocina por sucursal (algo dañado, algo sucio, se hizo
 -- limpieza, cómo quedó algo, otro) con foto opcional en Cloudinary.
 -- Solo dueño y admin pueden marcar una novedad como vista o eliminarla (borrado lógico).
