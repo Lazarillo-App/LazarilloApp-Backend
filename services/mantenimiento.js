@@ -12,7 +12,7 @@
 const pool = require('../config/db');
 const { _ctx, contexto: contextoProduccion } = require('./produccion');
 const { sqlEsJefe } = require('./auth/permisos');
-const { avisarAlEquipoSinEsperar, createSyncNotification } = require('./notificationService');
+const { avisarAbm, avisarAlEquipoSinEsperar, createSyncNotification } = require('./notificationService');
 
 const { contextoDe, fallar, exigir, fechaISO, sumarDias } = _ctx;
 const num = (v) => { if (v === '' || v == null) return null; const n = Number(String(v).replace(',', '.')); return Number.isFinite(n) ? n : null; };
@@ -118,6 +118,8 @@ async function guardarEquipo(req) {
          precio = CASE WHEN $15::boolean THEN $16 ELSE precio END, updated_at = NOW()
         WHERE id = $17 AND business_id = $18 AND deleted_at IS NULL`, [...vals, c.gestor, num(b.precio), id, c.bizId]);
     if (!rowCount) fallar(404, 'equipo_no_encontrado');
+    const titulo = estado === 'baja' ? `Equipo de baja: ${nombre}` : `Equipo editado: ${nombre}`;
+    avisarAbm(req, { businessId: c.bizId, type: 'mant_equipo', title: titulo, metadata: { equipo_id: id, estado } });
   } else {
     const { rows } = await pool.query(
       `INSERT INTO mant_equipos (nombre, rubro, marca, modelo, proveedor, codigo, ubicacion, sector_id, responsable_user_id, fecha_compra,
@@ -125,14 +127,21 @@ async function guardarEquipo(req) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::bigint) RETURNING id`,
       [...vals, c.gestor ? num(b.precio) : null, c.bizId, c.uid, c.suc]);
     equipoId = Number(rows[0].id);
+    avisarAbm(req, { businessId: c.bizId, type: 'mant_equipo', title: `Equipo nuevo: ${nombre}`, metadata: { equipo_id: equipoId, rubro } });
   }
   return detalleEquipo({ ...req, params: { ...req.params, equipoId } });
 }
 
 async function borrarEquipo(req) {
   const c = await contextoDe(req); exigir(c.planifica);
-  await pool.query(`UPDATE mant_equipos SET deleted_at = NOW() WHERE id = $1 AND business_id = $2`, [Number(req.params.equipoId), c.bizId]);
-  await pool.query(`UPDATE mant_ordenes SET estado = 'cancelada', updated_at = NOW() WHERE equipo_id = $1 AND estado = 'pendiente'`, [Number(req.params.equipoId)]);
+  const equipoId = Number(req.params.equipoId);
+  const { rows: eq } = await pool.query(
+    `UPDATE mant_equipos SET deleted_at = NOW() WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL RETURNING nombre`,
+    [equipoId, c.bizId]);
+  await pool.query(`UPDATE mant_ordenes SET estado = 'cancelada', updated_at = NOW() WHERE equipo_id = $1 AND estado = 'pendiente'`, [equipoId]);
+  if (eq[0]?.nombre) {
+    avisarAbm(req, { businessId: c.bizId, type: 'mant_equipo', title: `Equipo de baja: ${eq[0].nombre}`, metadata: { equipo_id: equipoId } });
+  }
   return { ok: true };
 }
 
@@ -169,7 +178,7 @@ async function guardarPlan(req) {
   const c = await contextoDe(req); exigir(c.planifica);
   const b = req.body || {};
   const equipoId = Number(req.params.equipoId);
-  const { rows: eq } = await pool.query(`SELECT id FROM mant_equipos WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`, [equipoId, c.bizId]);
+  const { rows: eq } = await pool.query(`SELECT id, nombre FROM mant_equipos WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`, [equipoId, c.bizId]);
   if (!eq.length) fallar(404, 'equipo_no_encontrado');
   const nombre = texto(b.nombre, 100);
   if (!nombre) fallar(400, 'nombre_requerido', 'Poné qué mantenimiento es');
@@ -180,6 +189,7 @@ async function guardarPlan(req) {
   const proxima = ajustarDia(fechaISO(b.proxima) || hoyAR(), dias);
   const vals = [nombre, texto(b.descripcion, 1000), cadaN, unidad, dias, Number(b.responsable_user_id) || null, !!b.nota_obligatoria, b.activo !== false, proxima];
   const planId = Number(req.params.planId) || null;
+  const equipoNombre = eq[0].nombre;
   if (planId) {
     const { rowCount } = await pool.query(
       `UPDATE mant_planes SET nombre = $1, descripcion = $2, cada_n = $3, unidad = $4, dias_semana = $5::smallint[], responsable_user_id = $6,
@@ -190,18 +200,28 @@ async function guardarPlan(req) {
       `UPDATE mant_ordenes SET fecha = $2, titulo = $3, responsable_user_id = COALESCE($4, responsable_user_id), updated_at = NOW()
         WHERE plan_id = $1 AND estado = 'pendiente'`, [planId, proxima, nombre, Number(b.responsable_user_id) || null]);
     if (b.activo === false) await pool.query(`UPDATE mant_ordenes SET estado = 'cancelada', updated_at = NOW() WHERE plan_id = $1 AND estado = 'pendiente'`, [planId]);
+    avisarAbm(req, { businessId: c.bizId, type: 'mant_plan', title: `Mantenimiento editado: ${nombre} · ${equipoNombre}`, metadata: { equipo_id: equipoId, plan_id: planId } });
   } else {
-    await pool.query(
+    const { rows: ins } = await pool.query(
       `INSERT INTO mant_planes (nombre, descripcion, cada_n, unidad, dias_semana, responsable_user_id, nota_obligatoria, activo, proxima, business_id, equipo_id, created_by)
-       VALUES ($1,$2,$3,$4,$5::smallint[],$6,$7,$8,$9,$10,$11,$12)`, [...vals, c.bizId, equipoId, c.uid]);
+       VALUES ($1,$2,$3,$4,$5::smallint[],$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [...vals, c.bizId, equipoId, c.uid]);
+    avisarAbm(req, { businessId: c.bizId, type: 'mant_plan', title: `Mantenimiento nuevo: ${nombre} · ${equipoNombre}`, metadata: { equipo_id: equipoId, plan_id: Number(ins[0]?.id) || null } });
   }
   return detalleEquipo(req);
 }
 async function borrarPlan(req) {
   const c = await contextoDe(req); exigir(c.planifica);
   const planId = Number(req.params.planId);
-  await pool.query(`UPDATE mant_planes SET deleted_at = NOW() WHERE id = $1 AND business_id = $2`, [planId, c.bizId]);
+  const { rows: pl } = await pool.query(
+    `UPDATE mant_planes p SET deleted_at = NOW()
+       FROM mant_equipos e
+      WHERE p.id = $1 AND p.business_id = $2 AND p.deleted_at IS NULL AND e.id = p.equipo_id
+      RETURNING p.nombre, p.equipo_id, e.nombre AS equipo`,
+    [planId, c.bizId]);
   await pool.query(`UPDATE mant_ordenes SET estado = 'cancelada', updated_at = NOW() WHERE plan_id = $1 AND estado = 'pendiente'`, [planId]);
+  if (pl[0]?.nombre) {
+    avisarAbm(req, { businessId: c.bizId, type: 'mant_plan', title: `Mantenimiento eliminado: ${pl[0].nombre}${pl[0].equipo ? ` · ${pl[0].equipo}` : ''}`, metadata: { equipo_id: Number(pl[0].equipo_id) || null, plan_id: planId } });
+  }
   return detalleEquipo(req);
 }
 
