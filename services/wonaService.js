@@ -318,6 +318,148 @@ async function aplicarArticulos(bid) {
   return { nuevos: nuevos.length, actualizados };
 }
 
+// ───────────────────────── insumos y recetas del buffet ─────────────────────────
+
+const normalizar = (x) => txt(x).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** Código del rubro de insumo con ese nombre (lo crea si falta). */
+async function codigoDeRubro(client, businessId, nombre, cache) {
+  if (!nombre) return null;
+  const k = normalizar(nombre);
+  if (cache.has(k)) return cache.get(k);
+  const { rows } = await client.query('SELECT codigo, nombre FROM insumo_rubros WHERE business_id = $1', [businessId]);
+  const hay = rows.find((r) => normalizar(r.nombre) === k);
+  let codigo = hay ? Number(hay.codigo) : null;
+  if (codigo == null) {
+    codigo = rows.reduce((m, r) => Math.max(m, Number(r.codigo) || 0), 0) + 1;
+    await client.query(
+      `INSERT INTO insumo_rubros (business_id, codigo, codigo_maxi, nombre, activo) VALUES ($1, $2, $4, $3, true)
+       ON CONFLICT (business_id, codigo) DO NOTHING`, [businessId, codigo, nombre, codigo]);
+  }
+  cache.set(k, codigo);
+  return codigo;
+}
+
+/**
+ * Un insumo por producto del buffet (lo que se revende es artículo e insumo a la vez): unidad «u», rubro =
+ * grupo de Wona, precio = costo de Wona. Si ya hay un insumo con el mismo nombre en Lazarillo, se usa ese.
+ * Cambios posteriores de Wona pasan campo por campo solo si nadie lo editó en Lazarillo (insumo_aplicado);
+ * el precio también: si llega una compra que lo cambia, Wona deja de tocarlo.
+ */
+async function aplicarInsumos(bid) {
+  const { rows: prods } = await pool.query(
+    "SELECT * FROM wona_productos WHERE business_id = $1 AND tipo = 'buffet' AND articulo_id IS NOT NULL ORDER BY nombre", [bid]);
+  if (!prods.length) return { nuevos: 0, vinculados: 0, actualizados: 0, tocados: [] };
+  const client = await pool.connect();
+  let nuevos = 0, vinculados = 0, actualizados = 0;
+  const tocados = new Set();
+  const rubros = new Map();
+  try {
+    await client.query('BEGIN');
+    const { rows: existentes } = await client.query(
+      "SELECT id, nombre, codigo_maxi, unidad_med, rubro, precio_ref FROM insumos WHERE business_id = $1 AND estado = 'activo'", [bid]);
+    const porId = new Map(existentes.map((e) => [Number(e.id), e]));
+    const porNombre = new Map();
+    for (const e of existentes) {
+      const k = normalizar(e.nombre);
+      if (k) porNombre.set(k, porNombre.has(k) ? null : Number(e.id));
+    }
+    const { rows: usados } = await client.query('SELECT codigo_maxi FROM insumos WHERE business_id = $1 AND codigo_maxi IS NOT NULL', [bid]);
+    const codigos = new Set(usados.map((e) => txt(e.codigo_maxi)).filter(Boolean));
+    const tomados = new Set(prods.filter((p) => p.insumo_id != null).map((p) => Number(p.insumo_id)));
+
+    for (const p of prods) {
+      const rubro = String(await codigoDeRubro(client, bid, p.grupo || 'Buffet', rubros));
+      const costo = num(p.costo) > 0 ? num(p.costo) : null;
+      const quiere = { nombre: p.nombre, unidad_med: 'u', rubro, precio_ref: costo };
+      let insumoId = p.insumo_id != null ? Number(p.insumo_id) : null;
+      const aplicado = p.insumo_aplicado || {};
+      if (insumoId != null && porId.has(insumoId)) {
+        const actual = porId.get(insumoId);
+        const sets = [];
+        const vals = [];
+        for (const [campo, valor] of Object.entries(quiere)) {
+          if (valor == null || txt(actual[campo]) === txt(valor)) continue;
+          if (aplicado[campo] !== undefined && txt(actual[campo]) !== txt(aplicado[campo])) continue; // editado en Lazarillo
+          vals.push(valor);
+          sets.push(`${campo} = $${vals.length + 2}`);
+        }
+        if (sets.length) {
+          await client.query(`UPDATE insumos SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $1 AND business_id = $2`, [insumoId, bid, ...vals]);
+          actualizados++;
+          if (sets.some((x) => x.startsWith('precio_ref'))) tocados.add(insumoId);
+        }
+      } else {
+        const igual = porNombre.get(normalizar(p.nombre));
+        if (igual != null && !tomados.has(igual)) {
+          insumoId = igual; // ya existía en Lazarillo: lo de Lazarillo gana
+          vinculados++;
+        } else {
+          const codigo = codigos.has(String(p.articulo_id)) ? null : String(p.articulo_id);
+          const { rows } = await client.query(
+            `INSERT INTO insumos (business_id, codigo_maxi, nombre, unidad_med, precio_ref, rubro, origen, estado, sin_equivalencia)
+             VALUES ($1, $2, $3, 'u', $4, $5, 'wona', 'activo', false) RETURNING id`,
+            [bid, codigo, p.nombre, costo, rubro]);
+          insumoId = Number(rows[0].id);
+          if (codigo) codigos.add(codigo);
+          nuevos++;
+          tocados.add(insumoId);
+        }
+        tomados.add(insumoId);
+      }
+      await client.query('UPDATE wona_productos SET insumo_id = $3, insumo_aplicado = $4 WHERE business_id = $1 AND wona_id = $2',
+        [bid, p.wona_id, insumoId, JSON.stringify(quiere)]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (nuevos) {
+    try { await require('./autoAssignNewInsumos').autoAssignNewInsumos(bid); } catch (e) { console.warn(`[wona] ${bid} auto-asignar insumos:`, e.message); }
+  }
+  return { nuevos, vinculados, actualizados, tocados: [...tocados] };
+}
+
+/** Receta de cada artículo del buffet = 1 u de su insumo. Solo si el artículo no tiene receta. */
+async function aplicarRecetas(bid, tocados = []) {
+  const { rows: prods } = await pool.query(
+    `SELECT w.articulo_id, w.insumo_id, w.nombre, i.codigo_maxi
+       FROM wona_productos w JOIN insumos i ON i.id = w.insumo_id
+      WHERE w.business_id = $1 AND w.tipo = 'buffet' AND w.articulo_id IS NOT NULL AND w.insumo_id IS NOT NULL`, [bid]);
+  const { propagarCostoInsumo } = require('./costoRecetaService');
+  let nuevas = 0;
+  const recalcular = new Set(tocados.map(Number));
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const p of prods) {
+      const { rows } = await client.query(
+        `INSERT INTO recetas (article_id, business_id, nombre, descripcion, porciones, porcentaje_venta, costo_total, active, origen, created_at, updated_at)
+         SELECT $1, $2, nombre, '', 1, 0, 0, TRUE, 'wona', NOW(), NOW() FROM maxi_articles WHERE business_id = $2 AND articulo_id = $1
+         ON CONFLICT (article_id, business_id) DO NOTHING RETURNING id`, [Number(p.articulo_id), bid]);
+      if (!rows[0]) continue; // ya tenía receta (de Wona o hecha en Lazarillo): no se toca
+      await client.query(
+        `INSERT INTO receta_items (receta_id, insumo_id, codigo_maxi_insumo, nombre_insumo_maxi, cantidad, unidad, costo_unitario, orden, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 1, 'u', 0, 0, NOW(), NOW())`,
+        [rows[0].id, Number(p.insumo_id), p.codigo_maxi || null, p.nombre]);
+      recalcular.add(Number(p.insumo_id));
+      nuevas++;
+    }
+    // Costo de cada renglón desde el precio del insumo y recálculo de las recetas que lo usan.
+    for (const id of recalcular) await propagarCostoInsumo(id, bid, client);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  return { nuevas, recalculadas: recalcular.size };
+}
+
 // ───────────────────────── ventas ─────────────────────────
 
 /** Ventas por día y origen al Panel de Resultados (gestion_ventas). */
@@ -500,10 +642,10 @@ function avisar(businessId, args) {
 // ───────────────────────── sincronizar ─────────────────────────
 
 const enCurso = new Set();
-const TRAER_DEFAULT = { ventas: true, articulos: true, compras: true };
+const TRAER_DEFAULT = { ventas: true, articulos: true, insumos: true, compras: true };
 function normalizarTraer(t) {
   const o = { ...TRAER_DEFAULT };
-  if (t && typeof t === 'object') for (const k of ['articulos', 'compras']) if (k in t) o[k] = !!t[k];
+  if (t && typeof t === 'object') for (const k of ['articulos', 'insumos', 'compras']) if (k in t) o[k] = !!t[k];
   o.ventas = true;
   return o;
 }
@@ -531,12 +673,21 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
     const buffet = await traerBuffet(con, api, dBuffet < d ? d : dBuffet, h);
     await precioDeTurnos(bid);
     if (traer.articulos) await aplicarArticulos(bid); // con el precio de los turnos ya calculado
+    let insumos = null;
+    let recetas = null;
+    if (traer.articulos && traer.insumos) {
+      try {
+        insumos = await aplicarInsumos(bid);
+        recetas = await aplicarRecetas(bid, insumos.tocados);
+        delete insumos.tocados;
+      } catch (e) { console.error(`[wona] negocio ${bid} insumos/recetas:`, e.message); insumos = { error: e.message }; }
+    }
     const volcado = await volcar(con, tramos(d, h, 1).map(([x]) => x));
     let compras = null;
     if (traer.compras) {
       try { compras = await traerCompras(con, api, hoy); } catch (e) { console.error(`[wona] negocio ${bid} compras:`, e.message); compras = { error: e.message }; }
     }
-    const resumen = { desde: d, hasta: h, productos: productos.productos, canchas: productos.canchas, articulos, panel, turnos, buffet, compras, filas: volcado.filas };
+    const resumen = { desde: d, hasta: h, productos: productos.productos, canchas: productos.canchas, articulos, insumos, recetas, panel, turnos, buffet, compras, filas: volcado.filas };
     await pool.query(
       `UPDATE integraciones_wona SET ultimo_sync_at = now(), ultimo_sync_error = NULL, ultimo_resumen = $3,
               ventas_hasta = GREATEST(COALESCE(ventas_hasta, $2::date), $2::date), updated_at = now()
@@ -546,6 +697,7 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
       const partes = [];
       if (articulos?.nuevos) partes.push(`${articulos.nuevos} artículo${articulos.nuevos === 1 ? '' : 's'} nuevo${articulos.nuevos === 1 ? '' : 's'}`);
       if (turnos.turnos) partes.push(`${turnos.turnos} turnos`);
+      if (insumos?.nuevos) partes.push(`${insumos.nuevos} insumo${insumos.nuevos === 1 ? '' : 's'} del buffet con su receta`);
       if (compras?.nuevas) partes.push(`${compras.nuevas} compra${compras.nuevas === 1 ? '' : 's'} nueva${compras.nuevas === 1 ? '' : 's'}`);
       await avisar(bid, {
         type: 'wona_sincronizado',

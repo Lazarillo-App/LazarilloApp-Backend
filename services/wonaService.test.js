@@ -48,5 +48,5 @@ test('tramos de 31 días cubren el rango sin huecos', () => {
 });
 
 test('normalizarTraer: las ventas no se apagan', () => {
-  assert.deepStrictEqual(w._normalizarTraer({ ventas: false, compras: false }), { ventas: true, articulos: true, compras: false });
+  assert.deepStrictEqual(w._normalizarTraer({ ventas: false, compras: false }), { ventas: true, articulos: true, insumos: true, compras: false });
 });
