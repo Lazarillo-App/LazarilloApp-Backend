@@ -46,6 +46,8 @@ const RESERVA_NO_VALIDA = /CANCEL|REMOVED|REJECT|EXPIRED/i;
 
 const txt = (v) => (v == null ? '' : String(v).trim());
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+// El precio (numeric de Postgres) llega como texto «1500.00»: se compara como número, el resto como texto.
+const mismoValor = (campo, a, b) => (campo === 'precio_ref' ? Math.abs(num(a) - num(b)) < 0.005 : txt(a) === txt(b));
 
 // ───────────────────────── fechas (puras) ─────────────────────────
 
@@ -228,17 +230,19 @@ async function traerProductos(con, api) {
       wona_id: p.presentationUuid, tipo: 'buffet', nombre: txt(p.presentationName).slice(0, 200),
       grupo: txt(p.groupName) || 'Buffet', subgrupo: txt(p.subGroupName) || null,
       costo: num(p.presentationCost), precio: num(p.presentationPrice),
+      proveedor: (txt(p.providerName) || '').slice(0, 200), // '' = sin proveedor (se prepara): solo artículo
     })),
-    ...tipos.map((t) => ({ wona_id: `cancha:${t}`, tipo: 'cancha', nombre: `Turno ${t}`, grupo: 'Canchas', subgrupo: t, costo: 0, precio: null })),
+    ...tipos.map((t) => ({ wona_id: `cancha:${t}`, tipo: 'cancha', nombre: `Turno ${t}`, grupo: 'Canchas', subgrupo: t, costo: 0, precio: null, proveedor: null })),
   ];
   if (filas.length) {
     await pool.query(
-      `INSERT INTO wona_productos AS w (business_id, wona_id, tipo, nombre, grupo, subgrupo, costo, precio, visto_at)
-       SELECT $1, * , now() FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::numeric[], $8::numeric[])
+      `INSERT INTO wona_productos AS w (business_id, wona_id, tipo, nombre, grupo, subgrupo, costo, precio, proveedor, visto_at)
+       SELECT $1, * , now() FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[])
        ON CONFLICT (business_id, wona_id) DO UPDATE SET tipo = EXCLUDED.tipo, nombre = EXCLUDED.nombre, grupo = EXCLUDED.grupo,
-         subgrupo = EXCLUDED.subgrupo, costo = EXCLUDED.costo, precio = COALESCE(EXCLUDED.precio, w.precio), visto_at = now()`,
+         subgrupo = EXCLUDED.subgrupo, costo = EXCLUDED.costo, precio = COALESCE(EXCLUDED.precio, w.precio),
+         proveedor = EXCLUDED.proveedor, visto_at = now()`,
       [bid, filas.map((f) => f.wona_id), filas.map((f) => f.tipo), filas.map((f) => f.nombre), filas.map((f) => f.grupo),
-        filas.map((f) => f.subgrupo), filas.map((f) => f.costo), filas.map((f) => f.precio)]);
+        filas.map((f) => f.subgrupo), filas.map((f) => f.costo), filas.map((f) => f.precio), filas.map((f) => f.proveedor)]);
   }
   return { productos: productos.length, canchas: canchas.length, tipos, tipoDeCancha };
 }
@@ -348,7 +352,8 @@ async function codigoDeRubro(client, businessId, nombre, cache) {
  */
 async function aplicarInsumos(bid) {
   const { rows: prods } = await pool.query(
-    "SELECT * FROM wona_productos WHERE business_id = $1 AND tipo = 'buffet' AND articulo_id IS NOT NULL ORDER BY nombre", [bid]);
+    `SELECT * FROM wona_productos WHERE business_id = $1 AND tipo = 'buffet' AND articulo_id IS NOT NULL
+        AND COALESCE(proveedor, '') <> '' ORDER BY nombre`, [bid]); // solo lo que se compra y se revende (25/11/2026)
   if (!prods.length) return { nuevos: 0, vinculados: 0, actualizados: 0, tocados: [] };
   const client = await pool.connect();
   let nuevos = 0, vinculados = 0, actualizados = 0;
@@ -379,8 +384,8 @@ async function aplicarInsumos(bid) {
         const sets = [];
         const vals = [];
         for (const [campo, valor] of Object.entries(quiere)) {
-          if (valor == null || txt(actual[campo]) === txt(valor)) continue;
-          if (aplicado[campo] !== undefined && txt(actual[campo]) !== txt(aplicado[campo])) continue; // editado en Lazarillo
+          if (valor == null || mismoValor(campo, actual[campo], valor)) continue;
+          if (aplicado[campo] !== undefined && !mismoValor(campo, actual[campo], aplicado[campo])) continue; // editado en Lazarillo
           vals.push(valor);
           sets.push(`${campo} = $${vals.length + 2}`);
         }
@@ -423,12 +428,69 @@ async function aplicarInsumos(bid) {
   return { nuevos, vinculados, actualizados, tocados: [...tocados] };
 }
 
+/**
+ * Productos del buffet SIN proveedor en Wona (se preparan: WRAPS, tostados) que ya tenían insumo y receta automáticos
+ * de antes de la regla del 25/11/2026:
+ * - la receta automática (origen 'wona', un único renglón = 1 u de ese insumo) se borra;
+ * - el insumo, si lo creó Wona, nadie lo editó en Lazarillo y ninguna otra receta lo usa, queda discontinuado
+ *   (igual que «Eliminar» en Insumos); si no, queda como está y solo se desvincula del producto.
+ * Si la receta del artículo se editó en Lazarillo (más renglones u otro insumo), no se toca nada.
+ */
+async function quitarInsumosSinProveedor(bid) {
+  const { rows: prods } = await pool.query(
+    `SELECT w.wona_id, w.articulo_id, w.insumo_id, w.insumo_aplicado, i.origen, i.estado, i.nombre, i.unidad_med, i.rubro, i.precio_ref
+       FROM wona_productos w JOIN insumos i ON i.id = w.insumo_id
+      WHERE w.business_id = $1 AND w.tipo = 'buffet' AND w.proveedor = '' AND w.insumo_id IS NOT NULL`, [bid]);
+  const r = { recetasBorradas: 0, insumosBaja: 0, desvinculados: 0, conservados: 0 };
+  if (!prods.length) return r;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const p of prods) {
+      const insumoId = Number(p.insumo_id);
+      const { rows: rec } = await client.query(
+        `SELECT r.id, r.origen, COUNT(ri.id)::int AS n, BOOL_AND(ri.insumo_id = $3 AND ri.cantidad = 1) AS es_auto
+           FROM recetas r LEFT JOIN receta_items ri ON ri.receta_id = r.id
+          WHERE r.business_id = $1 AND r.article_id = $2
+          GROUP BY r.id, r.origen`, [bid, Number(p.articulo_id), insumoId]);
+      const receta = rec[0];
+      const recetaAuto = receta && receta.origen === 'wona' && receta.n === 1 && receta.es_auto;
+      if (receta && !recetaAuto && receta.origen === 'wona') { r.conservados++; continue; } // editada en Lazarillo
+      if (recetaAuto) {
+        await client.query('DELETE FROM receta_items WHERE receta_id = $1', [receta.id]);
+        await client.query('DELETE FROM recetas WHERE id = $1 AND business_id = $2', [receta.id, bid]);
+        r.recetasBorradas++;
+      }
+      const { rows: otras } = await client.query('SELECT 1 FROM receta_items WHERE insumo_id = $1 LIMIT 1', [insumoId]);
+      const aplicado = p.insumo_aplicado || {};
+      const editado = ['nombre', 'unidad_med', 'rubro', 'precio_ref']
+        .some((c) => aplicado[c] !== undefined && !mismoValor(c, p[c], aplicado[c]));
+      if (p.origen === 'wona' && p.estado === 'activo' && !editado && !otras.length) {
+        await client.query(`UPDATE insumos SET estado = 'discontinuado', updated_at = NOW() WHERE id = $1 AND business_id = $2`, [insumoId, bid]);
+        r.insumosBaja++;
+      } else {
+        r.desvinculados++;
+      }
+      await client.query(`UPDATE wona_productos SET insumo_id = NULL, insumo_aplicado = '{}'::jsonb WHERE business_id = $1 AND wona_id = $2`,
+        [bid, p.wona_id]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  return r;
+}
+
 /** Receta de cada artículo del buffet = 1 u de su insumo. Solo si el artículo no tiene receta. */
 async function aplicarRecetas(bid, tocados = []) {
   const { rows: prods } = await pool.query(
     `SELECT w.articulo_id, w.insumo_id, w.nombre, i.codigo_maxi
        FROM wona_productos w JOIN insumos i ON i.id = w.insumo_id
-      WHERE w.business_id = $1 AND w.tipo = 'buffet' AND w.articulo_id IS NOT NULL AND w.insumo_id IS NOT NULL`, [bid]);
+      WHERE w.business_id = $1 AND w.tipo = 'buffet' AND w.articulo_id IS NOT NULL AND w.insumo_id IS NOT NULL
+        AND COALESCE(w.proveedor, '') <> ''`, [bid]);
   const { propagarCostoInsumo } = require('./costoRecetaService');
   let nuevas = 0;
   const recalcular = new Set(tocados.map(Number));
@@ -677,9 +739,11 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
     let recetas = null;
     if (traer.articulos && traer.insumos) {
       try {
+        const sinProveedor = await quitarInsumosSinProveedor(bid);
         insumos = await aplicarInsumos(bid);
         recetas = await aplicarRecetas(bid, insumos.tocados);
         delete insumos.tocados;
+        insumos.sinProveedor = sinProveedor;
       } catch (e) { console.error(`[wona] negocio ${bid} insumos/recetas:`, e.message); insumos = { error: e.message }; }
     }
     const volcado = await volcar(con, tramos(d, h, 1).map(([x]) => x));

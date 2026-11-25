@@ -26,6 +26,13 @@ const pool = require('../../config/db');
       const q = async (sql, params) => (await c.query(sql, params)).rows[0];
       const prod = await q(`SELECT COUNT(*) FILTER (WHERE tipo = 'buffet')::int AS buffet, COUNT(*) FILTER (WHERE tipo = 'buffet' AND insumo_id IS NOT NULL)::int AS con_insumo
                               FROM wona_productos WHERE business_id = $1`, [bid]);
+      try {
+        const pv = await q(`SELECT COUNT(*) FILTER (WHERE proveedor <> '')::int AS con, COUNT(*) FILTER (WHERE proveedor = '')::int AS sin,
+                                   COUNT(*) FILTER (WHERE proveedor IS NULL)::int AS sin_leer
+                              FROM wona_productos WHERE business_id = $1 AND tipo = 'buffet'`, [bid]);
+        console.log('buffet con proveedor:', pv.con, '| sin proveedor (solo artículo):', pv.sin, '| aún sin leer:', pv.sin_leer,
+          '| última limpieza:', JSON.stringify(r.insumos?.sinProveedor));
+      } catch (e) { console.log('proveedor: columna aún no creada (falta deploy 174)'); }
       const ins = await q(`SELECT COUNT(*)::int AS wona, COUNT(*) FILTER (WHERE estado = 'activo')::int AS activos FROM insumos WHERE business_id = $1 AND origen = 'wona'`, [bid]);
       const todos = await q(`SELECT COUNT(*)::int AS n FROM insumos WHERE business_id = $1`, [bid]);
       const rec = await q(`SELECT COUNT(*)::int AS n FROM recetas WHERE business_id = $1 AND origen = 'wona'`, [bid]);
