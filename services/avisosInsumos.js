@@ -213,11 +213,15 @@ A.grupoRegla = avisoAbm({
 
 /* ───── mermas ───── */
 A.mermaCrear = avisoAbm({
-  armar: async (req, b) => ({
-    type: 'insumo_merma', title: `Merma nueva en ${await nomIns(req.params.id)}: ${b.data?.nombre || req.body?.nombre || ''}`.trim(),
-    message: req.body?.peso_inicial && req.body?.peso_final ? `${req.body.peso_inicial} → ${req.body.peso_final}` : null,
-    metadata: { ids: [Number(req.params.id)] },
-  }),
+  armar: async (req, b) => {
+    const pi = Number(req.body?.peso_inicial), pf = Number(req.body?.peso_final);
+    const pct = pi > 0 && pf >= 0 && pf <= pi ? Math.round(((pi - pf) / pi) * 1000) / 10 : null;
+    return {
+      type: 'insumo_merma', title: `Merma en ${await nomIns(req.params.id)}: ${b.data?.nombre || req.body?.nombre || 'Limpieza'}${pct != null ? ` (${pct}%)` : ''}`.trim(),
+      message: pi > 0 && pf > 0 ? `${req.body.peso_inicial} → ${req.body.peso_final}` : null,
+      metadata: { ids: [Number(req.params.id)] },
+    };
+  },
 });
 A.mermaEditar = avisoAbm({
   armar: async (req, b) => ({
