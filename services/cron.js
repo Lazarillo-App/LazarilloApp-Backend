@@ -231,6 +231,35 @@ function startFudoCron() {
 }
 
 /**
+ * Wona todas las noches (usuaria 25/11/2026): cada negocio conectado trae ventas, turnos, buffet y
+ * compras de su sede de Wona (services/wonaService.js). Servidor a servidor, solo lectura.
+ * - WONA_CRON=1 / 0 → fuerza encenderlo / apagarlo. Sin la variable, corre donde corre la ingesta.
+ * - CRON_WONA_SCHEDULE → default "45 4 * * *" (04:45).
+ */
+let wonaStarted = false;
+
+function startWonaCron() {
+  if (wonaStarted) return;
+  wonaStarted = true;
+  const forzado = process.env.WONA_CRON;
+  const habilitado = forzado === '1' || (forzado !== '0' && gestionCronHabilitado());
+  if (!habilitado) {
+    console.log(`[cron] Wona diario deshabilitado en este servicio (${process.env.RENDER_SERVICE_NAME || 'local'})`);
+    return;
+  }
+  const tz = process.env.CRON_TZ || 'America/Argentina/Buenos_Aires';
+  const expr = process.env.CRON_WONA_SCHEDULE || '45 4 * * *';
+  console.log(`[cron] Wona diario habilitado. TZ=${tz} schedule=${expr}`);
+  cron.schedule(expr, async () => {
+    try {
+      await require('./wonaService').corridaDiaria();
+    } catch (e) {
+      console.error('[cron] ❌ error en Wona diario:', e.message);
+    }
+  }, { timezone: tz });
+}
+
+/**
  * Servicios por hora (Diego 20/11/2026): todos los días recalcula cada ancla y su familia y avisa
  * si los costos subieron 5 % desde el último aumento o si bajó el uso (services/servicioAvisos.js).
  * - SERVICIOS_CRON=1 / 0 → fuerza encenderlo / apagarlo. Sin la variable, corre donde corre la
@@ -270,6 +299,8 @@ function startGestionCron() {
   startMercadoPagoCron();
   // Fudo diario: su propia llave (FUDO_CRON).
   startFudoCron();
+  // Wona diario: su propia llave (WONA_CRON).
+  startWonaCron();
   // Servicios por hora: su propia llave (SERVICIOS_CRON).
   startServiciosCron();
 

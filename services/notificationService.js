@@ -42,6 +42,8 @@ const ALLOWED_TYPES = new Set([
   'produccion_tarea', 'produccion_cambio', 'produccion_decision', 'produccion_nota',
   // Mantenimiento de equipos (21/11/2026)
   'mant_falla', 'mant_orden',
+  // Wona Sports (25/11/2026)
+  'wona_conectado', 'wona_desconectado', 'wona_sincronizado', 'wona_vencido',
 ]);
 
 function safeType(type) {

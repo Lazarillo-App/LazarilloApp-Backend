@@ -22,7 +22,7 @@
 
 const pool = require('../config/db');
 
-const NOMBRES = { fudo: 'Fudo' };
+const NOMBRES = { fudo: 'Fudo', wona: 'Wona' };
 const txt = (v) => (v == null ? '' : String(v).trim());
 const normalizar = (s) => txt(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const soloDigitos = (s) => txt(s).replace(/\D/g, '');

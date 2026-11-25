@@ -32,7 +32,7 @@ async function rebuildSalesDailyRange({ businessId, from, to, client = null }) {
       FROM sales_daily_items
       WHERE business_id = $1
         AND day BETWEEN $2::date AND $3::date
-        AND source IN ('csv','maxi','fudo')
+        AND source IN ('csv','maxi','fudo','wona')
       ORDER BY business_id, day, article_id, COALESCE(branch_id, 0),
                CASE WHEN source='csv' THEN 0 ELSE 1 END
     )

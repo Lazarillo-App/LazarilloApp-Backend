@@ -80,7 +80,7 @@ async function getVentas(req, res, next) {
         FROM sales_daily_items sdi
         WHERE sdi.business_id = $1
           AND sdi.day BETWEEN $2::date AND $3::date
-          AND sdi.source IN ('csv','maxi','fudo')
+          AND sdi.source IN ('csv','maxi','fudo','wona')
         ORDER BY sdi.day, sdi.article_id,
           CASE WHEN sdi.source = 'csv' THEN 0 ELSE 1 END
       )
@@ -203,7 +203,7 @@ async function getArticleSeries(req, res, next) {
         WHERE business_id = $1
           AND article_id  = $2
           AND day BETWEEN $3::date AND $4::date
-          AND source IN ('csv','maxi','fudo')
+          AND source IN ('csv','maxi','fudo','wona')
         ORDER BY day,
           CASE WHEN source = 'csv' THEN 0 ELSE 1 END
       )
@@ -265,7 +265,7 @@ async function getArticleSeriesQuery(req, res, next) {
           WHERE business_id = $1
             AND article_id  = $2
             AND day BETWEEN $3::date AND $4::date
-            AND source IN ('csv','maxi','fudo')
+            AND source IN ('csv','maxi','fudo','wona')
           ORDER BY day,
             CASE WHEN source = 'csv' THEN 0 ELSE 1 END
         )
@@ -304,7 +304,7 @@ async function getArticleSeriesQuery(req, res, next) {
         WHERE business_id = $1
           AND article_id  = $2
           AND day BETWEEN $3::date AND $4::date
-          AND source IN ('csv','maxi','fudo')
+          AND source IN ('csv','maxi','fudo','wona')
         ORDER BY day,
           CASE WHEN source = 'csv' THEN 0 ELSE 1 END
       )

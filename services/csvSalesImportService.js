@@ -200,7 +200,7 @@ async function applyReplaceRange(client, { businessId, from, to, importId, branc
     await client.query(`
       DELETE FROM sales_daily_items
       WHERE business_id = $1
-        AND source IN ('maxi','fudo')  -- los POS automáticos (Fudo: 17/11/2026)
+        AND source IN ('maxi','fudo','wona')  -- los POS automáticos (Fudo: 17/11/2026, Wona: 25/11/2026)
         AND day BETWEEN $2::date AND $3::date
     `, [businessId, from, to]);
   }
