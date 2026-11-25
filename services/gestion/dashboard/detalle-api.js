@@ -18,7 +18,7 @@ const { buildDateRange, filtroSucursalSql, importeCondition, observacionConditio
 const { fuenteCompras } = require('./fuente-compras');
 const { recortarConHasMore } = require('./recortar-has-more');
 const { reshapeDetalle } = require('./reshape-detalle');
-const { monthsParam, parseObservacionQuery, parseImporteQuery } = require('./params');
+const { monthsParam, diasParam, parseObservacionQuery, parseImporteQuery } = require('./params');
 const { DETALLE_COMPRAS_LIMITE, DETALLE_VENTAS_LIMITE, SIN_TIPO_CODE, SIN_COBRO_CODE } = require('./constants');
 const { claveComprobante, estadoPago } = require('../cta-cte/estado');
 const { combinarPagos } = require('../pagos-proveedor/imputar');
@@ -120,7 +120,7 @@ const aFila = (r) => ({
 // Alias: c (fuente), p (proveedores), cc_ef / rc_ef / rv (concepto y rubro efectivos y su visibilidad).
 function buildDetalleConditions({
   businessId, sucursal, year, mes, meses, proveedorId, proveedorTexto, codigo, sinProveedor,
-  rubroCodigo, conceptoCodigo, observacionQuery, importeQuery, historico = false,
+  rubroCodigo, conceptoCodigo, observacionQuery, importeQuery, historico = false, dias,
 }) {
   const { fechaStart, fechaEnd } = buildDateRange(year, mes);
   const conditions = [
@@ -133,6 +133,10 @@ function buildDetalleConditions({
   ];
   if (!historico && !mes && meses?.length) {
     conditions.push(sql`EXTRACT(MONTH FROM COALESCE(c."fechaManual", c.fecha))::int IN (${sql.join(meses.map((m) => sql`${m}`))})`);
+  }
+  // Días del mes (25/11/2026): con un solo mes (el de la celda o el único elegido).
+  if (!historico && dias && (mes || meses?.length === 1)) {
+    conditions.push(sql`EXTRACT(DAY FROM COALESCE(c."fechaManual", c.fecha))::int BETWEEN ${dias.desde} AND ${dias.hasta}`);
   }
   if (proveedorId !== undefined) conditions.push(sql`p.id = ${proveedorId}`);
   else if (proveedorTexto !== undefined) {
@@ -291,6 +295,7 @@ async function obtenerDetalleCompras({ organizationId, businessId, sucursal, sp 
     businessId, sucursal, year,
     mes: mesValido(sp.get("mes")),
     meses: monthsParam.safeParse(sp.get("months")).data,
+    dias: diasParam.safeParse(sp.get("dias")).data,
     proveedorId: entero(sp.get("proveedorId")),
     proveedorTexto: proveedorTextoRaw && proveedorTextoRaw.length <= 256 ? proveedorTextoRaw : undefined,
     codigo: codigoValido(sp.get("codigo")),
@@ -355,6 +360,9 @@ async function obtenerDetalleVentas({ businessId, sucursal, sp }) {
   ];
   if (tipo) condiciones.push(tipo === SIN_TIPO_CODE ? sql`v.tipo IS NULL` : sql`v.tipo = ${tipo}`);
   if (cobro) condiciones.push(cobro === SIN_COBRO_CODE ? sql`v."codCobro" IS NULL` : sql`v."codCobro" = ${cobro}`);
+  // Días del mes (25/11/2026): solo con el mes de la celda.
+  const dias = diasParam.safeParse(sp.get("dias")).data;
+  if (dias && mesValido(sp.get("mes"))) condiciones.push(sql`EXTRACT(DAY FROM v.fecha)::int BETWEEN ${dias.desde} AND ${dias.hasta}`);
   const rows = await db.many(sql`
     SELECT v."rowId", v.fecha, v.importe, v."importeManual", v.tipo, v.cobro, v.turno, v.comprobant, v.hora, v.mesa, v.mozo,
            v.total, v.descuento, v.cupon,

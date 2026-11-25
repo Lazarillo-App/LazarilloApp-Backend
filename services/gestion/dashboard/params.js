@@ -37,6 +37,17 @@ const monthsParam = z.preprocess((v) => {
   return parsed.length > 0 && parsed.length < 12 ? parsed : undefined;
 }, z.array(z.number().int().min(1).max(12)).optional());
 
+// Días dentro del mes elegido (usuaria 25/11/2026: «si quiero ver 1 día hoy no puedo»): «3-8» o «25».
+// Solo vale con un único mes elegido; si no, se ignora.
+const diasParam = z.preprocess((v) => {
+  if (typeof v !== "string" || v === "") return undefined;
+  const m = v.match(/^(\d{1,2})(?:-(\d{1,2}))?$/);
+  if (!m) return undefined;
+  const a = Number(m[1]);
+  const b = Number(m[2] ?? m[1]);
+  return a >= 1 && b <= 31 && a <= b ? { desde: a, hasta: b } : undefined;
+}, z.object({ desde: z.number().int(), hasta: z.number().int() }).optional());
+
 // Trunca a 256 (igual que `observacionQuery` en el pivot) en vez de rechazar:
 // la paleta guarda el texto completo de la observación (hasta 500), y si el
 // detalle descartara el filtro mostraría más compras que la celda clickeada.
@@ -86,6 +97,7 @@ const dashboardParamsSchema = z.object({
   observacionQuery: truncatedStringParam(256),
   importeQuery: truncatedStringParam(40),
   months: monthsParam,
+  dias: diasParam,
   vista: vistaParam,
   agrupacion: agrupacionParam,
   modo: modoParam,
@@ -97,6 +109,7 @@ const ventasParamsSchema = z.object({
   localId: optionalIntParam,
   pdvId: optionalIntParam,
   months: monthsParam,
+  dias: diasParam,
 });
 
 function parseDashboardParams(sp) {
@@ -111,6 +124,7 @@ function parseDashboardParams(sp) {
     observacionQuery: sp.get("observacionQuery"),
     importeQuery: sp.get("importeQuery"),
     months: sp.get("months"),
+    dias: sp.get("dias"),
     vista: sp.get("vista"),
     agrupacion: sp.get("agrupacion"),
     modo: sp.get("modo"),
@@ -124,6 +138,7 @@ function parseVentasParams(sp) {
     localId: sp.get("localId"),
     pdvId: sp.get("pdvId"),
     months: sp.get("months"),
+    dias: sp.get("dias"),
   });
 }
 
@@ -213,4 +228,4 @@ function buildVentasDetalleUrl(filter) {
   return `/api/dashboard/detalle-ventas?${params}`;
 }
 
-module.exports = { monthsParam, parseSucursal, parseObservacionQuery, parseImporteQuery, parseDashboardParams, parseVentasParams, buildDashboardUrl, buildVentasPivotUrl, buildComprasDetalleUrl, buildFlujoCajaUrl, buildDiferenciaCajaUrl, buildRangoAniosUrl, buildVentasDetalleUrl };
+module.exports = { monthsParam, diasParam, parseSucursal, parseObservacionQuery, parseImporteQuery, parseDashboardParams, parseVentasParams, buildDashboardUrl, buildVentasPivotUrl, buildComprasDetalleUrl, buildFlujoCajaUrl, buildDiferenciaCajaUrl, buildRangoAniosUrl, buildVentasDetalleUrl };

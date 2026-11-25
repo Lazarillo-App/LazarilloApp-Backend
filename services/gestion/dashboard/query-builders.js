@@ -85,6 +85,7 @@ function buildPivotConditions({
   sucursal,
   scopePropio = false,
   months,
+  dias,
   rubroCodigo,
   conceptoCodigo,
   proveedorId,
@@ -126,6 +127,8 @@ function buildPivotConditions({
     conditions.push(
       sql`EXTRACT(MONTH FROM ${fechaExpr})::int IN (${sql.join(months.map((m) => sql`${m}`))})`
     );
+    // Días del mes (25/11/2026): solo con un mes elegido.
+    if (months.length === 1 && dias) conditions.push(sql`EXTRACT(DAY FROM ${fechaExpr})::int BETWEEN ${dias.desde} AND ${dias.hasta}`);
   }
   if (rubroCodigo) {
     conditions.push(sql`COALESCE(rc.codigo, '__sin_rubro') = ${rubroCodigo}`);

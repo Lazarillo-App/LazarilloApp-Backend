@@ -12,8 +12,8 @@ const { SIN_TIPO_CODE, SIN_TIPO_NOMBRE, SIN_COBRO_CODE, SIN_COBRO_NOMBRE } = req
  * @param {{ businessId: number, params: object }} o  params = parseVentasParams(...)
  */
 async function obtenerPivotVentas({ businessId, params }) {
-  const { year, sucursal, months } = params;
-  const conditions = buildPivotConditions({ year, tableAlias: "v", hasFechaManual: false, businessId, sucursal, months });
+  const { year, sucursal, months, dias } = params;
+  const conditions = buildPivotConditions({ year, tableAlias: "v", hasFechaManual: false, businessId, sucursal, months, dias });
   const where = sql.join(conditions, " AND ");
 
   const rows = await db.many(sql`

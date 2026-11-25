@@ -41,13 +41,13 @@ const joinsMaestros = (organizationId, businessId) => sql`
  *   proveedorId, observacionQuery, importeQuery, vista, agrupacion, modo)
  */
 async function obtenerPivot({ organizationId, businessId, params }) {
-  const { year, sucursal, rubroCodigo, conceptoCodigo, proveedorId, observacionQuery, importeQuery, months, vista, agrupacion, modo } = params;
+  const { year, sucursal, rubroCodigo, conceptoCodigo, proveedorId, observacionQuery, importeQuery, months, dias, vista, agrupacion, modo } = params;
   // Económica (por fecha de factura) o Financiera (por fecha de pago): ver fuente-compras.js.
   const fuente = fuenteCompras(modo);
   const visibilidadCol = vista === "resultados" ? "visibleEnResultados" : "visibleEnDashboard";
   const maestros = joinsMaestros(organizationId, businessId);
 
-  const conditions = buildPivotConditions({ year, tableAlias: "c", businessId, sucursal, months, rubroCodigo, conceptoCodigo, proveedorId, observacionQuery, importeQuery, filterRubrosOcultos: true, visibilidadCol });
+  const conditions = buildPivotConditions({ year, tableAlias: "c", businessId, sucursal, months, dias, rubroCodigo, conceptoCodigo, proveedorId, observacionQuery, importeQuery, filterRubrosOcultos: true, visibilidadCol });
   const where = sql.join(conditions, " AND ");
 
   // La composición del tooltip SIEMPRE muestra el reparto completo, aunque el
@@ -58,7 +58,7 @@ async function obtenerPivot({ organizationId, businessId, params }) {
   // mismo local, así que mirando Canchas el tooltip mostraba el reparto de las compras del Bar.
   // En Lazarillo son negocios distintos de la misma organización: se acota por la organización
   // de origen (las reglas de apertura solo reparten dentro de una organización).
-  const conditionsComposicion = buildPivotConditions({ year, tableAlias: "c", scopePropio: true, businessId, months, rubroCodigo, conceptoCodigo, proveedorId, observacionQuery, importeQuery, filterRubrosOcultos: true, visibilidadCol });
+  const conditionsComposicion = buildPivotConditions({ year, tableAlias: "c", scopePropio: true, businessId, months, dias, rubroCodigo, conceptoCodigo, proveedorId, observacionQuery, importeQuery, filterRubrosOcultos: true, visibilidadCol });
   conditionsComposicion.push(sql`c.business_id_origen IN (SELECT b.id FROM app_businesses b WHERE b.organization_id = ${organizationId})`);
   const whereComposicion = sql.join(conditionsComposicion, " AND ");
 

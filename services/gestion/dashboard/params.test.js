@@ -248,3 +248,16 @@ describe("parseObservacionQuery", () => {
     expect(parseObservacionQuery("a".repeat(300))).toBe("a".repeat(256));
   });
 });
+
+// Días dentro del mes (25/11/2026).
+describe('diasParam', () => {
+  const { diasParam } = require('./params');
+  it('acepta «3-8» y «25» y descarta lo inválido', () => {
+    expect(diasParam.parse('3-8')).toEqual({ desde: 3, hasta: 8 });
+    expect(diasParam.parse('25')).toEqual({ desde: 25, hasta: 25 });
+    expect(diasParam.parse('8-3')).toBe(undefined);
+    expect(diasParam.parse('0-40')).toBe(undefined);
+    expect(diasParam.parse('hola')).toBe(undefined);
+    expect(diasParam.parse('')).toBe(undefined);
+  });
+});
