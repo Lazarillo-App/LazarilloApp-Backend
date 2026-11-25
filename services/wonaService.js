@@ -500,7 +500,7 @@ async function aplicarRecetas(bid, tocados = []) {
     for (const p of prods) {
       const { rows } = await client.query(
         `INSERT INTO recetas (article_id, business_id, nombre, descripcion, porciones, porcentaje_venta, costo_total, active, origen, created_at, updated_at)
-         SELECT $1, $2, nombre, '', 1, 0, 0, TRUE, 'wona', NOW(), NOW() FROM maxi_articles WHERE business_id = $2 AND articulo_id = $1
+         SELECT $1::int, $2::int, nombre, '', 1, 0, 0, TRUE, 'wona', NOW(), NOW() FROM maxi_articles WHERE business_id = $2::int AND articulo_id = $1::int
          ON CONFLICT (article_id, business_id) DO NOTHING RETURNING id`, [Number(p.articulo_id), bid]);
       if (!rows[0]) continue; // ya tenía receta (de Wona o hecha en Lazarillo): no se toca
       await client.query(
@@ -738,13 +738,14 @@ async function sincronizar(businessId, { desde = null, hasta = null, origen = 'm
     let insumos = null;
     let recetas = null;
     if (traer.articulos && traer.insumos) {
+      let sinProveedor = null;
       try {
-        const sinProveedor = await quitarInsumosSinProveedor(bid);
+        sinProveedor = await quitarInsumosSinProveedor(bid);
         insumos = await aplicarInsumos(bid);
         recetas = await aplicarRecetas(bid, insumos.tocados);
         delete insumos.tocados;
         insumos.sinProveedor = sinProveedor;
-      } catch (e) { console.error(`[wona] negocio ${bid} insumos/recetas:`, e.message); insumos = { error: e.message }; }
+      } catch (e) { console.error(`[wona] negocio ${bid} insumos/recetas:`, e.message); insumos = { error: e.message, sinProveedor }; }
     }
     const volcado = await volcar(con, tramos(d, h, 1).map(([x]) => x));
     let compras = null;
