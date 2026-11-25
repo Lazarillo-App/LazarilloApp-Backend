@@ -140,9 +140,11 @@ function requireEdicionSeccion(seccion, { lecturas = [] } = {}) {
 // ── Staff y sus subroles (Diego 11/11/2026) ──────────────────────────────────────────────
 // Qué puede hacer un Staff. Por defecto NO (clave ausente = false); el dueño habilita en Roles.
 // aprobar_equipo convierte al subrol en «jefe» de sus sectores (da el OK antes del admin).
-const STAFF_KEYS = ['ver_precio', 'ver_costo_pct', 'ver_objetivo', 'ver_sugerido', 'mover_agrupacion', 'ver_menu', 'aprobar_equipo'];
-// El subrol que se crea solo la primera vez (se puede editar o borrar).
-const JEFE_DEFAULT = { ver_precio: true, ver_costo_pct: true, aprobar_equipo: true };
+// es_cocina habilita Operación › Producción, Mantenimiento y Novedades de cocina.
+const STAFF_KEYS = ['ver_precio', 'ver_costo_pct', 'ver_objetivo', 'ver_sugerido', 'mover_agrupacion', 'ver_menu', 'aprobar_equipo', 'es_cocina'];
+// Subroles que se crean solos la primera vez (se pueden editar o borrar).
+const JEFE_DEFAULT = { ver_precio: true, ver_costo_pct: true, aprobar_equipo: true, es_cocina: true };
+const COCINERO_DEFAULT = { es_cocina: true };
 
 function limpiarStaff(src, { base = false } = {}) {
   const out = {};
@@ -177,8 +179,15 @@ async function getStaffPermisos(userId, businessId, { sinAjustes = false } = {})
   if (!rows.length) return null;
   const r = rows[0];
   const permisos = { ...limpiarStaff(r.base_perm, { base: true }) };
-  if (r.subrol_id) Object.assign(permisos, limpiarStaff(r.sub_perm));
-  else if (r.subrol === 'jefe') Object.assign(permisos, JEFE_DEFAULT);
+  if (r.subrol_id) {
+    Object.assign(permisos, limpiarStaff(r.sub_perm));
+    // Los subroles «Jefe de cocina» o con aprobar_equipo que ya existían siguen siendo de cocina
+    // salvo que el dueño destilde explícitamente es_cocina (es_cocina: false en permisos_staff).
+    const rawSub = r.sub_perm && typeof r.sub_perm === 'object' ? r.sub_perm : {};
+    if (rawSub.es_cocina !== false && (permisos.aprobar_equipo || /^(jefe de cocina|cocinero)$/i.test(String(r.subrol_nombre || '').trim()))) {
+      permisos.es_cocina = true;
+    }
+  } else if (r.subrol === 'jefe') Object.assign(permisos, JEFE_DEFAULT);
   // Ajustes solo para esta persona (true habilita, false saca).
   for (const [k, v] of Object.entries(sinAjustes ? {} : (limpiarAjustes(r.ajustes).staff || {}))) {
     if (v) permisos[k] = true; else delete permisos[k];
@@ -195,5 +204,17 @@ const sqlEsJefe = (a) => `(${a}.role = 'staff' AND (${a}.subrol = 'jefe' OR EXIS
   SELECT 1 FROM app_custom_roles xj WHERE xj.id = ${a}.custom_role_id AND xj.deleted_at IS NULL
      AND xj.base_role = 'staff' AND COALESCE((xj.permisos_staff->>'aprobar_equipo')::boolean, FALSE))))`;
 
+// SQL: la asignación (alias a) es de cocina (subrol con es_cocina o aprobar_equipo, legado subrol='jefe', o ajuste personal es_cocina).
+const sqlEsCocina = (a) => `(${a}.role = 'staff' AND (
+  ${a}.subrol = 'jefe'
+  OR COALESCE((${a}.permissions->'staff'->>'es_cocina')::boolean, FALSE)
+  OR (COALESCE((${a}.permissions->'staff'->>'es_cocina')::boolean, TRUE) AND EXISTS (
+    SELECT 1 FROM app_custom_roles xc WHERE xc.id = ${a}.custom_role_id AND xc.deleted_at IS NULL
+       AND xc.base_role = 'staff'
+       AND (COALESCE((xc.permisos_staff->>'es_cocina')::boolean, FALSE)
+         OR (COALESCE((xc.permisos_staff->>'es_cocina')::boolean, TRUE)
+           AND (COALESCE((xc.permisos_staff->>'aprobar_equipo')::boolean, FALSE)
+             OR LOWER(TRIM(xc.nombre)) IN ('jefe de cocina', 'cocinero'))))))))`;
+
 module.exports = { SECCIONES, normalizarRol, ADMINISTRACION_DEFAULT, administracionDefault, getPermisos, puedeSeccion, estaOculto, requireSeccion, requireEdicionSeccion,
-  STAFF_KEYS, JEFE_DEFAULT, limpiarStaff, getStaffPermisos, sqlEsJefe, limpiarAjustes, aplicarAjustes, cantidadAjustes };
+  STAFF_KEYS, JEFE_DEFAULT, COCINERO_DEFAULT, limpiarStaff, getStaffPermisos, sqlEsJefe, sqlEsCocina, limpiarAjustes, aplicarAjustes, cantidadAjustes };

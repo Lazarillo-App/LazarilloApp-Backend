@@ -1,7 +1,7 @@
 // Guardia de escritura por sección (tablero #45, 16/11/2026): Recetas en roles a medida.
 const test = require('node:test');
 const assert = require('node:assert');
-const { requireEdicionSeccion } = require('./permisos');
+const { requireEdicionSeccion, STAFF_KEYS, JEFE_DEFAULT, COCINERO_DEFAULT, limpiarStaff, sqlEsCocina } = require('./permisos');
 
 function correr(mw, { method, path = '/', permisos }) {
   const out = { status: 200, siguio: false };
@@ -29,4 +29,13 @@ test('escribir necesita Recetas en «editar»', () => {
   assert.deepStrictEqual(ver.body, { error: 'sin_permiso', seccion: 'recetas', modo: 'editar' });
   assert.strictEqual(correr(guardia, { method: 'DELETE', permisos: rol(null) }).status, 403);
   assert.strictEqual(correr(guardia, { method: 'POST', path: '/bulk-add-insumo', permisos: rol('ver') }).status, 403);
+});
+
+test('subroles de cocina: STAFF_KEYS incluye es_cocina; JEFE_DEFAULT y COCINERO_DEFAULT lo traen activo', () => {
+  assert.ok(STAFF_KEYS.includes('es_cocina'));
+  assert.strictEqual(JEFE_DEFAULT.es_cocina, true);
+  assert.strictEqual(JEFE_DEFAULT.aprobar_equipo, true);
+  assert.deepStrictEqual(COCINERO_DEFAULT, { es_cocina: true });
+  assert.deepStrictEqual(limpiarStaff({ es_cocina: true, ver_precio: false, otra: true }), { es_cocina: true });
+  assert.ok(sqlEsCocina('ua').includes('es_cocina'));
 });

@@ -12,7 +12,7 @@
 
 const pool = require('../config/db');
 const { sectoresQueConduce } = require('./jefeCocina');
-const { sqlEsJefe } = require('./auth/permisos');
+const { sqlEsJefe, sqlEsCocina, getStaffPermisos } = require('./auth/permisos');
 const { avisarAbm, createSyncNotification } = require('./notificationService');
 const { createOrUpdateProposal, snapshotRecetaElaborado } = require('./recetaProposals');
 const { factorConversion, normalizarCantidadUnidad } = require('./unidades');
@@ -88,6 +88,8 @@ async function contextoDe(req) {
   const jefe = conduce.length > 0;
   let misSectores = [];
   if (rol === 'staff') {
+    const sp = await getStaffPermisos(uid, bizId);
+    if (!jefe && !sp?.permisos?.es_cocina) fallar(403, 'no_es_cocina', 'Solo para el equipo de cocina');
     const { rows } = await pool.query(
       `SELECT COALESCE(sector_ids, '{}'::int[]) AS s FROM user_assignments
         WHERE user_id = $1 AND scope_type = 'business' AND scope_id = $2 AND revoked_at IS NULL LIMIT 1`, [uid, bizId]);
@@ -115,16 +117,18 @@ const exigir = (cond, code = 'forbidden') => { if (!cond) fallar(403, code); };
 async function equipo(bizId) {
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (u.id) u.id, COALESCE(NULLIF(u.display_name, ''), NULLIF(u.name, ''), split_part(u.email, '@', 1)) AS nombre,
-            x.role, x.subrol, COALESCE(x.sector_ids, '{}'::int[]) AS sector_ids
+            x.role, x.es_jefe, COALESCE(x.sector_ids, '{}'::int[]) AS sector_ids
        FROM (
-         SELECT ua.user_id, ua.role, ua.subrol, ua.sector_ids FROM user_assignments ua
-          WHERE ua.revoked_at IS NULL AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
+         SELECT ua.user_id, ua.role, ${sqlEsJefe('ua')} AS es_jefe, ua.sector_ids FROM user_assignments ua
+          WHERE ua.revoked_at IS NULL
+            AND (ua.role IN ('owner', 'admin') OR ${sqlEsCocina('ua')})
+            AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
              OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
          UNION ALL
-         SELECT owner_id, 'owner', NULL, NULL FROM app_businesses WHERE id = $1 AND owner_id IS NOT NULL
+         SELECT owner_id, 'owner', FALSE, NULL FROM app_businesses WHERE id = $1 AND owner_id IS NOT NULL
        ) x JOIN app_users u ON u.id = x.user_id
       ORDER BY u.id, CASE x.role WHEN 'staff' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END`, [bizId]);
-  return rows.map((r) => ({ id: Number(r.id), nombre: r.nombre, rol: r.role, jefe: r.subrol === 'jefe', sector_ids: (r.sector_ids || []).map(Number) }))
+  return rows.map((r) => ({ id: Number(r.id), nombre: r.nombre, rol: r.role, jefe: !!r.es_jefe, sector_ids: (r.sector_ids || []).map(Number) }))
     .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
 }
 async function plazas(bizId) {

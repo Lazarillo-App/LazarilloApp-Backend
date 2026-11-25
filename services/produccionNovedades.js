@@ -7,6 +7,7 @@
 
 const pool = require('../config/db');
 const { _ctx } = require('./produccion');
+const { sqlEsCocina } = require('./auth/permisos');
 const { createSyncNotification, avisarAbm } = require('./notificationService');
 
 const { contextoDe, fallar, exigir } = _ctx;
@@ -60,14 +61,15 @@ function formatoNovedad(r) {
   };
 }
 
-/** Destinatarios de un aviso de novedad: todo el equipo de cocina del negocio (staff y jefes) + dueño/admin. */
+/** Destinatarios de un aviso de novedad: todo el equipo de cocina del negocio (subroles con es_cocina y jefes) + dueño/admin. */
 async function destinatariosCocinaYDueno(bizId) {
   const { rows } = await pool.query(
     `SELECT DISTINCT uid FROM (
        SELECT owner_id AS uid FROM app_businesses WHERE id = $1
        UNION SELECT m.user_id FROM app_memberships m WHERE m.business_id = $1 AND m.role IN ('owner','manager')
        UNION SELECT ua.user_id FROM user_assignments ua
-              WHERE ua.revoked_at IS NULL AND ua.role IN ('admin','owner','staff')
+              WHERE ua.revoked_at IS NULL
+                AND (ua.role IN ('admin','owner') OR ${sqlEsCocina('ua')})
                 AND ((ua.scope_type = 'business' AND ua.scope_id = $1)
                   OR (ua.scope_type = 'organization' AND ua.scope_id = (SELECT organization_id FROM app_businesses WHERE id = $1)))
      ) x WHERE uid IS NOT NULL`,
