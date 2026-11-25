@@ -7,22 +7,19 @@
 
 const pool = require('../config/db');
 const { _ctx } = require('./produccion');
-const { recalcularCostoRecetas } = require('./costoRecetaService');
+const { propagarCostoInsumo } = require('./costoRecetaService');
 
 const { contextoDe, fallar, exigir, bizInsumos } = _ctx;
 const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
 const pctDe = (pi, pf) => (pi > 0 ? Math.round(((pi - pf) / pi) * 1000) / 10 : null);
 const factorDe = (pi, pf) => (pf > 0 ? pi / pf : 1);
 
-/** Ajusta el costo de los renglones de receta que usan esa merma (factor bruto/limpio) y recalcula. */
-async function ajustarRecetas(client, mermaId, factorViejo, factorNuevo) {
-  if (!(factorViejo > 0) || factorViejo === factorNuevo) return;
-  const { rows } = await client.query(
-    `UPDATE receta_items SET costo_unitario = costo_unitario / $1::numeric * $2::numeric, updated_at = NOW()
-      WHERE merma_id = $3 RETURNING receta_id`, [factorViejo, factorNuevo, mermaId]);
-  const ids = [...new Set(rows.map((r) => r.receta_id))];
-  if (ids.length) await recalcularCostoRecetas(ids, client);
-}
+/**
+ * El circuito completo (igual que editar o borrar una merma en la ficha del insumo): cada renglón de receta
+ * que usa el insumo se recalcula con los valores actuales de sus mermas (también si tiene varias), sus
+ * recetas se recalculan y, si alguna es de un elaborado, su costo sube a las recetas que lo usan.
+ */
+const recalcularCircuito = (client, insumoId, bizDelInsumo) => propagarCostoInsumo(insumoId, bizDelInsumo, client);
 
 // Sube por la cadena (jefe → dueño/admin; dueño → el resto de dueños/admins). Ver produccion.avisarCadena.
 const avisar = (c, args) => _ctx.avisarCadenaSinEsperar(c, args);
@@ -35,7 +32,8 @@ async function usarMerma(req) {
   const pi = num(b.bruto), pf = num(b.neto);
   if (!insumoId) fallar(400, 'insumo_requerido');
   if (!(pi > 0) || !(pf > 0) || pf > pi) fallar(400, 'pesos_invalidos', 'El peso limpio tiene que ser mayor a 0 y no más que el bruto');
-  const { rows: ins } = await pool.query('SELECT id, nombre FROM insumos WHERE id = $1 AND business_id = $2', [insumoId, await bizInsumos(c.bizId)]);
+  const bizDelInsumo = await bizInsumos(c.bizId);
+  const { rows: ins } = await pool.query('SELECT id, nombre FROM insumos WHERE id = $1 AND business_id = $2', [insumoId, bizDelInsumo]);
   if (!ins[0]) fallar(404, 'insumo_no_encontrado');
   const registroId = Number(b.registro_id) || null;
   if (registroId) {
@@ -56,7 +54,7 @@ async function usarMerma(req) {
       antes = { existia: true, nombre: m[0].nombre, peso_inicial: vpi, peso_final: vpf, es_default: !!m[0].es_default, pct: pctDe(vpi, vpf) };
       mermaId = Number(m[0].id);
       await client.query(`UPDATE insumo_mermas SET peso_inicial = $2, peso_final = $3, es_default = TRUE, updated_at = NOW() WHERE id = $1`, [mermaId, pi, pf]);
-      await ajustarRecetas(client, mermaId, factorDe(vpi, vpf), factorDe(pi, pf));
+      if (factorDe(vpi, vpf) !== factorDe(pi, pf)) await recalcularCircuito(client, insumoId, bizDelInsumo);
     } else {
       antes = { existia: false, pct: null };
       const { rows } = await client.query(
@@ -91,6 +89,7 @@ async function usarMerma(req) {
 async function deshacerUso(req) {
   const c = await contextoDe(req); exigir(c.decide);
   const id = Number(req.params.usoId);
+  const bizDelInsumo = await bizInsumos(c.bizId);
   const client = await pool.connect();
   let u;
   try {
@@ -108,21 +107,19 @@ async function deshacerUso(req) {
     const a = u.antes || {};
     const { rows: actual } = await client.query('SELECT * FROM insumo_mermas WHERE id = $1 FOR UPDATE', [u.insumo_merma_id]);
     if (actual[0]) {
-      const fNow = factorDe(Number(actual[0].peso_inicial), Number(actual[0].peso_final));
       if (a.existia) {
         await client.query(`UPDATE insumo_mermas SET peso_inicial = $2, peso_final = $3, es_default = $4, updated_at = NOW() WHERE id = $1`,
           [u.insumo_merma_id, a.peso_inicial, a.peso_final, !!a.es_default]);
-        await ajustarRecetas(client, Number(u.insumo_merma_id), fNow, factorDe(Number(a.peso_inicial), Number(a.peso_final)));
       } else {
         // No había merma: se saca la creada, salvo que ya la use alguna receta (ahí queda sin merma: 1 → 1).
         const { rows: usa } = await client.query('SELECT 1 FROM receta_items WHERE merma_id = $1 LIMIT 1', [u.insumo_merma_id]);
         if (usa[0]) {
           await client.query(`UPDATE insumo_mermas SET peso_inicial = 1, peso_final = 1, updated_at = NOW() WHERE id = $1`, [u.insumo_merma_id]);
-          await ajustarRecetas(client, Number(u.insumo_merma_id), fNow, 1);
         } else {
           await client.query('DELETE FROM insumo_mermas WHERE id = $1', [u.insumo_merma_id]);
         }
       }
+      await recalcularCircuito(client, Number(u.insumo_id), bizDelInsumo);
     }
     await client.query('UPDATE produccion_mermas_uso SET deshecho_at = NOW(), deshecho_por = $2 WHERE id = $1', [id, c.uid]);
     await client.query('COMMIT');

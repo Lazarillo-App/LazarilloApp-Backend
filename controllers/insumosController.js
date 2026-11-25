@@ -2862,18 +2862,8 @@ exports.mermas_create = async (req, res) => {
         [mermaId, nombreLimpio, Number(peso_inicial), Number(peso_final), es_default === true]
       );
       rows = up.rows;
-      if (factorViejo !== factorNuevo && factorViejo > 0) {
-        const { rows: itemsAfectados } = await client.query(
-          `UPDATE receta_items
-              SET costo_unitario = costo_unitario / $1::numeric * $2::numeric,
-                  updated_at = NOW()
-            WHERE merma_id = $3
-           RETURNING receta_id`,
-          [factorViejo, factorNuevo, mermaId]
-        );
-        const recetaIds = [...new Set(itemsAfectados.map(it => it.receta_id))];
-        if (recetaIds.length) await recalcularCostoRecetas(recetaIds, client);
-      }
+      // Misma cascada que editar/borrar (ver mermas_update).
+      if (factorViejo !== factorNuevo) await propagarCostoInsumo(insumoId, bizId, client);
     } else {
       const ins = await client.query(
         `INSERT INTO insumo_mermas (insumo_id, nombre, peso_inicial, peso_final, es_default)
@@ -2969,18 +2959,11 @@ exports.mermas_update = async (req, res) => {
       const pesoInicialNuevo = Number(rows[0].peso_inicial);
       const pesoFinalNuevo = Number(rows[0].peso_final);
       const factorNuevo = pesoFinalNuevo > 0 ? pesoInicialNuevo / pesoFinalNuevo : 1;
-      if (factorViejo !== factorNuevo && factorViejo > 0) {
-        const { rows: itemsAfectados } = await client.query(
-          `UPDATE receta_items
-              SET costo_unitario = costo_unitario / $1::numeric * $2::numeric,
-                  updated_at = NOW()
-            WHERE merma_id = $3
-           RETURNING receta_id`,
-          [factorViejo, factorNuevo, mermaId]
-        );
-        const recetaIds = [...new Set(itemsAfectados.map(it => it.receta_id))];
-        if (recetaIds.length) await recalcularCostoRecetas(recetaIds, client);
-      }
+      // 25/11/2026: la misma cascada que al borrar una merma (propagarCostoInsumo): recalcula cada
+      // renglón con los valores actuales de sus mermas (también los que tienen varias, merma_ids),
+      // sus recetas y, si son de un elaborado, su costo y las recetas que lo usan, hacia arriba.
+      // Antes se multiplicaba por factor solo donde merma_id = esta, y los elaborados no se enteraban.
+      if (factorViejo !== factorNuevo) await propagarCostoInsumo(insumoId, bizId, client);
     }
 
     await logAudit(client, {
