@@ -357,7 +357,10 @@ async function obtenerDetalleVentas({ businessId, sucursal, sp }) {
   if (cobro) condiciones.push(cobro === SIN_COBRO_CODE ? sql`v."codCobro" IS NULL` : sql`v."codCobro" = ${cobro}`);
   const rows = await db.many(sql`
     SELECT v."rowId", v.fecha, v.importe, v."importeManual", v.tipo, v.cobro, v.turno, v.comprobant, v.hora, v.mesa, v.mozo,
-           v.total, v.descuento, v.cupon, neg.name AS negocio, COALESCE(br.name, (SELECT m.name FROM app_branches m WHERE m.business_id = v.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), neg.name) AS sucursal
+           v.total, v.descuento, v.cupon,
+           -- Cubiertos de la fila (usuaria 25/11/2026). Con varios pagos, el POS los pone en una sola fila
+           -- (verificado en Comercio: sumar las filas da el total sin duplicar).
+           COALESCE(NULLIF(regexp_replace(COALESCE(v.cub::text, ''), '[^0-9]', '', 'g'), '')::int, 0) AS cubiertos, neg.name AS negocio, COALESCE(br.name, (SELECT m.name FROM app_branches m WHERE m.business_id = v.business_id AND COALESCE((m.props->>'is_main')::boolean, false) ORDER BY m.id LIMIT 1), neg.name) AS sucursal
     FROM gestion_ventas v
     LEFT JOIN app_businesses neg ON v.business_id = neg.id
     LEFT JOIN app_branches br    ON v.branch_id = br.id
