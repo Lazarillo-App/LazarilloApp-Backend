@@ -16,7 +16,8 @@ router.use((req, res, next) => {
 });
 
 const bid = (req) => Number(req.businessId);
-const STATUS = { wona_no_conectado: 404, wona_en_curso: 409, wona_vencido: 409, wona_claves_invalidas: 401, wona_caido: 502 };
+// 422 y no 401: el front toma cualquier 401 como sesión de Lazarillo vencida y te manda al login (25/11/2026).
+const STATUS = { wona_no_conectado: 404, wona_en_curso: 409, wona_vencido: 409, wona_claves_invalidas: 422, wona_caido: 502 };
 const manejar = (fn) => async (req, res) => {
   try {
     const r = await fn(req);
