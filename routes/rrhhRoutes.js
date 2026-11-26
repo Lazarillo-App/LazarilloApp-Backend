@@ -39,5 +39,7 @@ router.get('/semanas', ctrl.listarSemanas);
 router.get('/semanas/:semana', ctrl.getSemana);
 router.put('/semanas/:semana', ctrl.putSemana);
 router.delete('/semanas/:semana', ctrl.borrarSemana);
+// Historial de novedades del día (faltó, horas extra…) en un rango; solo dueño/admin como todo RRHH.
+router.get('/novedades', ctrl.listarNovedades);
 
 module.exports = router;

@@ -997,6 +997,56 @@ async function listarSemanas(req, res) {
   }
 }
 
+// ── Novedad de un día (usuaria 26/11/2026): faltó, llegó tarde, horas extra, cambio de horario, diligencia u otro.
+// Solo ese día: al repetir la semana la celda vuelve a `base` y la novedad no se copia (lo hace el front).
+const TIPOS_NOVEDAD = ['falto', 'llego_tarde', 'horas_extra', 'cambio_horario', 'diligencia', 'otro'];
+const HORA = /^([01]\d|2[0-3]):[0-5]\d$/;
+function novedadLimpia(n) {
+  if (!n || typeof n !== 'object' || !TIPOS_NOVEDAD.includes(n.tipo)) return null;
+  const b = n.base && typeof n.base === 'object' ? n.base : null;
+  const horasBase = b ? Number(b.horas) : NaN;
+  return JSON.stringify({
+    tipo: n.tipo,
+    nota: String(n.nota || '').trim().slice(0, 300),
+    base: b ? {
+      entrada: HORA.test(String(b.entrada || '')) ? b.entrada : null,
+      salida: HORA.test(String(b.salida || '')) ? b.salida : null,
+      horas: Number.isFinite(horasBase) && horasBase > 0 ? horasBase : null,
+      puesto: b.puesto ? String(b.puesto).slice(0, 40) : null,
+    } : null,
+  });
+}
+
+// GET /novedades?desde=YYYY-MM-DD&hasta=YYYY-MM-DD → las novedades de todos los espacios del negocio en el rango,
+// con la fecha real del día (fecha_inicio de la semana + día), empleado, espacio y turno. Para el historial del mes.
+async function listarNovedades(req, res) {
+  const FECHA = /^\d{4}-\d{2}-\d{2}$/;
+  const desde = FECHA.test(String(req.query.desde || '')) ? req.query.desde : null;
+  const hasta = FECHA.test(String(req.query.hasta || '')) ? req.query.hasta : null;
+  if (!desde || !hasta) return res.status(400).json({ ok: false, error: 'rango_invalido' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT to_char(s.fecha_inicio + c.dia, 'YYYY-MM-DD') AS fecha, c.empleado_id AS "empleadoId",
+              TRIM(CONCAT(e.nombre, ' ', COALESCE(e.apellido, ''))) AS empleado,
+              es.nombre AS espacio, t.nombre AS turno, c.puesto, c.horas, c.entrada, c.salida, c.novedad
+         FROM rrhh_celdas c
+         JOIN rrhh_filas f ON f.id = c.fila_id
+         JOIN rrhh_semanas s ON s.id = f.semana_id
+         JOIN rrhh_espacios es ON es.id = s.espacio_id
+         LEFT JOIN rrhh_turnos t ON t.id = f.turno_id
+         JOIN rrhh_empleados e ON e.id = c.empleado_id
+        WHERE s.business_id = $1 AND c.novedad IS NOT NULL
+          AND (s.fecha_inicio + c.dia) BETWEEN $2::date AND $3::date
+        ORDER BY empleado, fecha`,
+      [req.businessId, desde, hasta]
+    );
+    return res.json({ ok: true, novedades: rows.map((r) => ({ ...r, horas: Number(r.horas) })) });
+  } catch (e) {
+    console.error('[rrhh.listarNovedades]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+
 async function leerSemana(bizId, espacioId, semana) {
   const sem = await pool.query(
     `SELECT id, to_char(fecha_inicio,'YYYY-MM-DD') AS "fechaInicio"
@@ -1011,7 +1061,7 @@ async function leerSemana(bizId, espacioId, semana) {
     [semanaId]
   );
   const celdas = await pool.query(
-    `SELECT c.fila_id AS "filaId", c.dia, c.empleado_id AS "empleadoId", c.puesto, c.horas, c.entrada, c.salida
+    `SELECT c.fila_id AS "filaId", c.dia, c.empleado_id AS "empleadoId", c.puesto, c.horas, c.entrada, c.salida, c.novedad
      FROM rrhh_celdas c JOIN rrhh_filas f ON f.id = c.fila_id
      WHERE f.semana_id=$1 ORDER BY c.fila_id, c.dia`,
     [semanaId]
@@ -1021,6 +1071,7 @@ async function leerSemana(bizId, espacioId, semana) {
     if (!celdasPorFila.has(c.filaId)) celdasPorFila.set(c.filaId, []);
     celdasPorFila.get(c.filaId).push({
       dia: c.dia, empleadoId: c.empleadoId, puesto: c.puesto, horas: Number(c.horas), entrada: c.entrada || null, salida: c.salida || null,
+      novedad: c.novedad || null,
     });
   }
   const porTurno = new Map();
@@ -1143,16 +1194,18 @@ async function putSemana(req, res) {
           if (dia == null || dia < 0 || dia > 6 || !empleadoId) continue;
           const horas = Number(c.horas);
           await client.query(
-            `INSERT INTO rrhh_celdas (fila_id, dia, empleado_id, puesto, horas, entrada, salida)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
+            `INSERT INTO rrhh_celdas (fila_id, dia, empleado_id, puesto, horas, entrada, salida, novedad)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
              ON CONFLICT (fila_id, dia) DO UPDATE
-               SET empleado_id=EXCLUDED.empleado_id, puesto=EXCLUDED.puesto, horas=EXCLUDED.horas, entrada=EXCLUDED.entrada, salida=EXCLUDED.salida`,
+               SET empleado_id=EXCLUDED.empleado_id, puesto=EXCLUDED.puesto, horas=EXCLUDED.horas, entrada=EXCLUDED.entrada, salida=EXCLUDED.salida,
+                   novedad=EXCLUDED.novedad`,
             [filaId, dia, empleadoId, c.puesto || null,
               Number.isFinite(horas) && horas > 0 ? horas : 8,
               // hora de entrada propia ('HH:MM'); vacía = la del turno
               /^([01]\d|2[0-3]):[0-5]\d$/.test(String(c.entrada || '')) ? c.entrada : null,
               // hora de salida opcional ('HH:MM')
-              /^([01]\d|2[0-3]):[0-5]\d$/.test(String(c.salida || '')) ? c.salida : null]
+              /^([01]\d|2[0-3]):[0-5]\d$/.test(String(c.salida || '')) ? c.salida : null,
+              novedadLimpia(c.novedad)]
           );
         }
       }
@@ -1215,4 +1268,5 @@ module.exports = {
   candidatosNomina, vincularNomina, desvincularNomina,
   getFeriados, putZonaFeriados,
   listarSemanas, getSemana, putSemana, borrarSemana,
+  listarNovedades,
 };
