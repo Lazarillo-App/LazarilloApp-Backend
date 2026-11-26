@@ -321,6 +321,10 @@ exports.ranking = async (req, res, next) => {
                 SUM(pi.precio_total + COALESCE(pi.iva_total_item, 0))::numeric AS total
            FROM purchase_items pi
            JOIN purchases p ON p.id = pi.purchase_id
+           -- Solo renglones con un insumo que existe (usuaria 26/11/2026: el ranking empezaba en #2).
+           -- Los renglones sin insumo vinculado sumaban como un «insumo» más (insumo_id NULL), se
+           -- llevaban el #1 y después el JOIN de abajo los descartaba: faltaba el 1 y quedaba «Top 19».
+           JOIN insumos i0 ON i0.id = pi.insumo_id
           WHERE pi.business_id = $1 AND pi.fecha BETWEEN $2::date AND $3::date
             ${branchFilter}
           GROUP BY pi.insumo_id
