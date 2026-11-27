@@ -66,7 +66,7 @@ router.use(async (req, res, next) => {
 // (no alcanza con esconderlas en pantalla). Sin rol a medida, req.permisos es null y pasa todo.
 const { puedeSeccion, estaOculto } = require('../services/auth/permisos');
 const SECCION_POR_RUTA = [
-  [/^\/(facturas|gastos-varios|empleados|conceptos-empleado|pagos-proveedor|ventas-manuales)(\/|$)/, 'carga'],
+  [/^\/(facturas|gastos-varios|empleados|conceptos-empleado|pagos-proveedor|pagos-cuotas|ventas-manuales)(\/|$)/, 'carga'],
   [/^\/(conceptos|conceptos-discontinuados|rubros-caja)(\/|$)/, 'conceptos'],
   [/^\/medios-pago(\/|$)/, 'medios'],
 ];
@@ -245,6 +245,13 @@ router.post('/pagos-proveedor', responder((req) => pagos.registrarPago({ ...req.
 router.patch('/pagos-proveedor/:id', responder((req) => pagos.editarPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), body: req.body })));
 router.delete('/pagos-proveedor/:id', responder((req) => pagos.anularPago({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req) })));
 router.delete('/pagos-proveedor/:id/aplicaciones', responder((req) => pagos.quitarAplicacion({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), sp: paramsDe(req) })));
+// Pago en cuotas (usuaria 27/11/2026): plan con las cuotas que faltan y aviso flotante el día que vence cada una.
+const cuotas = require('../services/gestion/cuotas-api');
+router.get('/pagos-cuotas', responder((req) => cuotas.listarPlanes({ ...req.gestion, codPro: paramsDe(req).get('codPro') })));
+router.get('/pagos-cuotas/vencidas', responder((req) => cuotas.cuotasVencidas(req.gestion)));
+router.post('/pagos-cuotas', responder((req) => cuotas.crearPlan({ ...req.gestion, usuario: usuarioDe(req), body: req.body })));
+router.patch('/pagos-cuotas/:id', responder((req) => cuotas.editarPlan({ ...req.gestion, id: idDe(req), body: req.body })));
+router.post('/pagos-cuotas/:id/cuotas/:n/pagar', responder((req) => cuotas.pagarCuota({ ...req.gestion, usuario: usuarioDe(req), id: idDe(req), n: Number(req.params.n), body: req.body })));
 // Lugares del negocio con la forma de gestion (un "local" con sus "puntos de venta").
 // La principal se muestra con el nombre de su sucursal (la marcada is_main: «CONTAINER BAR · RAMOS MEJIA»),
 // no el del negocio repetido (Diego 08/11/2026). Solo para mostrar: todo lo demás va por id.
