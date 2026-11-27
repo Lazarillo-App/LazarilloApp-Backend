@@ -1047,6 +1047,71 @@ async function listarNovedades(req, res) {
   }
 }
 
+// ── Vacaciones por rango (usuaria 27/11/2026). No tocan el cronograma: la grilla marca esos días. ──
+const FECHA_ISO = /^\d{4}-\d{2}-\d{2}$/;
+// GET /licencias?desde&hasta → las que se cruzan con el rango, con días corridos.
+async function listarLicencias(req, res) {
+  const desde = FECHA_ISO.test(String(req.query.desde || '')) ? req.query.desde : null;
+  const hasta = FECHA_ISO.test(String(req.query.hasta || '')) ? req.query.hasta : null;
+  if (!desde || !hasta) return res.status(400).json({ ok: false, error: 'rango_invalido' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT l.id, l.empleado_id AS "empleadoId", TRIM(CONCAT(e.nombre, ' ', COALESCE(e.apellido, ''))) AS empleado,
+              l.tipo, to_char(l.desde, 'YYYY-MM-DD') AS desde, to_char(l.hasta, 'YYYY-MM-DD') AS hasta,
+              (l.hasta - l.desde + 1)::int AS dias, l.nota
+         FROM rrhh_licencias l JOIN rrhh_empleados e ON e.id = l.empleado_id
+        WHERE l.business_id = $1 AND l.desde <= $3::date AND l.hasta >= $2::date
+        ORDER BY empleado, l.desde`,
+      [req.businessId, desde, hasta]
+    );
+    return res.json({ ok: true, licencias: rows });
+  } catch (e) {
+    console.error('[rrhh.listarLicencias]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+// POST /licencias { empleadoId, desde, hasta, nota }
+async function crearLicencia(req, res) {
+  const b = req.body || {};
+  const empleadoId = asInt(b.empleadoId);
+  const desde = FECHA_ISO.test(String(b.desde || '')) ? b.desde : null;
+  const hasta = FECHA_ISO.test(String(b.hasta || '')) ? b.hasta : null;
+  if (!empleadoId || !desde || !hasta) return res.status(400).json({ ok: false, error: 'faltan_datos', message: 'Elegí la persona y las fechas.' });
+  if (hasta < desde) return res.status(400).json({ ok: false, error: 'rango_invalido', message: 'La fecha «hasta» es anterior a «desde».' });
+  try {
+    const { rows: emp } = await pool.query('SELECT 1 FROM rrhh_empleados WHERE id = $1', [empleadoId]);
+    if (!emp.length) return res.status(404).json({ ok: false, error: 'empleado_not_found' });
+    const { rows: cruce } = await pool.query(
+      `SELECT to_char(desde,'DD/MM') AS d, to_char(hasta,'DD/MM') AS h FROM rrhh_licencias
+        WHERE business_id = $1 AND empleado_id = $2 AND desde <= $4::date AND hasta >= $3::date LIMIT 1`,
+      [req.businessId, empleadoId, desde, hasta]);
+    if (cruce.length) {
+      return res.status(409).json({ ok: false, error: 'se_superpone', message: `Ya tiene vacaciones del ${cruce[0].d} al ${cruce[0].h} que se cruzan con esas fechas.` });
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO rrhh_licencias (business_id, empleado_id, tipo, desde, hasta, nota, created_by)
+       VALUES ($1, $2, 'vacaciones', $3, $4, $5, $6) RETURNING id`,
+      [req.businessId, empleadoId, desde, hasta, String(b.nota || '').trim().slice(0, 300) || null, req.user?.id || null]);
+    return res.json({ ok: true, id: rows[0].id });
+  } catch (e) {
+    console.error('[rrhh.crearLicencia]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+// DELETE /licencias/:id
+async function borrarLicencia(req, res) {
+  const id = asInt(req.params.id);
+  if (!id) return res.status(400).json({ ok: false, error: 'id_invalido' });
+  try {
+    const r = await pool.query('DELETE FROM rrhh_licencias WHERE id = $1 AND business_id = $2', [id, req.businessId]);
+    if (!r.rowCount) return res.status(404).json({ ok: false, error: 'not_found' });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[rrhh.borrarLicencia]', e);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+}
+
 async function leerSemana(bizId, espacioId, semana) {
   const sem = await pool.query(
     `SELECT id, to_char(fecha_inicio,'YYYY-MM-DD') AS "fechaInicio"
@@ -1269,4 +1334,5 @@ module.exports = {
   getFeriados, putZonaFeriados,
   listarSemanas, getSemana, putSemana, borrarSemana,
   listarNovedades,
+  listarLicencias, crearLicencia, borrarLicencia,
 };

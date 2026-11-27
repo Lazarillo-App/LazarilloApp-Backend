@@ -41,5 +41,9 @@ router.put('/semanas/:semana', ctrl.putSemana);
 router.delete('/semanas/:semana', ctrl.borrarSemana);
 // Historial de novedades del día (faltó, horas extra…) en un rango; solo dueño/admin como todo RRHH.
 router.get('/novedades', ctrl.listarNovedades);
+// Vacaciones por rango (no tocan el cronograma).
+router.get('/licencias', ctrl.listarLicencias);
+router.post('/licencias', ctrl.crearLicencia);
+router.delete('/licencias/:id', ctrl.borrarLicencia);
 
 module.exports = router;
