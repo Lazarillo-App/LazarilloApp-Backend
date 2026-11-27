@@ -315,6 +315,7 @@ exports.listDailyItems = async (req, res, next) => {
       offset = 0,
       source = null,
       por = null,
+      branch_id: rawBranchId = null,
     } = req.query;
     // por=mes: agrupa por mes × artículo (el gráfico mensual del KPI de food
     // cost bajaba ~48 mil filas día × artículo para después sumarlas por mes).
@@ -359,6 +360,19 @@ exports.listDailyItems = async (req, res, next) => {
             WHERE group_id = ANY($${params.length})
           )
         `;
+      }
+    }
+
+    // Sucursal (Diego 27/11/2026: el food cost mensual de FC RAMOS juntaba las ventas de las dos
+    // sucursales con las compras de una sola). 'main'/'none' → el principal; número → esa sucursal;
+    // ausente/'all' → todas. Lo usan el gráfico mensual del KPI de food cost (Artículos, Panel, celular).
+    if (rawBranchId === 'main' || rawBranchId === 'none') {
+      sourceFilter += ' AND sdi.branch_id IS NULL';
+    } else if (rawBranchId && rawBranchId !== 'all' && rawBranchId !== 'null') {
+      const bid = Number(rawBranchId);
+      if (Number.isFinite(bid) && bid > 0) {
+        params.push(bid);
+        sourceFilter += ` AND sdi.branch_id = $${params.length}`;
       }
     }
 
@@ -438,6 +452,7 @@ exports.listDailyItems = async (req, res, next) => {
         articleId: articleId ? Number(articleId) : null,
         groupIds: groupIds || null,
         source: source || null,
+        branch_id: rawBranchId || null,
       },
       totals: {
         rows_total: Number(totals?.rows_total || 0),
