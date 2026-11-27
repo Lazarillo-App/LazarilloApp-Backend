@@ -11,12 +11,18 @@ const cloudinary = require('../config/cloudinary');
 const uploadMantFoto = multer({
   storage: new CloudinaryStorage({
     cloudinary,
-    params: async (req) => ({
-      folder: `lazarillo/cocina/${Number(req.params.businessId) || 'general'}`,
-      allowed_formats: ['jpg', 'png', 'jpeg', 'webp', 'pdf'], // pdf: certificados del service (usuaria 25/11/2026)
-      transformation: [{ width: 1200, height: 1200, crop: 'limit', quality: 'auto' }],
-      public_id: `mant_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    }),
+    params: async (req, file) => {
+      const folder = `lazarillo/cocina/${Number(req.params.businessId) || 'general'}`;
+      const public_id = `mant_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      // PDF (certificados del service, usuaria 25/11/2026): va como archivo tal cual. Con la transformación
+      // de las fotos (achicar a 1200 px y comprimir) Cloudinary lo rechazaba y salía «error interno» (27/11).
+      if (file?.mimetype === 'application/pdf') return { folder, public_id: `${public_id}.pdf`, resource_type: 'raw' };
+      return {
+        folder, public_id,
+        allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+        transformation: [{ width: 1200, height: 1200, crop: 'limit', quality: 'auto' }],
+      };
+    },
   }),
   limits: { fileSize: 8 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
@@ -60,8 +66,10 @@ router.post('/foto', r(async (req) => {
     uploadMantFoto.single('file')(req, null, (err) => {
       if (!err) return resolve();
       if (err instanceof ErrorProduccion) return reject(err);
-      if (err.code === 'LIMIT_FILE_SIZE') return reject(new ErrorProduccion(400, 'archivo_grande', 'La foto supera el máximo de 8 MB'));
-      return reject(err);
+      if (err.code === 'LIMIT_FILE_SIZE') return reject(new ErrorProduccion(400, 'archivo_grande', 'El archivo supera el máximo de 8 MB'));
+      // Lo que rechace Cloudinary se muestra tal cual (antes llegaba como «error interno»).
+      console.error('[mantenimiento] subir archivo:', err?.message || err);
+      return reject(new ErrorProduccion(400, 'subida_fallida', `No se pudo subir el archivo${err?.message ? `: ${String(err.message).slice(0, 160)}` : '.'}`));
     });
   });
   if (!req.file) throw new ErrorProduccion(400, 'falta_archivo', 'Elegí o sacá una foto, o subí el PDF');
