@@ -171,7 +171,13 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
       SELECT o.m, COUNT(DISTINCT b.mes) AS h FROM obj o
       JOIN b ON b.mes < o.m AND b.mes >= o.m - make_interval(months => ${ANUAL})
       GROUP BY o.m
-    )
+    ),
+    -- Concepto cargado en el mes con otra clave (Diego 28/11/2026: «Autónomos» de Bar figuraba sin carga en
+    -- junio y julio, pero ese mes se había cargado a nombre de un proveedor). Un gasto vario no falta si su
+    -- concepto se cargó ese mes con cualquier proveedor; un proveedor no falta si su concepto se cargó ese mes
+    -- como gasto vario.
+    cm AS (SELECT DISTINCT mes, concepto_codigo FROM b WHERE concepto_codigo IS NOT NULL),
+    gv AS (SELECT DISTINCT mes, clave FROM pm WHERE clave LIKE 'c:%')
     SELECT to_char(r.m, 'YYYY-MM') AS mes, r.clave, r.proveedor, r.proveedor_id::int AS proveedor_id, r.empleado,
            r.concepto, r.concepto_codigo, r.rubro, ROUND(r.ultimo, 2)::float8 AS ultimo,
            ROUND(r.dia)::int AS dia, r.vencido,
@@ -180,7 +186,9 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
     FROM r
     LEFT JOIN n12 ON n12.m = r.m AND n12.clave = r.clave
     LEFT JOIN h12 ON h12.m = r.m
-    WHERE r.ultimo > 0
+    LEFT JOIN cm ON r.clave LIKE 'c:%' AND cm.mes = r.m AND cm.concepto_codigo = r.concepto_codigo
+    LEFT JOIN gv ON r.clave LIKE 'p:%' AND gv.mes = r.m AND gv.clave = 'c:' || r.concepto_codigo
+    WHERE r.ultimo > 0 AND cm.mes IS NULL AND gv.mes IS NULL
       -- "Ya no va": la clave sola; "Este mes no": la clave con "@YYYY-MM".
       AND NOT EXISTS (SELECT 1 FROM gestion_sin_carga_descartes d WHERE ${enLugar('d', businessId, sucursal)}
                         AND d.clave IN (r.clave, r.clave || '@' || to_char(r.m, 'YYYY-MM')))
