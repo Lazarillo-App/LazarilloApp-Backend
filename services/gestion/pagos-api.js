@@ -175,8 +175,12 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
     -- Concepto cargado en el mes con otra clave (Diego 28/11/2026: «Autónomos» de Bar figuraba sin carga en
     -- junio y julio, pero ese mes se había cargado a nombre de un proveedor). Un gasto vario no falta si su
     -- concepto se cargó ese mes con cualquier proveedor; un proveedor no falta si su concepto se cargó ese mes
-    -- como gasto vario.
+    -- como gasto vario o con otro proveedor, si ese concepto es de UN proveedor por mes (servicios: «contador
+    -- alejandro» pasó de Hernandez a De Simone, 28/11/2026). En mercadería (Papelera, Packaging) varios
+    -- proveedores conviven en un mismo mes: cada uno sigue avisando por separado.
     cm AS (SELECT DISTINCT mes, concepto_codigo FROM b WHERE concepto_codigo IS NOT NULL),
+    cmc AS (SELECT DISTINCT mes, clave, concepto_codigo FROM b WHERE concepto_codigo IS NOT NULL AND clave LIKE 'p:%'),
+    varios AS (SELECT mes, concepto_codigo FROM cmc GROUP BY 1, 2 HAVING COUNT(*) > 1),
     gv AS (SELECT DISTINCT mes, clave FROM pm WHERE clave LIKE 'c:%')
     SELECT to_char(r.m, 'YYYY-MM') AS mes, r.clave, r.proveedor, r.proveedor_id::int AS proveedor_id, r.empleado,
            r.concepto, r.concepto_codigo, r.rubro, ROUND(r.ultimo, 2)::float8 AS ultimo,
@@ -189,6 +193,10 @@ function sinCargaSql({ organizationId, businessId, sucursal, meses }) {
     LEFT JOIN cm ON r.clave LIKE 'c:%' AND cm.mes = r.m AND cm.concepto_codigo = r.concepto_codigo
     LEFT JOIN gv ON r.clave LIKE 'p:%' AND gv.mes = r.m AND gv.clave = 'c:' || r.concepto_codigo
     WHERE r.ultimo > 0 AND cm.mes IS NULL AND gv.mes IS NULL
+      AND NOT (r.clave LIKE 'p:%'
+               AND EXISTS (SELECT 1 FROM cmc y WHERE y.mes = r.m AND y.concepto_codigo = r.concepto_codigo AND y.clave <> r.clave)
+               AND NOT EXISTS (SELECT 1 FROM varios v WHERE v.concepto_codigo = r.concepto_codigo
+                                 AND v.mes <= r.m AND v.mes >= r.m - make_interval(months => ${RECURRENTE_VENTANA})))
       -- "Ya no va": la clave sola; "Este mes no": la clave con "@YYYY-MM".
       AND NOT EXISTS (SELECT 1 FROM gestion_sin_carga_descartes d WHERE ${enLugar('d', businessId, sucursal)}
                         AND d.clave IN (r.clave, r.clave || '@' || to_char(r.m, 'YYYY-MM')))
